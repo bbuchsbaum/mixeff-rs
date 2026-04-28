@@ -65,7 +65,10 @@ pub use random_term_card::{
     RandomTermCard, RoleOrigin, WithinGroupVariation, RANDOM_TERM_CARD_SCHEMA,
     RANDOM_TERM_CARD_SCHEMA_VERSION,
 };
-pub use report::{AuditReportLine, AuditReportSection, AuditReportStatus, ModelAuditReport};
+pub use report::{
+    AuditReportLine, AuditReportSection, AuditReportStatus, ConvergenceLevel, ConvergenceSource,
+    ConvergenceVerdict, ModelAuditReport,
+};
 pub use theta_map::{
     CovarianceFamily, CovarianceFamilyTransition, ParameterConstraint, ParameterStatus, ThetaMap,
     ThetaMapBlock, ThetaSlot,

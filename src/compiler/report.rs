@@ -1358,7 +1358,7 @@ fn optimizer_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
         status: evidence_quality_status(&certificate.evidence.certification_quality),
         detail: evidence_quality_detail(&certificate.evidence.certification_quality),
     });
-    lines.push(convergence_next_steps_line(certificate));
+    lines.push(convergence_next_steps_line(certificate, &artifact.diagnostics));
 
     let not_assessed = certificate
         .checks
@@ -1387,6 +1387,588 @@ fn optimizer_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
         title: "Optimizer".to_string(),
         lines,
     }
+}
+
+/// Compact, action-oriented summary of model convergence quality.
+///
+/// `ConvergenceVerdict` is the single line a user should read first when
+/// inspecting a fitted model. It partitions evidence into two sources —
+/// the *optimizer* (gradient/Hessian/verification certificate) and the
+/// *structural* design (pre-fit identifiability diagnostics like
+/// row-saturated random effects, separation, collinear fixed effects).
+/// Optimizer tinkering does not fix structural design failures, so the
+/// `next_step` recommendation is gated on `source` to avoid suggesting
+/// "increase budget" when the model is unidentifiable.
+///
+/// This is a derived projection — built on demand from
+/// `CompiledModelArtifact::optimizer_certificate` and
+/// `CompiledModelArtifact::diagnostics` via
+/// [`ConvergenceVerdict::for_artifact`]. It is **not** persisted on the
+/// artifact so the audit JSON schema is unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConvergenceVerdict {
+    pub level: ConvergenceLevel,
+    pub source: ConvergenceSource,
+    /// One short clause summarising the verdict for compact print.
+    pub headline: String,
+    /// One actionable clause; `None` for clean fits where no follow-up
+    /// is recommended.
+    pub next_step: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConvergenceLevel {
+    Certified,
+    Ok,
+    Caution,
+    Failed,
+    NotAssessed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConvergenceSource {
+    Clean,
+    Optimizer,
+    Structural,
+    Mixed,
+    NotAssessed,
+}
+
+impl ConvergenceLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConvergenceLevel::Certified => "certified",
+            ConvergenceLevel::Ok => "ok",
+            ConvergenceLevel::Caution => "caution",
+            ConvergenceLevel::Failed => "failed",
+            ConvergenceLevel::NotAssessed => "not assessed",
+        }
+    }
+}
+
+impl ConvergenceSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConvergenceSource::Clean => "clean",
+            ConvergenceSource::Optimizer => "optimizer",
+            ConvergenceSource::Structural => "structural",
+            ConvergenceSource::Mixed => "mixed",
+            ConvergenceSource::NotAssessed => "not_assessed",
+        }
+    }
+}
+
+impl ConvergenceVerdict {
+    /// Build the verdict for a compiled model artifact. Reads both the
+    /// optimizer certificate and the artifact-level diagnostics (the
+    /// latter carries structural pre-fit signals like row-saturated
+    /// random effects).
+    pub fn for_artifact(artifact: &CompiledModelArtifact) -> Self {
+        match artifact.optimizer_certificate.as_ref() {
+            None => Self::for_unfitted(),
+            Some(certificate) => Self::compose(certificate, &artifact.diagnostics),
+        }
+    }
+
+    /// The "model has not been fitted yet" verdict.
+    pub fn for_unfitted() -> Self {
+        Self {
+            level: ConvergenceLevel::NotAssessed,
+            source: ConvergenceSource::NotAssessed,
+            headline: "model is not fitted".to_string(),
+            next_step: Some(
+                "call .fit() to populate the convergence certificate".to_string(),
+            ),
+        }
+    }
+
+    /// Compact one-line render: `"<level> — <headline>"`. The print path
+    /// uses this; callers who need structured access read the fields
+    /// directly.
+    pub fn one_liner(&self) -> String {
+        format!("{} — {}", self.level.as_str(), self.headline)
+    }
+
+    fn compose(
+        certificate: &super::audit::OptimizerCertificate,
+        diagnostics: &[Diagnostic],
+    ) -> Self {
+        let optimizer = optimizer_summary(certificate);
+        let structural = structural_findings(diagnostics);
+
+        if structural.is_empty() {
+            // Pure optimizer-side path. Resolve final level + source +
+            // next_step from the optimizer summary alone. Reassurance
+            // actions (e.g. "verification agrees") are not real
+            // follow-ups, so they don't populate `next_step`.
+            let next_step = optimizer
+                .actions
+                .iter()
+                .filter(|a| !a.is_reassurance())
+                .min_by_key(|a| a.priority())
+                .map(|a| a.text().to_string());
+
+            let (level, source) = match (optimizer.level, &next_step) {
+                (ConvergenceLevel::Certified, None) => {
+                    (ConvergenceLevel::Certified, ConvergenceSource::Clean)
+                }
+                (ConvergenceLevel::Ok, _) => (ConvergenceLevel::Ok, ConvergenceSource::Clean),
+                (level, _) => (level, ConvergenceSource::Optimizer),
+            };
+
+            return Self {
+                level,
+                source,
+                headline: optimizer.headline,
+                next_step,
+            };
+        }
+
+        // Structural finding(s) present. Optimizer tinkering will not
+        // help — pick the highest-priority structural finding for the
+        // next_step and either subordinate the optimizer signal (pure
+        // Structural) or surface it alongside (Mixed).
+        let primary = structural
+            .iter()
+            .min_by_key(|finding| finding.priority())
+            .expect("non-empty checked above");
+
+        let optimizer_clean = matches!(
+            optimizer.level,
+            ConvergenceLevel::Certified | ConvergenceLevel::Ok
+        );
+        let (source, headline) = if optimizer_clean {
+            (
+                ConvergenceSource::Structural,
+                format!("structural: {}", primary.headline()),
+            )
+        } else {
+            (
+                ConvergenceSource::Mixed,
+                format!(
+                    "structural: {} (optimizer: {})",
+                    primary.headline(),
+                    optimizer.headline
+                ),
+            )
+        };
+
+        Self {
+            level: ConvergenceLevel::Failed,
+            source,
+            headline,
+            next_step: Some(primary.next_step()),
+        }
+    }
+}
+
+/// Structured optimizer-side next-step.
+///
+/// Each variant carries its rendered text and a `is_optimizer_tinkering`
+/// flag used to suppress optimizer-only advice when a structural design
+/// failure has been diagnosed (the lme4 #120 lesson — you can't fix a
+/// row-saturated random effect by tweaking the optimizer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NextActionKind {
+    /// "increase optimizer budget or try an alternate optimizer"
+    BudgetOrAlternate,
+    /// "run verify_convergence() to compare restart and alternate-optimizer agreement"
+    SuggestVerify,
+    /// "gate inference on derivative-backed or finite-difference stationarity evidence"
+    GateInferenceOnDerivative,
+    /// "gate weak-identification claims until Hessian evidence is available"
+    GateWeakIdentification,
+    /// "scale predictors, simplify the random-effects structure, or collect more grouping levels"
+    PredictorScalingOrSimplifyRe,
+    /// "inspect Effective Covariance and consider diagonal covariance, a simpler random-effect term, or design_compiled policy"
+    InspectEffectiveCovariance,
+    /// "treat optimizer-agreement evidence as reassuring, while keeping any boundary or rank caveats"
+    TreatAgreementAsReassuring,
+    /// "compare objectives, theta, and beta across verification runs"
+    CompareVerificationRuns,
+}
+
+impl NextActionKind {
+    fn text(self) -> &'static str {
+        match self {
+            NextActionKind::BudgetOrAlternate => {
+                "increase optimizer budget or try an alternate optimizer"
+            }
+            NextActionKind::SuggestVerify => {
+                "run verify_convergence() to compare restart and alternate-optimizer agreement"
+            }
+            NextActionKind::GateInferenceOnDerivative => {
+                "gate inference on derivative-backed or finite-difference stationarity evidence"
+            }
+            NextActionKind::GateWeakIdentification => {
+                "gate weak-identification claims until Hessian evidence is available"
+            }
+            NextActionKind::PredictorScalingOrSimplifyRe => {
+                "scale predictors, simplify the random-effects structure, or collect more grouping levels"
+            }
+            NextActionKind::InspectEffectiveCovariance => {
+                "inspect Effective Covariance and consider diagonal covariance, a simpler random-effect term, or design_compiled policy"
+            }
+            NextActionKind::TreatAgreementAsReassuring => {
+                "treat optimizer-agreement evidence as reassuring, while keeping any boundary or rank caveats"
+            }
+            NextActionKind::CompareVerificationRuns => {
+                "compare objectives, theta, and beta across verification runs"
+            }
+        }
+    }
+
+    /// True for optimizer-tinkering actions that are pointless when the
+    /// underlying issue is structural identifiability.
+    fn is_optimizer_tinkering(self) -> bool {
+        matches!(
+            self,
+            NextActionKind::BudgetOrAlternate
+                | NextActionKind::SuggestVerify
+                | NextActionKind::GateInferenceOnDerivative
+        )
+    }
+
+    /// True when the action is a reassurance about an already-clean fit
+    /// rather than a follow-up the user should run. Excluded when the
+    /// verdict picks its single `next_step`.
+    fn is_reassurance(self) -> bool {
+        matches!(self, NextActionKind::TreatAgreementAsReassuring)
+    }
+
+    /// Lower = more actionable, used by [`ConvergenceVerdict`] to pick a
+    /// single recommendation. The audit line shows them all.
+    fn priority(self) -> u8 {
+        match self {
+            NextActionKind::BudgetOrAlternate => 0,
+            NextActionKind::SuggestVerify => 1,
+            NextActionKind::GateInferenceOnDerivative => 2,
+            NextActionKind::PredictorScalingOrSimplifyRe => 3,
+            NextActionKind::InspectEffectiveCovariance => 4,
+            NextActionKind::CompareVerificationRuns => 5,
+            NextActionKind::GateWeakIdentification => 6,
+            NextActionKind::TreatAgreementAsReassuring => 7,
+        }
+    }
+}
+
+/// Compact, level-aware summary of the optimizer dimension only. The
+/// verdict overlays this with structural findings; the audit lines
+/// (`convergence_interpretation`, `convergence_next_steps_line`) reuse
+/// the same `actions` list to stay in sync.
+struct OptimizerSummary {
+    level: ConvergenceLevel,
+    headline: String,
+    actions: Vec<NextActionKind>,
+}
+
+fn optimizer_summary(certificate: &super::audit::OptimizerCertificate) -> OptimizerSummary {
+    let mut level = ConvergenceLevel::Certified;
+    let mut clauses: Vec<String> = Vec::new();
+    let mut actions: Vec<NextActionKind> = Vec::new();
+
+    let bump = |current: &mut ConvergenceLevel, target: ConvergenceLevel| {
+        if level_severity(target) > level_severity(*current) {
+            *current = target;
+        }
+    };
+
+    if !certificate.evidence.optimizer_stop.acceptable_stop {
+        bump(&mut level, ConvergenceLevel::Failed);
+        clauses.push("optimizer stop unacceptable".to_string());
+        actions.push(NextActionKind::BudgetOrAlternate);
+    }
+
+    match certificate.status {
+        FitStatus::ConvergedInterior => {
+            clauses.push("interior optimum".to_string());
+        }
+        FitStatus::ConvergedBoundary => {
+            bump(&mut level, ConvergenceLevel::Caution);
+            clauses.push("boundary fit".to_string());
+            actions.push(NextActionKind::InspectEffectiveCovariance);
+        }
+        FitStatus::ConvergedReducedRank => {
+            bump(&mut level, ConvergenceLevel::Caution);
+            clauses.push("reduced-rank fit".to_string());
+            actions.push(NextActionKind::InspectEffectiveCovariance);
+        }
+        FitStatus::ConvergedPenalised => {
+            bump(&mut level, ConvergenceLevel::Caution);
+            clauses.push("penalised fit (not an MLE)".to_string());
+        }
+        FitStatus::NotIdentifiable => {
+            bump(&mut level, ConvergenceLevel::Failed);
+            clauses.push("not identifiable".to_string());
+        }
+        FitStatus::NotOptimized => {
+            bump(&mut level, ConvergenceLevel::Failed);
+            clauses.push("optimization did not run to completion".to_string());
+        }
+        FitStatus::NotAssessed => {
+            bump(&mut level, ConvergenceLevel::NotAssessed);
+            clauses.push("optimizer certificate not assessed".to_string());
+        }
+    }
+
+    if matches!(
+        certificate.evidence.gradient.method,
+        super::audit::EvidenceMethod::NotAvailable { .. }
+            | super::audit::EvidenceMethod::NotAssessed { .. }
+    ) {
+        bump(&mut level, ConvergenceLevel::Caution);
+        clauses.push("weak gradient evidence".to_string());
+        actions.push(NextActionKind::GateInferenceOnDerivative);
+    }
+
+    if let super::audit::EvidenceQuality::Failed { .. } =
+        &certificate.evidence.certification_quality
+    {
+        bump(&mut level, ConvergenceLevel::Caution);
+        clauses.push("certification failed".to_string());
+        actions.push(NextActionKind::PredictorScalingOrSimplifyRe);
+    }
+
+    match &certificate.evidence.hessian.quality {
+        super::audit::EvidenceQuality::Failed { .. } => {
+            bump(&mut level, ConvergenceLevel::Caution);
+            clauses.push("weak Hessian".to_string());
+            actions.push(NextActionKind::PredictorScalingOrSimplifyRe);
+        }
+        super::audit::EvidenceQuality::Unavailable { .. }
+        | super::audit::EvidenceQuality::NotAssessed { .. } => {
+            bump(&mut level, ConvergenceLevel::Caution);
+            clauses.push("Hessian evidence unavailable".to_string());
+            actions.push(NextActionKind::GateWeakIdentification);
+        }
+        _ => {}
+    }
+
+    match certificate.verification.as_ref().map(|v| v.status) {
+        Some(super::audit::ConvergenceVerificationStatus::RestartAgrees)
+        | Some(super::audit::ConvergenceVerificationStatus::OptimizerConsensus) => {
+            clauses.push("verification agrees".to_string());
+            actions.push(NextActionKind::TreatAgreementAsReassuring);
+        }
+        Some(super::audit::ConvergenceVerificationStatus::Fragile) => {
+            bump(&mut level, ConvergenceLevel::Caution);
+            clauses.push("verification fragile".to_string());
+            actions.push(NextActionKind::CompareVerificationRuns);
+        }
+        Some(super::audit::ConvergenceVerificationStatus::Unstable) => {
+            bump(&mut level, ConvergenceLevel::Failed);
+            clauses.push("verification unstable".to_string());
+            actions.push(NextActionKind::CompareVerificationRuns);
+        }
+        Some(super::audit::ConvergenceVerificationStatus::NotRun) | None => {
+            // No verification → invite it but don't downgrade an
+            // otherwise-clean fit below Ok.
+            if matches!(level, ConvergenceLevel::Certified) {
+                level = ConvergenceLevel::Ok;
+            }
+            clauses.push("verification not run".to_string());
+            actions.push(NextActionKind::SuggestVerify);
+        }
+    }
+
+    OptimizerSummary {
+        level,
+        headline: clauses.join("; "),
+        actions,
+    }
+}
+
+fn level_severity(level: ConvergenceLevel) -> u8 {
+    match level {
+        ConvergenceLevel::Certified => 0,
+        ConvergenceLevel::Ok => 1,
+        ConvergenceLevel::NotAssessed => 2,
+        ConvergenceLevel::Caution => 3,
+        ConvergenceLevel::Failed => 4,
+    }
+}
+
+/// Pre-fit structural identifiability findings detectable from the
+/// artifact's diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StructuralFinding {
+    RowSaturatedRandomEffect { term: String },
+    StructuralRefusal { term: String, reason: String },
+    Separation { reason: String },
+    NotIdentifiableOther { reason: String },
+    FixedRankDeficient { reason: String },
+    EmptyCell { reason: String },
+    UnsupportedRandomSlope { term: String },
+    RepeatedUnitUnmodeled { term: String },
+}
+
+impl StructuralFinding {
+    fn priority(&self) -> u8 {
+        match self {
+            StructuralFinding::RowSaturatedRandomEffect { .. } => 0,
+            StructuralFinding::Separation { .. } => 1,
+            StructuralFinding::StructuralRefusal { .. } => 2,
+            StructuralFinding::FixedRankDeficient { .. } => 3,
+            StructuralFinding::EmptyCell { .. } => 4,
+            StructuralFinding::UnsupportedRandomSlope { .. } => 5,
+            StructuralFinding::NotIdentifiableOther { .. } => 6,
+            StructuralFinding::RepeatedUnitUnmodeled { .. } => 7,
+        }
+    }
+
+    fn headline(&self) -> String {
+        match self {
+            StructuralFinding::RowSaturatedRandomEffect { term } => {
+                format!("row-saturated random effect {term}")
+            }
+            StructuralFinding::StructuralRefusal { term, reason } => {
+                if reason.is_empty() {
+                    format!("structural refusal on {term}")
+                } else {
+                    format!("structural refusal on {term} ({reason})")
+                }
+            }
+            StructuralFinding::Separation { reason } => {
+                if reason.is_empty() {
+                    "separation; likelihood unbounded".to_string()
+                } else {
+                    format!("separation: {reason}")
+                }
+            }
+            StructuralFinding::NotIdentifiableOther { reason } => {
+                if reason.is_empty() {
+                    "model not identifiable".to_string()
+                } else {
+                    format!("not identifiable: {reason}")
+                }
+            }
+            StructuralFinding::FixedRankDeficient { reason } => {
+                if reason.is_empty() {
+                    "fixed-effect design rank-deficient".to_string()
+                } else {
+                    format!("fixed-effect rank-deficient: {reason}")
+                }
+            }
+            StructuralFinding::EmptyCell { reason } => {
+                if reason.is_empty() {
+                    "fixed-effect design has empty cells".to_string()
+                } else {
+                    format!("empty fixed-effect cell: {reason}")
+                }
+            }
+            StructuralFinding::UnsupportedRandomSlope { term } => {
+                format!("requested random slope unsupported by within-group design ({term})")
+            }
+            StructuralFinding::RepeatedUnitUnmodeled { term } => {
+                format!("repeated unit unmodeled ({term})")
+            }
+        }
+    }
+
+    fn next_step(&self) -> String {
+        match self {
+            StructuralFinding::RowSaturatedRandomEffect { term } => format!(
+                "design has as many random effects as rows for term {term}; drop unsupported slopes, split RE structure, or treat as fixed — optimizer tuning will not help",
+            ),
+            StructuralFinding::StructuralRefusal { term, .. } => format!(
+                "remove the slope on {term} or move to a different grouping; this is a design refusal and not optimizer-fixable",
+            ),
+            StructuralFinding::Separation { .. } => {
+                "separation detected; use a Firth/penalised fit or drop the offending predictor".to_string()
+            }
+            StructuralFinding::NotIdentifiableOther { .. } => {
+                "model is not identifiable under the requested contract; reduce the model or add identifying constraints".to_string()
+            }
+            StructuralFinding::FixedRankDeficient { .. } => {
+                "fixed-effect design is rank-deficient; drop redundant predictors or aggregate factor levels".to_string()
+            }
+            StructuralFinding::EmptyCell { .. } => {
+                "fixed-effect design has empty cells; aggregate levels or remove the offending interaction".to_string()
+            }
+            StructuralFinding::UnsupportedRandomSlope { term } => format!(
+                "requested random slope on {term} is not supported by the within-group design; remove the slope",
+            ),
+            StructuralFinding::RepeatedUnitUnmodeled { term } => format!(
+                "add an explicit grouping factor (e.g. (1 | {term})) to model repeated units",
+            ),
+        }
+    }
+}
+
+fn structural_findings(diagnostics: &[Diagnostic]) -> Vec<StructuralFinding> {
+    let mut out: Vec<StructuralFinding> = Vec::new();
+    for diag in diagnostics {
+        match &diag.code {
+            DiagnosticCode::CovarianceTooRich => {
+                let row_saturated = diag
+                    .payload
+                    .get("row_saturated")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if row_saturated {
+                    let term = diag
+                        .affected_terms
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "<random term>".to_string());
+                    out.push(StructuralFinding::RowSaturatedRandomEffect { term });
+                }
+            }
+            DiagnosticCode::StructuralRefusal => {
+                let term = diag
+                    .affected_terms
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "<random term>".to_string());
+                out.push(StructuralFinding::StructuralRefusal {
+                    term,
+                    reason: diag.message.clone(),
+                });
+            }
+            DiagnosticCode::NotIdentifiable => {
+                let reason = diag.message.to_lowercase();
+                if reason.contains("separation") || reason.contains("separated") {
+                    out.push(StructuralFinding::Separation {
+                        reason: diag.message.clone(),
+                    });
+                } else {
+                    out.push(StructuralFinding::NotIdentifiableOther {
+                        reason: diag.message.clone(),
+                    });
+                }
+            }
+            DiagnosticCode::FixedEffectRankDeficient => {
+                out.push(StructuralFinding::FixedRankDeficient {
+                    reason: diag.message.clone(),
+                });
+            }
+            DiagnosticCode::FixedEffectEmptyCell => {
+                out.push(StructuralFinding::EmptyCell {
+                    reason: diag.message.clone(),
+                });
+            }
+            DiagnosticCode::RandomSlopeUnsupported => {
+                let term = diag
+                    .affected_terms
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "<random term>".to_string());
+                out.push(StructuralFinding::UnsupportedRandomSlope { term });
+            }
+            DiagnosticCode::RepeatedUnitUnmodeled => {
+                let term = diag
+                    .affected_terms
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "<grouping>".to_string());
+                out.push(StructuralFinding::RepeatedUnitUnmodeled { term });
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 fn convergence_interpretation_line(
@@ -1536,36 +2118,29 @@ fn convergence_interpretation(
 
 fn convergence_next_steps_line(
     certificate: &super::audit::OptimizerCertificate,
+    diagnostics: &[Diagnostic],
 ) -> AuditReportLine {
-    let mut actions = Vec::new();
+    let mut kinds: Vec<NextActionKind> = Vec::new();
 
     if !certificate.evidence.optimizer_stop.acceptable_stop {
-        actions.push("increase optimizer budget or try an alternate optimizer".to_string());
+        kinds.push(NextActionKind::BudgetOrAlternate);
     }
     if certificate.verification.is_none() {
-        actions.push(
-            "run verify_convergence() to compare restart and alternate-optimizer agreement"
-                .to_string(),
-        );
+        kinds.push(NextActionKind::SuggestVerify);
     }
     if matches!(
         certificate.evidence.gradient.method,
         super::audit::EvidenceMethod::NotAvailable { .. }
             | super::audit::EvidenceMethod::NotAssessed { .. }
     ) {
-        actions.push(
-            "gate inference on derivative-backed or finite-difference stationarity evidence"
-                .to_string(),
-        );
+        kinds.push(NextActionKind::GateInferenceOnDerivative);
     }
     if matches!(
         certificate.evidence.hessian.quality,
         super::audit::EvidenceQuality::Unavailable { .. }
             | super::audit::EvidenceQuality::NotAssessed { .. }
     ) {
-        actions.push(
-            "gate weak-identification claims until Hessian evidence is available".to_string(),
-        );
+        kinds.push(NextActionKind::GateWeakIdentification);
     }
     if matches!(
         certificate.evidence.hessian.quality,
@@ -1574,37 +2149,40 @@ fn convergence_next_steps_line(
         certificate.evidence.certification_quality,
         super::audit::EvidenceQuality::Failed { .. }
     ) {
-        actions.push(
-            "scale predictors, simplify the random-effects structure, or collect more grouping levels"
-                .to_string(),
-        );
+        kinds.push(NextActionKind::PredictorScalingOrSimplifyRe);
     }
     if matches!(
         certificate.status,
         FitStatus::ConvergedBoundary | FitStatus::ConvergedReducedRank
     ) {
-        actions.push(
-            "inspect Effective Covariance and consider diagonal covariance, a simpler random-effect term, or design_compiled policy"
-                .to_string(),
-        );
+        kinds.push(NextActionKind::InspectEffectiveCovariance);
     }
     if let Some(verification) = &certificate.verification {
         match verification.status {
             super::audit::ConvergenceVerificationStatus::RestartAgrees
             | super::audit::ConvergenceVerificationStatus::OptimizerConsensus => {
-                actions.push(
-                    "treat optimizer-agreement evidence as reassuring, while keeping any boundary or rank caveats"
-                        .to_string(),
-                );
+                kinds.push(NextActionKind::TreatAgreementAsReassuring);
             }
             super::audit::ConvergenceVerificationStatus::Fragile
             | super::audit::ConvergenceVerificationStatus::Unstable => {
-                actions.push(
-                    "compare objectives, theta, and beta across verification runs".to_string(),
-                );
+                kinds.push(NextActionKind::CompareVerificationRuns);
             }
             super::audit::ConvergenceVerificationStatus::NotRun => {}
         }
+    }
+
+    // Structural overlay: pre-fit identifiability failures cannot be
+    // fixed by optimizer tinkering. Suppress optimizer-tinkering
+    // recommendations (issue lme4#120 lesson) and append the
+    // highest-priority structural step.
+    let structural = structural_findings(diagnostics);
+    if !structural.is_empty() {
+        kinds.retain(|kind| !kind.is_optimizer_tinkering());
+    }
+
+    let mut actions: Vec<String> = kinds.into_iter().map(|k| k.text().to_string()).collect();
+    if let Some(primary) = structural.iter().min_by_key(|f| f.priority()) {
+        actions.push(primary.next_step());
     }
 
     actions.sort();
@@ -2376,5 +2954,278 @@ mod tests {
         text.chars()
             .filter(|character| matches!(character, '.' | '?' | '!'))
             .count()
+    }
+
+    // ---------------------------------------------------------------
+    // ConvergenceVerdict tests
+    // ---------------------------------------------------------------
+
+    use super::super::audit::{
+        ConvergenceVerification, ConvergenceVerificationStatus, EvidenceMethod, EvidenceQuality,
+        OptimizerCertificate,
+    };
+    use super::super::diagnostics::{DiagnosticCode, DiagnosticSeverity, DiagnosticStage};
+
+    /// Build a baseline certificate at `ConvergedInterior` with acceptable
+    /// stop, exact gradient evidence, and certified Hessian evidence. Tests
+    /// mutate specific fields to exercise individual verdict branches.
+    fn clean_certificate() -> OptimizerCertificate {
+        let mut cert = OptimizerCertificate::not_assessed();
+        cert.status = FitStatus::ConvergedInterior;
+        cert.evidence.optimizer_stop.acceptable_stop = true;
+        cert.evidence.optimizer_stop.return_code = Some("SUCCESS".to_string());
+        cert.evidence.gradient.method = EvidenceMethod::Exact;
+        cert.evidence.hessian.method = EvidenceMethod::Exact;
+        cert.evidence.hessian.quality = EvidenceQuality::Certified;
+        cert.evidence.certification_quality = EvidenceQuality::Certified;
+        cert
+    }
+
+    fn certificate_with_verification(status: ConvergenceVerificationStatus) -> OptimizerCertificate {
+        let mut cert = clean_certificate();
+        cert.verification = Some(ConvergenceVerification {
+            status,
+            objective_tolerance: 1e-6,
+            theta_tolerance: 1e-6,
+            beta_tolerance: 1e-6,
+            reference_objective: Some(0.0),
+            reference_theta: vec![0.0],
+            reference_beta: vec![0.0],
+            reference_effective_ranks: Vec::new(),
+            runs: Vec::new(),
+            message: format!("{status:?}"),
+        });
+        cert
+    }
+
+    fn diag(code: DiagnosticCode, message: &str, terms: &[&str]) -> Diagnostic {
+        Diagnostic::new(code, DiagnosticSeverity::Warning, DiagnosticStage::DesignAudit, message)
+            .with_affected_terms(terms.iter().map(|t| t.to_string()).collect())
+    }
+
+    fn row_saturated_diag(term: &str) -> Diagnostic {
+        let mut d = diag(
+            DiagnosticCode::CovarianceTooRich,
+            "row-saturated random effect",
+            &[term],
+        );
+        d.payload
+            .insert("row_saturated".to_string(), serde_json::json!(true));
+        d
+    }
+
+    #[test]
+    fn verdict_clean_fit_with_verification_is_certified_clean() {
+        let cert = certificate_with_verification(ConvergenceVerificationStatus::RestartAgrees);
+        let v = ConvergenceVerdict::compose(&cert, &[]);
+        assert_eq!(v.level, ConvergenceLevel::Certified);
+        assert_eq!(v.source, ConvergenceSource::Clean);
+        assert!(v.next_step.is_none(), "certified clean fits need no next step");
+        assert!(v.headline.contains("interior"));
+        assert!(v.headline.contains("verification agrees"));
+    }
+
+    #[test]
+    fn verdict_clean_fit_without_verification_is_ok_with_verify_hint() {
+        let cert = clean_certificate();
+        let v = ConvergenceVerdict::compose(&cert, &[]);
+        assert_eq!(v.level, ConvergenceLevel::Ok);
+        assert_eq!(v.source, ConvergenceSource::Clean);
+        let next = v.next_step.expect("verify hint expected");
+        assert!(next.contains("verify_convergence"));
+    }
+
+    #[test]
+    fn verdict_boundary_fit_is_caution_optimizer() {
+        let mut cert = clean_certificate();
+        cert.status = FitStatus::ConvergedBoundary;
+        let v = ConvergenceVerdict::compose(&cert, &[]);
+        assert_eq!(v.level, ConvergenceLevel::Caution);
+        assert_eq!(v.source, ConvergenceSource::Optimizer);
+        let next = v.next_step.expect("boundary fits suggest a follow-up");
+        assert!(next.contains("Effective Covariance") || next.contains("verify_convergence"));
+    }
+
+    #[test]
+    fn verdict_weak_gradient_suggests_verify_convergence() {
+        let mut cert = clean_certificate();
+        cert.evidence.gradient.method = EvidenceMethod::NotAvailable {
+            reason: "derivative-free optimizer".to_string(),
+        };
+        let v = ConvergenceVerdict::compose(&cert, &[]);
+        assert_eq!(v.source, ConvergenceSource::Optimizer);
+        let next = v.next_step.expect("weak gradient demands a follow-up");
+        // BudgetOrAlternate doesn't fire (acceptable_stop=true), so the
+        // most actionable item is SuggestVerify.
+        assert!(
+            next.contains("verify_convergence"),
+            "expected verify_convergence hint, got: {next}"
+        );
+    }
+
+    #[test]
+    fn verdict_failed_hessian_is_caution_with_predictor_scaling() {
+        let mut cert = clean_certificate();
+        cert.evidence.hessian.quality = EvidenceQuality::Failed {
+            reason: "singular Hessian".to_string(),
+        };
+        let v = ConvergenceVerdict::compose(&cert, &[]);
+        assert_eq!(v.source, ConvergenceSource::Optimizer);
+        // With acceptable_stop=true and verification absent, SuggestVerify
+        // is the highest-priority single recommendation; Hessian failure
+        // bumps the level to Caution.
+        assert_eq!(v.level, ConvergenceLevel::Caution);
+    }
+
+    #[test]
+    fn verdict_unacceptable_stop_is_failed() {
+        let mut cert = clean_certificate();
+        cert.evidence.optimizer_stop.acceptable_stop = false;
+        cert.evidence.optimizer_stop.return_code = Some("MAXEVAL_REACHED".to_string());
+        let v = ConvergenceVerdict::compose(&cert, &[]);
+        assert_eq!(v.level, ConvergenceLevel::Failed);
+        assert_eq!(v.source, ConvergenceSource::Optimizer);
+        let next = v.next_step.expect("unacceptable stop demands an action");
+        assert!(next.contains("budget") || next.contains("alternate optimizer"));
+    }
+
+    #[test]
+    fn verdict_row_saturated_re_is_structural_failed() {
+        let cert = clean_certificate();
+        let diags = vec![row_saturated_diag("(1 + x | g)")];
+        let v = ConvergenceVerdict::compose(&cert, &diags);
+        assert_eq!(v.level, ConvergenceLevel::Failed);
+        assert_eq!(v.source, ConvergenceSource::Structural);
+        assert!(v.headline.contains("structural"));
+        assert!(v.headline.contains("row-saturated"));
+        let next = v.next_step.expect("structural failure must surface an action");
+        assert!(
+            !next.contains("increase optimizer budget"),
+            "must not suggest optimizer tinkering on structural failure: {next}"
+        );
+        assert!(
+            !next.contains("verify_convergence"),
+            "must not suggest verify_convergence on structural failure: {next}"
+        );
+        assert!(next.contains("drop") || next.contains("split") || next.contains("treat"));
+        assert!(next.contains("optimizer tuning will not help"));
+    }
+
+    #[test]
+    fn verdict_separation_is_structural_directs_to_penalty() {
+        let cert = clean_certificate();
+        let diags = vec![diag(
+            DiagnosticCode::NotIdentifiable,
+            "complete separation detected on predictor x",
+            &[],
+        )];
+        let v = ConvergenceVerdict::compose(&cert, &diags);
+        assert_eq!(v.level, ConvergenceLevel::Failed);
+        assert_eq!(v.source, ConvergenceSource::Structural);
+        let next = v.next_step.expect("separation must surface an action");
+        assert!(
+            next.to_lowercase().contains("firth") || next.to_lowercase().contains("penalised"),
+            "expected Firth/penalised hint, got: {next}"
+        );
+    }
+
+    #[test]
+    fn verdict_fixed_rank_deficient_is_structural() {
+        let cert = clean_certificate();
+        let diags = vec![diag(
+            DiagnosticCode::FixedEffectRankDeficient,
+            "X has rank 2 of 3",
+            &[],
+        )];
+        let v = ConvergenceVerdict::compose(&cert, &diags);
+        assert_eq!(v.level, ConvergenceLevel::Failed);
+        assert_eq!(v.source, ConvergenceSource::Structural);
+        let next = v.next_step.expect("rank-deficient design needs an action");
+        assert!(next.contains("rank-deficient") || next.contains("redundant"));
+    }
+
+    #[test]
+    fn verdict_mixed_picks_structural_next_step() {
+        let mut cert = clean_certificate();
+        cert.status = FitStatus::ConvergedBoundary; // optimizer-side caution
+        let diags = vec![row_saturated_diag("(1 + x | g)")];
+        let v = ConvergenceVerdict::compose(&cert, &diags);
+        // Structural always promotes to Failed (issue #120 lesson).
+        assert_eq!(v.level, ConvergenceLevel::Failed);
+        assert_eq!(v.source, ConvergenceSource::Mixed);
+        // Headline should mention both axes.
+        assert!(v.headline.contains("structural"));
+        assert!(v.headline.contains("optimizer"));
+        // Next step is structural (not boundary advice).
+        let next = v.next_step.expect("mixed must surface a structural action");
+        assert!(next.contains("optimizer tuning will not help"));
+    }
+
+    #[test]
+    fn verdict_for_unfitted_artifact_is_not_assessed() {
+        let v = ConvergenceVerdict::for_unfitted();
+        assert_eq!(v.level, ConvergenceLevel::NotAssessed);
+        assert_eq!(v.source, ConvergenceSource::NotAssessed);
+        assert!(v.headline.contains("not fitted"));
+        assert!(v
+            .next_step
+            .as_deref()
+            .unwrap_or("")
+            .contains(".fit()"));
+    }
+
+    #[test]
+    fn verdict_round_trips_json() {
+        let cert = certificate_with_verification(ConvergenceVerificationStatus::RestartAgrees);
+        let v = ConvergenceVerdict::compose(&cert, &[]);
+        let json = serde_json::to_string(&v).unwrap();
+        let decoded: ConvergenceVerdict = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, v);
+    }
+
+    #[test]
+    fn next_steps_line_suppresses_optimizer_tinkering_on_structural_finding() {
+        // A non-acceptable optimizer stop normally emits "increase optimizer
+        // budget"; a structural-source finding must suppress it.
+        let mut cert = clean_certificate();
+        cert.evidence.optimizer_stop.acceptable_stop = false;
+        cert.evidence.gradient.method = EvidenceMethod::NotAvailable {
+            reason: "derivative-free path".to_string(),
+        };
+        let diags = vec![row_saturated_diag("(1 + x | g)")];
+        let line = convergence_next_steps_line(&cert, &diags);
+        assert!(
+            !line.detail.contains("increase optimizer budget"),
+            "structural finding should suppress 'increase optimizer budget': {}",
+            line.detail
+        );
+        assert!(
+            !line.detail.contains("run verify_convergence()"),
+            "structural finding should suppress verify_convergence hint: {}",
+            line.detail
+        );
+        assert!(
+            !line.detail.contains("derivative-backed"),
+            "structural finding should suppress derivative-gating hint: {}",
+            line.detail
+        );
+        assert!(
+            line.detail.contains("optimizer tuning will not help"),
+            "structural action must be present: {}",
+            line.detail
+        );
+    }
+
+    #[test]
+    fn next_steps_line_preserves_optimizer_actions_when_no_structural_finding() {
+        // Reduced-rank fits trigger optimizer-side recommendations and must
+        // be preserved bit-identically — they are NOT structural.
+        let mut cert = clean_certificate();
+        cert.status = FitStatus::ConvergedReducedRank;
+        let line = convergence_next_steps_line(&cert, &[]);
+        // SuggestVerify still fires (no verification on this certificate),
+        // and the boundary/reduced-rank hint must be present.
+        assert!(line.detail.contains("Effective Covariance"));
+        assert!(line.detail.contains("verify_convergence"));
     }
 }

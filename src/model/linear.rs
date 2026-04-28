@@ -783,6 +783,32 @@ impl LinearMixedModel {
 
     /// Run bounded convergence verification and attach the result to the
     /// optimizer certificate.
+    ///
+    /// Refits the model from the current optimum (and from one or more
+    /// jittered starts, and via alternate optimizers when consensus is
+    /// requested) and reports whether the runs agree on θ, β, and the
+    /// objective. The result is stored on
+    /// `compiler_artifact.optimizer_certificate.verification` so the
+    /// audit report and [`ConvergenceVerdict`](crate::compiler::ConvergenceVerdict)
+    /// can pick it up. lme4's analogue is `allFit()`.
+    ///
+    /// # When to call
+    ///
+    /// Run this after [`fit`](Self::fit) when the compact print shows
+    /// `convergence: caution` or `convergence: ok` with a
+    /// `next: run verify_convergence()` hint — that is, when the
+    /// optimizer stopped acceptably but gradient/Hessian evidence is
+    /// weak or unavailable, or when the model is at a boundary or
+    /// reduced-rank optimum and you want optimizer-agreement
+    /// reassurance. It is **not** the right tool for structural design
+    /// failures (row-saturated random effects, separation,
+    /// rank-deficient fixed effects); the verdict's `next:` line
+    /// already excludes optimizer tinkering when the source is
+    /// structural.
+    ///
+    /// Use [`verify_convergence_with_options`](Self::verify_convergence_with_options)
+    /// when you need finer-grained control over jitter scale, alternate
+    /// optimizer choice, or agreement tolerances.
     pub fn verify_convergence(&mut self) -> Result<ConvergenceVerification> {
         self.verify_convergence_with_options(ConvergenceVerificationOptions::default())
     }

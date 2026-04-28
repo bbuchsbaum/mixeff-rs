@@ -37,6 +37,7 @@ use super::artifact::{
     CompiledModelArtifact, CovarianceParameterTrace, FitMode, InferenceAvailability, ModelKind,
 };
 use super::diagnostics::{Diagnostic, DiagnosticSeverity, FitStatus};
+use super::report::{ConvergenceLevel, ConvergenceVerdict};
 
 /// Maximum number of top diagnostics shown in [`ModelPrint`].
 ///
@@ -78,6 +79,12 @@ pub struct ModelPrint {
     /// Inference availability copied from the artifact's
     /// `ModelBoundary`.
     pub inference: InferenceAvailability,
+    /// Compact convergence verdict — combines the optimizer certificate
+    /// with structural pre-fit diagnostics. Always populated, even for
+    /// unfitted artifacts (in which case it reports `not assessed`). See
+    /// [`ConvergenceVerdict`] for the typed projection backing the
+    /// one-line render.
+    pub verdict: ConvergenceVerdict,
 }
 
 impl ModelPrint {
@@ -105,6 +112,7 @@ impl ModelPrint {
             top_diagnostics,
             diagnostic_total,
             inference: artifact.model_boundary.inference_availability.clone(),
+            verdict: ConvergenceVerdict::for_artifact(artifact),
         }
     }
 }
@@ -120,6 +128,17 @@ impl fmt::Display for ModelPrint {
             "{:?} [{}]: {:?}",
             self.model_kind, status_label, self.fit_mode
         )?;
+        writeln!(
+            f,
+            "  convergence: {} — {}",
+            self.verdict.level.as_str(),
+            self.verdict.headline
+        )?;
+        if let Some(next_step) = &self.verdict.next_step {
+            if !matches!(self.verdict.level, ConvergenceLevel::Certified) {
+                writeln!(f, "    next: {}", next_step)?;
+            }
+        }
         writeln!(f, "  formula: {}", self.requested_formula)?;
         if let Some(effective) = &self.effective_formula {
             writeln!(f, "  effective: {}", effective)?;
@@ -242,11 +261,7 @@ impl fmt::Display for ParameterizationDrilldown {
                     header.optimizer_basis.join(", ")
                 )?;
             }
-            writeln!(
-                f,
-                "      covariance family: {:?}",
-                header.covariance_family
-            )?;
+            writeln!(f, "      covariance family: {:?}", header.covariance_family)?;
             writeln!(f, "      slots ({}):", traces.len())?;
             for trace in traces {
                 let theta_value = format_optional(trace.theta.value);
@@ -275,7 +290,11 @@ impl fmt::Display for ParameterizationDrilldown {
                     lambda_value
                 )?;
                 if let Some(parmap) = &trace.parmap_entry {
-                    let agreement = if parmap.matches_theta_map { "ok" } else { "mismatch" };
+                    let agreement = if parmap.matches_theta_map {
+                        "ok"
+                    } else {
+                        "mismatch"
+                    };
                     writeln!(
                         f,
                         "          parmap → term {} Λ[{}, {}] ({})",
@@ -368,7 +387,10 @@ mod tests {
         let mut artifact = sample_artifact();
         artifact.effective_formula = Some(artifact.requested_formula.clone());
         let print = ModelPrint::from_artifact(&artifact);
-        assert!(print.effective_formula.is_none(), "should suppress identical effective formula");
+        assert!(
+            print.effective_formula.is_none(),
+            "should suppress identical effective formula"
+        );
 
         artifact.effective_formula = Some("y ~ 1 + x + (1 | g)".to_string());
         let print = ModelPrint::from_artifact(&artifact);
@@ -381,10 +403,148 @@ mod tests {
     }
 
     #[test]
+    fn model_print_emits_convergence_line_for_unfitted_artifact() {
+        let artifact = sample_artifact();
+        let print = ModelPrint::from_artifact(&artifact);
+        assert!(print.fit_status.is_none());
+        let rendered = print.to_string();
+        assert!(
+            rendered.contains("convergence: not assessed"),
+            "expected 'convergence: not assessed' line, got:\n{rendered}"
+        );
+        // Unfitted artifact should expose a `next: ...` line pointing at
+        // .fit() — not certified, so the `next:` line is emitted.
+        assert!(
+            rendered.contains("next: ") && rendered.contains(".fit()"),
+            "expected next: line pointing at .fit(), got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn model_print_structural_failure_renders_failed_with_next_step() {
+        use super::super::audit::OptimizerCertificate;
+        use super::super::diagnostics::{
+            Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticStage,
+        };
+
+        let mut artifact = sample_artifact();
+        let mut cert = OptimizerCertificate::not_assessed();
+        cert.status = FitStatus::ConvergedInterior;
+        cert.evidence.optimizer_stop.acceptable_stop = true;
+        artifact.optimizer_certificate = Some(cert);
+
+        let mut diag = Diagnostic::new(
+            DiagnosticCode::CovarianceTooRich,
+            DiagnosticSeverity::Warning,
+            DiagnosticStage::DesignAudit,
+            "row-saturated random effect",
+        )
+        .with_affected_terms(vec!["(1 + x | g)".to_string()]);
+        diag.payload
+            .insert("row_saturated".to_string(), serde_json::json!(true));
+        artifact.diagnostics.push(diag);
+
+        let print = ModelPrint::from_artifact(&artifact);
+        let rendered = print.to_string();
+        assert!(
+            rendered.contains("convergence: failed"),
+            "expected 'convergence: failed' line, got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("structural"),
+            "verdict headline should mention structural source, got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("next: "),
+            "structural failure must surface a 'next:' line, got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("optimizer tuning will not help"),
+            "structural next-step must call out that optimizer tuning won't help, got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("increase optimizer budget"),
+            "structural source must not suggest optimizer tinkering, got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn model_print_caution_boundary_renders_with_next_step() {
+        use super::super::audit::{EvidenceMethod, EvidenceQuality, OptimizerCertificate};
+
+        let mut artifact = sample_artifact();
+        let mut cert = OptimizerCertificate::not_assessed();
+        cert.status = FitStatus::ConvergedBoundary;
+        cert.evidence.optimizer_stop.acceptable_stop = true;
+        cert.evidence.gradient.method = EvidenceMethod::Exact;
+        cert.evidence.hessian.method = EvidenceMethod::Exact;
+        cert.evidence.hessian.quality = EvidenceQuality::Certified;
+        cert.evidence.certification_quality = EvidenceQuality::Certified;
+        artifact.optimizer_certificate = Some(cert);
+
+        let print = ModelPrint::from_artifact(&artifact);
+        let rendered = print.to_string();
+        assert!(
+            rendered.contains("convergence: caution"),
+            "expected 'convergence: caution' line, got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("next: "),
+            "caution-level fit must surface a 'next:' line, got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn model_print_certified_fit_omits_next_line() {
+        use super::super::audit::{
+            ConvergenceVerification, ConvergenceVerificationStatus, EvidenceMethod, EvidenceQuality,
+            OptimizerCertificate,
+        };
+
+        let mut artifact = sample_artifact();
+        let mut cert = OptimizerCertificate::not_assessed();
+        cert.status = FitStatus::ConvergedInterior;
+        cert.evidence.optimizer_stop.acceptable_stop = true;
+        cert.evidence.gradient.method = EvidenceMethod::Exact;
+        cert.evidence.hessian.method = EvidenceMethod::Exact;
+        cert.evidence.hessian.quality = EvidenceQuality::Certified;
+        cert.evidence.certification_quality = EvidenceQuality::Certified;
+        cert.verification = Some(ConvergenceVerification {
+            status: ConvergenceVerificationStatus::RestartAgrees,
+            objective_tolerance: 1e-6,
+            theta_tolerance: 1e-6,
+            beta_tolerance: 1e-6,
+            reference_objective: Some(0.0),
+            reference_theta: Vec::new(),
+            reference_beta: Vec::new(),
+            reference_effective_ranks: Vec::new(),
+            runs: Vec::new(),
+            message: "restart agrees".to_string(),
+        });
+        artifact.optimizer_certificate = Some(cert);
+
+        let print = ModelPrint::from_artifact(&artifact);
+        let rendered = print.to_string();
+        assert!(
+            rendered.contains("convergence: certified"),
+            "expected 'convergence: certified' line, got:\n{rendered}"
+        );
+        // Certified fits must not emit a `next:` continuation — the
+        // verdict line stands alone.
+        assert!(
+            !rendered.contains("next: "),
+            "certified fits must not emit a 'next:' line, got:\n{rendered}"
+        );
+    }
+
+    #[test]
     fn parameterization_drilldown_renders_random_term_traces() {
         let artifact = sample_artifact();
         let drilldown = ParameterizationDrilldown::from_artifact(&artifact);
-        assert!(!drilldown.traces.is_empty(), "expected at least one random-term trace");
+        assert!(
+            !drilldown.traces.is_empty(),
+            "expected at least one random-term trace"
+        );
         let rendered = drilldown.to_string();
         assert!(rendered.starts_with("Parameterization:"));
         assert!(rendered.contains("requested formula:"));
