@@ -14,6 +14,7 @@ use nalgebra::{DMatrix, DVector, SymmetricEigen};
 use nlopt::{
     Algorithm as NloptAlgorithm, FailState as NloptFailState, Nlopt, Target as NloptTarget,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::compiler::{
     compile_formula_ir, BasisLoading, CompiledModelArtifact, CompilerPolicy,
@@ -6523,11 +6524,13 @@ fn logdet_block(block: &MatrixBlock) -> f64 {
 // ── Parametric bootstrap ──────────────────────────────────────────────────────
 
 /// A single parametric bootstrap replicate.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootstrapReplicate {
     /// Profile-likelihood objective (deviance or REML criterion).
+    #[serde(with = "json_f64")]
     pub objective: f64,
     /// Residual standard deviation σ.
+    #[serde(with = "json_f64")]
     pub sigma: f64,
     /// Fixed-effects coefficients (pivot order).
     pub beta: DVector<f64>,
@@ -6542,7 +6545,7 @@ pub struct BootstrapReplicate {
 /// Produced by [`parametricbootstrap`].  Each replicate stores the
 /// objective, residual σ, fixed-effects β, and covariance θ for a
 /// model fitted to a simulated response.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MixedModelBootstrap {
     /// One entry per bootstrap replicate.
     pub fits: Vec<BootstrapReplicate>,
@@ -6577,6 +6580,91 @@ impl MixedModelBootstrap {
     /// θ parameter vectors across all replicates.
     pub fn thetas(&self) -> Vec<Vec<f64>> {
         self.fits.iter().map(|f| f.theta.clone()).collect()
+    }
+
+    /// Save bootstrap replicates as JSON.
+    ///
+    /// The JSON form is intentionally just the replicate collection, so it can
+    /// be restored independently and then validated against a model template.
+    pub fn save_replicates<W: std::io::Write>(
+        &self,
+        writer: W,
+    ) -> std::result::Result<(), serde_json::Error> {
+        serde_json::to_writer(writer, self)
+    }
+
+    /// Restore bootstrap replicates from JSON.
+    pub fn restore_replicates<R: std::io::Read>(
+        reader: R,
+    ) -> std::result::Result<Self, serde_json::Error> {
+        serde_json::from_reader(reader)
+    }
+
+    /// Validate restored replicate dimensions against a model template.
+    pub fn validate_for_model(&self, model: &LinearMixedModel) -> Result<()> {
+        let expected_beta = model.feterm.rank;
+        let expected_theta = model.n_theta();
+
+        for (idx, fit) in self.fits.iter().enumerate() {
+            if fit.beta.len() != expected_beta {
+                return Err(MixedModelError::InvalidArgument(format!(
+                    "bootstrap replicate {idx} beta length ({}) does not match model fixed-effect rank ({expected_beta})",
+                    fit.beta.len()
+                )));
+            }
+            if fit.theta.len() != expected_theta {
+                return Err(MixedModelError::InvalidArgument(format!(
+                    "bootstrap replicate {idx} theta length ({}) does not match model theta length ({expected_theta})",
+                    fit.theta.len()
+                )));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+mod json_f64 {
+    use serde::de::Error;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &f64, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if value.is_finite() {
+            serializer.serialize_f64(*value)
+        } else if value.is_nan() {
+            serializer.serialize_str("NaN")
+        } else if value.is_sign_positive() {
+            serializer.serialize_str("Infinity")
+        } else {
+            serializer.serialize_str("-Infinity")
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> std::result::Result<f64, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum JsonF64 {
+            Number(f64),
+            Special(String),
+        }
+
+        match JsonF64::deserialize(deserializer)? {
+            JsonF64::Number(value) => Ok(value),
+            JsonF64::Special(value) => match value.as_str() {
+                "NaN" => Ok(f64::NAN),
+                "Infinity" => Ok(f64::INFINITY),
+                "-Infinity" => Ok(f64::NEG_INFINITY),
+                _ => Err(D::Error::custom(format!(
+                    "invalid non-finite float marker `{value}`"
+                ))),
+            },
+        }
     }
 }
 
@@ -10750,6 +10838,84 @@ mod tests {
                 n_theta,
                 rep.theta.len()
             );
+        }
+    }
+
+    #[test]
+    fn test_parametricbootstrap_save_restore_round_trip() {
+        let data = dyestuff_fixture();
+        let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let mut rng = StdRng::seed_from_u64(20260428);
+        let bsamp = parametricbootstrap(&mut rng, 4, &model);
+
+        let mut bytes = Vec::new();
+        crate::stats::savereplicates(&mut bytes, &bsamp).unwrap();
+        let restored = crate::stats::restorereplicates(bytes.as_slice(), &model).unwrap();
+
+        assert_eq!(restored.len(), bsamp.len());
+        for (actual, expected) in restored.fits.iter().zip(bsamp.fits.iter()) {
+            assert_relative_eq!(actual.objective, expected.objective, epsilon = 1e-12);
+            assert_relative_eq!(actual.sigma, expected.sigma, epsilon = 1e-12);
+            assert_eq!(actual.beta.len(), expected.beta.len());
+            for (a, e) in actual.beta.iter().zip(expected.beta.iter()) {
+                assert_relative_eq!(*a, *e, epsilon = 1e-12);
+            }
+            assert_eq!(actual.theta.len(), expected.theta.len());
+            for (a, e) in actual.theta.iter().zip(expected.theta.iter()) {
+                assert_relative_eq!(*a, *e, epsilon = 1e-12);
+            }
+        }
+    }
+
+    #[test]
+    fn test_parametricbootstrap_save_restore_preserves_nan_status() {
+        let bsamp = MixedModelBootstrap {
+            fits: vec![BootstrapReplicate {
+                objective: f64::NAN,
+                sigma: f64::NAN,
+                beta: DVector::from_vec(vec![1.0, 2.0]),
+                theta: vec![0.5],
+            }],
+        };
+
+        let mut bytes = Vec::new();
+        bsamp.save_replicates(&mut bytes).unwrap();
+        let restored = MixedModelBootstrap::restore_replicates(bytes.as_slice()).unwrap();
+
+        assert_eq!(restored.len(), 1);
+        assert!(restored.fits[0].objective.is_nan());
+        assert!(restored.fits[0].sigma.is_nan());
+        assert_eq!(restored.fits[0].beta, DVector::from_vec(vec![1.0, 2.0]));
+        assert_eq!(restored.fits[0].theta, vec![0.5]);
+    }
+
+    #[test]
+    fn test_restorereplicates_rejects_mismatched_model_shape() {
+        let data = dyestuff_fixture();
+        let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let bsamp = MixedModelBootstrap {
+            fits: vec![BootstrapReplicate {
+                objective: 1.0,
+                sigma: 1.0,
+                beta: DVector::zeros(model.feterm.rank + 1),
+                theta: model.theta(),
+            }],
+        };
+
+        let mut bytes = Vec::new();
+        crate::stats::savereplicates(&mut bytes, &bsamp).unwrap();
+        let err = crate::stats::restorereplicates(bytes.as_slice(), &model).unwrap_err();
+        match err {
+            MixedModelError::InvalidArgument(message) => {
+                assert!(message.contains("beta length"));
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
         }
     }
 

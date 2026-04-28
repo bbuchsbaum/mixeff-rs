@@ -5,7 +5,53 @@
 //! result types and exposes the `shortest_cov_int` utility used to summarize
 //! replicate distributions.
 
+use std::io::{Read, Write};
+
+use crate::error::{MixedModelError, Result};
+use crate::model::linear::LinearMixedModel;
 pub use crate::model::linear::{parametricbootstrap, BootstrapReplicate, MixedModelBootstrap};
+
+/// Save bootstrap replicates as JSON.
+///
+/// Mirrors the Julia `savereplicates(io, pb)` surface while using a portable
+/// JSON representation in Rust.
+pub fn savereplicates<W: Write>(
+    writer: W,
+    bootstrap: &MixedModelBootstrap,
+) -> std::result::Result<(), serde_json::Error> {
+    bootstrap.save_replicates(writer)
+}
+
+/// Rust-style alias for [`savereplicates`].
+pub fn save_replicates<W: Write>(
+    writer: W,
+    bootstrap: &MixedModelBootstrap,
+) -> std::result::Result<(), serde_json::Error> {
+    savereplicates(writer, bootstrap)
+}
+
+/// Restore bootstrap replicates from JSON and validate dimensions against `model`.
+///
+/// Mirrors Julia's `restorereplicates(io, model)` shape: the model is used as a
+/// template guard so stale or mismatched replicate files are rejected up front.
+pub fn restorereplicates<R: Read>(
+    reader: R,
+    model: &LinearMixedModel,
+) -> Result<MixedModelBootstrap> {
+    let bootstrap = MixedModelBootstrap::restore_replicates(reader).map_err(|err| {
+        MixedModelError::InvalidArgument(format!("could not restore bootstrap replicates: {err}"))
+    })?;
+    bootstrap.validate_for_model(model)?;
+    Ok(bootstrap)
+}
+
+/// Rust-style alias for [`restorereplicates`].
+pub fn restore_replicates<R: Read>(
+    reader: R,
+    model: &LinearMixedModel,
+) -> Result<MixedModelBootstrap> {
+    restorereplicates(reader, model)
+}
 
 /// Shortest coverage interval containing `level` proportion of values.
 ///
