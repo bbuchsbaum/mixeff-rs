@@ -1,0 +1,562 @@
+{
+  "schema": {
+    "schema_name": "mixedmodels.compiled_model_artifact",
+    "schema_version": 1,
+    "crate_version": "0.1.0"
+  },
+  "model_boundary": {
+    "model_kind": "linear_mixed_model",
+    "response_distribution": "gaussian",
+    "link": "identity",
+    "objective_approximation": "exact_gaussian",
+    "optimizer_certificate_scope": "exact_objective",
+    "covariance_derivatives": {
+      "not_available": {
+        "reason": "compiler v0 does not expose covariance derivative certificates"
+      }
+    },
+    "inference_availability": {
+      "not_assessed": {
+        "reason": "finite-sample inference is not implemented in compiler v0"
+      }
+    }
+  },
+  "requested_formula": "diameter ~ 1 + (1 | plate) + (1 | sample)",
+  "semantic_model": {
+    "schema_name": "mixedmodels.semantic_model",
+    "schema_version": 1,
+    "response": "diameter",
+    "fixed_terms": [
+      "1"
+    ],
+    "random_terms": [
+      {
+        "id": "r0",
+        "group": {
+          "single": {
+            "name": "plate"
+          }
+        },
+        "basis": [
+          {
+            "name": "intercept",
+            "kind": "intercept",
+            "source": "1"
+          }
+        ],
+        "covariance": "scalar",
+        "intercept": "included",
+        "role": "unknown",
+        "source_syntax": {
+          "text": "(1 | plate)"
+        },
+        "covariance_story": {
+          "summary": "plate: varying coefficients [intercept]",
+          "assumptions": [
+            "plate levels may differ in baseline response",
+            "single variance direction is estimated"
+          ],
+          "dependence": [
+            "observations sharing plate are correlated through this term's random coefficients"
+          ]
+        }
+      },
+      {
+        "id": "r1",
+        "group": {
+          "single": {
+            "name": "sample"
+          }
+        },
+        "basis": [
+          {
+            "name": "intercept",
+            "kind": "intercept",
+            "source": "1"
+          }
+        ],
+        "covariance": "scalar",
+        "intercept": "included",
+        "role": "unknown",
+        "source_syntax": {
+          "text": "(1 | sample)"
+        },
+        "covariance_story": {
+          "summary": "sample: varying coefficients [intercept]",
+          "assumptions": [
+            "sample levels may differ in baseline response",
+            "single variance direction is estimated"
+          ],
+          "dependence": [
+            "observations sharing sample are correlated through this term's random coefficients"
+          ]
+        }
+      }
+    ],
+    "diagnostics": []
+  },
+  "effective_formula": null,
+  "effective_semantic_model": null,
+  "theta_maps": [
+    {
+      "family": "scalar",
+      "map": {
+        "schema_name": "mixedmodels.theta_map",
+        "schema_version": 1,
+        "term_id": "r0",
+        "term_index": 0,
+        "group": "plate",
+        "user_basis": [
+          "intercept"
+        ],
+        "optimizer_basis": [
+          "intercept"
+        ],
+        "theta_slots": [
+          {
+            "global_index": 0,
+            "local_index": 0,
+            "term_index": 0,
+            "basis_row": 0,
+            "basis_col": 0,
+            "lambda_row": 0,
+            "lambda_col": 0,
+            "name": "theta[0:intercept,intercept]",
+            "constraint": {
+              "lower_bound": {
+                "lower": 0.0
+              }
+            },
+            "status": "free"
+          }
+        ],
+        "source_parmap": [
+          [
+            0,
+            0,
+            0
+          ]
+        ]
+      }
+    },
+    {
+      "family": "scalar",
+      "map": {
+        "schema_name": "mixedmodels.theta_map",
+        "schema_version": 1,
+        "term_id": "r1",
+        "term_index": 1,
+        "group": "sample",
+        "user_basis": [
+          "intercept"
+        ],
+        "optimizer_basis": [
+          "intercept"
+        ],
+        "theta_slots": [
+          {
+            "global_index": 1,
+            "local_index": 0,
+            "term_index": 1,
+            "basis_row": 0,
+            "basis_col": 0,
+            "lambda_row": 0,
+            "lambda_col": 0,
+            "name": "theta[1:intercept,intercept]",
+            "constraint": {
+              "lower_bound": {
+                "lower": 0.0
+              }
+            },
+            "status": "free"
+          }
+        ],
+        "source_parmap": [
+          [
+            1,
+            0,
+            0
+          ]
+        ]
+      }
+    }
+  ],
+  "design_audit": {
+    "schema_name": "mixedmodels.design_audit",
+    "schema_version": 1,
+    "fixed_effect_rank": {
+      "rank": 1,
+      "expected": 1,
+      "status": "full_rank",
+      "reason": null
+    },
+    "fixed_effects": {
+      "n_rows": 144,
+      "n_columns": 1,
+      "rank": {
+        "rank": 1,
+        "expected": 1,
+        "status": "full_rank",
+        "reason": null
+      },
+      "columns": [
+        {
+          "name": "(Intercept)",
+          "source_term": "1",
+          "kind": "intercept"
+        }
+      ],
+      "terms": [
+        {
+          "term": "1",
+          "n_columns": 1,
+          "status": "estimable",
+          "aliased_columns": [],
+          "diagnostics": []
+        }
+      ],
+      "aliased_columns": [],
+      "empty_cells": [],
+      "diagnostics": []
+    },
+    "random_terms": [
+      {
+        "term_id": "r0",
+        "group": {
+          "name": "plate",
+          "n_observations": 144,
+          "n_levels": 24,
+          "min_obs_per_level": 6,
+          "max_obs_per_level": 6,
+          "repeated": true,
+          "reason": null
+        },
+        "basis_size": 1,
+        "requested_covariance_parameters": 1,
+        "information_budget": {
+          "n_levels": 24,
+          "basis_dimension": 1,
+          "covariance_family": "scalar",
+          "requested_covariance_parameters": 1,
+          "min_levels_variance": 5,
+          "min_levels_full_covariance": null,
+          "effective_n": {
+            "n_rows": 144,
+            "n_levels": 24,
+            "min_obs_per_level": 6,
+            "max_obs_per_level": 6,
+            "basis_dimension": 1,
+            "covariance_parameters": 1,
+            "levels_per_basis_direction": 24.0,
+            "levels_per_covariance_parameter": 24.0,
+            "rows_per_covariance_parameter": 144.0,
+            "total_rows_can_mislead": false,
+            "explanation": "144 rows are clustered into 24 grouping levels; grouping levels are the effective n for random-effect distribution support",
+            "recommendation": "information budget is sufficient under v0 thresholds"
+          },
+          "status": "sufficient",
+          "reason": null
+        },
+        "basis": [
+          {
+            "name": "intercept",
+            "kind": "intercept",
+            "min_within_group_sd": null,
+            "max_within_group_sd": null,
+            "supported": true,
+            "reason": null
+          }
+        ],
+        "diagnostics": []
+      },
+      {
+        "term_id": "r1",
+        "group": {
+          "name": "sample",
+          "n_observations": 144,
+          "n_levels": 6,
+          "min_obs_per_level": 24,
+          "max_obs_per_level": 24,
+          "repeated": true,
+          "reason": null
+        },
+        "basis_size": 1,
+        "requested_covariance_parameters": 1,
+        "information_budget": {
+          "n_levels": 6,
+          "basis_dimension": 1,
+          "covariance_family": "scalar",
+          "requested_covariance_parameters": 1,
+          "min_levels_variance": 5,
+          "min_levels_full_covariance": null,
+          "effective_n": {
+            "n_rows": 144,
+            "n_levels": 6,
+            "min_obs_per_level": 24,
+            "max_obs_per_level": 24,
+            "basis_dimension": 1,
+            "covariance_parameters": 1,
+            "levels_per_basis_direction": 6.0,
+            "levels_per_covariance_parameter": 6.0,
+            "rows_per_covariance_parameter": 144.0,
+            "total_rows_can_mislead": false,
+            "explanation": "144 rows are clustered into 6 grouping levels; grouping levels are the effective n for random-effect distribution support",
+            "recommendation": "information budget is sufficient under v0 thresholds"
+          },
+          "status": "sufficient",
+          "reason": null
+        },
+        "basis": [
+          {
+            "name": "intercept",
+            "kind": "intercept",
+            "min_within_group_sd": null,
+            "max_within_group_sd": null,
+            "supported": true,
+            "reason": null
+          }
+        ],
+        "diagnostics": []
+      }
+    ],
+    "covariance_kernels": {
+      "kernels": [
+        {
+          "term_id": "r0",
+          "group": "plate",
+          "parts": [
+            "plate"
+          ],
+          "path": "marginal",
+          "has_intercept": true,
+          "basis": [
+            "intercept"
+          ],
+          "covariance_family": "scalar",
+          "source_syntax": "(1 | plate)"
+        },
+        {
+          "term_id": "r1",
+          "group": "sample",
+          "parts": [
+            "sample"
+          ],
+          "path": "marginal",
+          "has_intercept": true,
+          "basis": [
+            "intercept"
+          ],
+          "covariance_family": "scalar",
+          "source_syntax": "(1 | sample)"
+        }
+      ],
+      "repeated_units": [
+        {
+          "unit": "plate",
+          "parts": [
+            "plate"
+          ],
+          "path": "marginal",
+          "n_observations": 144,
+          "n_levels": 24,
+          "min_obs_per_level": 6,
+          "max_obs_per_level": 6,
+          "repeated": true,
+          "covered_by_terms": [
+            "r0"
+          ]
+        },
+        {
+          "unit": "sample",
+          "parts": [
+            "sample"
+          ],
+          "path": "marginal",
+          "n_observations": 144,
+          "n_levels": 6,
+          "min_obs_per_level": 24,
+          "max_obs_per_level": 24,
+          "repeated": true,
+          "covered_by_terms": [
+            "r1"
+          ]
+        }
+      ],
+      "missing_dependence_paths": []
+    },
+    "diagnostics": []
+  },
+  "compiler_policy": {
+    "random_strategy": "maximal_feasible",
+    "thresholds": {
+      "min_levels_random_intercept_fit": 2,
+      "min_levels_random_intercept_reliability": 5,
+      "max_condition_number": 10000000000.0,
+      "min_within_group_sd": 1e-8,
+      "max_basis_pairwise_abs_corr": 0.999,
+      "min_observations_per_supported_level": 2,
+      "effective_rank_relative_tolerance": 1e-6,
+      "effective_rank_absolute_tolerance": 1e-10
+    },
+    "apply_design_time_reductions": false
+  },
+  "policy_recommendations": [],
+  "effective_covariance": [],
+  "reductions": [],
+  "covariance_transitions": [],
+  "covariance_parameter_traces": [
+    {
+      "term_id": "r0",
+      "source_syntax": "(1 | plate)",
+      "semantic_term_index": 0,
+      "optimizer_term_index": 0,
+      "group": "plate",
+      "covariance_family": "scalar",
+      "user_basis": [
+        "intercept"
+      ],
+      "optimizer_basis": [
+        "intercept"
+      ],
+      "theta": {
+        "global_index": 0,
+        "local_index": 0,
+        "name": "theta[0:intercept,intercept]",
+        "constraint": {
+          "lower_bound": {
+            "lower": 0.0
+          }
+        },
+        "status": "free",
+        "value": 1.0
+      },
+      "lambda": {
+        "row": 0,
+        "col": 0,
+        "row_basis": "intercept",
+        "col_basis": "intercept",
+        "value": 1.0
+      },
+      "parmap_entry": {
+        "theta_index": 0,
+        "term_index": 0,
+        "lambda_row": 0,
+        "lambda_col": 0,
+        "matches_theta_map": true
+      },
+      "varcorr_entries": [
+        {
+          "kind": "standard_deviation",
+          "label": "sd(intercept)",
+          "basis": [
+            "intercept"
+          ],
+          "value": null
+        }
+      ]
+    },
+    {
+      "term_id": "r1",
+      "source_syntax": "(1 | sample)",
+      "semantic_term_index": 1,
+      "optimizer_term_index": 1,
+      "group": "sample",
+      "covariance_family": "scalar",
+      "user_basis": [
+        "intercept"
+      ],
+      "optimizer_basis": [
+        "intercept"
+      ],
+      "theta": {
+        "global_index": 1,
+        "local_index": 0,
+        "name": "theta[1:intercept,intercept]",
+        "constraint": {
+          "lower_bound": {
+            "lower": 0.0
+          }
+        },
+        "status": "free",
+        "value": 1.0
+      },
+      "lambda": {
+        "row": 0,
+        "col": 0,
+        "row_basis": "intercept",
+        "col_basis": "intercept",
+        "value": 1.0
+      },
+      "parmap_entry": {
+        "theta_index": 1,
+        "term_index": 1,
+        "lambda_row": 0,
+        "lambda_col": 0,
+        "matches_theta_map": true
+      },
+      "varcorr_entries": [
+        {
+          "kind": "standard_deviation",
+          "label": "sd(intercept)",
+          "basis": [
+            "intercept"
+          ],
+          "value": null
+        }
+      ]
+    }
+  ],
+  "reproducibility": {
+    "fit_intent": "confirmatory_as_specified",
+    "seed": null,
+    "random_state_used": false,
+    "thresholds": [
+      [
+        "min_levels_random_intercept_fit",
+        "2"
+      ],
+      [
+        "min_levels_random_intercept_reliability",
+        "5"
+      ],
+      [
+        "min_levels_variance",
+        "max(5, 2*d_basis + 1)"
+      ],
+      [
+        "min_levels_full_cov",
+        "max(10, 5*n_cov_params)"
+      ],
+      [
+        "max_condition_number",
+        "10000000000"
+      ],
+      [
+        "min_within_group_sd",
+        "0.00000001"
+      ],
+      [
+        "max_basis_pairwise_abs_corr",
+        "0.999"
+      ],
+      [
+        "min_observations_per_supported_level",
+        "2"
+      ],
+      [
+        "effective_rank_relative_tolerance",
+        "0.000001"
+      ],
+      [
+        "effective_rank_absolute_tolerance",
+        "0.0000000001"
+      ],
+      [
+        "apply_design_time_reductions",
+        "false"
+      ]
+    ]
+  },
+  "optimizer_certificate": null,
+  "diagnostics": []
+}

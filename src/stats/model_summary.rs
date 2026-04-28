@@ -1,0 +1,728 @@
+//! Mixed-model summary tables used by MIME-style renderers.
+
+use statrs::distribution::{ChiSquared, ContinuousCDF};
+
+use crate::model::traits::MixedModelFit;
+use crate::model::{GeneralizedLinearMixedModel, LinearMixedModel};
+use crate::stats::VarCorr;
+
+/// One row in a model summary table.
+#[derive(Debug, Clone)]
+pub struct ModelSummaryRow {
+    pub label: String,
+    pub estimate: Option<f64>,
+    pub std_error: Option<f64>,
+    pub z_stat: Option<f64>,
+    pub pvalue: Option<f64>,
+    pub sigma_values: Vec<Option<f64>>,
+}
+
+/// A markdown/HTML/LaTeX-ready summary of a fitted mixed model.
+#[derive(Debug, Clone)]
+pub struct ModelSummary {
+    pub sigma_headers: Vec<String>,
+    pub rows: Vec<ModelSummaryRow>,
+}
+
+impl ModelSummary {
+    /// Construct a summary from a linear mixed model.
+    pub fn from_linear_model(model: &LinearMixedModel) -> Self {
+        let sigma = model.sigma();
+        let varcorr = VarCorr::from_reterms(&model.reterms, sigma, Some(sigma));
+        let coeftable = model.coeftable();
+        summary_from_parts_with_pvalues(
+            &coeftable.names,
+            &coeftable.estimates,
+            &coeftable.std_errors,
+            Some(&coeftable.p_values),
+            &varcorr,
+            Some("Residual"),
+            Some(sigma),
+        )
+    }
+
+    /// Construct a summary from a generalized linear mixed model.
+    pub fn from_generalized_model(model: &GeneralizedLinearMixedModel) -> Self {
+        let scale = model.dispersion(false);
+        let residual_label = if model.family.has_dispersion() {
+            Some("Dispersion")
+        } else {
+            None
+        };
+        let residual_value = if model.family.has_dispersion() {
+            Some(scale)
+        } else {
+            None
+        };
+        let varcorr = VarCorr::from_reterms(&model.lmm.reterms, scale, None);
+        summary_from_parts(
+            &model.coef_names(),
+            &model.coef().as_slice().to_vec(),
+            &model.stderror().as_slice().to_vec(),
+            &varcorr,
+            residual_label,
+            residual_value,
+        )
+    }
+
+    /// Render the summary as a markdown table.
+    pub fn to_markdown(&self) -> String {
+        let header = self.header_row();
+        let rows = self.markdown_rows();
+        let mut all_rows = Vec::with_capacity(rows.len() + 1);
+        all_rows.push(header.clone());
+        all_rows.extend(rows.iter().cloned());
+
+        let widths = column_widths(&all_rows);
+        let mut out = String::new();
+        out.push_str(&format_markdown_row(
+            &header,
+            &widths,
+            &alignments(self.sigma_headers.len()),
+        ));
+        out.push('\n');
+        out.push_str(&format_markdown_alignment(
+            &widths,
+            &alignments(self.sigma_headers.len()),
+        ));
+        out.push('\n');
+        for row in rows {
+            out.push_str(&format_markdown_row(
+                &row,
+                &widths,
+                &alignments(self.sigma_headers.len()),
+            ));
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Render the summary as an HTML table.
+    pub fn to_html(&self) -> String {
+        let header = self.header_row();
+        let rows = self.markdown_rows();
+        let mut out = String::from("<table><tr>");
+        for cell in &header {
+            out.push_str(&format!("<th align=\"left\">{}</th>", html_escape(cell)));
+        }
+        out.push_str("</tr>");
+        for row in rows {
+            out.push_str("<tr>");
+            for (idx, cell) in row.iter().enumerate() {
+                let align = if idx == 0 { "left" } else { "right" };
+                out.push_str(&format!("<td align=\"{align}\">{}</td>", html_escape(cell)));
+            }
+            out.push_str("</tr>");
+        }
+        out.push_str("</table>\n");
+        out
+    }
+
+    /// Render the summary as a LaTeX table.
+    pub fn to_latex(&self) -> String {
+        let header = self.latex_header_row();
+        let rows = self.latex_rows();
+        let mut out = String::new();
+        let cols = "l | ".to_string() + &vec!["r"; header.len() - 1].join(" | ");
+
+        out.push_str("\\begin{tabular}\n");
+        out.push_str(&format!("{{{cols}}}\n"));
+        out.push_str(&header.join(" & "));
+        out.push_str(" \\\\\n");
+        for row in rows {
+            out.push_str(&row.join(" & "));
+            out.push_str(" \\\\\n");
+        }
+        out.push_str("\\end{tabular}\n");
+        out
+    }
+
+    fn header_row(&self) -> Vec<String> {
+        let mut header = vec![
+            String::new(),
+            "Est.".to_string(),
+            "SE".to_string(),
+            "z".to_string(),
+            "p".to_string(),
+        ];
+        header.extend(self.sigma_headers.iter().cloned());
+        header
+    }
+
+    fn latex_header_row(&self) -> Vec<String> {
+        let mut header = vec![
+            String::new(),
+            "Est.".to_string(),
+            "SE".to_string(),
+            "z".to_string(),
+            "p".to_string(),
+        ];
+        header.extend(
+            self.sigma_headers
+                .iter()
+                .map(|h| sigma_header_to_latex(h))
+                .collect::<Vec<_>>(),
+        );
+        header
+    }
+
+    fn markdown_rows(&self) -> Vec<Vec<String>> {
+        self.rows
+            .iter()
+            .map(|row| {
+                let mut cells = vec![
+                    row.label.clone(),
+                    format_optional(row.estimate, format_fixed4),
+                    format_optional(row.std_error, format_fixed4),
+                    format_optional(row.z_stat, format_fixed2),
+                    format_optional(row.pvalue, format_pvalue),
+                ];
+                cells.extend(
+                    row.sigma_values
+                        .iter()
+                        .map(|value| format_optional(*value, format_fixed4)),
+                );
+                cells
+            })
+            .collect()
+    }
+
+    fn latex_rows(&self) -> Vec<Vec<String>> {
+        self.rows
+            .iter()
+            .map(|row| {
+                let mut cells = vec![
+                    latex_escape(&row.label),
+                    format_optional(row.estimate, format_fixed4),
+                    format_optional(row.std_error, format_fixed4),
+                    format_optional(row.z_stat, format_fixed2),
+                    format_optional(row.pvalue, format_pvalue),
+                ];
+                cells.extend(
+                    row.sigma_values
+                        .iter()
+                        .map(|value| format_optional(*value, format_fixed4)),
+                );
+                cells
+            })
+            .collect()
+    }
+}
+
+fn summary_from_parts(
+    coef_names: &[String],
+    coef: &[f64],
+    stderror: &[f64],
+    varcorr: &VarCorr,
+    residual_label: Option<&str>,
+    residual_value: Option<f64>,
+) -> ModelSummary {
+    summary_from_parts_with_pvalues(
+        coef_names,
+        coef,
+        stderror,
+        None,
+        varcorr,
+        residual_label,
+        residual_value,
+    )
+}
+
+fn summary_from_parts_with_pvalues(
+    coef_names: &[String],
+    coef: &[f64],
+    stderror: &[f64],
+    pvalues: Option<&[f64]>,
+    varcorr: &VarCorr,
+    residual_label: Option<&str>,
+    residual_value: Option<f64>,
+) -> ModelSummary {
+    let sigma_headers = varcorr
+        .components
+        .iter()
+        .map(|comp| format!("σ_{}", comp.group))
+        .collect::<Vec<_>>();
+    let sigma_maps = varcorr
+        .components
+        .iter()
+        .map(|comp| {
+            comp.names
+                .iter()
+                .cloned()
+                .zip(comp.std_dev.iter().copied())
+                .collect::<std::collections::HashMap<_, _>>()
+        })
+        .collect::<Vec<_>>();
+
+    let chisq1 = ChiSquared::new(1.0).unwrap();
+    let mut rows = Vec::new();
+
+    for (index, ((label, est), se)) in coef_names
+        .iter()
+        .zip(coef.iter())
+        .zip(stderror.iter())
+        .enumerate()
+    {
+        let z = if *se > 0.0 && se.is_finite() {
+            Some(*est / *se)
+        } else {
+            None
+        };
+        let pvalue = pvalues
+            .and_then(|values| values.get(index).copied())
+            .filter(|value| value.is_finite())
+            .or_else(|| {
+                pvalues
+                    .is_none()
+                    .then(|| z.map(|zv| 1.0 - chisq1.cdf(zv * zv)))
+                    .flatten()
+            });
+        rows.push(ModelSummaryRow {
+            label: label.clone(),
+            estimate: Some(*est),
+            std_error: Some(*se),
+            z_stat: z,
+            pvalue,
+            sigma_values: sigma_maps
+                .iter()
+                .map(|map| map.get(label).copied())
+                .collect(),
+        });
+    }
+
+    let mut seen = coef_names.to_vec();
+    for comp in &varcorr.components {
+        for name in &comp.names {
+            if seen.contains(name) {
+                continue;
+            }
+            rows.push(ModelSummaryRow {
+                label: name.clone(),
+                estimate: None,
+                std_error: None,
+                z_stat: None,
+                pvalue: None,
+                sigma_values: sigma_maps
+                    .iter()
+                    .map(|map| map.get(name).copied())
+                    .collect(),
+            });
+            seen.push(name.clone());
+        }
+    }
+
+    if let (Some(label), Some(value)) = (residual_label, residual_value) {
+        rows.push(ModelSummaryRow {
+            label: label.to_string(),
+            estimate: Some(value),
+            std_error: None,
+            z_stat: None,
+            pvalue: None,
+            sigma_values: vec![None; sigma_headers.len()],
+        });
+    }
+
+    ModelSummary {
+        sigma_headers,
+        rows,
+    }
+}
+
+fn alignments(sigma_columns: usize) -> Vec<Alignment> {
+    let mut align = vec![
+        Alignment::Left,
+        Alignment::Right,
+        Alignment::Right,
+        Alignment::Right,
+        Alignment::Right,
+    ];
+    align.extend((0..sigma_columns).map(|_| Alignment::Right));
+    align
+}
+
+#[derive(Clone, Copy)]
+enum Alignment {
+    Left,
+    Right,
+}
+
+fn column_widths(rows: &[Vec<String>]) -> Vec<usize> {
+    (0..rows[0].len())
+        .map(|col| {
+            rows.iter()
+                .map(|row| row[col].chars().count())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
+fn format_markdown_row(row: &[String], widths: &[usize], align: &[Alignment]) -> String {
+    let mut out = String::new();
+    for ((cell, width), alignment) in row.iter().zip(widths.iter()).zip(align.iter()) {
+        match alignment {
+            Alignment::Left => out.push_str(&format!("| {:<width$} ", cell, width = *width)),
+            Alignment::Right => out.push_str(&format!("| {:>width$} ", cell, width = *width)),
+        }
+    }
+    out.push('|');
+    out
+}
+
+fn format_markdown_alignment(widths: &[usize], align: &[Alignment]) -> String {
+    let mut out = String::new();
+    for (width, alignment) in widths.iter().zip(align.iter()) {
+        match alignment {
+            Alignment::Left => {
+                out.push_str("|:");
+                out.push_str(&"-".repeat(*width));
+                out.push(' ');
+            }
+            Alignment::Right => {
+                out.push_str("| ");
+                out.push_str(&"-".repeat(*width));
+                out.push(':');
+            }
+        }
+    }
+    out.push('|');
+    out
+}
+
+fn format_optional(value: Option<f64>, f: fn(f64) -> String) -> String {
+    value.map(f).unwrap_or_default()
+}
+
+fn format_fixed4(value: f64) -> String {
+    format!("{value:.4}")
+}
+
+fn format_fixed2(value: f64) -> String {
+    format!("{value:.2}")
+}
+
+fn format_pvalue(pvalue: f64) -> String {
+    if !pvalue.is_finite() {
+        return String::new();
+    }
+    if pvalue <= 0.0 {
+        return "<1e-99".to_string();
+    }
+    if pvalue < 1.0e-4 {
+        let exponent = (-pvalue.log10()).floor().max(1.0) as i32;
+        return format!("<1e-{exponent:02}");
+    }
+    format!("{pvalue:.4}")
+}
+
+fn sigma_header_to_latex(header: &str) -> String {
+    if let Some(rest) = header.strip_prefix("σ_") {
+        format!("$\\sigma_\\text{{{}}}$", latex_escape(rest))
+    } else {
+        latex_escape(header)
+    }
+}
+
+fn html_escape(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn latex_escape(input: &str) -> String {
+    input.replace('_', "\\_")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::formula::parse_formula;
+    use crate::model::{DataFrame, LinkFunction};
+    use crate::model::{Family, GeneralizedLinearMixedModel, LinearMixedModel};
+
+    fn row(
+        label: &str,
+        estimate: Option<f64>,
+        std_error: Option<f64>,
+        z_stat: Option<f64>,
+        pvalue: Option<f64>,
+        sigma_values: &[Option<f64>],
+    ) -> ModelSummaryRow {
+        ModelSummaryRow {
+            label: label.to_string(),
+            estimate,
+            std_error,
+            z_stat,
+            pvalue,
+            sigma_values: sigma_values.to_vec(),
+        }
+    }
+
+    #[test]
+    fn test_markdown_lmm_matches_julia_example() {
+        let summary = ModelSummary {
+            sigma_headers: vec!["σ_subj".to_string()],
+            rows: vec![
+                row(
+                    "(Intercept)",
+                    Some(251.4051),
+                    Some(6.6323),
+                    Some(37.91),
+                    Some(0.0),
+                    &[Some(23.7805)],
+                ),
+                row(
+                    "days",
+                    Some(10.4673),
+                    Some(1.5022),
+                    Some(6.97),
+                    Some(5e-12),
+                    &[Some(5.7168)],
+                ),
+                row("Residual", Some(25.5918), None, None, None, &[None]),
+            ],
+        };
+
+        assert_eq!(
+            summary.to_markdown(),
+            concat!(
+                "|             |     Est. |     SE |     z |      p |  σ_subj |\n",
+                "|:----------- | --------:| ------:| -----:| ------:| -------:|\n",
+                "| (Intercept) | 251.4051 | 6.6323 | 37.91 | <1e-99 | 23.7805 |\n",
+                "| days        |  10.4673 | 1.5022 |  6.97 | <1e-11 |  5.7168 |\n",
+                "| Residual    |  25.5918 |        |       |        |         |\n"
+            )
+        );
+    }
+
+    #[test]
+    fn test_markdown_re_without_fe_matches_julia_example() {
+        let summary = ModelSummary {
+            sigma_headers: vec!["σ_subj".to_string(), "σ_item".to_string()],
+            rows: vec![
+                row(
+                    "(Intercept)",
+                    Some(2092.3713),
+                    Some(76.9426),
+                    Some(27.19),
+                    Some(0.0),
+                    &[None, Some(349.7858)],
+                ),
+                row("spkr: new", None, None, None, None, &[Some(258.9242), None]),
+                row("spkr: old", None, None, None, None, &[Some(377.3837), None]),
+                row("load: yes", None, None, None, None, &[None, Some(142.5331)]),
+                row("Residual", Some(800.3224), None, None, None, &[None, None]),
+            ],
+        };
+
+        assert_eq!(
+            summary.to_markdown(),
+            concat!(
+                "|             |      Est. |      SE |     z |      p |   σ_subj |   σ_item |\n",
+                "|:----------- | ---------:| -------:| -----:| ------:| --------:| --------:|\n",
+                "| (Intercept) | 2092.3713 | 76.9426 | 27.19 | <1e-99 |          | 349.7858 |\n",
+                "| spkr: new   |           |         |       |        | 258.9242 |          |\n",
+                "| spkr: old   |           |         |       |        | 377.3837 |          |\n",
+                "| load: yes   |           |         |       |        |          | 142.5331 |\n",
+                "| Residual    |  800.3224 |         |       |        |          |          |\n"
+            )
+        );
+    }
+
+    #[test]
+    fn test_markdown_glmm_matches_julia_example() {
+        let summary = ModelSummary {
+            sigma_headers: vec!["σ_subj".to_string(), "σ_item".to_string()],
+            rows: vec![
+                row(
+                    "(Intercept)",
+                    Some(0.1956),
+                    Some(0.4052),
+                    Some(0.48),
+                    Some(0.6294),
+                    &[Some(1.3398), Some(0.4953)],
+                ),
+                row(
+                    "anger",
+                    Some(0.0576),
+                    Some(0.0168),
+                    Some(3.43),
+                    Some(0.0006),
+                    &[None, None],
+                ),
+                row(
+                    "gender: M",
+                    Some(0.3208),
+                    Some(0.1913),
+                    Some(1.68),
+                    Some(0.0935),
+                    &[None, None],
+                ),
+                row(
+                    "btype: scold",
+                    Some(-1.0583),
+                    Some(0.2568),
+                    Some(-4.12),
+                    Some(5e-5),
+                    &[None, None],
+                ),
+                row(
+                    "btype: shout",
+                    Some(-2.1048),
+                    Some(0.2585),
+                    Some(-8.14),
+                    Some(1e-15),
+                    &[None, None],
+                ),
+                row(
+                    "situ: self",
+                    Some(-1.0550),
+                    Some(0.2103),
+                    Some(-5.02),
+                    Some(1e-6),
+                    &[None, None],
+                ),
+            ],
+        };
+
+        assert_eq!(
+            summary.to_markdown(),
+            concat!(
+                "|              |    Est. |     SE |     z |      p | σ_subj | σ_item |\n",
+                "|:------------ | -------:| ------:| -----:| ------:| ------:| ------:|\n",
+                "| (Intercept)  |  0.1956 | 0.4052 |  0.48 | 0.6294 | 1.3398 | 0.4953 |\n",
+                "| anger        |  0.0576 | 0.0168 |  3.43 | 0.0006 |        |        |\n",
+                "| gender: M    |  0.3208 | 0.1913 |  1.68 | 0.0935 |        |        |\n",
+                "| btype: scold | -1.0583 | 0.2568 | -4.12 | <1e-04 |        |        |\n",
+                "| btype: shout | -2.1048 | 0.2585 | -8.14 | <1e-15 |        |        |\n",
+                "| situ: self   | -1.0550 | 0.2103 | -5.02 | <1e-06 |        |        |\n"
+            )
+        );
+    }
+
+    #[test]
+    fn test_latex_uses_sigma_subscripts() {
+        let summary = ModelSummary {
+            sigma_headers: vec!["σ_subj".to_string(), "σ_item".to_string()],
+            rows: vec![row(
+                "x",
+                Some(1.0),
+                Some(0.1),
+                Some(10.0),
+                Some(1e-6),
+                &[None, None],
+            )],
+        };
+        let out = summary.to_latex();
+
+        assert!(out.starts_with("\\begin{tabular}\n{l | r | r | r | r | r | r}\n"));
+        assert!(out.contains("$\\sigma_\\text{subj}$"));
+        assert!(out.contains("$\\sigma_\\text{item}$"));
+    }
+
+    #[test]
+    fn test_from_linear_model_adds_random_effect_only_rows() {
+        let mut data = DataFrame::new();
+        data.add_numeric("y", vec![2.0, 2.5, 3.0, 3.2, 4.0, 4.4, 5.0, 5.1]);
+        data.add_numeric("x", vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
+        data.add_categorical(
+            "g",
+            vec![
+                "a".to_string(),
+                "a".to_string(),
+                "b".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+                "c".to_string(),
+                "d".to_string(),
+                "d".to_string(),
+            ],
+        );
+
+        let formula = parse_formula("y ~ 1 + (1 + x | g)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.set_theta(&[0.5, 0.0, 0.25]).unwrap();
+        model.update_l().unwrap();
+        model.optsum.feval = 1;
+
+        let summary = ModelSummary::from_linear_model(&model);
+        let labels = summary
+            .rows
+            .iter()
+            .map(|row| row.label.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(summary.sigma_headers, vec!["σ_g".to_string()]);
+        assert!(labels.contains(&"(Intercept)"));
+        assert!(labels.contains(&"x"));
+        assert!(labels.contains(&"Residual"));
+        assert_eq!(model.summary_markdown(), summary.to_markdown());
+        assert_eq!(model.summary_html(), summary.to_html());
+        assert_eq!(model.summary_latex(), summary.to_latex());
+        assert_eq!(
+            model.varcorr().to_markdown(),
+            VarCorr::from_model(&model.reterms, model.sigma()).to_markdown()
+        );
+        assert_eq!(
+            model.block_description().to_markdown(),
+            crate::stats::BlockDescription::from_linear_model(&model).to_markdown()
+        );
+    }
+
+    #[test]
+    fn test_from_generalized_model_omits_residual_for_bernoulli() {
+        let mut data = DataFrame::new();
+        data.add_numeric("y", vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
+        data.add_numeric("x", vec![-1.0, -0.5, 0.0, 0.5, 1.0, 1.5]);
+        data.add_categorical(
+            "g",
+            vec![
+                "a".to_string(),
+                "a".to_string(),
+                "b".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+                "c".to_string(),
+            ],
+        );
+
+        let formula = parse_formula("y ~ 1 + x + (1 | g)").unwrap();
+        let mut model = GeneralizedLinearMixedModel::new(
+            formula,
+            &data,
+            Family::Bernoulli,
+            Some(LinkFunction::Logit),
+        )
+        .unwrap();
+        model.lmm.set_theta(&[0.75]).unwrap();
+        model.lmm.update_l().unwrap();
+        model.beta[0] = 0.2;
+        model.beta[1] = 0.1;
+        model.lmm.optsum.feval = 1;
+
+        let summary = ModelSummary::from_generalized_model(&model);
+        let labels = summary
+            .rows
+            .iter()
+            .map(|row| row.label.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(summary.sigma_headers, vec!["σ_g".to_string()]);
+        assert!(labels.contains(&"(Intercept)"));
+        assert!(labels.contains(&"x"));
+        assert!(!labels.contains(&"Residual"));
+        assert!(!labels.contains(&"Dispersion"));
+        assert_eq!(model.summary_markdown(), summary.to_markdown());
+        assert_eq!(model.summary_html(), summary.to_html());
+        assert_eq!(model.summary_latex(), summary.to_latex());
+        assert_eq!(
+            model.varcorr().to_markdown(),
+            VarCorr::from_reterms(&model.lmm.reterms, model.dispersion(false), None).to_markdown()
+        );
+        assert_eq!(
+            model.block_description().to_markdown(),
+            crate::stats::BlockDescription::from_generalized_model(&model).to_markdown()
+        );
+    }
+}

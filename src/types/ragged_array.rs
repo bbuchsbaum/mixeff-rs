@@ -85,10 +85,7 @@ impl RaggedArray {
     ///
     /// Panics if `dest.len() < self.n_groups`.
     pub fn sum_into(&self, dest: &mut [f64]) {
-        assert!(
-            dest.len() >= self.n_groups,
-            "destination slice too short"
-        );
+        assert!(dest.len() >= self.n_groups, "destination slice too short");
         for (&val, &grp) in self.data.iter().zip(self.refs.iter()) {
             dest[grp] += val;
         }
@@ -117,11 +114,7 @@ mod tests {
 
     #[test]
     fn test_sum_into() {
-        let ra = RaggedArray::new(
-            vec![1.0, 2.0, 3.0],
-            vec![0, 0, 1],
-            2,
-        );
+        let ra = RaggedArray::new(vec![1.0, 2.0, 3.0], vec![0, 0, 1], 2);
         let mut dest = vec![10.0, 20.0];
         ra.sum_into(&mut dest);
         assert_relative_eq!(dest[0], 13.0); // 10 + 1 + 2

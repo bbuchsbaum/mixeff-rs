@@ -1,0 +1,208 @@
+{
+  "schema_name": "mixedmodels.model_audit_report",
+  "schema_version": 1,
+  "requested_formula": "incidence ~ 1 + period + (1 | herd)",
+  "sections": [
+    {
+      "title": "Requested Model",
+      "lines": [
+        {
+          "label": "formula",
+          "status": "info",
+          "detail": "incidence ~ 1 + period + (1 | herd)"
+        },
+        {
+          "label": "model kind",
+          "status": "info",
+          "detail": "generalized_linear_mixed_model"
+        },
+        {
+          "label": "distribution/link",
+          "status": "info",
+          "detail": "binomial/logit"
+        },
+        {
+          "label": "objective",
+          "status": "info",
+          "detail": "laplace(inner=pirls)"
+        },
+        {
+          "label": "certificate scope",
+          "status": "info",
+          "detail": "approximated_objective"
+        },
+        {
+          "label": "fixed terms",
+          "status": "info",
+          "detail": "1, period"
+        },
+        {
+          "label": "random terms",
+          "status": "info",
+          "detail": "1"
+        },
+        {
+          "label": "theta maps",
+          "status": "info",
+          "detail": "1 map(s)"
+        }
+      ]
+    },
+    {
+      "title": "Model State",
+      "lines": [
+        {
+          "label": "requested",
+          "status": "ok",
+          "detail": "status=requested; formula=incidence ~ 1 + period + (1 | herd); random_terms=1; reason=formula as requested by the caller"
+        },
+        {
+          "label": "semantic",
+          "status": "ok",
+          "detail": "status=canonical; formula=incidence ~ 1 + period + (1 | herd); random_terms=1; reason=formula compiled into semantic IR"
+        },
+        {
+          "label": "supported",
+          "status": "ok",
+          "detail": "status=supported; formula=incidence ~ 1 + period + (1 | herd); random_terms=1; reason=design audit did not recommend design-time model changes"
+        },
+        {
+          "label": "fitted",
+          "status": "not_assessed",
+          "detail": "status=not_assessed; formula=incidence ~ 1 + period + (1 | herd); random_terms=1; reason=model has not been fitted"
+        },
+        {
+          "label": "changes",
+          "status": "ok",
+          "detail": "none"
+        }
+      ]
+    },
+    {
+      "title": "Fixed Effects",
+      "lines": [
+        {
+          "label": "rank",
+          "status": "ok",
+          "detail": "4 of 4"
+        },
+        {
+          "label": "aliased columns",
+          "status": "ok",
+          "detail": "none"
+        },
+        {
+          "label": "empty cells",
+          "status": "ok",
+          "detail": "0"
+        }
+      ]
+    },
+    {
+      "title": "Random Effects",
+      "lines": [
+        {
+          "label": "r0",
+          "status": "ok",
+          "detail": "group=herd, rows=56, levels=15, obs_per_level=1..4, basis=1, covariance=scalar, params=1, budget=sufficient"
+        }
+      ]
+    },
+    {
+      "title": "Random-Effect Information Budget",
+      "lines": [
+        {
+          "label": "r0",
+          "status": "ok",
+          "detail": "levels=15, rows=56, obs_per_level=1..4, basis=1, cov_params=1, levels/basis=15.00, levels/param=15.00, rows/param=56.00; grouping levels are the effective n for covariance support; risk=v0 information budget is sufficient; recommendation=information budget is sufficient under v0 thresholds; explanation=56 rows are clustered into 15 grouping levels; grouping levels are the effective n for random-effect distribution support"
+        }
+      ]
+    },
+    {
+      "title": "Dependence Paths",
+      "lines": [
+        {
+          "label": "kernels",
+          "status": "info",
+          "detail": "r0=marginal(herd, intercept=true, covariance=scalar, basis=intercept)"
+        },
+        {
+          "label": "repeated units",
+          "status": "ok",
+          "detail": "herd=marginal(herd, levels=15, obs_per_level=1..4, covered_by=r0)"
+        },
+        {
+          "label": "missing paths",
+          "status": "ok",
+          "detail": "none"
+        }
+      ]
+    },
+    {
+      "title": "Parameterization Trace",
+      "lines": [
+        {
+          "label": "r0",
+          "status": "ok",
+          "detail": "source=(1 | herd); group=herd; family=Scalar; user_basis=intercept; optimizer_basis=intercept; theta_slots=theta[0]; lambda_slots=(0, 0); parmap_aligned=1/1; varcorr_entries=sd(intercept)"
+        }
+      ]
+    },
+    {
+      "title": "Effective Covariance",
+      "lines": [
+        {
+          "label": "effective covariance rank",
+          "status": "not_assessed",
+          "detail": "not assessed"
+        }
+      ]
+    },
+    {
+      "title": "Policy Recommendations",
+      "lines": [
+        {
+          "label": "maximal feasible",
+          "status": "ok",
+          "detail": "no advisory reductions or refusals"
+        }
+      ]
+    },
+    {
+      "title": "Optimizer",
+      "lines": [
+        {
+          "label": "certificate",
+          "status": "not_assessed",
+          "detail": "model has not been fitted"
+        }
+      ]
+    },
+    {
+      "title": "Inference",
+      "lines": [
+        {
+          "label": "finite-sample inference",
+          "status": "not_assessed",
+          "detail": "LMM finite-sample methods such as Satterthwaite/KR are unsupported for GLMMs in compiler v0"
+        },
+        {
+          "label": "covariance derivatives",
+          "status": "not_assessed",
+          "detail": "GLMM covariance derivatives are not certified for the objective approximation"
+        }
+      ]
+    },
+    {
+      "title": "Diagnostics",
+      "lines": [
+        {
+          "label": "diagnostics",
+          "status": "ok",
+          "detail": "none"
+        }
+      ]
+    }
+  ],
+  "diagnostics": []
+}

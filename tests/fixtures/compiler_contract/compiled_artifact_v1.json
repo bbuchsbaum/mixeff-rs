@@ -1,0 +1,675 @@
+{
+  "schema": {
+    "schema_name": "mixedmodels.compiled_model_artifact",
+    "schema_version": 1,
+    "crate_version": "0.1.0"
+  },
+  "model_boundary": {
+    "model_kind": "linear_mixed_model",
+    "response_distribution": "gaussian",
+    "link": "identity",
+    "objective_approximation": "exact_gaussian",
+    "optimizer_certificate_scope": "exact_objective",
+    "covariance_derivatives": {
+      "not_available": {
+        "reason": "compiler v0 does not expose covariance derivative certificates"
+      }
+    },
+    "inference_availability": {
+      "not_assessed": {
+        "reason": "finite-sample inference is not implemented in compiler v0"
+      }
+    }
+  },
+  "requested_formula": "y ~ 1 + x + x2 + (1 + x | subject)",
+  "semantic_model": {
+    "schema_name": "mixedmodels.semantic_model",
+    "schema_version": 1,
+    "response": "y",
+    "fixed_terms": [
+      "1",
+      "x",
+      "x2"
+    ],
+    "random_terms": [
+      {
+        "id": "r0",
+        "group": {
+          "single": {
+            "name": "subject"
+          }
+        },
+        "basis": [
+          {
+            "name": "intercept",
+            "kind": "intercept",
+            "source": "1"
+          },
+          {
+            "name": "x",
+            "kind": "slope",
+            "source": "x"
+          }
+        ],
+        "covariance": "full",
+        "intercept": "included",
+        "role": "unknown",
+        "source_syntax": {
+          "text": "(1 + x | subject)"
+        },
+        "covariance_story": {
+          "summary": "subject: varying coefficients [intercept, x]",
+          "assumptions": [
+            "subject levels may differ in baseline response",
+            "random coefficients may covary in the compiled basis"
+          ],
+          "dependence": [
+            "observations sharing subject are correlated through this term's random coefficients"
+          ]
+        }
+      }
+    ],
+    "diagnostics": []
+  },
+  "effective_formula": null,
+  "effective_semantic_model": null,
+  "theta_maps": [
+    {
+      "family": "full_cholesky",
+      "map": {
+        "schema_name": "mixedmodels.theta_map",
+        "schema_version": 1,
+        "term_id": "r0",
+        "term_index": 0,
+        "group": "subject",
+        "user_basis": [
+          "intercept",
+          "x"
+        ],
+        "optimizer_basis": [
+          "intercept",
+          "x"
+        ],
+        "theta_slots": [
+          {
+            "global_index": 0,
+            "local_index": 0,
+            "term_index": 0,
+            "basis_row": 0,
+            "basis_col": 0,
+            "lambda_row": 0,
+            "lambda_col": 0,
+            "name": "theta[0:intercept,intercept]",
+            "constraint": {
+              "lower_bound": {
+                "lower": 0.0
+              }
+            },
+            "status": "free"
+          },
+          {
+            "global_index": 1,
+            "local_index": 1,
+            "term_index": 0,
+            "basis_row": 1,
+            "basis_col": 0,
+            "lambda_row": 1,
+            "lambda_col": 0,
+            "name": "theta[0:x,intercept]",
+            "constraint": "unconstrained",
+            "status": "free"
+          },
+          {
+            "global_index": 2,
+            "local_index": 2,
+            "term_index": 0,
+            "basis_row": 1,
+            "basis_col": 1,
+            "lambda_row": 1,
+            "lambda_col": 1,
+            "name": "theta[0:x,x]",
+            "constraint": {
+              "lower_bound": {
+                "lower": 0.0
+              }
+            },
+            "status": "free"
+          }
+        ],
+        "source_parmap": [
+          [
+            0,
+            0,
+            0
+          ],
+          [
+            0,
+            1,
+            0
+          ],
+          [
+            0,
+            1,
+            1
+          ]
+        ]
+      }
+    }
+  ],
+  "design_audit": {
+    "schema_name": "mixedmodels.design_audit",
+    "schema_version": 1,
+    "fixed_effect_rank": {
+      "rank": 2,
+      "expected": 3,
+      "status": "rank_deficient",
+      "reason": "fixed-effect columns are linearly dependent under tolerance 1e-8"
+    },
+    "fixed_effects": {
+      "n_rows": 6,
+      "n_columns": 3,
+      "rank": {
+        "rank": 2,
+        "expected": 3,
+        "status": "rank_deficient",
+        "reason": "fixed-effect columns are linearly dependent under tolerance 1e-8"
+      },
+      "columns": [
+        {
+          "name": "(Intercept)",
+          "source_term": "1",
+          "kind": "intercept"
+        },
+        {
+          "name": "x",
+          "source_term": "x",
+          "kind": "numeric"
+        },
+        {
+          "name": "x2",
+          "source_term": "x2",
+          "kind": "numeric"
+        }
+      ],
+      "terms": [
+        {
+          "term": "1",
+          "n_columns": 1,
+          "status": "estimable",
+          "aliased_columns": [],
+          "diagnostics": []
+        },
+        {
+          "term": "x",
+          "n_columns": 1,
+          "status": "not_estimable",
+          "aliased_columns": [
+            "x"
+          ],
+          "diagnostics": [
+            {
+              "code": "fixed_effect_rank_deficient",
+              "severity": "warning",
+              "stage": "estimability",
+              "message": "fixed-effect term 'x' is not fully estimable from the compiled design",
+              "affected_terms": [
+                "x"
+              ],
+              "suggested_actions": []
+            }
+          ]
+        },
+        {
+          "term": "x2",
+          "n_columns": 1,
+          "status": "estimable",
+          "aliased_columns": [],
+          "diagnostics": []
+        }
+      ],
+      "aliased_columns": [
+        "x"
+      ],
+      "empty_cells": [],
+      "diagnostics": [
+        {
+          "code": "fixed_effect_rank_deficient",
+          "severity": "warning",
+          "stage": "design_audit",
+          "message": "fixed-effect design matrix has rank 2 but 3 columns",
+          "affected_terms": [
+            "x"
+          ],
+          "suggested_actions": []
+        }
+      ]
+    },
+    "random_terms": [
+      {
+        "term_id": "r0",
+        "group": {
+          "name": "subject",
+          "n_observations": 6,
+          "n_levels": 3,
+          "min_obs_per_level": 2,
+          "max_obs_per_level": 2,
+          "repeated": true,
+          "reason": null
+        },
+        "basis_size": 2,
+        "requested_covariance_parameters": 3,
+        "information_budget": {
+          "n_levels": 3,
+          "basis_dimension": 2,
+          "covariance_family": "full",
+          "requested_covariance_parameters": 3,
+          "min_levels_variance": 5,
+          "min_levels_full_covariance": 15,
+          "effective_n": {
+            "n_rows": 6,
+            "n_levels": 3,
+            "min_obs_per_level": 2,
+            "max_obs_per_level": 2,
+            "basis_dimension": 2,
+            "covariance_parameters": 3,
+            "levels_per_basis_direction": 1.5,
+            "levels_per_covariance_parameter": 1.0,
+            "rows_per_covariance_parameter": 2.0,
+            "total_rows_can_mislead": true,
+            "explanation": "6 rows are clustered into 3 grouping levels; covariance support is limited by grouping levels, not by total rows",
+            "recommendation": "full covariance asks for 3 parameter(s); use design_compiled with diagonal/reduced-rank covariance, treat the grouping factor as fixed when it is designed or directly compared, or collect at least 15 grouping levels"
+          },
+          "status": "too_rich",
+          "reason": "3 levels are below the v0 full-covariance threshold 15 for 3 covariance parameters"
+        },
+        "basis": [
+          {
+            "name": "intercept",
+            "kind": "intercept",
+            "min_within_group_sd": null,
+            "max_within_group_sd": null,
+            "supported": true,
+            "reason": null
+          },
+          {
+            "name": "x",
+            "kind": "slope",
+            "min_within_group_sd": 0.7071067811865476,
+            "max_within_group_sd": 0.7071067811865476,
+            "supported": true,
+            "reason": null
+          }
+        ],
+        "diagnostics": [
+          {
+            "code": "covariance_too_rich",
+            "severity": "warning",
+            "stage": "design_audit",
+            "message": "3 levels are below the v0 full-covariance threshold 15 for 3 covariance parameters",
+            "affected_terms": [
+              "(1 + x | subject)"
+            ],
+            "suggested_actions": [],
+            "payload": {
+              "basis_dimension": 2,
+              "min_levels_full_covariance": 15,
+              "min_levels_random_intercept_fit": 2,
+              "min_levels_random_intercept_reliability": 5,
+              "min_levels_variance": 5,
+              "n_levels": 3,
+              "requested_covariance_parameters": 3
+            }
+          }
+        ]
+      }
+    ],
+    "covariance_kernels": {
+      "kernels": [
+        {
+          "term_id": "r0",
+          "group": "subject",
+          "parts": [
+            "subject"
+          ],
+          "path": "marginal",
+          "has_intercept": true,
+          "basis": [
+            "intercept",
+            "x"
+          ],
+          "covariance_family": "full",
+          "source_syntax": "(1 + x | subject)"
+        }
+      ],
+      "repeated_units": [
+        {
+          "unit": "subject",
+          "parts": [
+            "subject"
+          ],
+          "path": "marginal",
+          "n_observations": 6,
+          "n_levels": 3,
+          "min_obs_per_level": 2,
+          "max_obs_per_level": 2,
+          "repeated": true,
+          "covered_by_terms": [
+            "r0"
+          ]
+        }
+      ],
+      "missing_dependence_paths": []
+    },
+    "diagnostics": [
+      {
+        "code": "fixed_effect_rank_deficient",
+        "severity": "warning",
+        "stage": "design_audit",
+        "message": "fixed-effect design matrix has rank 2 but 3 columns",
+        "affected_terms": [
+          "x"
+        ],
+        "suggested_actions": []
+      },
+      {
+        "code": "covariance_too_rich",
+        "severity": "warning",
+        "stage": "design_audit",
+        "message": "3 levels are below the v0 full-covariance threshold 15 for 3 covariance parameters",
+        "affected_terms": [
+          "(1 + x | subject)"
+        ],
+        "suggested_actions": [],
+        "payload": {
+          "basis_dimension": 2,
+          "min_levels_full_covariance": 15,
+          "min_levels_random_intercept_fit": 2,
+          "min_levels_random_intercept_reliability": 5,
+          "min_levels_variance": 5,
+          "n_levels": 3,
+          "requested_covariance_parameters": 3
+        }
+      }
+    ]
+  },
+  "compiler_policy": {
+    "random_strategy": "maximal_feasible",
+    "thresholds": {
+      "min_levels_random_intercept_fit": 2,
+      "min_levels_random_intercept_reliability": 5,
+      "max_condition_number": 10000000000.0,
+      "min_within_group_sd": 1e-8,
+      "max_basis_pairwise_abs_corr": 0.999,
+      "min_observations_per_supported_level": 2,
+      "effective_rank_relative_tolerance": 1e-6,
+      "effective_rank_absolute_tolerance": 1e-10
+    },
+    "apply_design_time_reductions": false
+  },
+  "policy_recommendations": [
+    {
+      "term_id": "r0",
+      "source_syntax": "(1 + x | subject)",
+      "action": "refuse_random_term_distribution",
+      "reason": "3 levels are below the v0 variance-direction threshold 5",
+      "current_covariance": "full",
+      "recommended_covariance": null,
+      "inference_consequence": "confirmatory fixed-effect p-values should be withheld or recomputed after a declared design-level change",
+      "diagnostics": [
+        {
+          "code": "covariance_too_rich",
+          "severity": "warning",
+          "stage": "design_audit",
+          "message": "3 levels are below the v0 variance-direction threshold 5",
+          "affected_terms": [
+            "(1 + x | subject)"
+          ],
+          "suggested_actions": [],
+          "payload": {
+            "n_levels": 3
+          }
+        }
+      ]
+    }
+  ],
+  "effective_covariance": [],
+  "reductions": [],
+  "covariance_transitions": [],
+  "covariance_parameter_traces": [
+    {
+      "term_id": "r0",
+      "source_syntax": "(1 + x | subject)",
+      "semantic_term_index": 0,
+      "optimizer_term_index": 0,
+      "group": "subject",
+      "covariance_family": "full_cholesky",
+      "user_basis": [
+        "intercept",
+        "x"
+      ],
+      "optimizer_basis": [
+        "intercept",
+        "x"
+      ],
+      "theta": {
+        "global_index": 0,
+        "local_index": 0,
+        "name": "theta[0:intercept,intercept]",
+        "constraint": {
+          "lower_bound": {
+            "lower": 0.0
+          }
+        },
+        "status": "free",
+        "value": null
+      },
+      "lambda": {
+        "row": 0,
+        "col": 0,
+        "row_basis": "intercept",
+        "col_basis": "intercept",
+        "value": null
+      },
+      "parmap_entry": null,
+      "varcorr_entries": [
+        {
+          "kind": "standard_deviation",
+          "label": "sd(intercept)",
+          "basis": [
+            "intercept"
+          ],
+          "value": null
+        }
+      ]
+    },
+    {
+      "term_id": "r0",
+      "source_syntax": "(1 + x | subject)",
+      "semantic_term_index": 0,
+      "optimizer_term_index": 0,
+      "group": "subject",
+      "covariance_family": "full_cholesky",
+      "user_basis": [
+        "intercept",
+        "x"
+      ],
+      "optimizer_basis": [
+        "intercept",
+        "x"
+      ],
+      "theta": {
+        "global_index": 1,
+        "local_index": 1,
+        "name": "theta[0:x,intercept]",
+        "constraint": "unconstrained",
+        "status": "free",
+        "value": null
+      },
+      "lambda": {
+        "row": 1,
+        "col": 0,
+        "row_basis": "x",
+        "col_basis": "intercept",
+        "value": null
+      },
+      "parmap_entry": null,
+      "varcorr_entries": [
+        {
+          "kind": "standard_deviation",
+          "label": "sd(x)",
+          "basis": [
+            "x"
+          ],
+          "value": null
+        },
+        {
+          "kind": "correlation",
+          "label": "corr(x,intercept)",
+          "basis": [
+            "x",
+            "intercept"
+          ],
+          "value": null
+        }
+      ]
+    },
+    {
+      "term_id": "r0",
+      "source_syntax": "(1 + x | subject)",
+      "semantic_term_index": 0,
+      "optimizer_term_index": 0,
+      "group": "subject",
+      "covariance_family": "full_cholesky",
+      "user_basis": [
+        "intercept",
+        "x"
+      ],
+      "optimizer_basis": [
+        "intercept",
+        "x"
+      ],
+      "theta": {
+        "global_index": 2,
+        "local_index": 2,
+        "name": "theta[0:x,x]",
+        "constraint": {
+          "lower_bound": {
+            "lower": 0.0
+          }
+        },
+        "status": "free",
+        "value": null
+      },
+      "lambda": {
+        "row": 1,
+        "col": 1,
+        "row_basis": "x",
+        "col_basis": "x",
+        "value": null
+      },
+      "parmap_entry": null,
+      "varcorr_entries": [
+        {
+          "kind": "standard_deviation",
+          "label": "sd(x)",
+          "basis": [
+            "x"
+          ],
+          "value": null
+        },
+        {
+          "kind": "correlation",
+          "label": "corr(x,intercept)",
+          "basis": [
+            "x",
+            "intercept"
+          ],
+          "value": null
+        }
+      ]
+    }
+  ],
+  "reproducibility": {
+    "fit_intent": "confirmatory_as_specified",
+    "seed": null,
+    "random_state_used": false,
+    "thresholds": [
+      [
+        "min_levels_random_intercept_fit",
+        "2"
+      ],
+      [
+        "min_levels_random_intercept_reliability",
+        "5"
+      ],
+      [
+        "min_levels_variance",
+        "max(5, 2*d_basis + 1)"
+      ],
+      [
+        "min_levels_full_cov",
+        "max(10, 5*n_cov_params)"
+      ],
+      [
+        "max_condition_number",
+        "10000000000"
+      ],
+      [
+        "min_within_group_sd",
+        "0.00000001"
+      ],
+      [
+        "max_basis_pairwise_abs_corr",
+        "0.999"
+      ],
+      [
+        "min_observations_per_supported_level",
+        "2"
+      ],
+      [
+        "effective_rank_relative_tolerance",
+        "0.000001"
+      ],
+      [
+        "effective_rank_absolute_tolerance",
+        "0.0000000001"
+      ],
+      [
+        "apply_design_time_reductions",
+        "false"
+      ]
+    ]
+  },
+  "optimizer_certificate": null,
+  "diagnostics": [
+    {
+      "code": "fixed_effect_rank_deficient",
+      "severity": "warning",
+      "stage": "design_audit",
+      "message": "fixed-effect design matrix has rank 2 but 3 columns",
+      "affected_terms": [
+        "x"
+      ],
+      "suggested_actions": []
+    },
+    {
+      "code": "covariance_too_rich",
+      "severity": "warning",
+      "stage": "design_audit",
+      "message": "3 levels are below the v0 full-covariance threshold 15 for 3 covariance parameters",
+      "affected_terms": [
+        "(1 + x | subject)"
+      ],
+      "suggested_actions": [],
+      "payload": {
+        "basis_dimension": 2,
+        "min_levels_full_covariance": 15,
+        "min_levels_random_intercept_fit": 2,
+        "min_levels_random_intercept_reliability": 5,
+        "min_levels_variance": 5,
+        "n_levels": 3,
+        "requested_covariance_parameters": 3
+      }
+    }
+  ]
+}

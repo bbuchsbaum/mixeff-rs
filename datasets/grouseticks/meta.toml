@@ -1,0 +1,55 @@
+name = "grouseticks"
+source = "lme4::grouseticks"
+license = "GPL (>= 2) — see lme4 DESCRIPTION"
+n_rows = 403
+description = """
+Tick counts on red-grouse chicks (Elston et al., 2001). Three nested
+groupings: chick (INDEX) within brood (BROOD) within location (LOCATION),
+and a year covariate. Poisson GLMM with strong overdispersion — typically
+fit with an observation-level random effect (`(1|INDEX)`) to absorb the
+overdispersion. The classic small overdispersed-count fixture.
+"""
+
+[[columns]]
+name = "INDEX"
+type = "categorical"
+# 403 levels = one per row (observation-level RE for overdispersion).
+
+[[columns]]
+name = "TICKS"
+type = "numeric"
+
+[[columns]]
+name = "BROOD"
+type = "categorical"
+# ~118 levels; first-appearance order suffices.
+
+[[columns]]
+name = "HEIGHT"
+type = "numeric"
+
+[[columns]]
+name = "YEAR"
+type = "categorical"
+levels = ["95","96","97"]
+
+[[columns]]
+name = "LOCATION"
+type = "categorical"
+# 63 levels; first-appearance order suffices.
+
+[[columns]]
+name = "cHEIGHT"
+type = "numeric"           # centered HEIGHT
+
+[[fits]]
+formula = "TICKS ~ 1 + YEAR + cHEIGHT + (1 | BROOD) + (1 | INDEX) + (1 | LOCATION)"
+family = "Poisson"
+link = "Log"
+estimator = "Laplace"
+
+[tags]
+structure = ["random_intercept", "nested", "glmm", "observation_level_re"]
+family = "poisson"
+difficulty = "moderate"
+notes = "tests overdispersion handling via OLRE"

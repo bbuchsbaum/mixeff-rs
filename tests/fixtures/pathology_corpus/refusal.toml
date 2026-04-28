@@ -1,0 +1,11 @@
+name = "refusal_collinear_fixed_effect"
+stratum = "refusal"
+group_sizes = [6, 6, 6, 6, 6, 6]
+fe_truth = [2.0, 1.0, 1.0]
+re_cov_truth = [[0.5, 0.1], [0.1, 0.25]]
+family = "gaussian"
+link = "identity"
+seed = 401
+residual_sd = 0.5
+fixed_design = "collinear_fixed_effect"
+seed_sweep = [401, 402, 403]

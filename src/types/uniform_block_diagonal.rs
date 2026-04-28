@@ -36,11 +36,7 @@ impl UniformBlockDiagonal {
     pub fn new(blocks: Vec<DMatrix<f64>>) -> Self {
         assert!(!blocks.is_empty(), "blocks must be non-empty");
         let m = blocks[0].nrows();
-        assert_eq!(
-            blocks[0].ncols(),
-            m,
-            "each block must be square"
-        );
+        assert_eq!(blocks[0].ncols(), m, "each block must be square");
         for (i, blk) in blocks.iter().enumerate().skip(1) {
             assert_eq!(
                 (blk.nrows(), blk.ncols()),
@@ -59,11 +55,7 @@ impl UniformBlockDiagonal {
     ///
     /// The slice length must equal `m * m * k`.
     pub fn from_3d_slice(data: &[f64], m: usize, k: usize) -> Self {
-        assert_eq!(
-            data.len(),
-            m * m * k,
-            "data length must equal m * m * k"
-        );
+        assert_eq!(data.len(), m * m * k, "data length must equal m * m * k");
         let blocks: Vec<DMatrix<f64>> = (0..k)
             .map(|blk_idx| {
                 let offset = blk_idx * m * m;
@@ -156,11 +148,7 @@ impl UniformBlockDiagonal {
     /// signature mirrors `copy_oftype` from the Julia source and allows
     /// in-place element transformation (e.g., rounding).
     pub fn copy_with<F: Fn(f64) -> f64>(&self, f: F) -> Self {
-        let blocks = self
-            .blocks
-            .iter()
-            .map(|blk| blk.map(|v| f(v)))
-            .collect();
+        let blocks = self.blocks.iter().map(|blk| blk.map(|v| f(v))).collect();
         Self {
             blocks,
             block_size: self.block_size,

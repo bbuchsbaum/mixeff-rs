@@ -1,0 +1,41 @@
+name = "orthodont"
+source = "nlme::Orthodont"
+license = "Part of nlme; redistributable for academic use"
+n_rows = 108
+description = """
+Pothoff & Roy (1964) orthodontic-growth data: 27 children (16 boys, 11
+girls) measured at ages 8, 10, 12, 14. Standard small longitudinal LMM
+fixture with random intercept and slope per subject and a sex × age fixed
+interaction. Note: nlme stores Subject in non-canonical order, which we
+preserve to match the reference encoding.
+"""
+
+[[columns]]
+name = "distance"
+type = "numeric"
+
+[[columns]]
+name = "age"
+type = "numeric"
+
+[[columns]]
+name = "Subject"
+type = "categorical"
+levels = ["M16","M05","M02","M11","M07","M08","M03","M12","M13","M14",
+          "M09","M15","M06","M04","M01","M10",
+          "F10","F09","F06","F01","F05","F07","F02","F08","F03","F04","F11"]
+
+[[columns]]
+name = "Sex"
+type = "categorical"
+levels = ["Male","Female"]
+
+[[fits]]
+formula = "distance ~ 1 + age * Sex + (1 + age | Subject)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+
+[tags]
+structure = ["random_intercept", "random_slope", "longitudinal", "interaction_fe"]
+difficulty = "easy"

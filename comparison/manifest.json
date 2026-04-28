@@ -1,0 +1,212 @@
+{
+  "fits": [
+    {
+      "dataset": "cake",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "angle ~ 1 + recipe * temperature + (1 | recipe:replicate)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "cbpp",
+      "estimator": "Laplace",
+      "family": "Binomial",
+      "formula": "incidence / size ~ 1 + period + (1 | herd)",
+      "link": "Logit",
+      "weights": "size"
+    },
+    {
+      "dataset": "dyestuff",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "Yield ~ 1 + (1 | Batch)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "dyestuff",
+      "estimator": "ML",
+      "family": "Gaussian",
+      "formula": "Yield ~ 1 + (1 | Batch)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "dyestuff2",
+      "estimator": "ML",
+      "family": "Gaussian",
+      "formula": "Yield ~ 1 + (1 | Batch)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "dyestuff2",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "Yield ~ 1 + (1 | Batch)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "ergostool",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "effort ~ 1 + Type + (1 | Subject)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "grouseticks",
+      "estimator": "Laplace",
+      "family": "Poisson",
+      "formula": "TICKS ~ 1 + YEAR + cHEIGHT + (1 | BROOD) + (1 | INDEX) + (1 | LOCATION)",
+      "link": "Log",
+      "weights": null
+    },
+    {
+      "dataset": "kb07",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "rt_trunc ~ 1 + spkr + prec + load + (1 + spkr + prec + load | subj) + (1 + spkr + prec + load | item)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "kb07",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "rt_trunc ~ 1 + spkr + prec + load + (1 + spkr + prec + load || subj) + (1 + spkr + prec + load || item)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "kb07",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "rt_trunc ~ 1 + spkr + prec + load + (1 | subj) + (1 | item)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "machines",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "score ~ 1 + Machine + (1 | Worker) + (1 | Worker:Machine)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "machines",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "score ~ 1 + Machine + (1 + Machine | Worker)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "oats",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "yield ~ 1 + Variety * nitro + (1 | Block) + (1 | Block:Variety)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "orthodont",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "distance ~ 1 + age * Sex + (1 + age | Subject)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "pastes",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "strength ~ 1 + (1 | sample) + (1 | batch)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "penicillin",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "diameter ~ 1 + (1 | plate) + (1 | sample)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "rail",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "travel ~ 1 + (1 | Rail)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "singular",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "y ~ 1 + A * B * C + (A * B * C | group)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "singular",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "y ~ 1 + A * B * C + (A * B * C || group)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "singular",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "y ~ 1 + A * B * C + (A + B + C || group)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "singular",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "y ~ 1 + A + B + C + (A + B + C || group)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "sleepstudy",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "Reaction ~ 1 + Days + (1 + Days | Subject)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "sleepstudy",
+      "estimator": "ML",
+      "family": "Gaussian",
+      "formula": "Reaction ~ 1 + Days + (1 + Days | Subject)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "tungara_single_caller",
+      "estimator": "Laplace",
+      "family": "Binomial",
+      "formula": "did_focal_follower_overlap_preceding_call_YN ~ 1 + preceding_caller_mass * distance + (1 | chorus_ID) + (1 + preceding_caller_mass | chorus_ID:focal_toe_clip_number)",
+      "link": "Logit",
+      "weights": null
+    },
+    {
+      "dataset": "verbagg",
+      "estimator": "Laplace",
+      "family": "Binomial",
+      "formula": "r2 ~ 1 + Anger + Gender + btype + situ + mode + (1 | id) + (1 | item)",
+      "link": "Logit",
+      "weights": null
+    }
+  ]
+}

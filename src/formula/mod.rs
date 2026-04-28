@@ -17,4 +17,6 @@ pub mod terms;
 
 // Re-export the main public types for convenience.
 pub use parser::{parse_formula, FormulaError};
-pub use terms::{FixedTerm, Formula, GroupingFactor, RandomTerm};
+pub use terms::{
+    FixedTerm, Formula, GroupingFactor, RandomTerm, RandomTermExpansion, RandomTermSource,
+};

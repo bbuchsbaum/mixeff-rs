@@ -1,0 +1,248 @@
+{
+  "schema_name": "mixedmodels.model_audit_report",
+  "schema_version": 1,
+  "requested_formula": "y ~ 1 + A + B + C + A:B + A:C + B:C + A:B:C + (1 + A + B + C + A:B + A:C + B:C + A:B:C | group)",
+  "sections": [
+    {
+      "title": "Requested Model",
+      "lines": [
+        {
+          "label": "formula",
+          "status": "info",
+          "detail": "y ~ 1 + A + B + C + A:B + A:C + B:C + A:B:C + (1 + A + B + C + A:B + A:C + B:C + A:B:C | group)"
+        },
+        {
+          "label": "model kind",
+          "status": "info",
+          "detail": "linear_mixed_model"
+        },
+        {
+          "label": "distribution/link",
+          "status": "info",
+          "detail": "gaussian/identity"
+        },
+        {
+          "label": "objective",
+          "status": "info",
+          "detail": "exact_gaussian"
+        },
+        {
+          "label": "certificate scope",
+          "status": "info",
+          "detail": "exact_objective"
+        },
+        {
+          "label": "fixed terms",
+          "status": "info",
+          "detail": "1, A, B, C, A:B, A:C, B:C, A:B:C"
+        },
+        {
+          "label": "random terms",
+          "status": "info",
+          "detail": "1"
+        },
+        {
+          "label": "theta maps",
+          "status": "info",
+          "detail": "1 map(s)"
+        }
+      ]
+    },
+    {
+      "title": "Model State",
+      "lines": [
+        {
+          "label": "requested",
+          "status": "ok",
+          "detail": "status=requested; formula=y ~ 1 + A + B + C + A:B + A:C + B:C + A:B:C + (1 + A + B + C + A:B + A:C + B:C + A:B:C | group); random_terms=1; reason=formula as requested by the caller"
+        },
+        {
+          "label": "semantic",
+          "status": "ok",
+          "detail": "status=canonical; formula=y ~ 1 + A + B + C + A:B + A:C + B:C + A:B:C + (1 + A + B + C + A:B + A:C + B:C + A:B:C | group); random_terms=1; reason=formula compiled into semantic IR"
+        },
+        {
+          "label": "supported",
+          "status": "warning",
+          "detail": "status=refused; formula=y ~ 1 + A + B + C + A:B + A:C + B:C + A:B:C + (1 + A + B + C + A:B + A:C + B:C + A:B:C | group); random_terms=1; reason=design audit found at least one unsupported random-effect distribution"
+        },
+        {
+          "label": "fitted",
+          "status": "not_assessed",
+          "detail": "status=not_assessed; formula=y ~ 1 + A + B + C + A:B + A:C + B:C + A:B:C + (1 + A + B + C + A:B + A:C + B:C + A:B:C | group); random_terms=1; reason=model has not been fitted"
+        },
+        {
+          "label": "changes",
+          "status": "warning",
+          "detail": "Diagnostic:NotAReduction:(A * B * C | group) -> random-effect term was canonicalized as (1 + A + B + C + A:B + A:C + B:C + A:B:C | group) | Recommended:DesignTime:r0 -> 10 levels are below the v0 variance-direction threshold 17"
+        }
+      ]
+    },
+    {
+      "title": "Fixed Effects",
+      "lines": [
+        {
+          "label": "rank",
+          "status": "ok",
+          "detail": "8 of 8"
+        },
+        {
+          "label": "aliased columns",
+          "status": "ok",
+          "detail": "none"
+        },
+        {
+          "label": "empty cells",
+          "status": "ok",
+          "detail": "0"
+        }
+      ]
+    },
+    {
+      "title": "Random Effects",
+      "lines": [
+        {
+          "label": "r0",
+          "status": "warning",
+          "detail": "group=group, rows=150, levels=10, obs_per_level=15..15, basis=8, covariance=full, params=36, budget=too_rich; reason=10 levels are below the v0 full-covariance threshold 180 for 36 covariance parameters"
+        }
+      ]
+    },
+    {
+      "title": "Random-Effect Information Budget",
+      "lines": [
+        {
+          "label": "r0",
+          "status": "warning",
+          "detail": "levels=10, rows=150, obs_per_level=15..15, basis=8, cov_params=36, levels/basis=1.25, levels/param=0.28, rows/param=4.17; total rows can be misleading for covariance support; risk=maximal covariance structure is too rich for the grouping-level budget; recommendation=full covariance asks for 36 parameter(s); use design_compiled with diagonal/reduced-rank covariance, treat the grouping factor as fixed when it is designed or directly compared, or collect at least 180 grouping levels; explanation=150 rows are clustered into 10 grouping levels; covariance support is limited by grouping levels, not by total rows"
+        }
+      ]
+    },
+    {
+      "title": "Dependence Paths",
+      "lines": [
+        {
+          "label": "kernels",
+          "status": "info",
+          "detail": "r0=marginal(group, intercept=true, covariance=full, basis=intercept, A, B, C, A:B, A:C, B:C, A:B:C)"
+        },
+        {
+          "label": "repeated units",
+          "status": "ok",
+          "detail": "group=marginal(group, levels=10, obs_per_level=15..15, covered_by=r0)"
+        },
+        {
+          "label": "missing paths",
+          "status": "ok",
+          "detail": "none"
+        }
+      ]
+    },
+    {
+      "title": "Parameterization Trace",
+      "lines": [
+        {
+          "label": "r0",
+          "status": "ok",
+          "detail": "source=(1 + A + B + C + A:B + A:C + B:C + A:B:C | group); group=group; family=FullCholesky; user_basis=intercept, A, B, C, A:B, A:C, B:C, A:B:C; optimizer_basis=intercept, A, B, C, A:B, A:C, B:C, A:B:C; theta_slots=theta[0], theta[1], theta[2], theta[3], theta[4], theta[5], theta[6], theta[7], theta[8], theta[9], theta[10], theta[11], theta[12], theta[13], theta[14], theta[15], theta[16], theta[17], theta[18], theta[19], theta[20], theta[21], theta[22], theta[23], theta[24], theta[25], theta[26], theta[27], theta[28], theta[29], theta[30], theta[31], theta[32], theta[33], theta[34], theta[35]; lambda_slots=(0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (5, 0), (6, 0), (7, 0), (1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1), (7, 1), (2, 2), (3, 2), (4, 2), (5, 2), (6, 2), (7, 2), (3, 3), (4, 3), (5, 3), (6, 3), (7, 3), (4, 4), (5, 4), (6, 4), (7, 4), (5, 5), (6, 5), (7, 5), (6, 6), (7, 6), (7, 7); parmap_aligned=36/36; varcorr_entries=sd(intercept), sd(A), corr(A,intercept), sd(B), corr(B,intercept), corr(B,A), sd(C), corr(C,intercept), corr(C,A), corr(C,B), sd(A:B), corr(A:B,intercept), corr(A:B,A), corr(A:B,B), corr(A:B,C), sd(A:C), corr(A:C,intercept), corr(A:C,A), corr(A:C,B), corr(A:C,C), corr(A:C,A:B), sd(B:C), corr(B:C,intercept), corr(B:C,A), corr(B:C,B), corr(B:C,C), corr(B:C,A:B), corr(B:C,A:C), sd(A:B:C), corr(A:B:C,intercept), corr(A:B:C,A), corr(A:B:C,B), corr(A:B:C,C), corr(A:B:C,A:B), corr(A:B:C,A:C), corr(A:B:C,B:C)"
+        }
+      ]
+    },
+    {
+      "title": "Effective Covariance",
+      "lines": [
+        {
+          "label": "effective covariance rank",
+          "status": "not_assessed",
+          "detail": "not assessed"
+        }
+      ]
+    },
+    {
+      "title": "Policy Recommendations",
+      "lines": [
+        {
+          "label": "r0",
+          "status": "warning",
+          "detail": "refuse_random_term_distribution: 10 levels are below the v0 variance-direction threshold 17; inference=confirmatory fixed-effect p-values should be withheld or recomputed after a declared design-level change"
+        }
+      ]
+    },
+    {
+      "title": "Optimizer",
+      "lines": [
+        {
+          "label": "certificate",
+          "status": "not_assessed",
+          "detail": "model has not been fitted"
+        }
+      ]
+    },
+    {
+      "title": "Inference",
+      "lines": [
+        {
+          "label": "finite-sample inference",
+          "status": "not_assessed",
+          "detail": "finite-sample inference is not implemented in compiler v0"
+        },
+        {
+          "label": "covariance derivatives",
+          "status": "not_assessed",
+          "detail": "compiler v0 does not expose covariance derivative certificates"
+        }
+      ]
+    },
+    {
+      "title": "Diagnostics",
+      "lines": [
+        {
+          "label": "formula_canonicalized",
+          "status": "info",
+          "detail": "random-effect term was canonicalized as (1 + A + B + C + A:B + A:C + B:C + A:B:C | group); affected=(A * B * C | group)"
+        },
+        {
+          "label": "covariance_too_rich",
+          "status": "warning",
+          "detail": "10 levels are below the v0 full-covariance threshold 180 for 36 covariance parameters; affected=(1 + A + B + C + A:B + A:C + B:C + A:B:C | group)"
+        }
+      ]
+    }
+  ],
+  "diagnostics": [
+    {
+      "code": "formula_canonicalized",
+      "severity": "info",
+      "stage": "semantic_ir",
+      "message": "random-effect term was canonicalized as (1 + A + B + C + A:B + A:C + B:C + A:B:C | group)",
+      "affected_terms": [
+        "(A * B * C | group)"
+      ],
+      "suggested_actions": [],
+      "payload": {
+        "canonical_terms": [
+          "(1 + A + B + C + A:B + A:C + B:C + A:B:C | group)"
+        ]
+      }
+    },
+    {
+      "code": "covariance_too_rich",
+      "severity": "warning",
+      "stage": "design_audit",
+      "message": "10 levels are below the v0 full-covariance threshold 180 for 36 covariance parameters",
+      "affected_terms": [
+        "(1 + A + B + C + A:B + A:C + B:C + A:B:C | group)"
+      ],
+      "suggested_actions": [],
+      "payload": {
+        "basis_dimension": 8,
+        "min_levels_full_covariance": 180,
+        "min_levels_random_intercept_fit": 2,
+        "min_levels_random_intercept_reliability": 5,
+        "min_levels_variance": 17,
+        "n_levels": 10,
+        "requested_covariance_parameters": 36
+      }
+    }
+  ]
+}

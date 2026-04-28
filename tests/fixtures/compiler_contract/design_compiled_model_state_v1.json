@@ -1,0 +1,152 @@
+{
+  "schema_name": "mixedmodels.model_state_summary",
+  "schema_version": 1,
+  "requested": {
+    "stage": "requested",
+    "status": "requested",
+    "formula": "y ~ 1 + x + (1 + x | group)",
+    "fixed_terms": [
+      "1",
+      "x"
+    ],
+    "random_terms": [
+      {
+        "term_id": "r0",
+        "source_syntax": "(1 + x | group)",
+        "group": "group",
+        "semantic_basis": [
+          "intercept",
+          "x"
+        ],
+        "optimizer_basis": [
+          "intercept",
+          "x"
+        ],
+        "covariance": "full",
+        "basis_dimension": 2,
+        "covariance_parameters": 3,
+        "information_status": "too_rich",
+        "requested_rank": null,
+        "supported_rank": null
+      }
+    ],
+    "reason": "formula as requested by the caller"
+  },
+  "semantic": {
+    "stage": "semantic",
+    "status": "canonical",
+    "formula": "y ~ 1 + x + (1 + x | group)",
+    "fixed_terms": [
+      "1",
+      "x"
+    ],
+    "random_terms": [
+      {
+        "term_id": "r0",
+        "source_syntax": "(1 + x | group)",
+        "group": "group",
+        "semantic_basis": [
+          "intercept",
+          "x"
+        ],
+        "optimizer_basis": [
+          "intercept",
+          "x"
+        ],
+        "covariance": "full",
+        "basis_dimension": 2,
+        "covariance_parameters": 3,
+        "information_status": "too_rich",
+        "requested_rank": null,
+        "supported_rank": null
+      }
+    ],
+    "reason": "formula compiled into semantic IR"
+  },
+  "supported": {
+    "stage": "supported",
+    "status": "reduced",
+    "formula": "y ~ 1 + x + (1 + x || group)",
+    "fixed_terms": [
+      "1",
+      "x"
+    ],
+    "random_terms": [
+      {
+        "term_id": "r0",
+        "source_syntax": "(1 + x || group)",
+        "group": "group",
+        "semantic_basis": [
+          "intercept",
+          "x"
+        ],
+        "optimizer_basis": [
+          "intercept",
+          "x"
+        ],
+        "covariance": "diagonal",
+        "basis_dimension": 2,
+        "covariance_parameters": 3,
+        "information_status": "too_rich",
+        "requested_rank": null,
+        "supported_rank": null
+      }
+    ],
+    "reason": "design_compiled applied deterministic design-time model changes"
+  },
+  "fitted": {
+    "stage": "fitted",
+    "status": "not_assessed",
+    "formula": "y ~ 1 + x + (1 + x || group)",
+    "fixed_terms": [
+      "1",
+      "x"
+    ],
+    "random_terms": [
+      {
+        "term_id": "r0",
+        "source_syntax": "(1 + x || group)",
+        "group": "group",
+        "semantic_basis": [
+          "intercept",
+          "x"
+        ],
+        "optimizer_basis": [
+          "intercept",
+          "x"
+        ],
+        "covariance": "diagonal",
+        "basis_dimension": 2,
+        "covariance_parameters": 3,
+        "information_status": "too_rich",
+        "requested_rank": null,
+        "supported_rank": null
+      }
+    ],
+    "reason": "model has not been fitted"
+  },
+  "changes": [
+    {
+      "status": "applied",
+      "trigger": "design_time",
+      "from_stage": "semantic",
+      "to_stage": "supported",
+      "affected_term": "r0",
+      "reason": "6 levels are below the v0 full-covariance threshold 15 for 3 covariance parameters",
+      "replacement_term": "(1 + x || group)",
+      "inference_consequence": "correlation parameters would not be interpreted as confirmatory",
+      "diagnostics": [
+        {
+          "code": "covariance_too_rich",
+          "severity": "warning",
+          "stage": "design_audit",
+          "message": "6 levels are below the v0 full-covariance threshold 15 for 3 covariance parameters",
+          "affected_terms": [
+            "(1 + x | group)"
+          ],
+          "suggested_actions": []
+        }
+      ]
+    }
+  ]
+}

@@ -318,13 +318,7 @@ mod tests {
         // A (sparse, 3x2): [[1,0],[0,1],[1,1]]
         // B (dense, 3x2): [[2,0],[0,3],[1,1]]
         // A'B = [[3,1],[1,4]]
-        let a = csc_from_triplets(
-            3,
-            2,
-            &[0, 2, 1, 2],
-            &[0, 0, 1, 1],
-            &[1.0, 1.0, 1.0, 1.0],
-        );
+        let a = csc_from_triplets(3, 2, &[0, 2, 1, 2], &[0, 0, 1, 1], &[1.0, 1.0, 1.0, 1.0]);
         let b = DMatrix::from_row_slice(3, 2, &[2.0, 0.0, 0.0, 3.0, 1.0, 1.0]);
         let mut c = DMatrix::zeros(2, 2);
         rank_update_sparse_dense(&mut c, &a, &b, 1.0, 0.0).unwrap();
@@ -339,13 +333,7 @@ mod tests {
         // A sparse 2x2 identity, B dense 2x2 = [[1,2],[3,4]]
         // A'B = B. With alpha=2, beta=3, C_init=I:
         // C = 2*B + 3*I = [[5,4],[6,7]]
-        let a = csc_from_triplets(
-            2,
-            2,
-            &[0, 1],
-            &[0, 1],
-            &[1.0, 1.0],
-        );
+        let a = csc_from_triplets(2, 2, &[0, 1], &[0, 1], &[1.0, 1.0]);
         let b = DMatrix::from_row_slice(2, 2, &[1.0, 2.0, 3.0, 4.0]);
         let mut c = DMatrix::identity(2, 2);
         rank_update_sparse_dense(&mut c, &a, &b, 2.0, 3.0).unwrap();
@@ -357,43 +345,9 @@ mod tests {
 
     #[test]
     fn test_rank_update_sparse_symmetric() {
-        // A (sparse, 3x2): [[1,0],[0,1],[1,1]]
-        // A'A = [[2,1],[1,2]]
-        let a = csc_from_triplets(
-            3,
-            2,
-            &[0, 2, 1, 2],
-            &[0, 0, 1, 1],
-            &[1.0, 1.0, 1.0, 1.0],
-        );
-
-        // Note: for rank_update_sparse, C must be nrows x nrows (= 3x3)
-        // because A'A has dimension nrows x nrows when we interpret A as
-        // mapping from nrows-space. Wait -- actually A'A is ncols x ncols.
-        // But the Julia code uses `m` (=A.m = nrows) as the size of C for
-        // the lower-triangle case. Let me re-read...
-        //
-        // Actually the Julia code has: `(lower ? m : n) == size(C, 2)`
-        // where lower corresponds to C.uplo == 'L'. For lower triangle,
-        // C is m x m. This is because in the lower-triangle variant,
-        // it's computing the outer product over rows within each column.
-        //
-        // For our implementation, we do C = A'A (ncols x ncols) via the
-        // standard interpretation. Let me use a simple test.
-
-        // Actually re-reading our implementation: we require C to be m x m
-        // where m = a.nrows(). But mathematically A'A is ncols x ncols.
-        // The Julia version for the "lower" case uses m = nrows because
-        // the sparse structure groups by rows.
-        //
-        // Let me just test with a square sparse matrix to avoid confusion.
-        let a2 = csc_from_triplets(
-            2,
-            2,
-            &[0, 1, 0, 1],
-            &[0, 0, 1, 1],
-            &[1.0, 2.0, 3.0, 4.0],
-        );
+        // Square sparse A so C = A'A has the same shape as A (the
+        // implementation requires C to be a.nrows() x a.nrows()).
+        let a2 = csc_from_triplets(2, 2, &[0, 1, 0, 1], &[0, 0, 1, 1], &[1.0, 2.0, 3.0, 4.0]);
         // A = [[1,3],[2,4]]
         // A'A (lower) via column-wise outer product:
         // col 0: rows [0,1] vals [1,2] -> outer = [[1,2],[2,4]]
@@ -408,13 +362,7 @@ mod tests {
 
     #[test]
     fn test_rank_update_sparse_dense_dimension_mismatch() {
-        let a = csc_from_triplets(
-            3,
-            2,
-            &[0, 1],
-            &[0, 1],
-            &[1.0, 1.0],
-        );
+        let a = csc_from_triplets(3, 2, &[0, 1], &[0, 1], &[1.0, 1.0]);
         let b = DMatrix::from_row_slice(2, 2, &[1.0, 2.0, 3.0, 4.0]);
         let mut c = DMatrix::zeros(2, 2);
         let result = rank_update_sparse_dense(&mut c, &a, &b, 1.0, 0.0);

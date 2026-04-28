@@ -1,0 +1,229 @@
+{
+  "schema_name": "mixedmodels.model_audit_report",
+  "schema_version": 1,
+  "requested_formula": "y ~ 1 + subject + x + (1 | subject)",
+  "sections": [
+    {
+      "title": "Requested Model",
+      "lines": [
+        {
+          "label": "formula",
+          "status": "info",
+          "detail": "y ~ 1 + subject + x + (1 | subject)"
+        },
+        {
+          "label": "model kind",
+          "status": "info",
+          "detail": "linear_mixed_model"
+        },
+        {
+          "label": "distribution/link",
+          "status": "info",
+          "detail": "gaussian/identity"
+        },
+        {
+          "label": "objective",
+          "status": "info",
+          "detail": "exact_gaussian"
+        },
+        {
+          "label": "certificate scope",
+          "status": "info",
+          "detail": "exact_objective"
+        },
+        {
+          "label": "fixed terms",
+          "status": "info",
+          "detail": "1, subject, x"
+        },
+        {
+          "label": "random terms",
+          "status": "info",
+          "detail": "1"
+        },
+        {
+          "label": "theta maps",
+          "status": "info",
+          "detail": "1 map(s)"
+        }
+      ]
+    },
+    {
+      "title": "Model State",
+      "lines": [
+        {
+          "label": "requested",
+          "status": "ok",
+          "detail": "status=requested; formula=y ~ 1 + subject + x + (1 | subject); random_terms=1; reason=formula as requested by the caller"
+        },
+        {
+          "label": "semantic",
+          "status": "ok",
+          "detail": "status=canonical; formula=y ~ 1 + subject + x + (1 | subject); random_terms=1; reason=formula compiled into semantic IR"
+        },
+        {
+          "label": "supported",
+          "status": "ok",
+          "detail": "status=supported; formula=y ~ 1 + subject + x + (1 | subject); random_terms=1; reason=design audit did not recommend design-time model changes"
+        },
+        {
+          "label": "fitted",
+          "status": "not_assessed",
+          "detail": "status=not_assessed; formula=y ~ 1 + subject + x + (1 | subject); random_terms=1; reason=model has not been fitted"
+        },
+        {
+          "label": "changes",
+          "status": "ok",
+          "detail": "none"
+        }
+      ]
+    },
+    {
+      "title": "Fixed Effects",
+      "lines": [
+        {
+          "label": "rank",
+          "status": "ok",
+          "detail": "7 of 7"
+        },
+        {
+          "label": "aliased columns",
+          "status": "ok",
+          "detail": "none"
+        },
+        {
+          "label": "empty cells",
+          "status": "ok",
+          "detail": "0"
+        }
+      ]
+    },
+    {
+      "title": "Random Effects",
+      "lines": [
+        {
+          "label": "r0",
+          "status": "ok",
+          "detail": "group=subject, rows=12, levels=6, obs_per_level=2..2, basis=1, covariance=scalar, params=1, budget=sufficient"
+        }
+      ]
+    },
+    {
+      "title": "Random-Effect Information Budget",
+      "lines": [
+        {
+          "label": "r0",
+          "status": "ok",
+          "detail": "levels=6, rows=12, obs_per_level=2..2, basis=1, cov_params=1, levels/basis=6.00, levels/param=6.00, rows/param=12.00; grouping levels are the effective n for covariance support; risk=v0 information budget is sufficient; recommendation=information budget is sufficient under v0 thresholds; explanation=12 rows are clustered into 6 grouping levels; grouping levels are the effective n for random-effect distribution support"
+        }
+      ]
+    },
+    {
+      "title": "Dependence Paths",
+      "lines": [
+        {
+          "label": "kernels",
+          "status": "info",
+          "detail": "r0=marginal(subject, intercept=true, covariance=scalar, basis=intercept)"
+        },
+        {
+          "label": "repeated units",
+          "status": "ok",
+          "detail": "subject=marginal(subject, levels=6, obs_per_level=2..2, covered_by=r0)"
+        },
+        {
+          "label": "missing paths",
+          "status": "ok",
+          "detail": "none"
+        }
+      ]
+    },
+    {
+      "title": "Parameterization Trace",
+      "lines": [
+        {
+          "label": "r0",
+          "status": "ok",
+          "detail": "source=(1 | subject); group=subject; family=Scalar; user_basis=intercept; optimizer_basis=intercept; theta_slots=theta[0]; lambda_slots=(0, 0); parmap_aligned=1/1; varcorr_entries=sd(intercept)"
+        }
+      ]
+    },
+    {
+      "title": "Effective Covariance",
+      "lines": [
+        {
+          "label": "effective covariance rank",
+          "status": "not_assessed",
+          "detail": "not assessed"
+        }
+      ]
+    },
+    {
+      "title": "Policy Recommendations",
+      "lines": [
+        {
+          "label": "maximal feasible",
+          "status": "ok",
+          "detail": "no advisory reductions or refusals"
+        }
+      ]
+    },
+    {
+      "title": "Optimizer",
+      "lines": [
+        {
+          "label": "certificate",
+          "status": "not_assessed",
+          "detail": "model has not been fitted"
+        }
+      ]
+    },
+    {
+      "title": "Inference",
+      "lines": [
+        {
+          "label": "finite-sample inference",
+          "status": "not_assessed",
+          "detail": "finite-sample inference is not implemented in compiler v0"
+        },
+        {
+          "label": "covariance derivatives",
+          "status": "not_assessed",
+          "detail": "compiler v0 does not expose covariance derivative certificates"
+        }
+      ]
+    },
+    {
+      "title": "Diagnostics",
+      "lines": [
+        {
+          "label": "fixed_random_redundant",
+          "status": "warning",
+          "detail": "random intercept for 'subject' is redundant with fixed-effect term 'subject'; affected=(1 | subject), subject; suggested=drop the random intercept term '(1 | subject)' | or remove fixed-effect term 'subject' if 'subject' should be modeled as a sampled random unit"
+        }
+      ]
+    }
+  ],
+  "diagnostics": [
+    {
+      "code": "fixed_random_redundant",
+      "severity": "warning",
+      "stage": "design_audit",
+      "message": "random intercept for 'subject' is redundant with fixed-effect term 'subject'",
+      "affected_terms": [
+        "(1 | subject)",
+        "subject"
+      ],
+      "suggested_actions": [
+        "drop the random intercept term '(1 | subject)'",
+        "or remove fixed-effect term 'subject' if 'subject' should be modeled as a sampled random unit"
+      ],
+      "payload": {
+        "fixed_term": "subject",
+        "group": "subject",
+        "n_levels": 6,
+        "random_term": "(1 | subject)"
+      }
+    }
+  ]
+}

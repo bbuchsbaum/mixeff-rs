@@ -1,0 +1,36 @@
+name = "ergostool"
+source = "nlme::ergoStool"
+license = "Part of nlme; redistributable for academic use"
+n_rows = 36
+description = """
+Wretenberg, Arborelius, Lindberg & Strömberg (1976) ergonomics study:
+9 subjects × 4 stool types, balanced, one observation per cell.
+The simplest possible repeated-measures LMM — single random factor on
+subject. Useful as a single-factor ANOVA-vs-LMM regression test.
+Note: nlme stores Subject levels in non-canonical order (8,5,4,9,6,3,7,1,2),
+which we preserve here.
+"""
+
+[[columns]]
+name = "effort"
+type = "numeric"
+
+[[columns]]
+name = "Type"
+type = "categorical"
+levels = ["T1","T2","T3","T4"]
+
+[[columns]]
+name = "Subject"
+type = "categorical"
+levels = ["8","5","4","9","6","3","7","1","2"]
+
+[[fits]]
+formula = "effort ~ 1 + Type + (1 | Subject)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+
+[tags]
+structure = ["random_intercept", "scalar_re", "balanced"]
+difficulty = "easy"

@@ -79,9 +79,7 @@ impl FeTerm {
 
         let tol = (n.max(p) as f64) * f64::EPSILON * {
             // Estimate the largest column norm of the original matrix.
-            (0..p)
-                .map(|j| x.column(j).norm())
-                .fold(0.0_f64, f64::max)
+            (0..p).map(|j| x.column(j).norm()).fold(0.0_f64, f64::max)
         };
 
         // Work on a mutable copy.

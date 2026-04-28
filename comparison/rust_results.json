@@ -1,0 +1,934 @@
+{
+  "results": [
+    {
+      "aic": 1673.2461815336571,
+      "beta": [
+        29.133333333332015,
+        -2.26666666666526,
+        -1.1999999999986897,
+        2.4000000000003787,
+        1.6666666666670493,
+        4.400000000000381,
+        9.533333333333708,
+        5.933333333333711,
+        0.13333333333290703,
+        3.199999999999569,
+        0.8666666666662379,
+        -1.9333333333337563,
+        2.4666666666662396,
+        -1.4000000000004074,
+        2.133333333332922,
+        -1.466666666667076,
+        -3.066666666667071,
+        1.8666666666662584
+      ],
+      "bic": 1745.2146207136248,
+      "coef_names": [
+        "(Intercept)",
+        "recipe: B",
+        "recipe: C",
+        "temperature: 185",
+        "temperature: 195",
+        "temperature: 205",
+        "temperature: 215",
+        "temperature: 225",
+        "recipe: B:temperature: 185",
+        "recipe: B:temperature: 195",
+        "recipe: B:temperature: 205",
+        "recipe: B:temperature: 215",
+        "recipe: B:temperature: 225",
+        "recipe: C:temperature: 185",
+        "recipe: C:temperature: 195",
+        "recipe: C:temperature: 205",
+        "recipe: C:temperature: 215",
+        "recipe: C:temperature: 225"
+      ],
+      "dataset": "cake",
+      "error": null,
+      "estimator": "REML",
+      "family": "Gaussian",
+      "fit_time_ms": 0.49512500000000004,
+      "fit_time_ms_min": 0.317708,
+      "fit_time_ms_repeats": 3,
+      "formula": "angle ~ 1 + recipe * temperature + (1 | recipe:replicate)",
+      "is_singular": false,
+      "link": "Identity",
+      "loglik": -816.6230907668286,
+      "n_obs": 270,
+      "objective": 1633.2461815336571,
+      "sigma": 4.524455494621484,
+      "status": "ok",
+      "theta": [
+        1.4296373923248473
+      ]
+    },
+    {
+      "aic": null,
+      "beta": null,
+      "bic": null,
+      "coef_names": null,
+      "dataset": "cbpp",
+      "error": "Binomial/Logit not yet wired into compare_rust",
+      "estimator": "Laplace",
+      "family": "Binomial",
+      "fit_time_ms": null,
+      "fit_time_ms_min": null,
+      "fit_time_ms_repeats": null,
+      "formula": "incidence / size ~ 1 + period + (1 | herd)",
+      "is_singular": null,
+      "link": "Logit",
+      "loglik": null,
+      "n_obs": 56,
+      "objective": null,
+      "sigma": null,
+      "status": "not_implemented",
+      "theta": null
+    },
+    {
+      "aic": 325.65427684225597,
+      "beta": [
+        1527.4999999999998
+      ],
+      "bic": 329.85786898724245,
+      "coef_names": [
+        "(Intercept)"
+      ],
+      "dataset": "dyestuff",
+      "error": null,
+      "estimator": "REML",
+      "family": "Gaussian",
+      "fit_time_ms": 0.025625,
+      "fit_time_ms_min": 0.012291,
+      "fit_time_ms_repeats": 3,
+      "formula": "Yield ~ 1 + (1 | Batch)",
+      "is_singular": false,
+      "link": "Identity",
+      "loglik": -159.82713842112798,
+      "n_obs": 30,
+      "objective": 319.65427684225597,
+      "sigma": 49.5100957160886,
+      "status": "ok",
+      "theta": [
+        0.8483243229023545
+      ]
+    },
+    {
+      "aic": 333.327059881646,
+      "beta": [
+        1527.5000000000007
+      ],
+      "bic": 337.5306520266325,
+      "coef_names": [
+        "(Intercept)"
+      ],
+      "dataset": "dyestuff",
+      "error": null,
+      "estimator": "ML",
+      "family": "Gaussian",
+      "fit_time_ms": 0.012125,
+      "fit_time_ms_min": 0.010375,
+      "fit_time_ms_repeats": 3,
+      "formula": "Yield ~ 1 + (1 | Batch)",
+      "is_singular": false,
+      "link": "Identity",
+      "loglik": -163.663529940823,
+      "n_obs": 30,
+      "objective": 327.327059881646,
+      "sigma": 49.51017269106905,
+      "status": "ok",
+      "theta": [
+        0.7525732146822598
+      ]
+    },
+    {
+      "aic": 168.87303665382575,
+      "beta": [
+        5.665600000000001
+      ],
+      "bic": 173.0766287988122,
+      "coef_names": [
+        "(Intercept)"
+      ],
+      "dataset": "dyestuff2",
+      "error": null,
+      "estimator": "ML",
+      "family": "Gaussian",
+      "fit_time_ms": 0.015833,
+      "fit_time_ms_min": 0.012625,
+      "fit_time_ms_repeats": 3,
+      "formula": "Yield ~ 1 + (1 | Batch)",
+      "is_singular": true,
+      "link": "Identity",
+      "loglik": -81.43651832691287,
+      "n_obs": 30,
+      "objective": 162.87303665382575,
+      "sigma": 3.6532313513746506,
+      "status": "ok",
+      "theta": [
+        0.0
+      ]
+    },
+    {
+      "aic": 167.82827781228843,
+      "beta": [
+        5.665600000000001
+      ],
+      "bic": 172.0318699572749,
+      "coef_names": [
+        "(Intercept)"
+      ],
+      "dataset": "dyestuff2",
+      "error": null,
+      "estimator": "REML",
+      "family": "Gaussian",
+      "fit_time_ms": 0.015208000000000001,
+      "fit_time_ms_min": 0.011375,
+      "fit_time_ms_repeats": 3,
+      "formula": "Yield ~ 1 + (1 | Batch)",
+      "is_singular": true,
+      "link": "Identity",
+      "loglik": -80.91413890614422,
+      "n_obs": 30,
+      "objective": 161.82827781228843,
+      "sigma": 3.7156842744757252,
+      "status": "ok",
+      "theta": [
+        0.0
+      ]
+    },
+    {
+      "aic": 133.13078870237,
+      "beta": [
+        8.555555555555578,
+        3.888888888888884,
+        2.2222222222222183,
+        0.6666666666666627
+      ],
+      "bic": 142.63190233310667,
+      "coef_names": [
+        "(Intercept)",
+        "Type: T2",
+        "Type: T3",
+        "Type: T4"
+      ],
+      "dataset": "ergostool",
+      "error": null,
+      "estimator": "REML",
+      "family": "Gaussian",
+      "fit_time_ms": 0.085208,
+      "fit_time_ms_min": 0.02425,
+      "fit_time_ms_repeats": 3,
+      "formula": "effort ~ 1 + Type + (1 | Subject)",
+      "is_singular": false,
+      "link": "Identity",
+      "loglik": -60.565394351185006,
+      "n_obs": 36,
+      "objective": 121.13078870237001,
+      "sigma": 1.1002930421604715,
+      "status": "ok",
+      "theta": [
+        1.21101540341102
+      ]
+    },
+    {
+      "aic": null,
+      "beta": null,
+      "bic": null,
+      "coef_names": null,
+      "dataset": "grouseticks",
+      "error": "Poisson/Log not yet wired into compare_rust",
+      "estimator": "Laplace",
+      "family": "Poisson",
+      "fit_time_ms": null,
+      "fit_time_ms_min": null,
+      "fit_time_ms_repeats": null,
+      "formula": "TICKS ~ 1 + YEAR + cHEIGHT + (1 | BROOD) + (1 | INDEX) + (1 | LOCATION)",
+      "is_singular": null,
+      "link": "Log",
+      "loglik": null,
+      "n_obs": 403,
+      "objective": null,
+      "sigma": null,
+      "status": "not_implemented",
+      "theta": null
+    },
+    {
+      "aic": 28653.664031905144,
+      "beta": [
+        2526.488219396816,
+        135.62450381737625,
+        -667.7147818968209,
+        -157.35663662376953
+      ],
+      "bic": 28790.89933399286,
+      "coef_names": [
+        "(Intercept)",
+        "spkr: old",
+        "prec: maintain",
+        "load: no"
+      ],
+      "dataset": "kb07",
+      "error": null,
+      "estimator": "REML",
+      "family": "Gaussian",
+      "fit_time_ms": 736.595,
+      "fit_time_ms_min": 736.595,
+      "fit_time_ms_repeats": 3,
+      "formula": "rt_trunc ~ 1 + spkr + prec + load + (1 + spkr + prec + load | subj) + (1 + spkr + prec + load | item)",
+      "is_singular": false,
+      "link": "Identity",
+      "loglik": -14301.832015952572,
+      "n_obs": 1789,
+      "objective": 28603.664031905144,
+      "sigma": 669.6781326520467,
+      "status": "ok",
+      "theta": [
+        0.49363264105480475,
+        0.09410660752565303,
+        -0.1155543318412828,
+        -0.06459899884731317,
+        0.09324997761243092,
+        0.12852693735249238,
+        -0.1566837706302582,
+        0.06539149442929779,
+        -0.10561961823884373,
+        0.00004927073236208346,
+        0.8635015773432216,
+        0.008098378181272093,
+        -0.6793033193097269,
+        -0.04288109536261276,
+        0.12265403192404961,
+        0.3079970787712359,
+        -0.01535629472264411,
+        0.08239206010481359,
+        -0.1267500804598711,
+        0.00037727435326890846
+      ]
+    },
+    {
+      "aic": 28689.13304692253,
+      "beta": [
+        2526.467028016423,
+        135.6456951980789,
+        -667.6935905164223,
+        -157.2805348436143
+      ],
+      "bic": 28760.495404008143,
+      "coef_names": [
+        "(Intercept)",
+        "spkr: old",
+        "prec: maintain",
+        "load: no"
+      ],
+      "dataset": "kb07",
+      "error": null,
+      "estimator": "REML",
+      "family": "Gaussian",
+      "fit_time_ms": 196.320291,
+      "fit_time_ms_min": 193.984083,
+      "fit_time_ms_repeats": 3,
+      "formula": "rt_trunc ~ 1 + spkr + prec + load + (1 + spkr + prec + load || subj) + (1 + spkr + prec + load || item)",
+      "is_singular": false,
+      "link": "Identity",
+      "loglik": -14331.566523461264,
+      "n_obs": 1789,
+      "objective": 28663.13304692253,
+      "sigma": 676.4010528240115,
+      "status": "ok",
+      "theta": [
+        0.4426943919269343,
+        0.15930980251526677,
+        0.000011713331917171802,
+        0.09910680624043759,
+        0.8020706195426032,
+        0.000015716179084754767,
+        0.6944296129708367,
+        0.13942570497143578
+      ]
+    },
+    {
+      "aic": 28799.854804971394,
+      "beta": [
+        2525.9466226512986,
+        136.16610056303298,
+        -667.1731851512473,
+        -156.7085713923058
+      ],
+      "bic": 28838.280689555955,
+      "coef_names": [
+        "(Intercept)",
+        "spkr: old",
+        "prec: maintain",
+        "load: no"
+      ],
+      "dataset": "kb07",
+      "error": null,
+      "estimator": "REML",
+      "family": "Gaussian",
+      "fit_time_ms": 0.9885829999999999,
+      "fit_time_ms_min": 0.876459,
+      "fit_time_ms_repeats": 3,
+      "formula": "rt_trunc ~ 1 + spkr + prec + load + (1 | subj) + (1 | item)",
+      "is_singular": false,
+      "link": "Identity",
+      "loglik": -14392.927402485697,
+      "n_obs": 1789,
+      "objective": 28785.854804971394,
+      "sigma": 722.5314156686552,
+      "status": "ok",
+      "theta": [
+        0.4425051009394771,
+        0.5095366152805431
+      ]
+    },
+    {
+      "aic": 227.68756800827524,
+      "beta": [
+        52.35555555555717,
+        7.96666666666519,
+        13.916666666665611
+      ],
+      "bic": 239.62147228766088,
+      "coef_names": [
+        "(Intercept)",
+        "Machine: B",
+        "Machine: C"
+      ],
+      "dataset": "machines",
+      "error": null,
+      "estimator": "REML",
+      "family": "Gaussian",
+      "fit_time_ms": 0.146584,
+      "fit_time_ms_min": 0.1065,
+      "fit_time_ms_repeats": 3,
+      "formula": "score ~ 1 + Machine + (1 | Worker) + (1 | Worker:Machine)",
+      "is_singular": false,
+      "link": "Identity",
+      "loglik": -107.84378400413762,
+      "n_obs": 54,
+      "objective": 215.68756800827524,
+      "sigma": 0.9615766179388748,
+      "status": "ok",
+      "theta": [
+        3.8785663600202294,
+        4.972095103922667
+      ]
+    },
+    {
+      "aic": 228.31121925839702,
+      "beta": [
+        52.3555555555551,
+        7.966666666667038,
+        13.916666666667076
+      ],
+      "bic": 248.20105972403977,
+      "coef_names": [
+        "(Intercept)",
+        "Machine: B",
+        "Machine: C"
+      ],
+      "dataset": "machines",
+      "error": null,
+      "estimator": "REML",
+      "family": "Gaussian",
+      "fit_time_ms": 0.937416,
+      "fit_time_ms_min": 0.8695419999999999,
+      "fit_time_ms_repeats": 3,
+      "formula": "score ~ 1 + Machine + (1 + Machine | Worker)",
+      "is_singular": false,
+      "link": "Identity",
+      "loglik": -104.15560962919851,
+      "n_obs": 54,
+      "objective": 208.31121925839702,
+      "sigma": 0.9616029171100594,
+      "status": "ok",
+      "theta": [
+        4.241835605430099,
+        2.9560090763802593,
+        -1.4014164509239815,
+        5.348540113802205,
+        2.074972805448588,
+        2.9075739223148402
+      ]
+    },
+    {
+      "aic": 581.2371973325542,
+      "beta": [
+        81.89999999999944,
+        8.516666666666957,
+        -8.599999999999746,
+        75.33333333333367,
+        -10.750000000000366,
+        5.749999999999655
+      ],
+      "bic": 601.7271924036986,
+      "coef_names": [
+        "(Intercept)",
+        "Variety: Marvellous",
+        "Variety: Victory",
+        "nitro",
+        "Variety: Marvellous:nitro",
+        "Variety: Victory:nitro"
+      ],
+      "dataset": "oats",
+      "error": null,
+      "estimator": "REML",
+      "family": "Gaussian",
+      "fit_time_ms": 0.112084,
+      "fit_time_ms_min": 0.09691699999999999,
+      "fit_time_ms_repeats": 3,
+      "formula": "yield ~ 1 + Variety * nitro + (1 | Block) + (1 | Block:Variety)",
+      "is_singular": false,
+      "link": "Identity",
+      "loglik": -281.6185986662771,
+      "n_obs": 72,
+      "objective": 563.2371973325542,
+      "sigma": 12.990380953578022,
+      "status": "ok",
+      "theta": [
+        0.8005374662963435,
+        1.1273752921151634
+      ]
+    },
+    {
+      "aic": 448.5816669073308,
+      "beta": [
+        16.34062499999873,
+        0.7843750000000979,
+        1.032102272728785,
+        -0.3048295454546619
+      ],
+      "bic": 470.03871672432456,
+      "coef_names": [
+        "(Intercept)",
+        "age",
+        "Sex: Female",
+        "age:Sex: Female"
+      ],
+      "dataset": "orthodont",
+      "error": null,
+      "estimator": "REML",
+      "family": "Gaussian",
+      "fit_time_ms": 0.17875000000000002,
+      "fit_time_ms_min": 0.16175,
+      "fit_time_ms_repeats": 3,
+      "formula": "distance ~ 1 + age * Sex + (1 + age | Subject)",
+      "is_singular": false,
+      "link": "Identity",
+      "loglik": -216.2908334536654,
+      "n_obs": 108,
+      "objective": 432.5816669073308,
+      "sigma": 1.3102020038694555,
+      "status": "ok",
+      "theta": [
+        1.8341173477830917,
+        -0.09169311460015664,
+        0.10244760193357909
+      ]
+    },
+    {
+      "aic": 254.99074585331982,
+      "beta": [
+        60.05333333333438
+      ],
+      "bic": 263.36812410220824,
+      "coef_names": [
+        "(Intercept)"
+      ],
+      "dataset": "pastes",
+      "error": null,
+      "estimator": "REML",
+      "family": "Gaussian",
+      "fit_time_ms": 0.141208,
+      "fit_time_ms_min": 0.11075,
+      "fit_time_ms_repeats": 3,
+      "formula": "strength ~ 1 + (1 | sample) + (1 | batch)",
+      "is_singular": false,
+      "link": "Identity",
+      "loglik": -123.49537292665991,
+      "n_obs": 60,
+      "objective": 246.99074585331982,
+      "sigma": 0.8234074966081332,
+      "status": "ok",
+      "theta": [
+        3.5269024637141477,
+        1.563460047547084
+      ]
+    },
+    {
+      "aic": 338.860588991093,
+      "beta": [
+        22.972222222224474
+      ],
+      "bic": 350.739842189397,
+      "coef_names": [
+        "(Intercept)"
+      ],
+      "dataset": "penicillin",
+      "error": null,
+      "estimator": "REML",
+      "family": "Gaussian",
+      "fit_time_ms": 0.1315,
+      "fit_time_ms_min": 0.12141600000000001,
+      "fit_time_ms_repeats": 3,
+      "formula": "diameter ~ 1 + (1 | plate) + (1 | sample)",
+      "is_singular": false,
+      "link": "Identity",
+      "loglik": -165.4302944955465,
+      "n_obs": 144,
+      "objective": 330.860588991093,
+      "sigma": 0.5499232024995023,
+      "status": "ok",
+      "theta": [
+        1.5396772505045295,
+        3.51240677893965
+      ]
+    },
+    {
+      "aic": 128.17700080985884,
+      "beta": [
+        66.49999999999962
+      ],
+      "bic": 130.84811608354732,
+      "coef_names": [
+        "(Intercept)"
+      ],
+      "dataset": "rail",
+      "error": null,
+      "estimator": "REML",
+      "family": "Gaussian",
+      "fit_time_ms": 0.019,
+      "fit_time_ms_min": 0.010875,
+      "fit_time_ms_repeats": 3,
+      "formula": "travel ~ 1 + (1 | Rail)",
+      "is_singular": false,
+      "link": "Identity",
+      "loglik": -61.08850040492942,
+      "n_obs": 18,
+      "objective": 122.17700080985884,
+      "sigma": 4.020795157094695,
+      "status": "ok",
+      "theta": [
+        6.169234589854954
+      ]
+    },
+    {
+      "aic": 870.0196534819789,
+      "beta": [
+        -41.57192770501646,
+        13.124973224459147,
+        13.498809825058748,
+        13.303766243249369,
+        -0.42515926888117056,
+        -0.33334145921005787,
+        -0.31253473036264223,
+        0.039545242468098686
+      ],
+      "bic": 1005.4982417163104,
+      "coef_names": [
+        "(Intercept)",
+        "A",
+        "B",
+        "C",
+        "A:B",
+        "A:C",
+        "B:C",
+        "A:B:C"
+      ],
+      "dataset": "singular",
+      "error": null,
+      "estimator": "REML",
+      "family": "Gaussian",
+      "fit_time_ms": 649.1779170000001,
+      "fit_time_ms_min": 607.91725,
+      "fit_time_ms_repeats": 3,
+      "formula": "y ~ 1 + A * B * C + (A * B * C | group)",
+      "is_singular": false,
+      "link": "Identity",
+      "loglik": -390.00982674098947,
+      "n_obs": 150,
+      "objective": 780.0196534819789,
+      "sigma": 1.8865198721914973,
+      "status": "ok",
+      "theta": [
+        0.7476701006823446,
+        -0.19011060511453043,
+        -0.2870972730820856,
+        0.00997023808799934,
+        -0.026851185860460515,
+        -0.04094743311429832,
+        -0.05601601462299689,
+        0.007160683905911091,
+        1.1188601893615262,
+        0.2202063464984766,
+        0.416002360059439,
+        -0.11925867679172215,
+        -0.11441271809470753,
+        -0.10895949638749007,
+        0.017521673427068504,
+        1.1815387080519841,
+        -0.12939558853372934,
+        -0.07063872464825019,
+        0.06733987344782975,
+        -0.006851799926047162,
+        0.000543499236052886,
+        1.158970258474369,
+        -0.08772759612360266,
+        -0.15517429048630577,
+        -0.19371720752043908,
+        0.02155848733000995,
+        0.04191085095734158,
+        0.028278533906527452,
+        0.04192854308558997,
+        -0.006135493217606772,
+        0.04082918185435468,
+        0.05669756394407186,
+        -0.0052860155134789,
+        0.0026230149529105065,
+        -0.00008847323568691599,
+        0.00003615456495625793
+      ]
+    },
+    {
+      "aic": 810.5769003816168,
+      "beta": [
+        -48.10322476018494,
+        13.36583501117719,
+        14.054935723749612,
+        13.85751715285815,
+        -0.44533893538572245,
+        -0.3479623977825476,
+        -0.36082861536563055,
+        0.04084604161968792
+      ],
+      "bic": 861.7577003812532,
+      "coef_names": [
+        "(Intercept)",
+        "A",
+        "B",
+        "C",
+        "A:B",
+        "A:C",
+        "B:C",
+        "A:B:C"
+      ],
+      "dataset": "singular",
+      "error": null,
+      "estimator": "REML",
+      "family": "Gaussian",
+      "fit_time_ms": 74.36045800000001,
+      "fit_time_ms_min": 73.192333,
+      "fit_time_ms_repeats": 3,
+      "formula": "y ~ 1 + A * B * C + (A * B * C || group)",
+      "is_singular": false,
+      "link": "Identity",
+      "loglik": -388.2884501908084,
+      "n_obs": 150,
+      "objective": 776.5769003816168,
+      "sigma": 2.117226021697012,
+      "status": "ok",
+      "theta": [
+        0.5396370161561286,
+        0.447670196612167,
+        0.3298232225173178,
+        0.4923340439965662,
+        0.000030495131866258173,
+        0.000022288273649010584,
+        0.018128776809197323,
+        1.6289110896254121e-6
+      ]
+    },
+    {
+      "aic": 803.0117290464806,
+      "beta": [
+        -44.287643798455775,
+        12.987049968904127,
+        13.609607095881294,
+        13.330201119364263,
+        -0.3997451078090811,
+        -0.2964020545849157,
+        -0.30228628331741264,
+        0.03491750706811471
+      ],
+      "bic": 842.149987869732,
+      "coef_names": [
+        "(Intercept)",
+        "A",
+        "B",
+        "C",
+        "A:B",
+        "A:C",
+        "B:C",
+        "A:B:C"
+      ],
+      "dataset": "singular",
+      "error": null,
+      "estimator": "REML",
+      "family": "Gaussian",
+      "fit_time_ms": 0.731291,
+      "fit_time_ms_min": 0.6784579999999999,
+      "fit_time_ms_repeats": 3,
+      "formula": "y ~ 1 + A * B * C + (A + B + C || group)",
+      "is_singular": false,
+      "link": "Identity",
+      "loglik": -388.5058645232403,
+      "n_obs": 150,
+      "objective": 777.0117290464806,
+      "sigma": 2.1188778025205774,
+      "status": "ok",
+      "theta": [
+        1.5437039883583012,
+        0.45261088446123604,
+        0.35891681580710566,
+        0.5066001387233581
+      ]
+    },
+    {
+      "aic": 781.1790997931975,
+      "beta": [
+        -13.999432153434945,
+        9.511998929828088,
+        10.08219833771985,
+        10.814993749457953
+      ],
+      "bic": 808.2748174400638,
+      "coef_names": [
+        "(Intercept)",
+        "A",
+        "B",
+        "C"
+      ],
+      "dataset": "singular",
+      "error": null,
+      "estimator": "REML",
+      "family": "Gaussian",
+      "fit_time_ms": 0.643916,
+      "fit_time_ms_min": 0.6040000000000001,
+      "fit_time_ms_repeats": 3,
+      "formula": "y ~ 1 + A + B + C + (A + B + C || group)",
+      "is_singular": false,
+      "link": "Identity",
+      "loglik": -381.5895498965987,
+      "n_obs": 150,
+      "objective": 763.1790997931975,
+      "sigma": 2.1446635381286514,
+      "status": "ok",
+      "theta": [
+        1.0182388203732937,
+        0.41563080112653406,
+        0.34675038077210424,
+        0.49591017596521403
+      ]
+    },
+    {
+      "aic": 1755.6282719599549,
+      "beta": [
+        251.40510484848448,
+        10.467285959596046
+      ],
+      "bic": 1774.7860130652962,
+      "coef_names": [
+        "(Intercept)",
+        "Days"
+      ],
+      "dataset": "sleepstudy",
+      "error": null,
+      "estimator": "REML",
+      "family": "Gaussian",
+      "fit_time_ms": 0.134291,
+      "fit_time_ms_min": 0.088625,
+      "fit_time_ms_repeats": 3,
+      "formula": "Reaction ~ 1 + Days + (1 + Days | Subject)",
+      "is_singular": false,
+      "link": "Identity",
+      "loglik": -871.8141359799774,
+      "n_obs": 180,
+      "objective": 1743.6282719599549,
+      "sigma": 25.59179571950365,
+      "status": "ok",
+      "theta": [
+        0.9667417748905467,
+        0.015169058025660102,
+        0.23090995342627307
+      ]
+    },
+    {
+      "aic": 1763.9393444647174,
+      "beta": [
+        251.40510484848295,
+        10.467285959595804
+      ],
+      "bic": 1783.0970855700587,
+      "coef_names": [
+        "(Intercept)",
+        "Days"
+      ],
+      "dataset": "sleepstudy",
+      "error": null,
+      "estimator": "ML",
+      "family": "Gaussian",
+      "fit_time_ms": 0.110709,
+      "fit_time_ms_min": 0.108084,
+      "fit_time_ms_repeats": 3,
+      "formula": "Reaction ~ 1 + Days + (1 + Days | Subject)",
+      "is_singular": false,
+      "link": "Identity",
+      "loglik": -875.9696722323587,
+      "n_obs": 180,
+      "objective": 1751.9393444647174,
+      "sigma": 25.59182390491165,
+      "status": "ok",
+      "theta": [
+        0.9292213196547322,
+        0.01816837989313271,
+        0.2226448728491255
+      ]
+    },
+    {
+      "aic": null,
+      "beta": null,
+      "bic": null,
+      "coef_names": null,
+      "dataset": "tungara_single_caller",
+      "error": "Binomial/Logit not yet wired into compare_rust",
+      "estimator": "Laplace",
+      "family": "Binomial",
+      "fit_time_ms": null,
+      "fit_time_ms_min": null,
+      "fit_time_ms_repeats": null,
+      "formula": "did_focal_follower_overlap_preceding_call_YN ~ 1 + preceding_caller_mass * distance + (1 | chorus_ID) + (1 + preceding_caller_mass | chorus_ID:focal_toe_clip_number)",
+      "is_singular": null,
+      "link": "Logit",
+      "loglik": null,
+      "n_obs": 2955,
+      "objective": null,
+      "sigma": null,
+      "status": "not_implemented",
+      "theta": null
+    },
+    {
+      "aic": null,
+      "beta": null,
+      "bic": null,
+      "coef_names": null,
+      "dataset": "verbagg",
+      "error": "Binomial/Logit not yet wired into compare_rust",
+      "estimator": "Laplace",
+      "family": "Binomial",
+      "fit_time_ms": null,
+      "fit_time_ms_min": null,
+      "fit_time_ms_repeats": null,
+      "formula": "r2 ~ 1 + Anger + Gender + btype + situ + mode + (1 | id) + (1 | item)",
+      "is_singular": null,
+      "link": "Logit",
+      "loglik": null,
+      "n_obs": 7584,
+      "objective": null,
+      "sigma": null,
+      "status": "not_implemented",
+      "theta": null
+    }
+  ],
+  "tool": "mixedmodels (rust)",
+  "version": "0.1.0"
+}

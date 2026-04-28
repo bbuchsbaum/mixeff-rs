@@ -1,0 +1,83 @@
+name = "kb07"
+source = "MixedModels.jl :kb07"
+license = "CC-BY (per MixedModels.jl test data)"
+n_rows = 1789
+description = """
+Kliegl, Kuschela & Laubrock (2015 / 2007) reading-time data: 56 subjects ×
+32 items, 3 binary within-subject factors (`spkr`, `prec`, `load`). The
+field's standard optimizer-stress fixture for crossed random effects with
+random slopes — the maximal RE model is overparameterised relative to the
+data and typically converges to a singular covariance, which exposes
+boundary handling, identifiability checks, and `||` (zerocorr)
+parametrisations.
+"""
+
+[[columns]]
+name = "subj"
+type = "categorical"
+# 56 subjects, recorded in canonical Julia level order.
+levels = ["S030","S031","S034","S035","S036","S037","S038","S039","S041","S042",
+          "S043","S044","S045","S046","S047","S048","S049","S050","S051","S052",
+          "S053","S054","S055","S061","S064","S065","S066","S067","S068","S069",
+          "S070","S072","S073","S074","S075","S076","S078","S080","S081","S082",
+          "S083","S085","S086","S088","S089","S091","S093","S094","S095","S096",
+          "S097","S098","S100","S101","S102","S103"]
+
+[[columns]]
+name = "item"
+type = "categorical"
+levels = ["I01","I02","I03","I04","I05","I06","I07","I08","I09","I10",
+          "I11","I12","I13","I14","I15","I16","I17","I18","I19","I20",
+          "I21","I22","I23","I24","I25","I26","I27","I28","I29","I30",
+          "I31","I32"]
+
+[[columns]]
+name = "spkr"
+type = "categorical"
+levels = ["new","old"]
+
+[[columns]]
+name = "prec"
+type = "categorical"
+levels = ["break","maintain"]
+
+[[columns]]
+name = "load"
+type = "categorical"
+levels = ["yes","no"]
+
+[[columns]]
+name = "rt_trunc"
+type = "numeric"
+unit = "ms"
+
+[[columns]]
+name = "rt_raw"
+type = "numeric"
+unit = "ms"
+
+[[fits]]
+# Maximal model — the singular-fit trigger.
+formula = "rt_trunc ~ 1 + spkr + prec + load + (1 + spkr + prec + load | subj) + (1 + spkr + prec + load | item)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+
+[[fits]]
+# Zero-correlation variant — recommended diagnostic when the maximal model is singular.
+formula = "rt_trunc ~ 1 + spkr + prec + load + (1 + spkr + prec + load || subj) + (1 + spkr + prec + load || item)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+
+[[fits]]
+# Minimal scalar-RE baseline.
+formula = "rt_trunc ~ 1 + spkr + prec + load + (1 | subj) + (1 | item)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+
+[tags]
+structure = ["random_intercept", "random_slope", "crossed", "psycholinguistic"]
+difficulty = "stress"
+notes = "maximal model usually singular; tests boundary handling and zerocorr support"

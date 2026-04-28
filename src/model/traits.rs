@@ -41,7 +41,10 @@ impl Family {
 
     /// Whether this family has a dispersion parameter.
     pub fn has_dispersion(&self) -> bool {
-        matches!(self, Family::Normal | Family::Gamma | Family::InverseGaussian)
+        matches!(
+            self,
+            Family::Normal | Family::Gamma | Family::InverseGaussian
+        )
     }
 }
 
@@ -141,6 +144,11 @@ pub trait MixedModelFit {
 
     /// Log-likelihood.
     fn loglikelihood(&self) -> f64;
+
+    /// Canonical formula label used in summaries, if available.
+    fn formula_label(&self) -> Option<String> {
+        None
+    }
 
     /// AIC.
     fn aic(&self) -> f64 {

@@ -1,0 +1,50 @@
+name = "pastes"
+source = "lme4::Pastes"
+license = "GPL (>= 2) — see lme4 DESCRIPTION"
+n_rows = 60
+description = """
+Strength of chemical paste from a hierarchically nested sampling design:
+10 batches, 3 casks per batch, 2 strength assays per cask. The canonical
+nested random-effects example. Note that `sample` is already the
+batch:cask interaction encoded as a factor, so the formula can use it
+directly instead of `(1|batch/cask)`.
+"""
+
+[[columns]]
+name = "strength"
+type = "numeric"
+
+[[columns]]
+name = "batch"
+type = "categorical"
+levels = ["A","B","C","D","E","F","G","H","I","J"]
+
+[[columns]]
+name = "cask"
+type = "categorical"
+levels = ["a","b","c"]
+
+[[columns]]
+name = "sample"
+type = "categorical"
+# 30 levels: batch:cask interaction
+levels = ["A:a","A:b","A:c","B:a","B:b","B:c","C:a","C:b","C:c",
+          "D:a","D:b","D:c","E:a","E:b","E:c","F:a","F:b","F:c",
+          "G:a","G:b","G:c","H:a","H:b","H:c","I:a","I:b","I:c",
+          "J:a","J:b","J:c"]
+
+[[fits]]
+formula = "strength ~ 1 + (1 | sample) + (1 | batch)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+[fits.expected]
+beta = [60.0533]
+sigma = 0.8234
+# σ_sample (cask within batch), σ_batch
+re_sigmas = [2.9041, 1.0991]
+objective = 246.9907
+
+[tags]
+structure = ["random_intercept", "nested"]
+difficulty = "easy"

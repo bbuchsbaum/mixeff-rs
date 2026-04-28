@@ -1,0 +1,11 @@
+name = "easy_full_rank"
+stratum = "easy"
+group_sizes = [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+fe_truth = [2.0, 1.0]
+re_cov_truth = [[0.5, 0.1], [0.1, 0.25]]
+family = "gaussian"
+link = "identity"
+seed = 101
+residual_sd = 0.5
+fixed_design = "balanced_x"
+seed_sweep = [101, 102, 103]

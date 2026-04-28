@@ -1,0 +1,46 @@
+name = "cbpp"
+source = "lme4::cbpp"
+license = "GPL (>= 2) — see lme4 DESCRIPTION"
+n_rows = 56
+description = """
+Contagious bovine pleuropneumonia case counts in 15 herds across 4 time
+periods (Lesnoff et al., 2004). The standard small GLMM binomial example:
+period as a fixed factor, herd as a scalar random intercept. `incidence`
+is the number of new cases out of `size` animals at risk.
+"""
+
+[[columns]]
+name = "herd"
+type = "categorical"
+levels = ["1","2","3","4","5","6","7","8","9","10","11","12","13","14","15"]
+
+[[columns]]
+name = "incidence"
+type = "numeric"          # integer counts; loader treats as f64
+
+[[columns]]
+name = "size"
+type = "numeric"          # trials (denominator)
+
+[[columns]]
+name = "period"
+type = "categorical"
+levels = ["1","2","3","4"]
+
+[[fits]]
+# response is the binomial proportion: cbind(incidence, size - incidence)
+formula = "incidence / size ~ 1 + period + (1 | herd)"
+family = "Binomial"
+link = "Logit"
+weights = "size"
+estimator = "Laplace"
+[fits.expected]
+# lme4 glmer reference, nAGQ = 1 (Laplace)
+beta = [-1.3983, -0.9919, -1.1282, -1.5797]   # intercept, period2, period3, period4
+re_sigmas = [0.6421]
+objective = 100.0945                           # -2 logLik
+
+[tags]
+structure = ["random_intercept", "scalar_re", "glmm"]
+family = "binomial"
+difficulty = "moderate"

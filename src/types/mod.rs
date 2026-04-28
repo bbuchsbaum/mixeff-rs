@@ -13,19 +13,19 @@
 //! * [`OptSummary`] -- optimisation state, tolerances, and fit log
 
 mod blocked_sparse;
-mod gauss_hermite;
-mod ragged_array;
-mod uniform_block_diagonal;
-pub mod fe_term;
 pub mod fe_mat;
-pub mod re_mat;
+pub mod fe_term;
+mod gauss_hermite;
 pub mod opt_summary;
+mod ragged_array;
+pub mod re_mat;
+mod uniform_block_diagonal;
 
 pub use blocked_sparse::BlockedSparse;
-pub use gauss_hermite::{gh_norm, GaussHermiteNormalized};
-pub use ragged_array::RaggedArray;
-pub use uniform_block_diagonal::UniformBlockDiagonal;
-pub use fe_term::FeTerm;
 pub use fe_mat::FeMat;
+pub use fe_term::FeTerm;
+pub use gauss_hermite::{gh_norm, GaussHermiteNormalized};
+pub use opt_summary::{FitLogEntry, OptSummary, Optimizer};
+pub use ragged_array::RaggedArray;
 pub use re_mat::ReMat;
-pub use opt_summary::{OptSummary, FitLogEntry, Optimizer};
+pub use uniform_block_diagonal::UniformBlockDiagonal;

@@ -1,0 +1,94 @@
+name = "singular"
+source = "Cross Validated answer 449095; CSV mirror: https://raw.githubusercontent.com/rnorouzian/e/master/sng.csv"
+license = "Stack Exchange content is CC BY-SA; CSV mirror has no explicit repository license"
+n_rows = 150
+description = """
+Robert Long's worked singular-fit example for Bates et al. (2015) style
+random-effect simplification. The data have 10 groups with 15 observations
+per group, three continuous predictors (`A`, `B`, `C`), and a response `y`.
+
+The deliberately maximal model `y ~ A * B * C + (A * B * C | group)` asks for
+an eight-dimensional random-coefficient covariance matrix: intercept, three
+main-effect slopes, three two-way interaction slopes, and one three-way
+interaction slope. That is 36 covariance parameters from only 10 groups. In
+lme4 this fit is singular even though the printed VarCorr table need not show
+obvious +/-1 correlations or plainly zero variances; rePCA exposes that only
+about four random-effect directions are supported.
+
+This fixture is included to test the compiler-contract story: the preflight
+information budget should call the full covariance too rich, the compiled
+random-effect basis should be traceable to all eight requested directions, and
+post-fit effective-rank summaries should explain unsupported covariance
+directions as unsupported by this data set rather than as proof that the
+population variances are exactly zero.
+"""
+
+[[columns]]
+name = "group"
+type = "categorical"
+levels = ["Sch.1","Sch.2","Sch.3","Sch.4","Sch.5",
+          "Sch.6","Sch.7","Sch.8","Sch.9","Sch.10"]
+
+[[columns]]
+name = "y"
+type = "numeric"
+
+[[columns]]
+name = "A"
+type = "numeric"
+
+[[columns]]
+name = "B"
+type = "numeric"
+
+[[columns]]
+name = "C"
+type = "numeric"
+
+[[fits]]
+# Maximal model from the Cross Validated discussion. The point is not that
+# optimization fails; it is that convergence alone does not certify that the
+# requested covariance dimension is supported.
+formula = "y ~ 1 + A * B * C + (A * B * C | group)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+[fits.expected]
+is_singular = true
+
+[[fits]]
+# Zero-correlation diagnostic: the unsupported interaction directions become
+# visible as near-zero diagonal variances.
+formula = "y ~ 1 + A * B * C + (A * B * C || group)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+[fits.expected]
+is_singular = true
+
+[[fits]]
+# Random interactions removed; fixed interactions retained for comparison.
+formula = "y ~ 1 + A * B * C + (A + B + C || group)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+[fits.expected]
+is_singular = false
+
+[[fits]]
+# Simulation truth described in the answer: main fixed effects, random
+# intercept plus independent A/B/C slopes, and no fixed interactions.
+formula = "y ~ 1 + A + B + C + (A + B + C || group)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+[fits.expected]
+beta = [-13.99946, 9.51200, 10.08220, 10.81500]
+sigma = 2.14467
+re_sigmas = [2.18404, 0.89138, 0.74364, 1.06354]
+is_singular = false
+
+[tags]
+structure = ["random_intercept", "random_slope", "interaction_re", "zerocorr", "reduced_rank"]
+difficulty = "boundary"
+notes = "Worked singular-fit fixture: maximal covariance is too rich; rePCA/effective-rank diagnostics should identify supported directions without equating unsupported directions with true zero population variance."

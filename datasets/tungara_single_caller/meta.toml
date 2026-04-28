@@ -1,0 +1,120 @@
+name = "tungara_single_caller"
+source = "Dryad doi:10.5061/dryad.3n5tb2rrz::Single_Caller_Transition_Analysis_GLMM/single_caller_transition_data.csv"
+license = "CC0-1.0"
+n_rows = 2955
+description = """
+Single-caller transition data from Larter and Ryan (2024), recording whether
+a following tungara frog call overlapped the preceding caller. The public data
+ship with 2,975 rows; this fixture follows the analysis Rmd and removes 20
+first-call rows with missing preceding-call IOI values.
+
+This is a public fallback stress fixture discovered while investigating
+lme4/lme4#720. It is not the original GH720 `free_chucks_model_data.csv`,
+whose 2023 Dryad DOI is no longer publicly viewable.
+"""
+
+[[columns]]
+name = "ID_focal_following_caller"
+type = "categorical"
+levels = [
+  "210927_001_Tr3","210927_001_Tr5","210927_001_Tr2","210927_001_Tr4","210927_001_Tr1","210927_001_Tr6",
+  "211001_002_Tr2","211001_002_Tr3","211001_002_Tr6","211001_002_Tr4","211001_002_Tr5","211001_002_Tr1",
+  "211006_001_Tr5","211006_001_Tr3","211006_001_Tr4","211006_001_Tr2","211006_001_Tr6","211006_001_Tr1",
+  "211008_003_Tr3","211008_003_Tr2","211008_003_Tr6","211008_003_Tr4","211008_003_Tr5","211008_003_Tr1",
+  "211013_001_Tr4","211013_001_Tr5","211013_001_Tr2","211013_001_Tr3","211013_001_Tr6","211013_001_Tr1",
+  "211017_001_Tr5","211017_001_Tr3","211017_001_Tr4","211017_001_Tr2","211017_001_Tr6","211017_001_Tr1"
+]
+
+[[columns]]
+name = "chorus_ID"
+type = "categorical"
+levels = ["210927_001","211001_002","211006_001","211008_003","211013_001","211017_001"]
+
+[[columns]]
+name = "did_focal_follower_overlap_preceding_call_YN"
+type = "numeric"
+
+[[columns]]
+name = "IOI_duration_preceding_focal_call"
+type = "numeric"
+unit = "seconds"
+
+[[columns]]
+name = "focal_svl"
+type = "numeric"
+unit = "mm"
+
+[[columns]]
+name = "focal_mass"
+type = "numeric"
+unit = "g"
+
+[[columns]]
+name = "focal_toe_clip_number"
+type = "categorical"
+levels = [
+  "3300","3010","3200","3400","3000","1100","0-310","0-210","0-350","0-330","0-340","0-302",
+  "001club*","0-305","0-303","0-410","0-301","0-051","0-045","0-053","0-042","0-052","0-043",
+  "1240","1250","1401","1230","1201","1210","0-013","1club*00","1205","1203","1310","1202"
+]
+
+[[columns]]
+name = "preceding_caller_svl"
+type = "numeric"
+unit = "mm"
+
+[[columns]]
+name = "preceding_caller_mass"
+type = "numeric"
+unit = "g"
+
+[[columns]]
+name = "preceding_caller_focal_toe_clip_number"
+type = "categorical"
+levels = [
+  "3000","3200","3300","3400","3010","1100","0-302","0-310","0-210","0-330","0-340","0-350",
+  "0-301","0-303","0-305","001club*","0-410","0-043","0-045","0-051","0-042","0-052","0-053",
+  "1210","1401","1230","1240","1250","1201","1202","1203","1club*00","1205","0-013","1310"
+]
+
+[[columns]]
+name = "max_freq"
+type = "numeric"
+unit = "Hz"
+
+[[columns]]
+name = "min_freq"
+type = "numeric"
+unit = "Hz"
+
+[[columns]]
+name = "after_knee_amplitude_skewness"
+type = "numeric"
+
+[[columns]]
+name = "min_last_150"
+type = "numeric"
+
+[[columns]]
+name = "distance"
+type = "numeric"
+unit = "m"
+
+[[fits]]
+formula = "did_focal_follower_overlap_preceding_call_YN ~ 1 + preceding_caller_mass * distance + (1 | chorus_ID) + (1 + preceding_caller_mass | chorus_ID:focal_toe_clip_number)"
+family = "Binomial"
+link = "Logit"
+estimator = "Laplace"
+[fits.expected]
+beta = [5.0696042653, -2.3902619375, -0.8742407241, 0.5461355300]
+re_sigmas = [6.7773127143, 4.1915882986, 0.9868054096]
+re_corr = -0.9975206962
+theta = [6.7773127143, -4.1811960779, 0.2949776639, 0.9868054096]
+objective = 2981.9321678344
+is_singular = false
+
+[tags]
+structure = ["random_intercept", "random_slope", "cell_grouping", "glmm", "boundary_like"]
+family = "binomial"
+difficulty = "stress"
+notes = "Public related fixture from Larter/Ryan 2024; exact lme4 GH720 data is unavailable. Strong fixed-effect correlations and near-perfect random intercept-slope correlation make this useful for diagnostics/user-feedback work."

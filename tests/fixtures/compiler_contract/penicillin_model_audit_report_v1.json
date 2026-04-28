@@ -1,0 +1,223 @@
+{
+  "schema_name": "mixedmodels.model_audit_report",
+  "schema_version": 1,
+  "requested_formula": "diameter ~ 1 + (1 | plate) + (1 | sample)",
+  "sections": [
+    {
+      "title": "Requested Model",
+      "lines": [
+        {
+          "label": "formula",
+          "status": "info",
+          "detail": "diameter ~ 1 + (1 | plate) + (1 | sample)"
+        },
+        {
+          "label": "model kind",
+          "status": "info",
+          "detail": "linear_mixed_model"
+        },
+        {
+          "label": "distribution/link",
+          "status": "info",
+          "detail": "gaussian/identity"
+        },
+        {
+          "label": "objective",
+          "status": "info",
+          "detail": "exact_gaussian"
+        },
+        {
+          "label": "certificate scope",
+          "status": "info",
+          "detail": "exact_objective"
+        },
+        {
+          "label": "fixed terms",
+          "status": "info",
+          "detail": "1"
+        },
+        {
+          "label": "random terms",
+          "status": "info",
+          "detail": "2"
+        },
+        {
+          "label": "theta maps",
+          "status": "info",
+          "detail": "2 map(s)"
+        }
+      ]
+    },
+    {
+      "title": "Model State",
+      "lines": [
+        {
+          "label": "requested",
+          "status": "ok",
+          "detail": "status=requested; formula=diameter ~ 1 + (1 | plate) + (1 | sample); random_terms=2; reason=formula as requested by the caller"
+        },
+        {
+          "label": "semantic",
+          "status": "ok",
+          "detail": "status=canonical; formula=diameter ~ 1 + (1 | plate) + (1 | sample); random_terms=2; reason=formula compiled into semantic IR"
+        },
+        {
+          "label": "supported",
+          "status": "ok",
+          "detail": "status=supported; formula=diameter ~ 1 + (1 | plate) + (1 | sample); random_terms=2; reason=design audit did not recommend design-time model changes"
+        },
+        {
+          "label": "fitted",
+          "status": "not_assessed",
+          "detail": "status=not_assessed; formula=diameter ~ 1 + (1 | plate) + (1 | sample); random_terms=2; reason=model has not been fitted"
+        },
+        {
+          "label": "changes",
+          "status": "ok",
+          "detail": "none"
+        }
+      ]
+    },
+    {
+      "title": "Fixed Effects",
+      "lines": [
+        {
+          "label": "rank",
+          "status": "ok",
+          "detail": "1 of 1"
+        },
+        {
+          "label": "aliased columns",
+          "status": "ok",
+          "detail": "none"
+        },
+        {
+          "label": "empty cells",
+          "status": "ok",
+          "detail": "0"
+        }
+      ]
+    },
+    {
+      "title": "Random Effects",
+      "lines": [
+        {
+          "label": "r0",
+          "status": "ok",
+          "detail": "group=plate, rows=144, levels=24, obs_per_level=6..6, basis=1, covariance=scalar, params=1, budget=sufficient"
+        },
+        {
+          "label": "r1",
+          "status": "ok",
+          "detail": "group=sample, rows=144, levels=6, obs_per_level=24..24, basis=1, covariance=scalar, params=1, budget=sufficient"
+        }
+      ]
+    },
+    {
+      "title": "Random-Effect Information Budget",
+      "lines": [
+        {
+          "label": "r0",
+          "status": "ok",
+          "detail": "levels=24, rows=144, obs_per_level=6..6, basis=1, cov_params=1, levels/basis=24.00, levels/param=24.00, rows/param=144.00; grouping levels are the effective n for covariance support; risk=v0 information budget is sufficient; recommendation=information budget is sufficient under v0 thresholds; explanation=144 rows are clustered into 24 grouping levels; grouping levels are the effective n for random-effect distribution support"
+        },
+        {
+          "label": "r1",
+          "status": "ok",
+          "detail": "levels=6, rows=144, obs_per_level=24..24, basis=1, cov_params=1, levels/basis=6.00, levels/param=6.00, rows/param=144.00; grouping levels are the effective n for covariance support; risk=v0 information budget is sufficient; recommendation=information budget is sufficient under v0 thresholds; explanation=144 rows are clustered into 6 grouping levels; grouping levels are the effective n for random-effect distribution support"
+        }
+      ]
+    },
+    {
+      "title": "Dependence Paths",
+      "lines": [
+        {
+          "label": "kernels",
+          "status": "info",
+          "detail": "r0=marginal(plate, intercept=true, covariance=scalar, basis=intercept) | r1=marginal(sample, intercept=true, covariance=scalar, basis=intercept)"
+        },
+        {
+          "label": "repeated units",
+          "status": "ok",
+          "detail": "plate=marginal(plate, levels=24, obs_per_level=6..6, covered_by=r0) | sample=marginal(sample, levels=6, obs_per_level=24..24, covered_by=r1)"
+        },
+        {
+          "label": "missing paths",
+          "status": "ok",
+          "detail": "none"
+        }
+      ]
+    },
+    {
+      "title": "Parameterization Trace",
+      "lines": [
+        {
+          "label": "r0",
+          "status": "ok",
+          "detail": "source=(1 | plate); group=plate; family=Scalar; user_basis=intercept; optimizer_basis=intercept; theta_slots=theta[0]; lambda_slots=(0, 0); parmap_aligned=1/1; varcorr_entries=sd(intercept)"
+        },
+        {
+          "label": "r1",
+          "status": "ok",
+          "detail": "source=(1 | sample); group=sample; family=Scalar; user_basis=intercept; optimizer_basis=intercept; theta_slots=theta[1]; lambda_slots=(0, 0); parmap_aligned=1/1; varcorr_entries=sd(intercept)"
+        }
+      ]
+    },
+    {
+      "title": "Effective Covariance",
+      "lines": [
+        {
+          "label": "effective covariance rank",
+          "status": "not_assessed",
+          "detail": "not assessed"
+        }
+      ]
+    },
+    {
+      "title": "Policy Recommendations",
+      "lines": [
+        {
+          "label": "maximal feasible",
+          "status": "ok",
+          "detail": "no advisory reductions or refusals"
+        }
+      ]
+    },
+    {
+      "title": "Optimizer",
+      "lines": [
+        {
+          "label": "certificate",
+          "status": "not_assessed",
+          "detail": "model has not been fitted"
+        }
+      ]
+    },
+    {
+      "title": "Inference",
+      "lines": [
+        {
+          "label": "finite-sample inference",
+          "status": "not_assessed",
+          "detail": "finite-sample inference is not implemented in compiler v0"
+        },
+        {
+          "label": "covariance derivatives",
+          "status": "not_assessed",
+          "detail": "compiler v0 does not expose covariance derivative certificates"
+        }
+      ]
+    },
+    {
+      "title": "Diagnostics",
+      "lines": [
+        {
+          "label": "diagnostics",
+          "status": "ok",
+          "detail": "none"
+        }
+      ]
+    }
+  ],
+  "diagnostics": []
+}

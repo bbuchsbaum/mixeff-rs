@@ -1,0 +1,11 @@
+name = "reduced_rank_unit_correlation"
+stratum = "reduced-rank"
+group_sizes = [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]
+fe_truth = [2.0, 1.0]
+re_cov_truth = [[1.0, 1.0], [1.0, 1.0]]
+family = "gaussian"
+link = "identity"
+seed = 301
+residual_sd = 0.5
+fixed_design = "balanced_x"
+seed_sweep = [301, 302, 303]

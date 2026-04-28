@@ -127,13 +127,8 @@ mod tests {
         // Block 1: [[5, 0], [0, 7]] -> logdet = ln(5) + ln(7)
         let b0 = DMatrix::from_row_slice(2, 2, &[2.0, 0.0, 0.0, 3.0]);
         let b1 = DMatrix::from_row_slice(2, 2, &[5.0, 0.0, 0.0, 7.0]);
-        let expected =
-            2.0_f64.ln() + 3.0_f64.ln() + 5.0_f64.ln() + 7.0_f64.ln();
-        assert_relative_eq!(
-            logdet_block_diagonal(&[b0, b1]),
-            expected,
-            epsilon = 1e-12
-        );
+        let expected = 2.0_f64.ln() + 3.0_f64.ln() + 5.0_f64.ln() + 7.0_f64.ln();
+        assert_relative_eq!(logdet_block_diagonal(&[b0, b1]), expected, epsilon = 1e-12);
     }
 
     #[test]

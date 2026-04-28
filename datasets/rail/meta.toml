@@ -1,0 +1,39 @@
+name = "rail"
+source = "nlme::Rail"
+license = "Part of nlme; redistributable for academic use"
+n_rows = 18
+description = """
+Devore (2000) ultrasonic-headwave travel times through 6 railway rails,
+3 measurements each. The smallest fixture in the registry — a single
+random factor on `Rail` with strong shrinkage. Useful for sanity-checking
+single-factor LMMs and visualising BLUPs / shrinkage on a plot. The travel
+times are reported as nanoseconds minus 36100.
+"""
+
+[[columns]]
+name = "Rail"
+type = "categorical"
+# nlme stores Rail levels in non-canonical order; preserved here.
+levels = ["2","5","1","6","3","4"]
+
+[[columns]]
+name = "travel"
+type = "numeric"
+unit = "ns - 36100"
+
+[[fits]]
+formula = "travel ~ 1 + (1 | Rail)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+[fits.expected]
+# nlme reference fit (Pinheiro & Bates 2000, ch. 1)
+beta = [66.5]
+sigma = 4.0208
+re_sigmas = [24.805]
+objective = 122.177    # -2 * REML logLik
+
+[tags]
+structure = ["random_intercept", "scalar_re", "ultra_small"]
+difficulty = "easy"
+notes = "smallest dataset in registry; ideal for shrinkage / BLUP visualisation"

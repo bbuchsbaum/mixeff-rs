@@ -14,9 +14,12 @@
 //! // ... build DataFrame, construct model, fit ...
 //! ```
 
+pub mod compiler;
+pub mod datasets;
 pub mod error;
 pub mod formula;
 pub mod linalg;
 pub mod model;
+pub mod pathology;
 pub mod stats;
 pub mod types;

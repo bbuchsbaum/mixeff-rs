@@ -1,0 +1,65 @@
+name = "verbagg"
+source = "lme4::VerbAgg"
+license = "GPL (>= 2) — see lme4 DESCRIPTION"
+n_rows = 7584
+description = """
+Vansteelandt et al. (2000) verbal-aggression item-response data: 316
+subjects answering 24 items. Crossed random effects (subject × item),
+binary response (`r2`) — the canonical small IRT-style GLMM fixture.
+"""
+
+[[columns]]
+name = "Anger"
+type = "numeric"
+
+[[columns]]
+name = "Gender"
+type = "categorical"
+levels = ["F","M"]
+
+[[columns]]
+name = "item"
+type = "categorical"
+# 24 levels; first-appearance order matches lme4's factor encoding.
+
+[[columns]]
+name = "resp"
+type = "categorical"
+levels = ["no","perhaps","yes"]      # ordered factor
+
+[[columns]]
+name = "id"
+type = "categorical"
+# 316 levels: subject id 1..316. Omitted for brevity; loader falls back to first-appearance.
+
+[[columns]]
+name = "btype"
+type = "categorical"
+levels = ["curse","scold","shout"]
+
+[[columns]]
+name = "situ"
+type = "categorical"
+levels = ["other","self"]
+
+[[columns]]
+name = "mode"
+type = "categorical"
+levels = ["want","do"]
+
+[[columns]]
+name = "r2"
+type = "categorical"
+levels = ["N","Y"]                   # binary response derived from `resp`
+
+[[fits]]
+formula = "r2 ~ 1 + Anger + Gender + btype + situ + mode + (1 | id) + (1 | item)"
+family = "Binomial"
+link = "Logit"
+estimator = "Laplace"
+
+[tags]
+structure = ["random_intercept", "crossed", "glmm"]
+family = "binomial"
+difficulty = "moderate"
+notes = "large by Tier-2 standards (~7.6k rows); good fixture for crossed-RE GLMM scaling"

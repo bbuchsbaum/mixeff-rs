@@ -67,8 +67,7 @@ impl GaussHermiteNormalized {
         }
 
         // Eigendecomposition of the symmetric matrix.
-        let eig = mat
-            .symmetric_eigen();
+        let eig = mat.symmetric_eigen();
         let eigenvalues = &eig.eigenvalues;
         let eigenvectors = &eig.eigenvectors;
 

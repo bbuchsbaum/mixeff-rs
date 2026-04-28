@@ -1,0 +1,66 @@
+{
+  "results": [
+    {
+      "fevals": 68,
+      "fit_only_ms_median": 0.266125,
+      "fit_time_ms_median": 0.34237500000000004,
+      "fit_time_ms_min": 0.335584,
+      "formula": "reaction ~ 1 + days + (1 + days | subj)",
+      "label": "s",
+      "n_obs": 1000,
+      "n_obs_per_subject": 10,
+      "n_subjects": 100,
+      "objective": 9697.111830328588,
+      "optimizer": "bobyqa",
+      "parse_build_ms_median": 0.077709,
+      "sigma": 25.612671462180913
+    },
+    {
+      "fevals": 40,
+      "fit_only_ms_median": 0.48466600000000004,
+      "fit_time_ms_median": 0.84575,
+      "fit_time_ms_min": 0.834125,
+      "formula": "reaction ~ 1 + days + (1 + days | subj)",
+      "label": "m",
+      "n_obs": 5000,
+      "n_obs_per_subject": 10,
+      "n_subjects": 500,
+      "objective": 48522.326010943165,
+      "optimizer": "bobyqa",
+      "parse_build_ms_median": 0.359916,
+      "sigma": 25.058272357776012
+    },
+    {
+      "fevals": 42,
+      "fit_only_ms_median": 1.929625,
+      "fit_time_ms_median": 3.251083,
+      "fit_time_ms_min": 3.168375,
+      "formula": "reaction ~ 1 + days + (1 + days | subj)",
+      "label": "l",
+      "n_obs": 20000,
+      "n_obs_per_subject": 10,
+      "n_subjects": 2000,
+      "objective": 194153.32212113563,
+      "optimizer": "bobyqa",
+      "parse_build_ms_median": 1.321416,
+      "sigma": 25.07175772091488
+    },
+    {
+      "fevals": 40,
+      "fit_only_ms_median": 9.410417,
+      "fit_time_ms_median": 17.195042,
+      "fit_time_ms_min": 16.663042,
+      "formula": "reaction ~ 1 + days + (1 + days | subj)",
+      "label": "xl",
+      "n_obs": 100000,
+      "n_obs_per_subject": 10,
+      "n_subjects": 10000,
+      "objective": 969850.2201793871,
+      "optimizer": "bobyqa",
+      "parse_build_ms_median": 7.739625,
+      "sigma": 24.946858965791318
+    }
+  ],
+  "tool": "mixedmodels (rust)",
+  "version": "0.1.0"
+}

@@ -1,0 +1,161 @@
+{
+  "schema_name": "mixedmodels.model_state_summary",
+  "schema_version": 1,
+  "requested": {
+    "stage": "requested",
+    "status": "requested",
+    "formula": "y ~ 1 + x + (1 + x | group)",
+    "fixed_terms": [
+      "1",
+      "x"
+    ],
+    "random_terms": [
+      {
+        "term_id": "r0",
+        "source_syntax": "(1 + x | group)",
+        "group": "group",
+        "semantic_basis": [
+          "intercept",
+          "x"
+        ],
+        "optimizer_basis": [
+          "intercept",
+          "x"
+        ],
+        "covariance": "full",
+        "basis_dimension": 2,
+        "covariance_parameters": 3,
+        "information_status": "sufficient",
+        "requested_rank": 2,
+        "supported_rank": 1
+      }
+    ],
+    "reason": "formula as requested by the caller"
+  },
+  "semantic": {
+    "stage": "semantic",
+    "status": "canonical",
+    "formula": "y ~ 1 + x + (1 + x | group)",
+    "fixed_terms": [
+      "1",
+      "x"
+    ],
+    "random_terms": [
+      {
+        "term_id": "r0",
+        "source_syntax": "(1 + x | group)",
+        "group": "group",
+        "semantic_basis": [
+          "intercept",
+          "x"
+        ],
+        "optimizer_basis": [
+          "intercept",
+          "x"
+        ],
+        "covariance": "full",
+        "basis_dimension": 2,
+        "covariance_parameters": 3,
+        "information_status": "sufficient",
+        "requested_rank": 2,
+        "supported_rank": 1
+      }
+    ],
+    "reason": "formula compiled into semantic IR"
+  },
+  "supported": {
+    "stage": "supported",
+    "status": "supported",
+    "formula": "y ~ 1 + x + (1 + x | group)",
+    "fixed_terms": [
+      "1",
+      "x"
+    ],
+    "random_terms": [
+      {
+        "term_id": "r0",
+        "source_syntax": "(1 + x | group)",
+        "group": "group",
+        "semantic_basis": [
+          "intercept",
+          "x"
+        ],
+        "optimizer_basis": [
+          "intercept",
+          "x"
+        ],
+        "covariance": "full",
+        "basis_dimension": 2,
+        "covariance_parameters": 3,
+        "information_status": "sufficient",
+        "requested_rank": 2,
+        "supported_rank": 1
+      }
+    ],
+    "reason": "design audit did not recommend design-time model changes"
+  },
+  "fitted": {
+    "stage": "fitted",
+    "status": "reduced",
+    "formula": "y ~ 1 + x + (1 + x | group)",
+    "fixed_terms": [
+      "1",
+      "x"
+    ],
+    "random_terms": [
+      {
+        "term_id": "r0",
+        "source_syntax": "(1 + x | group)",
+        "group": "group",
+        "semantic_basis": [
+          "intercept",
+          "x"
+        ],
+        "optimizer_basis": [
+          "intercept",
+          "x"
+        ],
+        "covariance": "full",
+        "basis_dimension": 2,
+        "covariance_parameters": 3,
+        "information_status": "sufficient",
+        "requested_rank": 2,
+        "supported_rank": 1
+      }
+    ],
+    "reason": "fit completed with ConvergedReducedRank and recorded fitted-state reductions"
+  },
+  "changes": [
+    {
+      "status": "applied",
+      "trigger": "certificate_time_boundary",
+      "from_stage": "supported",
+      "to_stage": "fitted",
+      "affected_term": "r0",
+      "reason": "effective covariance rank 1 is below requested rank 2",
+      "replacement_term": "reduced_rank(group, basis = intercept + x, rank = 1)",
+      "inference_consequence": "fixed-effect inference is conditional on a certificate-time reduced-rank covariance summary; unsupported directions are not evidence of zero population variance",
+      "diagnostics": [
+        {
+          "code": "covariance_reduced",
+          "severity": "info",
+          "stage": "certification",
+          "message": "fitted covariance for r0 has effective rank 1 of requested rank 2",
+          "affected_terms": [
+            "r0"
+          ],
+          "suggested_actions": [
+            "treat unsupported covariance directions as unsupported by this fit, not as proof of zero population variance"
+          ],
+          "payload": {
+            "effective_rank_absolute_tolerance": 1e-10,
+            "effective_rank_relative_tolerance": 1e-6,
+            "rank_tolerance": 4.014407594579746e-8,
+            "requested_rank": 2,
+            "supported_rank": 1
+          }
+        }
+      ]
+    }
+  ]
+}

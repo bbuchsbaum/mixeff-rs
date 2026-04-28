@@ -53,6 +53,71 @@ fn simulate_data(n_subjects: usize, n_obs_per_subject: usize, seed: u64) -> Data
     df
 }
 
+fn centered_mod(value: usize, modulus: usize, center: f64, scale: f64) -> f64 {
+    ((value % modulus) as f64 - center) * scale
+}
+
+/// Deterministic crossed-effects benchmark with 9 covariance parameters:
+/// (1 + days | subj) + (1 + days | item) + (1 + days | site)
+fn simulate_large_theta_data(
+    n_subjects: usize,
+    n_items: usize,
+    n_sites: usize,
+    n_rep: usize,
+) -> DataFrame {
+    let beta = [250.0, 9.5];
+
+    let total_n = n_subjects * n_items * n_rep;
+    let mut reaction = Vec::with_capacity(total_n);
+    let mut days = Vec::with_capacity(total_n);
+    let mut subj_labels = Vec::with_capacity(total_n);
+    let mut item_labels = Vec::with_capacity(total_n);
+    let mut site_labels = Vec::with_capacity(total_n);
+
+    for s in 0..n_subjects {
+        let subj_b0 = centered_mod(7 * s + 3, 19, 9.0, 2.4);
+        let subj_b1 = centered_mod(11 * s + 5, 17, 8.0, 0.38) + 0.05 * subj_b0;
+        let subj_label = format!("S{:03}", s + 1);
+
+        for i in 0..n_items {
+            let item_b0 = centered_mod(13 * i + 2, 23, 11.0, 1.6);
+            let item_b1 = centered_mod(5 * i + 7, 19, 9.0, 0.27) - 0.04 * item_b0;
+            let item_label = format!("I{:03}", i + 1);
+
+            for r in 0..n_rep {
+                let site = (5 * s + 3 * i + r) % n_sites;
+                let site_b0 = centered_mod(3 * site + 1, 13, 6.0, 1.2);
+                let site_b1 = centered_mod(7 * site + 4, 11, 5.0, 0.18) + 0.03 * site_b0;
+                let eps = centered_mod(13 * s + 7 * i + 3 * r + 2 * site, 29, 14.0, 0.9);
+                let x = r as f64 + (i % 4) as f64 * 0.35 + (s % 3) as f64 * 0.1;
+
+                let mu = beta[0]
+                    + beta[1] * x
+                    + subj_b0
+                    + subj_b1 * x
+                    + item_b0
+                    + item_b1 * x
+                    + site_b0
+                    + site_b1 * x;
+
+                reaction.push(mu + eps);
+                days.push(x);
+                subj_labels.push(subj_label.clone());
+                item_labels.push(item_label.clone());
+                site_labels.push(format!("K{:03}", site + 1));
+            }
+        }
+    }
+
+    let mut df = DataFrame::new();
+    df.add_numeric("reaction", reaction);
+    df.add_numeric("days", days);
+    df.add_categorical("subj", subj_labels);
+    df.add_categorical("item", item_labels);
+    df.add_categorical("site", site_labels);
+    df
+}
+
 fn bench_fit(
     data: &DataFrame,
     formula_str: &str,
@@ -89,6 +154,46 @@ fn bench_fit(
     }
 
     (times_ms, objectives)
+}
+
+fn bench_fit_with_feval(
+    data: &DataFrame,
+    formula_str: &str,
+    n_warmup: usize,
+    n_reps: usize,
+    reml: bool,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    let formula = parse_formula(formula_str).expect("formula parse failed");
+
+    for _ in 0..n_warmup {
+        let mut m = LinearMixedModel::new(formula.clone(), data, None).unwrap();
+        let _ = m.fit(reml);
+    }
+
+    let mut times_ms = Vec::with_capacity(n_reps);
+    let mut objectives = Vec::with_capacity(n_reps);
+    let mut fevals = Vec::with_capacity(n_reps);
+
+    for _ in 0..n_reps {
+        let start = Instant::now();
+        let mut m = LinearMixedModel::new(formula.clone(), data, None).unwrap();
+        match m.fit(reml) {
+            Ok(_) => {
+                let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+                times_ms.push(elapsed);
+                objectives.push(m.objective());
+                fevals.push(m.optsum.feval as f64);
+            }
+            Err(e) => {
+                eprintln!("Fit failed: {}", e);
+                times_ms.push(f64::NAN);
+                objectives.push(f64::NAN);
+                fevals.push(f64::NAN);
+            }
+        }
+    }
+
+    (times_ms, objectives, fevals)
 }
 
 fn median(v: &[f64]) -> f64 {
@@ -134,13 +239,7 @@ fn main() {
         let data = simulate_data(n_subj, n_obs, 42);
         let total_n = n_subj * n_obs;
 
-        let (times, objs) = bench_fit(
-            &data,
-            "reaction ~ 1 + days + (1 + days | subj)",
-            2,
-            7,
-            true,
-        );
+        let (times, objs) = bench_fit(&data, "reaction ~ 1 + days + (1 + days | subj)", 2, 7, true);
 
         let med = median(&times);
         let mn = mean(&times);
@@ -165,13 +264,7 @@ fn main() {
         let data = simulate_data(n_subj, n_obs, 42);
         let total_n = n_subj * n_obs;
 
-        let (times, objs) = bench_fit(
-            &data,
-            "reaction ~ 1 + days + (1 | subj)",
-            2,
-            7,
-            true,
-        );
+        let (times, objs) = bench_fit(&data, "reaction ~ 1 + days + (1 | subj)", 2, 7, true);
 
         let med = median(&times);
         let mn = mean(&times);
@@ -185,6 +278,48 @@ fn main() {
         println!(
             "scalar_{},{},{},{},{:.3},{:.3},{:.3},{:.6}",
             label, n_subj, n_obs, total_n, med, mn, mi, obj
+        );
+    }
+
+    let large_theta_scenarios: Vec<(usize, usize, usize, usize, &str)> = vec![
+        (18, 12, 6, 4, "crossed_small"),
+        (36, 24, 8, 4, "crossed_medium"),
+        (72, 36, 12, 4, "crossed_large"),
+    ];
+
+    println!(
+        "\n# Large-theta RE: reaction ~ 1 + days + (1 + days | subj) + (1 + days | item) + (1 + days | site)"
+    );
+    println!(
+        "scenario,n_subjects,n_items,n_sites,n_rep,total_n,median_ms,mean_ms,min_ms,objective,median_feval,mean_feval"
+    );
+
+    for &(n_subj, n_items, n_sites, n_rep, label) in &large_theta_scenarios {
+        let data = simulate_large_theta_data(n_subj, n_items, n_sites, n_rep);
+        let total_n = n_subj * n_items * n_rep;
+
+        let (times, objs, fevals) = bench_fit_with_feval(
+            &data,
+            "reaction ~ 1 + days + (1 + days | subj) + (1 + days | item) + (1 + days | site)",
+            1,
+            5,
+            true,
+        );
+
+        let med = median(&times);
+        let mn = mean(&times);
+        let mi = times
+            .iter()
+            .copied()
+            .filter(|x| x.is_finite())
+            .fold(f64::INFINITY, f64::min);
+        let obj = mean(&objs);
+        let fe_med = median(&fevals);
+        let fe_mean = mean(&fevals);
+
+        println!(
+            "{},{},{},{},{},{},{:.3},{:.3},{:.3},{:.6},{:.1},{:.1}",
+            label, n_subj, n_items, n_sites, n_rep, total_n, med, mn, mi, obj, fe_med, fe_mean
         );
     }
 }

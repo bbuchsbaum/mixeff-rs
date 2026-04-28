@@ -1,0 +1,2 @@
+Block: VI,V,III,IV,II,I
+Variety: Golden Rain,Marvellous,Victory

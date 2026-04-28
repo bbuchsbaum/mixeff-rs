@@ -145,11 +145,7 @@ mod tests {
     fn test_chol_3x3() {
         // A = [[4, 2, 1], [2, 5, 3], [1, 3, 6]]
         // L should satisfy L*L' = A
-        let mut a = DMatrix::from_row_slice(
-            3,
-            3,
-            &[4.0, 2.0, 1.0, 2.0, 5.0, 3.0, 1.0, 3.0, 6.0],
-        );
+        let mut a = DMatrix::from_row_slice(3, 3, &[4.0, 2.0, 1.0, 2.0, 5.0, 3.0, 1.0, 3.0, 6.0]);
         let a_orig = a.clone();
         chol_unblocked(&mut a).unwrap();
 

@@ -1,0 +1,43 @@
+name = "cake"
+source = "lme4::cake"
+license = "GPL (>= 2) — see lme4 DESCRIPTION"
+n_rows = 270
+description = """
+Cook & Underwood (1949) cake-breaking-angle data: 3 recipes × 6 oven
+temperatures × 15 replicates. Split-plot design — `replicate` is nested
+within `recipe` (the whole-plot factor). The standard small split-plot
+LMM example.
+"""
+
+[[columns]]
+name = "replicate"
+type = "categorical"
+levels = ["1","2","3","4","5","6","7","8","9","10","11","12","13","14","15"]
+
+[[columns]]
+name = "recipe"
+type = "categorical"
+levels = ["A","B","C"]
+
+[[columns]]
+name = "temperature"
+type = "categorical"
+levels = ["175","185","195","205","215","225"]
+
+[[columns]]
+name = "angle"
+type = "numeric"
+
+[[columns]]
+name = "temp"
+type = "numeric"           # numeric duplicate of `temperature`
+
+[[fits]]
+formula = "angle ~ 1 + recipe * temperature + (1 | recipe:replicate)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+
+[tags]
+structure = ["random_intercept", "split_plot", "interaction_factor"]
+difficulty = "easy"

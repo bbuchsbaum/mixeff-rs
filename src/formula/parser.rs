@@ -21,7 +21,9 @@
 
 use thiserror::Error;
 
-use super::terms::{FixedTerm, Formula, GroupingFactor, RandomTerm};
+use super::terms::{
+    FixedTerm, Formula, GroupingFactor, RandomTerm, RandomTermExpansion, RandomTermSource,
+};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -73,19 +75,19 @@ pub enum FormulaError {
 
 #[derive(Debug, Clone, PartialEq)]
 enum Token {
-    Tilde,        // ~
-    Plus,         // +
-    Minus,        // -
-    Star,         // *
-    Colon,        // :
-    Slash,        // /
-    Pipe,         // |
-    DoublePipe,   // ||
-    Ampersand,    // &
-    LParen,       // (
-    RParen,       // )
-    Zero,         // 0  (literal digit)
-    One,          // 1  (literal digit)
+    Tilde,      // ~
+    Plus,       // +
+    Minus,      // -
+    Star,       // *
+    Colon,      // :
+    Slash,      // /
+    Pipe,       // |
+    DoublePipe, // ||
+    Ampersand,  // &
+    LParen,     // (
+    RParen,     // )
+    Zero,       // 0  (literal digit)
+    One,        // 1  (literal digit)
     Ident(String),
 }
 
@@ -120,97 +122,162 @@ fn tokenize(input: &str) -> Result<Vec<Spanned>, FormulaError> {
 
         match c {
             '~' => {
-                tokens.push(Spanned { token: Token::Tilde, pos });
+                tokens.push(Spanned {
+                    token: Token::Tilde,
+                    pos,
+                });
                 i += 1;
             }
             '+' => {
-                tokens.push(Spanned { token: Token::Plus, pos });
+                tokens.push(Spanned {
+                    token: Token::Plus,
+                    pos,
+                });
                 i += 1;
             }
             '-' => {
-                tokens.push(Spanned { token: Token::Minus, pos });
+                tokens.push(Spanned {
+                    token: Token::Minus,
+                    pos,
+                });
                 i += 1;
             }
             '*' => {
-                tokens.push(Spanned { token: Token::Star, pos });
+                tokens.push(Spanned {
+                    token: Token::Star,
+                    pos,
+                });
                 i += 1;
             }
             ':' => {
-                tokens.push(Spanned { token: Token::Colon, pos });
+                tokens.push(Spanned {
+                    token: Token::Colon,
+                    pos,
+                });
                 i += 1;
             }
             '/' => {
-                tokens.push(Spanned { token: Token::Slash, pos });
+                tokens.push(Spanned {
+                    token: Token::Slash,
+                    pos,
+                });
                 i += 1;
             }
             '&' => {
-                tokens.push(Spanned { token: Token::Ampersand, pos });
+                tokens.push(Spanned {
+                    token: Token::Ampersand,
+                    pos,
+                });
                 i += 1;
             }
             '(' => {
-                tokens.push(Spanned { token: Token::LParen, pos });
+                tokens.push(Spanned {
+                    token: Token::LParen,
+                    pos,
+                });
                 i += 1;
             }
             ')' => {
-                tokens.push(Spanned { token: Token::RParen, pos });
+                tokens.push(Spanned {
+                    token: Token::RParen,
+                    pos,
+                });
                 i += 1;
             }
             '|' => {
                 // Distinguish `|` from `||`.
                 if i + 1 < len && chars[i + 1] == '|' {
-                    tokens.push(Spanned { token: Token::DoublePipe, pos });
+                    tokens.push(Spanned {
+                        token: Token::DoublePipe,
+                        pos,
+                    });
                     i += 2;
                 } else {
-                    tokens.push(Spanned { token: Token::Pipe, pos });
+                    tokens.push(Spanned {
+                        token: Token::Pipe,
+                        pos,
+                    });
                     i += 1;
                 }
             }
             '0' => {
                 // If `0` is followed by an identifier character, treat as ident start.
-                if i + 1 < len && (chars[i + 1].is_alphanumeric() || chars[i + 1] == '_' || chars[i + 1] == '.') {
+                if i + 1 < len
+                    && (chars[i + 1].is_alphanumeric()
+                        || chars[i + 1] == '_'
+                        || chars[i + 1] == '.')
+                {
                     let start = i;
-                    while i < len && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '.') {
+                    while i < len
+                        && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '.')
+                    {
                         i += 1;
                     }
                     let word: String = chars[start..i].iter().collect();
-                    tokens.push(Spanned { token: Token::Ident(word), pos });
+                    tokens.push(Spanned {
+                        token: Token::Ident(word),
+                        pos,
+                    });
                 } else {
-                    tokens.push(Spanned { token: Token::Zero, pos });
+                    tokens.push(Spanned {
+                        token: Token::Zero,
+                        pos,
+                    });
                     i += 1;
                 }
             }
             '1' => {
                 // Same logic: bare `1` is a special token; `1abc` is an ident.
-                if i + 1 < len && (chars[i + 1].is_alphanumeric() || chars[i + 1] == '_' || chars[i + 1] == '.') {
+                if i + 1 < len
+                    && (chars[i + 1].is_alphanumeric()
+                        || chars[i + 1] == '_'
+                        || chars[i + 1] == '.')
+                {
                     let start = i;
-                    while i < len && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '.') {
+                    while i < len
+                        && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '.')
+                    {
                         i += 1;
                     }
                     let word: String = chars[start..i].iter().collect();
-                    tokens.push(Spanned { token: Token::Ident(word), pos });
+                    tokens.push(Spanned {
+                        token: Token::Ident(word),
+                        pos,
+                    });
                 } else {
-                    tokens.push(Spanned { token: Token::One, pos });
+                    tokens.push(Spanned {
+                        token: Token::One,
+                        pos,
+                    });
                     i += 1;
                 }
             }
             _ if c.is_alphabetic() || c == '_' || c == '.' => {
                 let start = i;
-                while i < len && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '.') {
+                while i < len && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '.')
+                {
                     i += 1;
                 }
                 let word: String = chars[start..i].iter().collect();
-                tokens.push(Spanned { token: Token::Ident(word), pos });
+                tokens.push(Spanned {
+                    token: Token::Ident(word),
+                    pos,
+                });
             }
             '2'..='9' => {
                 // Digits 2-9 at the start of a token — treat as identifier start
                 // (R allows variable names starting with digits in formulas via backticks,
                 // but we keep it simple and reject bare digits other than 0/1).
                 let start = i;
-                while i < len && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '.') {
+                while i < len && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '.')
+                {
                     i += 1;
                 }
                 let word: String = chars[start..i].iter().collect();
-                tokens.push(Spanned { token: Token::Ident(word), pos });
+                tokens.push(Spanned {
+                    token: Token::Ident(word),
+                    pos,
+                });
             }
             _ => {
                 return Err(FormulaError::UnexpectedToken(c.to_string(), pos));
@@ -229,11 +296,16 @@ fn tokenize(input: &str) -> Result<Vec<Spanned>, FormulaError> {
 struct Parser {
     tokens: Vec<Spanned>,
     cursor: usize,
+    input: String,
 }
 
 impl Parser {
-    fn new(tokens: Vec<Spanned>) -> Self {
-        Self { tokens, cursor: 0 }
+    fn new(tokens: Vec<Spanned>, input: &str) -> Self {
+        Self {
+            tokens,
+            cursor: 0,
+            input: input.to_string(),
+        }
     }
 
     /// Peek at the current token without consuming it.
@@ -283,6 +355,16 @@ impl Parser {
         self.cursor >= self.tokens.len()
     }
 
+    fn source_span(&self, start: usize, end_inclusive: usize) -> String {
+        self.input
+            .chars()
+            .skip(start)
+            .take(end_inclusive.saturating_sub(start) + 1)
+            .collect::<String>()
+            .trim()
+            .to_string()
+    }
+
     // ----- LHS -----
 
     /// Parse the response variable (LHS of `~`).
@@ -328,8 +410,8 @@ impl Parser {
                 }
                 Some(Token::LParen) => {
                     // Random effect group.
-                    let rt = self.parse_random_term()?;
-                    random.push(rt);
+                    let rts = self.parse_random_term()?;
+                    random.extend(rts);
                     negate = false;
                 }
                 Some(Token::One) => {
@@ -373,6 +455,8 @@ impl Parser {
     /// - `x1` -> `[Column("x1")]`
     /// - `x1:x2` -> `[Interaction(["x1","x2"])]`
     /// - `x1*x2` -> `[Column("x1"), Column("x2"), Interaction(["x1","x2"])]`
+    /// - `x1*x2*x3` -> all main effects, two-way interactions, and the
+    ///   three-way interaction.
     /// - `x1/x2` -> `[Column("x1"), Interaction(["x1","x2"])]`  (nesting)
     fn parse_term_expr(&mut self) -> Result<Vec<FixedTerm>, FormulaError> {
         let first = self.parse_atom()?;
@@ -388,23 +472,24 @@ impl Parser {
                 Ok(vec![FixedTerm::Interaction(names)])
             }
             Some(Token::Star) => {
-                // a * b  =>  a + b + a:b
-                self.advance();
-                let second = self.parse_atom()?;
-                Ok(vec![
-                    FixedTerm::Column(first.clone()),
-                    FixedTerm::Column(second.clone()),
-                    FixedTerm::Interaction(vec![first, second]),
-                ])
+                // a * b * c => all non-empty products in formula order.
+                let mut names = vec![first];
+                while self.peek() == Some(&Token::Star) {
+                    self.advance();
+                    names.push(self.parse_atom()?);
+                }
+                Ok(Self::expand_star_terms(&names))
             }
             Some(Token::Slash) => {
-                // a / b  =>  a + a:b  (nesting)
-                self.advance();
-                let second = self.parse_atom()?;
-                Ok(vec![
-                    FixedTerm::Column(first.clone()),
-                    FixedTerm::Interaction(vec![first, second]),
-                ])
+                // a / b / c => a + a:b + a:b:c (nesting path).
+                let mut names = vec![first];
+                let mut terms = vec![FixedTerm::Column(names[0].clone())];
+                while self.peek() == Some(&Token::Slash) {
+                    self.advance();
+                    names.push(self.parse_atom()?);
+                    terms.push(FixedTerm::Interaction(names.clone()));
+                }
+                Ok(terms)
             }
             _ => Ok(vec![FixedTerm::Column(first)]),
         }
@@ -432,10 +517,49 @@ impl Parser {
         }
     }
 
+    fn expand_star_terms(names: &[String]) -> Vec<FixedTerm> {
+        let mut terms = Vec::new();
+        for size in 1..=names.len() {
+            let mut current = Vec::with_capacity(size);
+            Self::append_star_combinations(names, size, 0, &mut current, &mut terms);
+        }
+        terms
+    }
+
+    fn append_star_combinations(
+        names: &[String],
+        size: usize,
+        start: usize,
+        current: &mut Vec<String>,
+        terms: &mut Vec<FixedTerm>,
+    ) {
+        if current.len() == size {
+            if size == 1 {
+                terms.push(FixedTerm::Column(current[0].clone()));
+            } else {
+                terms.push(FixedTerm::Interaction(current.clone()));
+            }
+            return;
+        }
+
+        let remaining = size - current.len();
+        for index in start..=names.len() - remaining {
+            current.push(names[index].clone());
+            Self::append_star_combinations(names, size, index + 1, current, terms);
+            current.pop();
+        }
+    }
+
     // ----- Random term: (terms | grouping) -----
 
     /// Parse a random-effect specification `(terms | group)` or `(terms || group)`.
-    fn parse_random_term(&mut self) -> Result<RandomTerm, FormulaError> {
+    ///
+    /// Grouping expressions that imply multiple variance components are
+    /// expanded immediately:
+    /// - `(1 | a/b)` becomes `(1 | a) + (1 | a:b)`
+    /// - `(1 | a*b)` becomes `(1 | a) + (1 | b) + (1 | a:b)`
+    fn parse_random_term(&mut self) -> Result<Vec<RandomTerm>, FormulaError> {
+        let source_start = self.pos();
         self.expect(&Token::LParen)?;
 
         // Collect tokens inside the parentheses to find the bar position.
@@ -504,21 +628,44 @@ impl Parser {
         if terms.is_empty() {
             return Err(FormulaError::EmptyRandomTerms);
         }
+        if !terms
+            .iter()
+            .any(|term| matches!(term, FixedTerm::Intercept | FixedTerm::NoIntercept))
+        {
+            terms.insert(0, FixedTerm::Intercept);
+        }
 
-        // Parse grouping factor (right of `|`).
-        let grouping = self.parse_grouping()?;
+        // Parse grouping factor(s), expanding nested/crossed shorthand.
+        let parsed_grouping = self.parse_grouping()?;
 
+        let source_end = self.pos();
         self.expect(&Token::RParen)?;
+        let written = self.source_span(source_start, source_end);
 
-        Ok(RandomTerm {
-            terms,
-            grouping,
-            zerocorr,
-        })
+        Ok(parsed_grouping
+            .groupings
+            .into_iter()
+            .map(|grouping| RandomTerm {
+                terms: terms.clone(),
+                grouping,
+                zerocorr,
+                source: Some(RandomTermSource {
+                    written: written.clone(),
+                    expansion: parsed_grouping.expansion,
+                }),
+            })
+            .collect())
     }
 
-    /// Parse the grouping factor: a single identifier or `g1 & g2 [& g3 ...]`.
-    fn parse_grouping(&mut self) -> Result<GroupingFactor, FormulaError> {
+    /// Parse the grouping factor side of a random-effect term.
+    ///
+    /// Supported forms:
+    /// - `g`
+    /// - `g1 & g2` (legacy interaction syntax)
+    /// - `g1:g2` (cell-level grouping)
+    /// - `g1/g2[/g3...]` (nested expansion)
+    /// - `g1*g2[*g3...]` (main effects plus interaction expansion)
+    fn parse_grouping(&mut self) -> Result<ParsedGrouping, FormulaError> {
         let first = match self.peek() {
             Some(Token::Ident(_)) => self.parse_atom()?,
             _ => return Err(FormulaError::EmptyGrouping),
@@ -530,10 +677,97 @@ impl Parser {
                 self.advance();
                 names.push(self.parse_atom()?);
             }
-            Ok(GroupingFactor::Interaction(names))
+            Ok(ParsedGrouping::new(vec![GroupingFactor::Interaction(
+                names,
+            )]))
+        } else if self.peek() == Some(&Token::Colon) {
+            let mut names = vec![first];
+            while self.peek() == Some(&Token::Colon) {
+                self.advance();
+                names.push(self.parse_atom()?);
+            }
+            Ok(ParsedGrouping::new(vec![GroupingFactor::Cell(names)]))
+        } else if self.peek() == Some(&Token::Slash) {
+            let mut names = vec![first];
+            while self.peek() == Some(&Token::Slash) {
+                self.advance();
+                names.push(self.parse_atom()?);
+            }
+            Ok(ParsedGrouping {
+                groupings: expand_nested_grouping(&names),
+                expansion: Some(RandomTermExpansion::NestedGrouping),
+            })
+        } else if self.peek() == Some(&Token::Star) {
+            let mut names = vec![first];
+            while self.peek() == Some(&Token::Star) {
+                self.advance();
+                names.push(self.parse_atom()?);
+            }
+            Ok(ParsedGrouping {
+                groupings: expand_crossed_grouping(&names),
+                expansion: Some(RandomTermExpansion::CrossedGrouping),
+            })
         } else {
-            Ok(GroupingFactor::Single(first))
+            Ok(ParsedGrouping::new(vec![GroupingFactor::Single(first)]))
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ParsedGrouping {
+    groupings: Vec<GroupingFactor>,
+    expansion: Option<RandomTermExpansion>,
+}
+
+impl ParsedGrouping {
+    fn new(groupings: Vec<GroupingFactor>) -> Self {
+        Self {
+            groupings,
+            expansion: None,
+        }
+    }
+}
+
+fn expand_nested_grouping(names: &[String]) -> Vec<GroupingFactor> {
+    let mut result = Vec::new();
+    for end in 1..=names.len() {
+        if end == 1 {
+            result.push(GroupingFactor::Single(names[0].clone()));
+        } else {
+            result.push(GroupingFactor::Cell(names[..end].to_vec()));
+        }
+    }
+    result
+}
+
+fn expand_crossed_grouping(names: &[String]) -> Vec<GroupingFactor> {
+    let mut result = Vec::new();
+    for size in 1..=names.len() {
+        append_combinations(names, size, 0, &mut Vec::new(), &mut result);
+    }
+    result
+}
+
+fn append_combinations(
+    names: &[String],
+    size: usize,
+    start: usize,
+    current: &mut Vec<String>,
+    result: &mut Vec<GroupingFactor>,
+) {
+    if current.len() == size {
+        if size == 1 {
+            result.push(GroupingFactor::Single(current[0].clone()));
+        } else {
+            result.push(GroupingFactor::Cell(current.clone()));
+        }
+        return;
+    }
+
+    for idx in start..names.len() {
+        current.push(names[idx].clone());
+        append_combinations(names, size, idx + 1, current, result);
+        current.pop();
     }
 }
 
@@ -568,7 +802,7 @@ pub fn parse_formula(input: &str) -> Result<Formula, FormulaError> {
         return Err(FormulaError::Empty);
     }
 
-    let mut parser = Parser::new(tokens);
+    let mut parser = Parser::new(tokens, input);
 
     // --- LHS ---
     let response = parser.parse_response()?;
@@ -582,9 +816,9 @@ pub fn parse_formula(input: &str) -> Result<Formula, FormulaError> {
     // --- Implicit intercept ---
     // If no explicit `Intercept` or `NoIntercept` was given in the fixed terms,
     // insert an implicit intercept at the front.
-    let has_explicit_intercept = fixed.iter().any(|t| {
-        matches!(t, FixedTerm::Intercept | FixedTerm::NoIntercept)
-    });
+    let has_explicit_intercept = fixed
+        .iter()
+        .any(|t| matches!(t, FixedTerm::Intercept | FixedTerm::NoIntercept));
 
     if !has_explicit_intercept {
         fixed.insert(0, FixedTerm::Intercept);
@@ -674,8 +908,14 @@ mod tests {
     fn no_intercept_with_zero() {
         let f = parse_formula("y ~ 0 + x1 + x2").unwrap();
         // No intercept — the NoIntercept and Intercept are stripped.
-        assert!(!f.fixed_terms.iter().any(|t| matches!(t, FixedTerm::Intercept)));
-        assert!(!f.fixed_terms.iter().any(|t| matches!(t, FixedTerm::NoIntercept)));
+        assert!(!f
+            .fixed_terms
+            .iter()
+            .any(|t| matches!(t, FixedTerm::Intercept)));
+        assert!(!f
+            .fixed_terms
+            .iter()
+            .any(|t| matches!(t, FixedTerm::NoIntercept)));
         assert_eq!(
             f.fixed_terms,
             vec![
@@ -688,7 +928,10 @@ mod tests {
     #[test]
     fn no_intercept_with_minus_one() {
         let f = parse_formula("y ~ -1 + x1").unwrap();
-        assert!(!f.fixed_terms.iter().any(|t| matches!(t, FixedTerm::Intercept)));
+        assert!(!f
+            .fixed_terms
+            .iter()
+            .any(|t| matches!(t, FixedTerm::Intercept)));
         assert_eq!(f.fixed_terms, vec![FixedTerm::Column("x1".into())]);
     }
 
@@ -697,10 +940,9 @@ mod tests {
     #[test]
     fn interaction_colon() {
         let f = parse_formula("y ~ x1 + x2:x3").unwrap();
-        assert!(f.fixed_terms.contains(&FixedTerm::Interaction(vec![
-            "x2".into(),
-            "x3".into()
-        ])));
+        assert!(f
+            .fixed_terms
+            .contains(&FixedTerm::Interaction(vec!["x2".into(), "x3".into()])));
     }
 
     #[test]
@@ -709,10 +951,27 @@ mod tests {
         let f = parse_formula("y ~ x1 * x2").unwrap();
         assert!(f.fixed_terms.contains(&FixedTerm::Column("x1".into())));
         assert!(f.fixed_terms.contains(&FixedTerm::Column("x2".into())));
-        assert!(f.fixed_terms.contains(&FixedTerm::Interaction(vec![
-            "x1".into(),
-            "x2".into()
-        ])));
+        assert!(f
+            .fixed_terms
+            .contains(&FixedTerm::Interaction(vec!["x1".into(), "x2".into()])));
+    }
+
+    #[test]
+    fn three_way_star_expansion() {
+        let f = parse_formula("y ~ A * B * C").unwrap();
+        assert_eq!(
+            f.fixed_terms,
+            vec![
+                FixedTerm::Intercept,
+                FixedTerm::Column("A".into()),
+                FixedTerm::Column("B".into()),
+                FixedTerm::Column("C".into()),
+                FixedTerm::Interaction(vec!["A".into(), "B".into()]),
+                FixedTerm::Interaction(vec!["A".into(), "C".into()]),
+                FixedTerm::Interaction(vec!["B".into(), "C".into()]),
+                FixedTerm::Interaction(vec!["A".into(), "B".into(), "C".into()]),
+            ]
+        );
     }
 
     #[test]
@@ -720,10 +979,9 @@ mod tests {
         // x1 / x2 => x1 + x1:x2
         let f = parse_formula("y ~ x1 / x2").unwrap();
         assert!(f.fixed_terms.contains(&FixedTerm::Column("x1".into())));
-        assert!(f.fixed_terms.contains(&FixedTerm::Interaction(vec![
-            "x1".into(),
-            "x2".into()
-        ])));
+        assert!(f
+            .fixed_terms
+            .contains(&FixedTerm::Interaction(vec!["x1".into(), "x2".into()])));
         // Should NOT contain a standalone Column("x2").
         assert!(!f.fixed_terms.contains(&FixedTerm::Column("x2".into())));
     }
@@ -751,6 +1009,20 @@ mod tests {
         );
         assert_eq!(rt.grouping, GroupingFactor::Single("group".into()));
         assert!(!rt.zerocorr);
+    }
+
+    #[test]
+    fn random_slope_syntax_has_implicit_intercept() {
+        let f = parse_formula("y ~ x1 + (x1 | group)").unwrap();
+        let rt = &f.random_terms[0];
+        assert_eq!(
+            rt.terms,
+            vec![FixedTerm::Intercept, FixedTerm::Column("x1".into())]
+        );
+        assert_eq!(
+            rt.source.as_ref().map(|source| source.written.as_str()),
+            Some("(x1 | group)")
+        );
     }
 
     #[test]
@@ -789,13 +1061,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cell_grouping_with_colon() {
+        let f = parse_formula("y ~ x1 + (1 | subject:item)").unwrap();
+        assert_eq!(f.random_terms.len(), 1);
+        assert_eq!(
+            f.random_terms[0].grouping,
+            GroupingFactor::Cell(vec!["subject".into(), "item".into()])
+        );
+        assert_eq!(f.to_string(), "y ~ 1 + x1 + (1 | subject:item)");
+    }
+
+    #[test]
+    fn nested_grouping_expands_to_main_and_cell() {
+        let f = parse_formula("y ~ x1 + (1 | school/class)").unwrap();
+        assert_eq!(f.random_terms.len(), 2);
+        assert_eq!(
+            f.random_terms[0].grouping,
+            GroupingFactor::Single("school".into())
+        );
+        assert_eq!(
+            f.random_terms[1].grouping,
+            GroupingFactor::Cell(vec!["school".into(), "class".into()])
+        );
+        assert_eq!(
+            f.to_string(),
+            "y ~ 1 + x1 + (1 | school) + (1 | school:class)"
+        );
+        assert!(f.random_terms.iter().all(|term| {
+            term.source.as_ref().is_some_and(|source| {
+                source.written == "(1 | school/class)"
+                    && source.expansion == Some(RandomTermExpansion::NestedGrouping)
+            })
+        }));
+    }
+
+    #[test]
+    fn crossed_star_grouping_expands_to_main_effects_and_cell() {
+        let f = parse_formula("y ~ x1 + (1 | subject*item)").unwrap();
+        assert_eq!(f.random_terms.len(), 3);
+        assert_eq!(
+            f.random_terms[0].grouping,
+            GroupingFactor::Single("subject".into())
+        );
+        assert_eq!(
+            f.random_terms[1].grouping,
+            GroupingFactor::Single("item".into())
+        );
+        assert_eq!(
+            f.random_terms[2].grouping,
+            GroupingFactor::Cell(vec!["subject".into(), "item".into()])
+        );
+        assert_eq!(
+            f.to_string(),
+            "y ~ 1 + x1 + (1 | subject) + (1 | item) + (1 | subject:item)"
+        );
+        assert!(f.random_terms.iter().all(|term| {
+            term.source.as_ref().is_some_and(|source| {
+                source.written == "(1 | subject*item)"
+                    && source.expansion == Some(RandomTermExpansion::CrossedGrouping)
+            })
+        }));
+    }
+
     // ---- Edge cases ----
 
     #[test]
     fn no_fixed_intercept_with_random() {
         // y ~ 0 + x1 + (1|g)  — fixed intercept suppressed, random intercept present.
         let f = parse_formula("y ~ 0 + x1 + (1 | g)").unwrap();
-        assert!(!f.fixed_terms.iter().any(|t| matches!(t, FixedTerm::Intercept)));
+        assert!(!f
+            .fixed_terms
+            .iter()
+            .any(|t| matches!(t, FixedTerm::Intercept)));
         assert_eq!(f.fixed_terms, vec![FixedTerm::Column("x1".into())]);
         assert_eq!(f.random_terms.len(), 1);
     }
@@ -899,10 +1237,7 @@ mod tests {
         let rt0 = &f.random_terms[0];
         assert_eq!(
             rt0.terms,
-            vec![
-                FixedTerm::Intercept,
-                FixedTerm::Column("condition".into()),
-            ]
+            vec![FixedTerm::Intercept, FixedTerm::Column("condition".into()),]
         );
         assert_eq!(rt0.grouping, GroupingFactor::Single("subject".into()));
 

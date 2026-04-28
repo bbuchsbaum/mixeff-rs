@@ -1,7 +1,7 @@
 //! Data frame abstraction for passing tabular data to model constructors.
 
-use std::collections::HashMap;
 use indexmap::IndexMap;
+use std::collections::HashMap;
 
 /// A simple column-oriented table for feeding data to mixed models.
 ///
@@ -49,11 +49,37 @@ impl CategoricalColumn {
             };
             refs.push(idx);
         }
-        CategoricalColumn { levels, refs, values }
+        CategoricalColumn {
+            levels,
+            refs,
+            values,
+        }
     }
 
     pub fn n_levels(&self) -> usize {
         self.levels.len()
+    }
+
+    /// Construct from values together with an explicit canonical level order.
+    ///
+    /// Returns `None` if any observed value is not in `levels`. Use this when
+    /// the level order matters (e.g. matching a reference implementation's
+    /// factor encoding) rather than first-appearance order.
+    pub fn with_levels(values: Vec<String>, levels: Vec<String>) -> Option<Self> {
+        let level_map: HashMap<&String, u32> = levels
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s, i as u32))
+            .collect();
+        let mut refs = Vec::with_capacity(values.len());
+        for v in &values {
+            refs.push(*level_map.get(v)?);
+        }
+        Some(CategoricalColumn {
+            levels,
+            refs,
+            values,
+        })
     }
 }
 
@@ -100,7 +126,28 @@ impl DataFrame {
             assert_eq!(data.len(), self.n_rows, "Column length mismatch");
         }
         let cat = CategoricalColumn::new(data);
-        self.columns.insert(name.to_string(), Column::Categorical(cat));
+        self.columns
+            .insert(name.to_string(), Column::Categorical(cat));
+        self
+    }
+
+    /// Add a categorical column with an explicit canonical level order.
+    /// Panics if any value is not present in `levels`.
+    pub fn add_categorical_with_levels(
+        &mut self,
+        name: &str,
+        data: Vec<String>,
+        levels: Vec<String>,
+    ) -> &mut Self {
+        if self.columns.is_empty() {
+            self.n_rows = data.len();
+        } else {
+            assert_eq!(data.len(), self.n_rows, "Column length mismatch");
+        }
+        let cat = CategoricalColumn::with_levels(data, levels)
+            .expect("value not found in canonical levels");
+        self.columns
+            .insert(name.to_string(), Column::Categorical(cat));
         self
     }
 

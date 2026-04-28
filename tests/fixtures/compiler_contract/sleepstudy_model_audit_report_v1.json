@@ -1,0 +1,208 @@
+{
+  "schema_name": "mixedmodels.model_audit_report",
+  "schema_version": 1,
+  "requested_formula": "Reaction ~ 1 + Days + (1 + Days | Subject)",
+  "sections": [
+    {
+      "title": "Requested Model",
+      "lines": [
+        {
+          "label": "formula",
+          "status": "info",
+          "detail": "Reaction ~ 1 + Days + (1 + Days | Subject)"
+        },
+        {
+          "label": "model kind",
+          "status": "info",
+          "detail": "linear_mixed_model"
+        },
+        {
+          "label": "distribution/link",
+          "status": "info",
+          "detail": "gaussian/identity"
+        },
+        {
+          "label": "objective",
+          "status": "info",
+          "detail": "exact_gaussian"
+        },
+        {
+          "label": "certificate scope",
+          "status": "info",
+          "detail": "exact_objective"
+        },
+        {
+          "label": "fixed terms",
+          "status": "info",
+          "detail": "1, Days"
+        },
+        {
+          "label": "random terms",
+          "status": "info",
+          "detail": "1"
+        },
+        {
+          "label": "theta maps",
+          "status": "info",
+          "detail": "1 map(s)"
+        }
+      ]
+    },
+    {
+      "title": "Model State",
+      "lines": [
+        {
+          "label": "requested",
+          "status": "ok",
+          "detail": "status=requested; formula=Reaction ~ 1 + Days + (1 + Days | Subject); random_terms=1; reason=formula as requested by the caller"
+        },
+        {
+          "label": "semantic",
+          "status": "ok",
+          "detail": "status=canonical; formula=Reaction ~ 1 + Days + (1 + Days | Subject); random_terms=1; reason=formula compiled into semantic IR"
+        },
+        {
+          "label": "supported",
+          "status": "ok",
+          "detail": "status=supported; formula=Reaction ~ 1 + Days + (1 + Days | Subject); random_terms=1; reason=design audit did not recommend design-time model changes"
+        },
+        {
+          "label": "fitted",
+          "status": "not_assessed",
+          "detail": "status=not_assessed; formula=Reaction ~ 1 + Days + (1 + Days | Subject); random_terms=1; reason=model has not been fitted"
+        },
+        {
+          "label": "changes",
+          "status": "ok",
+          "detail": "none"
+        }
+      ]
+    },
+    {
+      "title": "Fixed Effects",
+      "lines": [
+        {
+          "label": "rank",
+          "status": "ok",
+          "detail": "2 of 2"
+        },
+        {
+          "label": "aliased columns",
+          "status": "ok",
+          "detail": "none"
+        },
+        {
+          "label": "empty cells",
+          "status": "ok",
+          "detail": "0"
+        }
+      ]
+    },
+    {
+      "title": "Random Effects",
+      "lines": [
+        {
+          "label": "r0",
+          "status": "ok",
+          "detail": "group=Subject, rows=180, levels=18, obs_per_level=10..10, basis=2, covariance=full, params=3, budget=sufficient"
+        }
+      ]
+    },
+    {
+      "title": "Random-Effect Information Budget",
+      "lines": [
+        {
+          "label": "r0",
+          "status": "ok",
+          "detail": "levels=18, rows=180, obs_per_level=10..10, basis=2, cov_params=3, levels/basis=9.00, levels/param=6.00, rows/param=60.00; grouping levels are the effective n for covariance support; risk=v0 information budget is sufficient; recommendation=information budget is sufficient under v0 thresholds; explanation=180 rows are clustered into 18 grouping levels; grouping levels are the effective n for random-effect distribution support"
+        }
+      ]
+    },
+    {
+      "title": "Dependence Paths",
+      "lines": [
+        {
+          "label": "kernels",
+          "status": "info",
+          "detail": "r0=marginal(Subject, intercept=true, covariance=full, basis=intercept, Days)"
+        },
+        {
+          "label": "repeated units",
+          "status": "ok",
+          "detail": "Subject=marginal(Subject, levels=18, obs_per_level=10..10, covered_by=r0)"
+        },
+        {
+          "label": "missing paths",
+          "status": "ok",
+          "detail": "none"
+        }
+      ]
+    },
+    {
+      "title": "Parameterization Trace",
+      "lines": [
+        {
+          "label": "r0",
+          "status": "ok",
+          "detail": "source=(1 + Days | Subject); group=Subject; family=FullCholesky; user_basis=intercept, Days; optimizer_basis=intercept, Days; theta_slots=theta[0], theta[1], theta[2]; lambda_slots=(0, 0), (1, 0), (1, 1); parmap_aligned=3/3; varcorr_entries=sd(intercept), sd(Days), corr(Days,intercept)"
+        }
+      ]
+    },
+    {
+      "title": "Effective Covariance",
+      "lines": [
+        {
+          "label": "effective covariance rank",
+          "status": "not_assessed",
+          "detail": "not assessed"
+        }
+      ]
+    },
+    {
+      "title": "Policy Recommendations",
+      "lines": [
+        {
+          "label": "maximal feasible",
+          "status": "ok",
+          "detail": "no advisory reductions or refusals"
+        }
+      ]
+    },
+    {
+      "title": "Optimizer",
+      "lines": [
+        {
+          "label": "certificate",
+          "status": "not_assessed",
+          "detail": "model has not been fitted"
+        }
+      ]
+    },
+    {
+      "title": "Inference",
+      "lines": [
+        {
+          "label": "finite-sample inference",
+          "status": "not_assessed",
+          "detail": "finite-sample inference is not implemented in compiler v0"
+        },
+        {
+          "label": "covariance derivatives",
+          "status": "not_assessed",
+          "detail": "compiler v0 does not expose covariance derivative certificates"
+        }
+      ]
+    },
+    {
+      "title": "Diagnostics",
+      "lines": [
+        {
+          "label": "diagnostics",
+          "status": "ok",
+          "detail": "none"
+        }
+      ]
+    }
+  ],
+  "diagnostics": []
+}

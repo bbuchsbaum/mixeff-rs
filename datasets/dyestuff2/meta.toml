@@ -1,0 +1,47 @@
+name = "dyestuff2"
+source = "lme4::Dyestuff2"
+license = "GPL (>= 2) — see lme4 DESCRIPTION"
+n_rows = 30
+description = """
+Bates' classic boundary-case dataset. Same structure as `dyestuff` but the
+between-batch variance estimate hits zero — the unconstrained MLE for σ_b
+lies on the boundary of the parameter space. Any optimizer that does not
+correctly clamp θ at zero will fail or produce nonsense here. Essential
+test for singular-fit handling.
+"""
+
+[[columns]]
+name = "Batch"
+type = "categorical"
+levels = ["A","B","C","D","E","F"]
+
+[[columns]]
+name = "Yield"
+type = "numeric"
+
+[[fits]]
+formula = "Yield ~ 1 + (1 | Batch)"
+family = "Gaussian"
+link = "Identity"
+estimator = "ML"
+[fits.expected]
+beta = [5.6656]
+sigma = 3.65264
+re_sigmas = [0.0]              # singular: variance hits boundary
+objective = 162.8736
+is_singular = true
+
+[[fits]]
+formula = "Yield ~ 1 + (1 | Batch)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+[fits.expected]
+beta = [5.6656]
+re_sigmas = [0.0]
+is_singular = true
+
+[tags]
+structure = ["random_intercept", "scalar_re"]
+difficulty = "boundary"
+notes = "tests singular-fit / θ = 0 path"

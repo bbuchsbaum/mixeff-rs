@@ -1,0 +1,38 @@
+name = "oats"
+source = "nlme::Oats"
+license = "Part of nlme; redistributable for academic use"
+n_rows = 72
+description = """
+Yates (1935) split-plot oat-yield experiment: 6 blocks × 3 varieties (whole
+plot) × 4 nitrogen levels (sub-plot). The textbook split-plot example with
+nested random effects: `Variety` randomized within `Block`. Note: nlme
+stores Block in non-canonical Roman-numeral order (VI,V,III,IV,II,I).
+"""
+
+[[columns]]
+name = "Block"
+type = "categorical"
+levels = ["VI","V","III","IV","II","I"]
+
+[[columns]]
+name = "Variety"
+type = "categorical"
+levels = ["Golden Rain","Marvellous","Victory"]
+
+[[columns]]
+name = "nitro"
+type = "numeric"
+
+[[columns]]
+name = "yield"
+type = "numeric"
+
+[[fits]]
+formula = "yield ~ 1 + Variety * nitro + (1 | Block) + (1 | Block:Variety)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+
+[tags]
+structure = ["random_intercept", "split_plot", "nested"]
+difficulty = "easy"

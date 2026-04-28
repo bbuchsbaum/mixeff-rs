@@ -217,11 +217,7 @@ mod tests {
     #[test]
     fn test_pivoted_qr_rectangular_tall() {
         // 4x2 full-rank matrix
-        let a = DMatrix::from_row_slice(
-            4,
-            2,
-            &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 1.0],
-        );
+        let a = DMatrix::from_row_slice(4, 2, &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 1.0]);
         let (rank, piv, r) = pivoted_qr(&a);
         assert_eq!(rank, 2);
         assert_eq!(piv.len(), 2);
@@ -231,11 +227,7 @@ mod tests {
     #[test]
     fn test_pivoted_qr_rectangular_wide() {
         // 2x4 matrix with rank 2
-        let a = DMatrix::from_row_slice(
-            2,
-            4,
-            &[1.0, 0.0, 1.0, 2.0, 0.0, 1.0, 1.0, 1.0],
-        );
+        let a = DMatrix::from_row_slice(2, 4, &[1.0, 0.0, 1.0, 2.0, 0.0, 1.0, 1.0, 1.0]);
         let (rank, _piv, _r) = pivoted_qr(&a);
         assert_eq!(rank, 2);
     }
@@ -253,7 +245,11 @@ mod tests {
         let (rank, piv, r) = pivoted_qr(&a);
         assert_eq!(rank, 1);
         assert_eq!(piv, vec![0]);
-        assert_relative_eq!(r[(0, 0)].abs(), (1.0_f64 + 4.0 + 9.0).sqrt(), epsilon = 1e-10);
+        assert_relative_eq!(
+            r[(0, 0)].abs(),
+            (1.0_f64 + 4.0 + 9.0).sqrt(),
+            epsilon = 1e-10
+        );
     }
 
     #[test]
@@ -266,11 +262,7 @@ mod tests {
 
     #[test]
     fn test_stats_rank_full_rank() {
-        let a = DMatrix::from_row_slice(
-            3,
-            2,
-            &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0],
-        );
+        let a = DMatrix::from_row_slice(3, 2, &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
         let (rank, piv) = stats_rank(&a);
         assert_eq!(rank, 2);
         // Full rank: identity permutation
@@ -317,12 +309,7 @@ mod tests {
         let a = DMatrix::from_row_slice(
             4,
             3,
-            &[
-                1.0, 2.0, 3.0,
-                4.0, 5.0, 6.0,
-                7.0, 8.0, 10.0,
-                2.0, 1.0, 3.0,
-            ],
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0, 2.0, 1.0, 3.0],
         );
         let (rank, piv, _r) = pivoted_qr(&a);
         assert_eq!(rank, 3);
@@ -330,5 +317,62 @@ mod tests {
         let mut sorted_piv = piv.clone();
         sorted_piv.sort();
         assert_eq!(sorted_piv, vec![0, 1, 2]);
+    }
+
+    // ── Tests ported from MixedModels.jl/test/pivot.jl ─────────────────────
+
+    #[test]
+    fn test_stats_rank_full_rank_intercept_plus_predictor() {
+        // Mirrors pivot.jl "fullranknumeric": [1, U] is full rank.
+        let n = 200;
+        let mut a = DMatrix::zeros(n, 2);
+        for i in 0..n {
+            a[(i, 0)] = 1.0;
+            a[(i, 1)] = (i % 10) as f64;
+        }
+        let (rank, piv) = stats_rank(&a);
+        assert_eq!(rank, 2);
+        assert_eq!(piv, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_stats_rank_dependent_column_realistic() {
+        // Mirrors pivot.jl "dependentcolumn": V = U − 4.5 (mean-centred U)
+        // makes [1, U, V, Z] rank-deficient with rank 3.
+        //
+        // Note: unlike Julia's LAPACK-based pivot (which preserves the intercept),
+        // our modified Gram-Schmidt drops the lowest-norm column from the dependent
+        // set {1, U, V}. The key properties — rank == 3 and Z retained — are
+        // implementation-independent and are what we test here.
+        let n = 200;
+        let u: Vec<f64> = (0..n).map(|i| (i % 10) as f64).collect();
+        let v: Vec<f64> = u.iter().map(|&x| x - 4.5).collect();
+        // Z: deterministic sequence linearly independent of 1, U, V
+        let z: Vec<f64> = (0..n)
+            .map(|i| (((i * 7 + 3) % 13) as f64) * 0.1 + 0.05)
+            .collect();
+
+        let mut a = DMatrix::zeros(n, 4);
+        for i in 0..n {
+            a[(i, 0)] = 1.0;
+            a[(i, 1)] = u[i];
+            a[(i, 2)] = v[i];
+            a[(i, 3)] = z[i];
+        }
+
+        let (rank, piv) = stats_rank(&a);
+        // V is a linear combination of 1 and U → rank 3
+        assert_eq!(rank, 3);
+        // Z (col 3) is linearly independent and must stay in the selected set
+        assert!(
+            piv[..rank].contains(&3),
+            "Z (col 3) must not be pivoted out"
+        );
+        // The dropped column must be from the linearly dependent set {1, U, V}
+        let dropped = piv[rank];
+        assert!(
+            dropped == 0 || dropped == 1 || dropped == 2,
+            "dropped column must be from the dependent set, got col {dropped}"
+        );
     }
 }

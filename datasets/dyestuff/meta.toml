@@ -1,0 +1,45 @@
+name = "dyestuff"
+source = "lme4::Dyestuff"
+license = "GPL (>= 2) — see lme4 DESCRIPTION"
+n_rows = 30
+description = """
+Yield of dyestuff in batches of an intermediate product (Davies, 1947).
+Six batches × five preparations each. The simplest possible variance-
+components model — one scalar random effect, no fixed effects beyond an
+intercept. Useful as the absolute-floor sanity check for the PLS step.
+"""
+
+[[columns]]
+name = "Batch"
+type = "categorical"
+levels = ["A","B","C","D","E","F"]
+
+[[columns]]
+name = "Yield"
+type = "numeric"
+
+[[fits]]
+formula = "Yield ~ 1 + (1 | Batch)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+[fits.expected]
+beta = [1527.5]
+sigma = 49.5101
+re_sigmas = [37.2603]
+objective = 319.6543
+
+[[fits]]
+formula = "Yield ~ 1 + (1 | Batch)"
+family = "Gaussian"
+link = "Identity"
+estimator = "ML"
+[fits.expected]
+beta = [1527.5]
+sigma = 49.5101
+re_sigmas = [37.2603]
+objective = 327.3271
+
+[tags]
+structure = ["random_intercept", "scalar_re"]
+difficulty = "easy"

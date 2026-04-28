@@ -1,0 +1,389 @@
+{
+  "schema": {
+    "schema_name": "mixedmodels.compiled_model_artifact",
+    "schema_version": 1,
+    "crate_version": "0.1.0"
+  },
+  "model_boundary": {
+    "model_kind": "generalized_linear_mixed_model",
+    "response_distribution": "binomial",
+    "link": "logit",
+    "objective_approximation": {
+      "laplace": {
+        "inner": "pirls"
+      }
+    },
+    "optimizer_certificate_scope": "approximated_objective",
+    "covariance_derivatives": {
+      "not_available": {
+        "reason": "GLMM covariance derivatives are not certified for the objective approximation"
+      }
+    },
+    "inference_availability": {
+      "unsupported": {
+        "reason": "LMM finite-sample methods such as Satterthwaite/KR are unsupported for GLMMs in compiler v0"
+      }
+    }
+  },
+  "requested_formula": "incidence ~ 1 + period + (1 | herd)",
+  "semantic_model": {
+    "schema_name": "mixedmodels.semantic_model",
+    "schema_version": 1,
+    "response": "incidence",
+    "fixed_terms": [
+      "1",
+      "period"
+    ],
+    "random_terms": [
+      {
+        "id": "r0",
+        "group": {
+          "single": {
+            "name": "herd"
+          }
+        },
+        "basis": [
+          {
+            "name": "intercept",
+            "kind": "intercept",
+            "source": "1"
+          }
+        ],
+        "covariance": "scalar",
+        "intercept": "included",
+        "role": "unknown",
+        "source_syntax": {
+          "text": "(1 | herd)"
+        },
+        "covariance_story": {
+          "summary": "herd: varying coefficients [intercept]",
+          "assumptions": [
+            "herd levels may differ in baseline response",
+            "single variance direction is estimated"
+          ],
+          "dependence": [
+            "observations sharing herd are correlated through this term's random coefficients"
+          ]
+        }
+      }
+    ],
+    "diagnostics": []
+  },
+  "effective_formula": null,
+  "effective_semantic_model": null,
+  "theta_maps": [
+    {
+      "family": "scalar",
+      "map": {
+        "schema_name": "mixedmodels.theta_map",
+        "schema_version": 1,
+        "term_id": "r0",
+        "term_index": 0,
+        "group": "herd",
+        "user_basis": [
+          "intercept"
+        ],
+        "optimizer_basis": [
+          "intercept"
+        ],
+        "theta_slots": [
+          {
+            "global_index": 0,
+            "local_index": 0,
+            "term_index": 0,
+            "basis_row": 0,
+            "basis_col": 0,
+            "lambda_row": 0,
+            "lambda_col": 0,
+            "name": "theta[0:intercept,intercept]",
+            "constraint": {
+              "lower_bound": {
+                "lower": 0.0
+              }
+            },
+            "status": "free"
+          }
+        ],
+        "source_parmap": [
+          [
+            0,
+            0,
+            0
+          ]
+        ]
+      }
+    }
+  ],
+  "design_audit": {
+    "schema_name": "mixedmodels.design_audit",
+    "schema_version": 1,
+    "fixed_effect_rank": {
+      "rank": 4,
+      "expected": 4,
+      "status": "full_rank",
+      "reason": null
+    },
+    "fixed_effects": {
+      "n_rows": 56,
+      "n_columns": 4,
+      "rank": {
+        "rank": 4,
+        "expected": 4,
+        "status": "full_rank",
+        "reason": null
+      },
+      "columns": [
+        {
+          "name": "(Intercept)",
+          "source_term": "1",
+          "kind": "intercept"
+        },
+        {
+          "name": "period: 2",
+          "source_term": "period",
+          "kind": "categorical_dummy"
+        },
+        {
+          "name": "period: 3",
+          "source_term": "period",
+          "kind": "categorical_dummy"
+        },
+        {
+          "name": "period: 4",
+          "source_term": "period",
+          "kind": "categorical_dummy"
+        }
+      ],
+      "terms": [
+        {
+          "term": "1",
+          "n_columns": 1,
+          "status": "estimable",
+          "aliased_columns": [],
+          "diagnostics": []
+        },
+        {
+          "term": "period",
+          "n_columns": 3,
+          "status": "estimable",
+          "aliased_columns": [],
+          "diagnostics": []
+        }
+      ],
+      "aliased_columns": [],
+      "empty_cells": [],
+      "diagnostics": []
+    },
+    "random_terms": [
+      {
+        "term_id": "r0",
+        "group": {
+          "name": "herd",
+          "n_observations": 56,
+          "n_levels": 15,
+          "min_obs_per_level": 1,
+          "max_obs_per_level": 4,
+          "repeated": true,
+          "reason": null
+        },
+        "basis_size": 1,
+        "requested_covariance_parameters": 1,
+        "information_budget": {
+          "n_levels": 15,
+          "basis_dimension": 1,
+          "covariance_family": "scalar",
+          "requested_covariance_parameters": 1,
+          "min_levels_variance": 5,
+          "min_levels_full_covariance": null,
+          "effective_n": {
+            "n_rows": 56,
+            "n_levels": 15,
+            "min_obs_per_level": 1,
+            "max_obs_per_level": 4,
+            "basis_dimension": 1,
+            "covariance_parameters": 1,
+            "levels_per_basis_direction": 15.0,
+            "levels_per_covariance_parameter": 15.0,
+            "rows_per_covariance_parameter": 56.0,
+            "total_rows_can_mislead": false,
+            "explanation": "56 rows are clustered into 15 grouping levels; grouping levels are the effective n for random-effect distribution support",
+            "recommendation": "information budget is sufficient under v0 thresholds"
+          },
+          "status": "sufficient",
+          "reason": null
+        },
+        "basis": [
+          {
+            "name": "intercept",
+            "kind": "intercept",
+            "min_within_group_sd": null,
+            "max_within_group_sd": null,
+            "supported": true,
+            "reason": null
+          }
+        ],
+        "diagnostics": []
+      }
+    ],
+    "covariance_kernels": {
+      "kernels": [
+        {
+          "term_id": "r0",
+          "group": "herd",
+          "parts": [
+            "herd"
+          ],
+          "path": "marginal",
+          "has_intercept": true,
+          "basis": [
+            "intercept"
+          ],
+          "covariance_family": "scalar",
+          "source_syntax": "(1 | herd)"
+        }
+      ],
+      "repeated_units": [
+        {
+          "unit": "herd",
+          "parts": [
+            "herd"
+          ],
+          "path": "marginal",
+          "n_observations": 56,
+          "n_levels": 15,
+          "min_obs_per_level": 1,
+          "max_obs_per_level": 4,
+          "repeated": true,
+          "covered_by_terms": [
+            "r0"
+          ]
+        }
+      ],
+      "missing_dependence_paths": []
+    },
+    "diagnostics": []
+  },
+  "compiler_policy": {
+    "random_strategy": "maximal_feasible",
+    "thresholds": {
+      "min_levels_random_intercept_fit": 2,
+      "min_levels_random_intercept_reliability": 5,
+      "max_condition_number": 10000000000.0,
+      "min_within_group_sd": 1e-8,
+      "max_basis_pairwise_abs_corr": 0.999,
+      "min_observations_per_supported_level": 2,
+      "effective_rank_relative_tolerance": 1e-6,
+      "effective_rank_absolute_tolerance": 1e-10
+    },
+    "apply_design_time_reductions": false
+  },
+  "policy_recommendations": [],
+  "effective_covariance": [],
+  "reductions": [],
+  "covariance_transitions": [],
+  "covariance_parameter_traces": [
+    {
+      "term_id": "r0",
+      "source_syntax": "(1 | herd)",
+      "semantic_term_index": 0,
+      "optimizer_term_index": 0,
+      "group": "herd",
+      "covariance_family": "scalar",
+      "user_basis": [
+        "intercept"
+      ],
+      "optimizer_basis": [
+        "intercept"
+      ],
+      "theta": {
+        "global_index": 0,
+        "local_index": 0,
+        "name": "theta[0:intercept,intercept]",
+        "constraint": {
+          "lower_bound": {
+            "lower": 0.0
+          }
+        },
+        "status": "free",
+        "value": 1.0
+      },
+      "lambda": {
+        "row": 0,
+        "col": 0,
+        "row_basis": "intercept",
+        "col_basis": "intercept",
+        "value": 1.0
+      },
+      "parmap_entry": {
+        "theta_index": 0,
+        "term_index": 0,
+        "lambda_row": 0,
+        "lambda_col": 0,
+        "matches_theta_map": true
+      },
+      "varcorr_entries": [
+        {
+          "kind": "standard_deviation",
+          "label": "sd(intercept)",
+          "basis": [
+            "intercept"
+          ],
+          "value": null
+        }
+      ]
+    }
+  ],
+  "reproducibility": {
+    "fit_intent": "confirmatory_as_specified",
+    "seed": null,
+    "random_state_used": false,
+    "thresholds": [
+      [
+        "min_levels_random_intercept_fit",
+        "2"
+      ],
+      [
+        "min_levels_random_intercept_reliability",
+        "5"
+      ],
+      [
+        "min_levels_variance",
+        "max(5, 2*d_basis + 1)"
+      ],
+      [
+        "min_levels_full_cov",
+        "max(10, 5*n_cov_params)"
+      ],
+      [
+        "max_condition_number",
+        "10000000000"
+      ],
+      [
+        "min_within_group_sd",
+        "0.00000001"
+      ],
+      [
+        "max_basis_pairwise_abs_corr",
+        "0.999"
+      ],
+      [
+        "min_observations_per_supported_level",
+        "2"
+      ],
+      [
+        "effective_rank_relative_tolerance",
+        "0.000001"
+      ],
+      [
+        "effective_rank_absolute_tolerance",
+        "0.0000000001"
+      ],
+      [
+        "apply_design_time_reductions",
+        "false"
+      ]
+    ]
+  },
+  "optimizer_certificate": null,
+  "diagnostics": []
+}

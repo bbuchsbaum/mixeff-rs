@@ -1,0 +1,294 @@
+{
+  "schema_name": "mixedmodels.model_audit_report",
+  "schema_version": 1,
+  "requested_formula": "y ~ 1 + x + (1 + x | group)",
+  "sections": [
+    {
+      "title": "Requested Model",
+      "lines": [
+        {
+          "label": "formula",
+          "status": "info",
+          "detail": "y ~ 1 + x + (1 + x | group)"
+        },
+        {
+          "label": "model kind",
+          "status": "info",
+          "detail": "linear_mixed_model"
+        },
+        {
+          "label": "distribution/link",
+          "status": "info",
+          "detail": "gaussian/identity"
+        },
+        {
+          "label": "objective",
+          "status": "info",
+          "detail": "exact_gaussian"
+        },
+        {
+          "label": "certificate scope",
+          "status": "info",
+          "detail": "exact_objective"
+        },
+        {
+          "label": "fixed terms",
+          "status": "info",
+          "detail": "1, x"
+        },
+        {
+          "label": "random terms",
+          "status": "info",
+          "detail": "1"
+        },
+        {
+          "label": "theta maps",
+          "status": "info",
+          "detail": "1 map(s)"
+        }
+      ]
+    },
+    {
+      "title": "Model State",
+      "lines": [
+        {
+          "label": "requested",
+          "status": "ok",
+          "detail": "status=requested; formula=y ~ 1 + x + (1 + x | group); random_terms=1; reason=formula as requested by the caller"
+        },
+        {
+          "label": "semantic",
+          "status": "ok",
+          "detail": "status=canonical; formula=y ~ 1 + x + (1 + x | group); random_terms=1; reason=formula compiled into semantic IR"
+        },
+        {
+          "label": "supported",
+          "status": "ok",
+          "detail": "status=supported; formula=y ~ 1 + x + (1 + x | group); random_terms=1; reason=design audit did not recommend design-time model changes"
+        },
+        {
+          "label": "fitted",
+          "status": "info",
+          "detail": "status=reduced; formula=y ~ 1 + x + (1 + x | group); random_terms=1; reason=fit completed with ConvergedReducedRank and recorded fitted-state reductions"
+        },
+        {
+          "label": "changes",
+          "status": "info",
+          "detail": "Applied:CertificateTimeBoundary:r0 -> effective covariance rank 1 is below requested rank 2"
+        }
+      ]
+    },
+    {
+      "title": "Fixed Effects",
+      "lines": [
+        {
+          "label": "rank",
+          "status": "ok",
+          "detail": "2 of 2"
+        },
+        {
+          "label": "aliased columns",
+          "status": "ok",
+          "detail": "none"
+        },
+        {
+          "label": "empty cells",
+          "status": "ok",
+          "detail": "0"
+        }
+      ]
+    },
+    {
+      "title": "Random Effects",
+      "lines": [
+        {
+          "label": "r0",
+          "status": "ok",
+          "detail": "group=group, rows=180, levels=30, obs_per_level=6..6, basis=2, covariance=full, params=3, budget=sufficient"
+        }
+      ]
+    },
+    {
+      "title": "Random-Effect Information Budget",
+      "lines": [
+        {
+          "label": "r0",
+          "status": "ok",
+          "detail": "levels=30, rows=180, obs_per_level=6..6, basis=2, cov_params=3, levels/basis=15.00, levels/param=10.00, rows/param=60.00; grouping levels are the effective n for covariance support; risk=v0 information budget is sufficient; recommendation=information budget is sufficient under v0 thresholds; explanation=180 rows are clustered into 30 grouping levels; grouping levels are the effective n for random-effect distribution support"
+        }
+      ]
+    },
+    {
+      "title": "Dependence Paths",
+      "lines": [
+        {
+          "label": "kernels",
+          "status": "info",
+          "detail": "r0=marginal(group, intercept=true, covariance=full, basis=intercept, x)"
+        },
+        {
+          "label": "repeated units",
+          "status": "ok",
+          "detail": "group=marginal(group, levels=30, obs_per_level=6..6, covered_by=r0)"
+        },
+        {
+          "label": "missing paths",
+          "status": "ok",
+          "detail": "none"
+        }
+      ]
+    },
+    {
+      "title": "Parameterization Trace",
+      "lines": [
+        {
+          "label": "r0",
+          "status": "ok",
+          "detail": "source=(1 + x | group); group=group; family=FullCholesky; user_basis=intercept, x; optimizer_basis=intercept, x; theta_slots=theta[0], theta[1], theta[2]; lambda_slots=(0, 0), (1, 0), (1, 1); parmap_aligned=3/3; varcorr_entries=sd(intercept), sd(x), corr(x,intercept)"
+        }
+      ]
+    },
+    {
+      "title": "Effective Covariance",
+      "lines": [
+        {
+          "label": "r0",
+          "status": "info",
+          "detail": "requested rank 2, supported rank 1; basis=intercept, x; supported direction PC1: 0.995*intercept + 0.100*x (1.000 variance explained); unsupported direction PC2: -0.100*intercept + 0.995*x (0.000 variance explained); inference consequence: fixed-effect inference is conditional on a certificate-time reduced-rank covariance summary; unsupported directions are not evidence of zero population variance; interpretable submodel suggestion: (1 | group); dominant loadings=0.995*intercept + 0.100*x; objective gap=0.000; within tolerance=true"
+        }
+      ]
+    },
+    {
+      "title": "Policy Recommendations",
+      "lines": [
+        {
+          "label": "maximal feasible",
+          "status": "ok",
+          "detail": "no advisory reductions or refusals"
+        }
+      ]
+    },
+    {
+      "title": "Optimizer",
+      "lines": [
+        {
+          "label": "status",
+          "status": "info",
+          "detail": "ConvergedReducedRank"
+        },
+        {
+          "label": "optimizer",
+          "status": "info",
+          "detail": "bobyqa"
+        },
+        {
+          "label": "objective",
+          "status": "info",
+          "detail": "-1823.641298"
+        },
+        {
+          "label": "optimizer stop",
+          "status": "ok",
+          "detail": "return_code=SUCCESS; acceptable=true; budget_exhausted=false; fevals=521; objective_delta=2532.81"
+        },
+        {
+          "label": "parameter space",
+          "status": "ok",
+          "detail": "theta=3, free=3, boundary=0, boundary_indices=none"
+        },
+        {
+          "label": "sample-size context",
+          "status": "info",
+          "detail": "n=180, theta=3, n/theta=60.00"
+        },
+        {
+          "label": "gradient evidence",
+          "status": "ok",
+          "detail": "method=finite_difference; raw=184.57; scaled=0.10; free=184.57; projected=184.57; kkt_boundary=0.00"
+        },
+        {
+          "label": "hessian evidence",
+          "status": "info",
+          "detail": "method=finite_difference; quality=approximate (finite-difference active-subspace Hessian is positive semidefinite); min_eigen=0.18; condition=44170259193.51; rank=3"
+        },
+        {
+          "label": "certification quality",
+          "status": "warning",
+          "detail": "failed (free-gradient norm 1.845664e2 exceeds tolerance 4.270411e-3)"
+        },
+        {
+          "label": "derivative checks",
+          "status": "warning",
+          "detail": "1 failed; 0 not assessed"
+        },
+        {
+          "label": "convergence verification",
+          "status": "not_assessed",
+          "detail": "not run; call verify_convergence() to compare bounded restarts and alternate optimizer fits"
+        }
+      ]
+    },
+    {
+      "title": "Inference",
+      "lines": [
+        {
+          "label": "finite-sample inference",
+          "status": "not_assessed",
+          "detail": "finite-sample inference is not implemented in compiler v0"
+        },
+        {
+          "label": "covariance derivatives",
+          "status": "not_assessed",
+          "detail": "compiler v0 does not expose covariance derivative certificates"
+        }
+      ]
+    },
+    {
+      "title": "Diagnostics",
+      "lines": [
+        {
+          "label": "covariance_reduced",
+          "status": "info",
+          "detail": "fitted covariance for r0 has effective rank 1 of requested rank 2; affected=r0; suggested=treat unsupported covariance directions as unsupported by this fit, not as proof of zero population variance | consider refitting the simpler random-effect term (1 | group); this fitted model was not silently refit"
+        }
+      ]
+    }
+  ],
+  "diagnostics": [
+    {
+      "code": "covariance_reduced",
+      "severity": "info",
+      "stage": "certification",
+      "message": "fitted covariance for r0 has effective rank 1 of requested rank 2",
+      "affected_terms": [
+        "r0"
+      ],
+      "suggested_actions": [
+        "treat unsupported covariance directions as unsupported by this fit, not as proof of zero population variance",
+        "consider refitting the simpler random-effect term (1 | group); this fitted model was not silently refit"
+      ],
+      "payload": {
+        "effective_rank_absolute_tolerance": 1e-10,
+        "effective_rank_relative_tolerance": 1e-6,
+        "interpretable_submodel": {
+          "loadings_dominant": [
+            {
+              "basis": "intercept",
+              "loading": 0.9950371950409282
+            },
+            {
+              "basis": "x",
+              "loading": 0.09950367071159558
+            }
+          ],
+          "objective_gap": 0.0,
+          "suggested_formula": "(1 | group)",
+          "within_tolerance": true
+        },
+        "rank_tolerance": 2.0404208990918134e-6,
+        "requested_rank": 2,
+        "supported_rank": 1
+      }
+    }
+  ]
+}

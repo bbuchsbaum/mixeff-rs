@@ -1,0 +1,40 @@
+name = "penicillin"
+source = "lme4::Penicillin"
+license = "GPL (>= 2) — see lme4 DESCRIPTION"
+n_rows = 144
+description = """
+Diameter of zone of inhibition for an antibiotic assay (Davies & Goldsmith,
+1972): 24 plates × 6 samples, fully crossed. The canonical small
+crossed-random-effects example. Both grouping factors are scalar random
+intercepts; no fixed effects beyond the grand mean.
+"""
+
+[[columns]]
+name = "diameter"
+type = "numeric"
+
+[[columns]]
+name = "plate"
+type = "categorical"
+levels = ["a","b","c","d","e","f","g","h","i","j","k","l",
+          "m","n","o","p","q","r","s","t","u","v","w","x"]
+
+[[columns]]
+name = "sample"
+type = "categorical"
+levels = ["A","B","C","D","E","F"]
+
+[[fits]]
+formula = "diameter ~ 1 + (1 | plate) + (1 | sample)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+[fits.expected]
+beta = [22.9722]
+sigma = 0.5499
+re_sigmas = [0.84672, 1.5395]   # σ_plate, σ_sample
+objective = 330.8606
+
+[tags]
+structure = ["random_intercept", "crossed"]
+difficulty = "easy"

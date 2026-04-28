@@ -1,0 +1,64 @@
+//! Compiler-contract layer for mixed model specifications.
+//!
+//! This module is intentionally additive. It records semantic model meaning,
+//! diagnostics, parameterization maps, and explanation artifacts without
+//! changing the existing numerical fitting path.
+
+pub mod artifact;
+pub mod audit;
+pub mod certificate;
+pub mod diagnostics;
+pub mod estimability;
+pub mod explain;
+pub mod ir;
+pub mod policy;
+pub mod report;
+pub mod theta_map;
+
+pub use artifact::{
+    BasisLoading, CompiledModelArtifact, CovarianceParameterTrace, DerivativeAvailability,
+    DominantLoading, EffectiveCovarianceSummary, EffectiveRankStatus, FitIntent, FitMode,
+    InferenceAvailability, InterpretableSubmodel, LambdaSlotTrace, ModelBoundary,
+    ModelChangeStatus, ModelKind, ModelRandomTermState, ModelStageState, ModelStateChange,
+    ModelStateStage, ModelStateStatus, ModelStateSummary, ObjectiveApproximation,
+    OptimizerCertificateScope, ParmapTrace, ReductionRecord, ReductionTrigger,
+    ReproducibilityRecord, SchemaMetadata, SupportedCovarianceDirection, ThetaSlotTrace,
+    VarCorrEntryKind, VarCorrEntryTrace, DOMINANT_LOADING_THRESHOLD, INTERPRETABLE_GAP_TOLERANCE,
+};
+pub use audit::{
+    audit_design, BasisAudit, CertificateCheck, ConvergenceEvidence, ConvergenceVerification,
+    ConvergenceVerificationRun, ConvergenceVerificationStatus, CovarianceKernelAudit,
+    CovarianceKernelGraphAudit, DependencePathAudit, DependencePathKind, DesignAudit,
+    EmptyCellAudit, EvidenceMethod, EvidenceQuality, FitAudit, FixedEffectAudit,
+    FixedEffectColumnAudit, FixedEffectColumnKind, FixedEffectTermAudit, FixedEffectTermStatus,
+    GradientEvidence, GroupingAudit, HessianEvidence, InformationBudgetStatus,
+    MissingDependencePathAudit, OptimizerCertificate, OptimizerDerivativeEvidence,
+    OptimizerStopEvidence, ParameterSpaceEvidence, RandomEffectEffectiveNReport,
+    RandomEffectInformationBudget, RandomTermAudit, RankAssessment, RankStatus, SampleSizeContext,
+};
+pub use certificate::{
+    certify, expected_statuses, generated_x_values, near_singular_re, Certificate, FixedDesign,
+    GeneratorSpec,
+};
+pub use diagnostics::{Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticStage, FitStatus};
+pub use estimability::{
+    ContrastMatrix, ContrastRhs, EstimabilityAssessment, EstimabilityStatus,
+    FixedContrastEstimability, FixedEffectHypothesis, FixedEffectTest, FixedTermEstimability,
+    InferenceMethod, InferenceStatus, KernelPathEstimability, RandomCovarianceEstimability,
+    RandomVarianceEstimability, ReliabilityGrade,
+};
+pub use explain::{explain_model, ModelExplanation};
+pub use ir::{
+    compile_formula_ir, CovarianceForm, CovarianceStory, GroupingFactorIr, GroupingRole,
+    InterceptPolicy, RandomCoefficient, RandomCoefficientKind, RandomTermIr, SemanticModel,
+    SourceSyntax,
+};
+pub use policy::{
+    recommend_policy, CompilerPolicy, CompilerThresholds, PolicyAction, PolicyRecommendation,
+    RandomStrategy,
+};
+pub use report::{AuditReportLine, AuditReportSection, AuditReportStatus, ModelAuditReport};
+pub use theta_map::{
+    CovarianceFamily, CovarianceFamilyTransition, ParameterConstraint, ParameterStatus, ThetaMap,
+    ThetaMapBlock, ThetaSlot,
+};

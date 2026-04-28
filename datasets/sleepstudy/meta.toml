@@ -1,0 +1,54 @@
+name = "sleepstudy"
+source = "lme4::sleepstudy"
+license = "GPL (>= 2) — see lme4 DESCRIPTION"
+n_rows = 180
+description = """
+Reaction-time data from a sleep-deprivation study (Belenky et al., 2003).
+18 subjects measured daily over 10 days. The classic worked example for a
+random-intercept-and-slope LMM and the standard sanity check for any new
+mixed-models implementation.
+"""
+
+[[columns]]
+name = "Reaction"
+type = "numeric"
+unit = "ms"
+
+[[columns]]
+name = "Days"
+type = "numeric"
+
+[[columns]]
+name = "Subject"
+type = "categorical"
+levels = ["308","309","310","330","331","332","333","334","335",
+          "337","349","350","351","352","369","370","371","372"]
+
+[[fits]]
+formula = "Reaction ~ 1 + Days + (1 + Days | Subject)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+[fits.expected]
+# lme4 reference (lmer default, REML)
+beta = [251.40510, 10.46729]
+sigma = 25.59179
+# random-effects covariance: σ_intercept, σ_slope, ρ
+re_sigmas = [24.7407, 5.9221]
+re_corr = 0.0656
+# REML deviance (-2 * REML logLik)
+objective = 1743.628
+
+[[fits]]
+formula = "Reaction ~ 1 + Days + (1 + Days | Subject)"
+family = "Gaussian"
+link = "Identity"
+estimator = "ML"
+[fits.expected]
+# MixedModels.jl reference (ML default)
+beta = [251.40510, 10.46729]
+objective = 1751.9393
+
+[tags]
+structure = ["random_intercept", "random_slope", "correlated_re"]
+difficulty = "easy"
