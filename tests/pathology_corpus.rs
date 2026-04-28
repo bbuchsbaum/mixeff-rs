@@ -32,7 +32,7 @@ use mixedmodels::pathology::{
     effective_status_from_artifact, empty_crossings, expected_statuses, extreme_prevalence,
     generate, map_error_to_status, near_singular_re, pareto_sizes, scale_mismatch, set_group_sizes,
     singletons_with_slope, BoundaryKind, Certificate, ExpectedStatusSet, GeneratorSpec,
-    StructuralIssue, WEAK_ID_THRESHOLD,
+    SeparationKind, StructuralIssue, SEPARATION_INTERCEPT_SHIFT_TOL, WEAK_ID_THRESHOLD,
 };
 
 /// Build the four foundation-stratum specs.
@@ -256,6 +256,29 @@ mod fixtures {
             dmatrix![4.0, 0.5; 0.5, 1.0],
         );
         collinear_fe(&mut spec, 0, 1, 0.99);
+        spec
+    }
+
+    /// Separation-stratum fixture for `bd-01KQ8FSHVBDS85KS0KM4867VBK`.
+    /// Bernoulli/Logit design with an extreme intercept shift that drives
+    /// the population prevalence below 1e-4, the canonical structural-
+    /// separation pattern. The placeholder certificate detector keys on
+    /// `family == Bernoulli && |intercept_shift| ≥ SEPARATION_INTERCEPT_SHIFT_TOL`,
+    /// flags `StructuralIssue::Separation`, and widens
+    /// [`expected_statuses`] to admit `ConvergedPenalised` alongside
+    /// `NotIdentifiable` and `NotOptimized`. Proper LP-based detection
+    /// lands under `bd-01KQ8FS7HK6TX2TMX0J0XFGYFD`.
+    pub fn separation_extreme_prevalence() -> GeneratorSpec {
+        let mut spec = GeneratorSpec::lmm(
+            "separation_extreme_prevalence_negative_15",
+            42,
+            vec![20; 30],
+            vec![0.0, 0.5],
+            true,
+            0,
+            dmatrix![1.0],
+        );
+        extreme_prevalence(&mut spec, -15.0);
         spec
     }
 
@@ -710,6 +733,85 @@ fn easy_fixture_does_not_trigger_weak_identification() {
         !cert.weak_identification,
         "easy fixture should not be flagged weakly identified (score = {}, threshold = {})",
         cert.weak_id_score, cert.weak_id_threshold
+    );
+}
+
+// --- bd-01KQ8FSHVBDS85KS0KM4867VBK -------------------------------------
+// ConvergedPenalised admittance for separation-stratum fixtures. The
+// certificate flags Bernoulli + extreme-intercept-shift specs as
+// `StructuralIssue::Separation { kind: Unspecified }` (placeholder
+// detection — proper LP-based detection lands under
+// bd-01KQ8FS7HK6TX2TMX0J0XFGYFD). The dedicated `expected_statuses`
+// branch returns `{NotIdentifiable, NotOptimized, ConvergedPenalised}`
+// — narrower than the generic structural-issue set, because honestly
+// reporting a separated logistic as `ConvergedInterior` would lie about
+// the existence of an MLE.
+
+#[test]
+fn separation_fixture_certifies_separation_structural_issue() {
+    let spec = fixtures::separation_extreme_prevalence();
+    // Sanity: the fixture sits above the placeholder detector threshold.
+    assert!(
+        spec.binary_intercept_shift.abs() >= SEPARATION_INTERCEPT_SHIFT_TOL,
+        "separation fixture must sit above the placeholder detector threshold; \
+         got |shift| = {} but tolerance is {}",
+        spec.binary_intercept_shift.abs(),
+        SEPARATION_INTERCEPT_SHIFT_TOL
+    );
+    let cert = certify(&spec);
+    assert!(
+        matches!(
+            cert.structural_issue,
+            Some(StructuralIssue::Separation {
+                kind: SeparationKind::Unspecified
+            })
+        ),
+        "expected StructuralIssue::Separation, got {:?}",
+        cert.structural_issue
+    );
+}
+
+#[test]
+fn separation_expected_statuses_admits_converged_penalised() {
+    // Acceptance criterion (bd-01KQ8FSHVBDS85KS0KM4867VBK): a
+    // separation-stratum fixture's expected status set must include
+    // `ConvergedPenalised`, alongside the refusal options.
+    let spec = fixtures::separation_extreme_prevalence();
+    let cert = certify(&spec);
+    let exp = expected_statuses(&cert);
+    assert!(
+        exp.contains(FitStatus::ConvergedPenalised),
+        "separation set should admit ConvergedPenalised, got {:?}",
+        exp.allowed
+    );
+    assert!(
+        exp.contains(FitStatus::NotIdentifiable),
+        "separation set should still admit NotIdentifiable (refusal path), got {:?}",
+        exp.allowed
+    );
+    assert!(
+        exp.contains(FitStatus::NotOptimized),
+        "separation set should still admit NotOptimized, got {:?}",
+        exp.allowed
+    );
+    // Critical contract claim: a separated logistic cannot honestly land
+    // on a standard Converged* status. Asserting these are *excluded*
+    // guards against accidentally widening the separation branch back to
+    // the generic structural-issue set.
+    assert!(
+        !exp.contains(FitStatus::ConvergedInterior),
+        "separation set must not admit ConvergedInterior, got {:?}",
+        exp.allowed
+    );
+    assert!(
+        !exp.contains(FitStatus::ConvergedBoundary),
+        "separation set must not admit ConvergedBoundary, got {:?}",
+        exp.allowed
+    );
+    assert!(
+        !exp.contains(FitStatus::ConvergedReducedRank),
+        "separation set must not admit ConvergedReducedRank, got {:?}",
+        exp.allowed
     );
 }
 

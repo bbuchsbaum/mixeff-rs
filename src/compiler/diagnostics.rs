@@ -3,12 +3,27 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 /// Top-level statistical fit status used by compiler and optimizer artifacts.
+///
+/// `ConvergedPenalised` is for fits whose maximum-likelihood estimate does
+/// **not** exist (likelihood unbounded; e.g. fixed-effect or conditional
+/// separation in a logistic GLMM) but for which a well-defined penalised
+/// estimate (Firth, ridge, weakly-informative prior) does exist. Calling
+/// such a fit `Converged*` would be dishonest — it is not an MLE — so the
+/// contract carves out a dedicated leaf status. Refusal/`NotIdentifiable`
+/// remains the right answer when no penalty is applied.
+///
+/// The ML-non-existence reason and the penalty method belong on the
+/// artifact (alongside the optimizer certificate), not on this enum, so
+/// the variant stays unit-shaped and `Copy + Eq`. See
+/// `docs/mixed_model_compiler_inference_contract.md` for the
+/// Refusal-vs-ConvergedPenalised decision tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FitStatus {
     ConvergedInterior,
     ConvergedBoundary,
     ConvergedReducedRank,
+    ConvergedPenalised,
     NotIdentifiable,
     NotOptimized,
     NotAssessed,

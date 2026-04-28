@@ -1281,7 +1281,9 @@ fn diagnostic_severity_status(severity: DiagnosticSeverity) -> AuditReportStatus
 fn fit_status(status: FitStatus) -> AuditReportStatus {
     match status {
         FitStatus::ConvergedInterior => AuditReportStatus::Ok,
-        FitStatus::ConvergedBoundary | FitStatus::ConvergedReducedRank => AuditReportStatus::Info,
+        FitStatus::ConvergedBoundary
+        | FitStatus::ConvergedReducedRank
+        | FitStatus::ConvergedPenalised => AuditReportStatus::Info,
         FitStatus::NotIdentifiable | FitStatus::NotOptimized => AuditReportStatus::Warning,
         FitStatus::NotAssessed => AuditReportStatus::NotAssessed,
     }

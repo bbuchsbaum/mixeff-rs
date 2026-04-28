@@ -134,6 +134,7 @@ pub enum FitStatus {
     ConvergedInterior,
     ConvergedBoundary,
     ConvergedReducedRank,
+    ConvergedPenalised,
     NotIdentifiable,
     NotOptimized,
 }
@@ -147,6 +148,14 @@ Suggested meanings:
   KKT signs and active-subspace curvature pass.
 - `ConvergedReducedRank`: requested covariance structure was singular or
   over-rich, but an effective lower-rank structure is identifiable and fitted.
+- `ConvergedPenalised`: the **maximum-likelihood** estimate does not exist
+  (likelihood unbounded — typically fixed-effect or conditional separation in
+  a logistic GLMM), but the user opted into a penalised path (Firth, ridge,
+  weakly-informative prior) and the *penalised* objective has a unique
+  optimum. The fit is honest about being a penalised estimate rather than an
+  MLE; consumers must inspect the artifact's penalty method and ML-non-
+  existence reason before treating point estimates as MLE-valid for things
+  like profile likelihood or Wald statistics.
 - `NotIdentifiable`: design or fitted information cannot support the requested
   fixed/random structure and no allowed reduction resolves it.
 - `NotOptimized`: numerical optimization failed before a certificate could be
@@ -154,6 +163,48 @@ Suggested meanings:
 
 This status should be supported by lower-level certificates rather than by
 optimizer exit codes alone.
+
+### Refusal vs `ConvergedPenalised` decision tree
+
+Whenever the design or response makes the MLE non-existent, the engine has
+exactly two honest answers — `NotIdentifiable` (refuse) or
+`ConvergedPenalised` (penalise). Choose between them with this tree:
+
+1. **Does the MLE exist?**
+   - **Yes** — return the appropriate `Converged*` status. Penalised paths
+     do **not** apply here; reporting `ConvergedPenalised` for a fit whose
+     MLE exists would mislabel a regular maximum likelihood estimate.
+   - **No** — proceed.
+2. **Did the caller opt into a penalty (e.g. `fit(..., penalty = firth())`),
+   and does the engine support that penalty for this family/link?**
+   - **No** — return `NotIdentifiable` and surface the structural diagnostic
+     (separation kind, reduced-rank direction, etc.). Refusal is the default
+     for non-existent MLEs; quietly substituting a penalty would violate
+     the contract's no-hidden-model-surgery principle.
+   - **Yes** — proceed.
+3. **Does the *penalised* objective have a unique optimum that satisfies
+   the optimizer KKT certificate?**
+   - **No** — return `NotIdentifiable`. A penalty alone does not rescue an
+     irreducibly degenerate design (e.g. perfect FE collinearity); refusal
+     stays the right answer.
+   - **Yes** — return `ConvergedPenalised`. The artifact must record the
+     penalty method, the penalty strength, and the ML-non-existence reason
+     so consumers can decide whether to trust the point estimate for their
+     downstream task.
+
+`NotOptimized` is orthogonal to this tree: it covers numerical failure of
+the optimizer (line search collapse, NaN propagation) regardless of whether
+the underlying problem is identifiable. A penalised fit whose optimizer
+failed remains `NotOptimized`, not `ConvergedPenalised`.
+
+The pathology corpus exercises the contract end-to-end: separation-stratum
+fixtures admit `{NotIdentifiable, NotOptimized, ConvergedPenalised}` in
+their certificate's expected status set
+(`src/pathology/certificate.rs::expected_statuses`), and a fit that lands
+outside that set is a contract regression. Proper LP-based separation
+detection lands under `bd-01KQ8FS7HK6TX2TMX0J0XFGYFD`; until then the
+certificate uses the placeholder Bernoulli + extreme-intercept-shift
+heuristic to gate the branch.
 
 ## KKT-Certified Optimization
 

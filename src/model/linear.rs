@@ -1091,11 +1091,18 @@ impl LinearMixedModel {
         let Some(certificate) = &self.compiler_artifact.optimizer_certificate else {
             return;
         };
+        // ConvergedPenalised fits still expose well-defined Λ matrices, so
+        // their effective-covariance summaries are meaningful and should be
+        // refreshed alongside the standard converged statuses. The
+        // *promotion* path below stays narrower (only Interior/Boundary
+        // promote to ReducedRank) — ConvergedPenalised is a contractual
+        // leaf and must not be silently rewritten.
         if !matches!(
             certificate.status,
             crate::compiler::FitStatus::ConvergedInterior
                 | crate::compiler::FitStatus::ConvergedBoundary
                 | crate::compiler::FitStatus::ConvergedReducedRank
+                | crate::compiler::FitStatus::ConvergedPenalised
         ) {
             self.compiler_artifact.effective_covariance.clear();
             return;

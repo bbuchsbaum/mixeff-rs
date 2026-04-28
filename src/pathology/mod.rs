@@ -26,7 +26,8 @@ pub mod transforms;
 pub use certificate::{
     certify, effective_status, effective_status_from_artifact, expected_statuses,
     fisher_correlation_eigvals, map_error_to_status, BoundaryKind, Certificate, CrossedSummary,
-    ExpectedStatusSet, StructuralIssue, WEAK_ID_THRESHOLD,
+    ExpectedStatusSet, SeparationKind, StructuralIssue, SEPARATION_INTERCEPT_SHIFT_TOL,
+    WEAK_ID_THRESHOLD,
 };
 pub use spec::{generate, CrossedSpec, GeneratorOutput, GeneratorSpec};
 pub use transforms::{

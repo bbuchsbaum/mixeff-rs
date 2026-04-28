@@ -20,7 +20,7 @@ use nalgebra::{DMatrix, SymmetricEigen};
 use super::spec::GeneratorSpec;
 use crate::compiler::{CompiledModelArtifact, EffectiveRankStatus, FitStatus};
 use crate::error::{LinAlgError, MixedModelError};
-use crate::model::LinearMixedModel;
+use crate::model::{Family, LinearMixedModel};
 
 /// Numerical zero threshold for variance components in truth.
 const ZERO_VARIANCE_TOL: f64 = 1e-10;
@@ -29,6 +29,17 @@ const UNIT_CORRELATION_TOL: f64 = 1e-6;
 /// Multiplicative threshold on the trace for counting an eigenvalue as
 /// "effectively zero" when computing rank(Σ_truth).
 const RANK_REL_TOL: f64 = 1e-12;
+/// Magnitude of [`super::spec::GeneratorSpec::binary_intercept_shift`] above
+/// which a Bernoulli logistic spec is treated as a *separation candidate*.
+/// At |shift| ≥ 10 the population prevalence is below `≈ exp(-10) ≈ 5e-5`
+/// (or above `1 - 5e-5`), so the realised data is almost certainly all-zero
+/// or all-one for the rare class — i.e. structurally separated.
+///
+/// **Placeholder threshold.** Proper LP-based separation detection lands
+/// in `bd-01KQ8FS7HK6TX2TMX0J0XFGYFD`; until then this magnitude check is
+/// the only mechanism by which a fixture can exercise the
+/// `ConvergedPenalised` admittance branch.
+pub const SEPARATION_INTERCEPT_SHIFT_TOL: f64 = 10.0;
 /// Default cutoff below which the dimensionless weak-identification index
 /// flags a design as weakly identified. Calibrated empirically against the
 /// pathology corpus (see `tests/fixtures/pathology_corpus/calibration.md`);
@@ -173,6 +184,42 @@ pub enum StructuralIssue {
     /// component — see [`expected_statuses`] for the acceptable status
     /// set under this issue.
     DisconnectedCrossings { n_components: usize },
+    /// The likelihood is unbounded because the design exhibits
+    /// (fixed-effect or conditional) separation. The MLE does not exist;
+    /// the contract response is either `NotIdentifiable` (the engine
+    /// refuses) or `ConvergedPenalised` (the engine applies a Firth-style
+    /// penalty and returns a well-defined penalised estimate). See the
+    /// Refusal-vs-ConvergedPenalised decision tree in
+    /// `docs/mixed_model_compiler_inference_contract.md`.
+    ///
+    /// Detection in this issue is a **placeholder** keyed off Bernoulli
+    /// + extreme `binary_intercept_shift` (see
+    /// [`SEPARATION_INTERCEPT_SHIFT_TOL`]); proper LP-based detection
+    /// lands in `bd-01KQ8FS7HK6TX2TMX0J0XFGYFD`.
+    Separation { kind: SeparationKind },
+}
+
+/// Coarse classification of a separation pattern.
+///
+/// The distinction matters for the next pathology issue
+/// (`bd-01KQ8FS7HK6TX2TMX0J0XFGYFD`), which will plumb proper
+/// (LP-based) FE separation and per-group conditional separation
+/// detection. For now the certificate only ever produces
+/// [`SeparationKind::Unspecified`] from its placeholder detector.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SeparationKind {
+    /// Linear separation in the fixed-effects design alone — there exists
+    /// a linear combination of `X` that perfectly predicts the response.
+    /// Konis (2007) trichotomy: complete, quasi-complete, overlap.
+    FixedEffect,
+    /// Conditional separation within at least one grouping level — at
+    /// least one group has all-success or all-failure outcomes, so the
+    /// per-group random intercept drifts to ±∞ at the MLE.
+    Conditional { group: usize },
+    /// Placeholder kind emitted by the current heuristic (Bernoulli +
+    /// extreme intercept shift). The next issue will replace this with
+    /// the appropriate refined kind.
+    Unspecified,
 }
 
 /// The set of [`FitStatus`] values any conformant fit engine must produce
@@ -441,6 +488,21 @@ fn detect_structural_issue(
             });
         }
     }
+    // Placeholder separation detection: a binary response with an extreme
+    // intercept shift produces an essentially constant outcome in
+    // expectation, which is the canonical separation pattern. Real
+    // (LP-based) FE separation detection plus per-group conditional
+    // separation lands under `bd-01KQ8FS7HK6TX2TMX0J0XFGYFD`; until
+    // then the certificate stays conservative — only the Bernoulli +
+    // extreme-shift signature flips this branch on, which is exactly
+    // what the separation-stratum fixture relies on.
+    if matches!(spec.family, Family::Bernoulli)
+        && spec.binary_intercept_shift.abs() >= SEPARATION_INTERCEPT_SHIFT_TOL
+    {
+        return Some(StructuralIssue::Separation {
+            kind: SeparationKind::Unspecified,
+        });
+    }
     if spec.n_re_slopes == 0 {
         return None;
     }
@@ -498,6 +560,24 @@ pub fn expected_statuses(cert: &Certificate) -> ExpectedStatusSet {
     use FitStatus::*;
 
     if let Some(issue) = &cert.structural_issue {
+        // Separation is its own branch: the MLE genuinely doesn't exist
+        // (the likelihood is unbounded), so the contract response is
+        // either Refusal (`NotIdentifiable`/`NotOptimized`) or a Firth-
+        // style penalised fit (`ConvergedPenalised`). Standard converged
+        // statuses must NOT be admitted here — a Bernoulli logistic with
+        // structural separation cannot honestly land on `ConvergedInterior`.
+        // See `docs/mixed_model_compiler_inference_contract.md` for the
+        // Refusal-vs-ConvergedPenalised decision tree.
+        if let StructuralIssue::Separation { kind } = issue {
+            return ExpectedStatusSet {
+                allowed: vec![NotIdentifiable, NotOptimized, ConvergedPenalised],
+                rationale: format!(
+                    "separation candidate ({:?}) in '{}': MLE undefined; \
+                     refuse or apply a penalised fit (e.g. Firth)",
+                    kind, cert.label
+                ),
+            };
+        }
         // ConvergedInterior is included because the *expectation*-level
         // rank deficiency (e.g. ρ=1 collinearity) propagates through
         // sqrt_psd as an eigenvalue near ε rather than exactly zero, so

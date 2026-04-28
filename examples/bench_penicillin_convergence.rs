@@ -466,6 +466,7 @@ fn fit_status_label(status: FitStatus) -> &'static str {
         FitStatus::ConvergedInterior => "converged_interior",
         FitStatus::ConvergedBoundary => "converged_boundary",
         FitStatus::ConvergedReducedRank => "converged_reduced_rank",
+        FitStatus::ConvergedPenalised => "converged_penalised",
         FitStatus::NotIdentifiable => "not_identifiable",
         FitStatus::NotOptimized => "not_optimized",
         FitStatus::NotAssessed => "not_assessed",

@@ -1,0 +1,10 @@
+name = "separation_extreme_prevalence_negative_15"
+stratum = "separation"
+group_sizes = [20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20]
+fe_truth = [0.0, 0.5]
+re_cov_truth = [[1.0]]
+family = "bernoulli"
+link = "logit"
+seed = 42
+binary_intercept_shift = -15.0
+seed_sweep = [42, 43, 44]
