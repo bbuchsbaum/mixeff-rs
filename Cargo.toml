@@ -19,10 +19,19 @@ num-traits = "0.2"
 approx = "0.5"
 indexmap = "2"
 log = "0.4"
-nlopt = "0.8.1"
+nlopt = { version = "0.8.1", optional = true }
 csv = "1"
 toml = { version = "0.8", default-features = false, features = ["parse"] }
 minilp = "0.2"
+
+[features]
+default = ["nlopt"]
+# Enables NLopt (BOBYQA / large-θ paths and the GLMM AGQ optimizer).
+# Requires CMake plus a C/C++ toolchain at build time, which is heavy
+# for downstream R/CRAN-tarball distribution. Disabling falls back to
+# COBYLA-based fits (LMM keeps full functionality; GLMM fitting
+# returns a structured error directing callers to enable the feature).
+nlopt = ["dep:nlopt"]
 
 [dev-dependencies]
 approx = "0.5"

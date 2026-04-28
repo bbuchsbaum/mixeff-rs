@@ -185,4 +185,19 @@ pub trait MixedModelFit {
 
     /// Random effects (conditional modes), one matrix per grouping factor.
     fn ranef(&self) -> Vec<DMatrix<f64>>;
+
+    /// Conditional distribution family. `None` for ordinary `LinearMixedModel`s
+    /// (Gaussian by construction); `Some(_)` for GLMMs.
+    ///
+    /// Used by `LikelihoodRatioTest` to refuse comparisons across families,
+    /// matching `MixedModels._samefamily` in the Julia reference.
+    fn family_kind(&self) -> Option<Family> {
+        None
+    }
+
+    /// Link function. `None` for ordinary `LinearMixedModel`s (identity by
+    /// construction); `Some(_)` for GLMMs.
+    fn link_kind(&self) -> Option<LinkFunction> {
+        None
+    }
 }

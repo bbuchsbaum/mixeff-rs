@@ -10,6 +10,7 @@
 //! only θ to be optimized numerically.
 
 use nalgebra::{DMatrix, DVector, SymmetricEigen};
+#[cfg(feature = "nlopt")]
 use nlopt::{
     Algorithm as NloptAlgorithm, FailState as NloptFailState, Nlopt, Target as NloptTarget,
 };
@@ -901,16 +902,30 @@ impl LinearMixedModel {
                 self.fit_cobyla(reml)?;
             }
             Optimizer::NloptBobyqa => {
+                #[cfg(feature = "nlopt")]
                 self.fit_nlopt_small_theta_with_maxeval(
                     reml,
                     Some(self.optsum.max_feval.max(1) as usize),
                 )?;
+                #[cfg(not(feature = "nlopt"))]
+                return Err(MixedModelError::Optimization(
+                    "Optimizer::NloptBobyqa requires the `nlopt` feature; \
+                     rebuild with default features or pick a non-NLopt optimizer"
+                        .to_string(),
+                ));
             }
             Optimizer::NloptNewuoa => {
+                #[cfg(feature = "nlopt")]
                 self.fit_nlopt_large_theta_with_maxeval(
                     reml,
                     Some(self.optsum.max_feval.max(1) as usize),
                 )?;
+                #[cfg(not(feature = "nlopt"))]
+                return Err(MixedModelError::Optimization(
+                    "Optimizer::NloptNewuoa requires the `nlopt` feature; \
+                     rebuild with default features or pick a non-NLopt optimizer"
+                        .to_string(),
+                ));
             }
         }
         self.refresh_optimizer_certificate();
@@ -1533,15 +1548,19 @@ impl LinearMixedModel {
         self.reterms.len() == 1 && self.reterms[0].vsize == 1 && self.n_theta() == 1
     }
 
+    #[cfg(feature = "nlopt")]
     fn use_nlopt_bobyqa_small_theta_optimizer(&self) -> bool {
         // Smooth, low-dimensional problems benefit substantially from
         // BOBYQA's trust-region modelling vs. pattern_search (~3× fewer
         // evals on profiled kb07-class fits). Pattern search remains the
-        // automatic fallback if BOBYQA fails to converge.
+        // automatic fallback if BOBYQA fails to converge. Gated to the
+        // `nlopt` feature; without it the auto-fit dispatch routes
+        // straight to COBYLA without consulting this predicate.
         let n_theta = self.n_theta();
         n_theta > 1 && n_theta <= 6
     }
 
+    #[cfg(feature = "nlopt")]
     fn use_large_single_vsize2_optimizer_tuning(&self) -> bool {
         self.reterms.len() == 1
             && self.reterms[0].vsize == 2
@@ -1553,6 +1572,7 @@ impl LinearMixedModel {
             && matches!(self.a_blocks[2], MatrixBlock::Dense(_))
     }
 
+    #[cfg(feature = "nlopt")]
     fn use_large_theta_nlopt_optimizer(&self) -> bool {
         self.n_theta() > 6
     }
@@ -1798,6 +1818,7 @@ impl LinearMixedModel {
         ))
     }
 
+    #[cfg(feature = "nlopt")]
     fn nlopt_ok(
         result: std::result::Result<nlopt::SuccessState, NloptFailState>,
         action: &str,
@@ -1807,6 +1828,7 @@ impl LinearMixedModel {
         })
     }
 
+    #[cfg(feature = "nlopt")]
     fn nlopt_status_label(name: &str) -> String {
         match name {
             "Success" => "SUCCESS".to_string(),
@@ -1906,6 +1928,7 @@ impl LinearMixedModel {
         Ok(self)
     }
 
+    #[cfg(feature = "nlopt")]
     fn rectify_theta_columns(theta: &mut [f64], parmap: &[(usize, usize, usize)], n_terms: usize) {
         for block in 0..n_terms {
             let max_col = parmap
@@ -2400,6 +2423,7 @@ impl LinearMixedModel {
         self.fit_cobyla_with_maxeval(reml, None)
     }
 
+    #[cfg(feature = "nlopt")]
     fn fit_nlopt_large_theta_with_maxeval(
         &mut self,
         reml: bool,
@@ -2425,6 +2449,7 @@ impl LinearMixedModel {
     /// evaluations of the pattern-search fallback; profiling kb07 (n_theta
     /// = 2) showed pattern_search using ~84 evaluations for what BOBYQA
     /// typically does in ~25.
+    #[cfg(feature = "nlopt")]
     fn fit_nlopt_small_theta_with_maxeval(
         &mut self,
         reml: bool,
@@ -2439,6 +2464,7 @@ impl LinearMixedModel {
         )
     }
 
+    #[cfg(feature = "nlopt")]
     fn fit_nlopt_small_theta(&mut self, reml: bool) -> Result<&mut Self> {
         // Mirror the large-θ fallback pattern: if BOBYQA fails to converge
         // (rare on this problem class but possible on near-singular fits),
@@ -2455,6 +2481,7 @@ impl LinearMixedModel {
         Ok(self)
     }
 
+    #[cfg(feature = "nlopt")]
     fn fit_nlopt_with_algorithm(
         &mut self,
         algorithm: NloptAlgorithm,
@@ -2627,6 +2654,7 @@ impl LinearMixedModel {
         Ok(self)
     }
 
+    #[cfg(feature = "nlopt")]
     fn fit_nlopt_large_theta(&mut self, reml: bool) -> Result<&mut Self> {
         if self.fit_nlopt_large_theta_with_maxeval(reml, None).is_err() {
             return self.fit_cobyla(reml);
@@ -2655,12 +2683,27 @@ impl LinearMixedModel {
 
         if self.use_scalar_single_theta_optimizer() {
             self.fit_scalar_single_theta()?;
-        } else if self.use_nlopt_bobyqa_small_theta_optimizer() {
-            self.fit_nlopt_small_theta(reml)?;
-        } else if self.use_large_theta_nlopt_optimizer() {
-            self.fit_nlopt_large_theta(reml)?;
         } else {
-            self.fit_cobyla(reml)?;
+            // The `use_*_nlopt_*` predicates always return `false` when
+            // the `nlopt` feature is disabled, so the no-feature build
+            // never reaches the nlopt arms even if they appear in the
+            // source. Cfg-gating the call sites lets the no-feature
+            // build still type-check (the methods themselves are gated
+            // out below).
+            #[cfg(feature = "nlopt")]
+            {
+                if self.use_nlopt_bobyqa_small_theta_optimizer() {
+                    self.fit_nlopt_small_theta(reml)?;
+                } else if self.use_large_theta_nlopt_optimizer() {
+                    self.fit_nlopt_large_theta(reml)?;
+                } else {
+                    self.fit_cobyla(reml)?;
+                }
+            }
+            #[cfg(not(feature = "nlopt"))]
+            {
+                self.fit_cobyla(reml)?;
+            }
         }
 
         self.refresh_optimizer_certificate();
@@ -6669,6 +6712,7 @@ mod tests {
         data
     }
 
+    #[cfg(feature = "nlopt")]
     fn simulate_large_theta_crossed(seed: u64) -> DataFrame {
         let mut rng = StdRng::seed_from_u64(seed);
         let normal = Normal::new(0.0, 1.0).unwrap();
@@ -8010,6 +8054,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "nlopt")]
     #[test]
     fn test_vector_fit_uses_bobyqa_with_bounded_evaluations() {
         // n_theta = 3 (correlated random slope) → BOBYQA path. Pattern
@@ -8030,6 +8075,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "nlopt")]
     #[test]
     fn test_large_theta_fit_uses_nlopt_newuoa() {
         let data = simulate_large_theta_crossed(123);
@@ -8048,6 +8094,7 @@ mod tests {
         assert!(model.sigma().is_finite());
     }
 
+    #[cfg(feature = "nlopt")]
     #[test]
     fn test_large_theta_nlopt_matches_or_beats_cobyla_baseline() {
         let data = simulate_large_theta_crossed(123);
@@ -8298,6 +8345,7 @@ mod tests {
         assert_eq!(model_sigma314.dof(), model_sigma314.n_theta());
     }
 
+    #[cfg(feature = "nlopt")]
     #[test]
     fn test_large_theta_fit_records_maxeval_status() {
         let data = simulate_large_theta_crossed(123);
@@ -8316,6 +8364,7 @@ mod tests {
         assert!(model.objective_value().is_finite());
     }
 
+    #[cfg(feature = "nlopt")]
     #[test]
     fn test_large_theta_fit_records_maxtime_status() {
         let data = simulate_large_theta_crossed(123);
@@ -8368,6 +8417,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "nlopt")]
     #[test]
     fn test_vector_objective_matches_julia_on_shared_fixture() {
         let data = shared_julia_parity_fixture();
@@ -8454,6 +8504,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "nlopt")]
     #[test]
     fn test_crossed_fit_matches_julia_on_shared_fixture() {
         let data = shared_julia_crossed_parity_fixture();
@@ -9339,6 +9390,7 @@ mod tests {
         assert_relative_eq!(model.logdet_re(), 74.4694698615524, epsilon = 0.1);
     }
 
+    #[cfg(feature = "nlopt")]
     #[test]
     fn test_penicillin_varcorr_std_devs_match_julia() {
         // Mirrors pls.jl "penicillin": std(fm) ≈ [[0.8456], [1.7707], [0.5499]]
@@ -9866,6 +9918,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "nlopt")]
     #[test]
     fn test_sleepstudy_ranef_u_shape_and_first_element() {
         // pls.jl:
@@ -9885,6 +9938,7 @@ mod tests {
         assert_relative_eq!(u3[0][(0, 0)], 3.030047743065841, epsilon = 0.001);
     }
 
+    #[cfg(feature = "nlopt")]
     #[test]
     fn test_sleepstudy_ranef_b_first_element() {
         // pls.jl: @test first(only(b3)) ≈ 2.8156104060324334 atol = 0.001
