@@ -643,6 +643,16 @@ impl LinearMixedModel {
         self.compiler_artifact.audit_report()
     }
 
+    /// Compact default print summary (PRD § 15).
+    pub fn print_summary(&self) -> crate::compiler::ModelPrint {
+        self.compiler_artifact.print_summary()
+    }
+
+    /// Source-to-fitted parameterization drilldown (PRD § 15).
+    pub fn parameterization(&self) -> crate::compiler::ParameterizationDrilldown {
+        self.compiler_artifact.parameterization()
+    }
+
     /// Requested, semantic, supported, and fitted model-state view.
     pub fn model_state_summary(&self) -> ModelStateSummary {
         self.compiler_artifact.model_state_summary()
@@ -3690,6 +3700,15 @@ impl LinearMixedModel {
             }
         }
         d
+    }
+}
+
+impl std::fmt::Display for LinearMixedModel {
+    /// Default print: the compact `ModelPrint` summary (PRD § 15).
+    /// Heavier reports stay one explicit method call away
+    /// (`audit_report`, `parameterization`, `changes`, `explain_model`).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.print_summary(), f)
     }
 }
 

@@ -12,6 +12,7 @@ pub mod estimability;
 pub mod explain;
 pub mod ir;
 pub mod policy;
+pub mod print;
 pub mod report;
 pub mod theta_map;
 
@@ -48,6 +49,7 @@ pub use estimability::{
     RandomVarianceEstimability, ReliabilityGrade,
 };
 pub use explain::{explain_model, ModelExplanation};
+pub use print::{ModelPrint, ParameterizationDrilldown, MODEL_PRINT_TOP_DIAGNOSTICS};
 pub use ir::{
     compile_formula_ir, CovarianceForm, CovarianceStory, GroupingFactorIr, GroupingRole,
     InterceptPolicy, RandomCoefficient, RandomCoefficientKind, RandomTermIr, SemanticModel,

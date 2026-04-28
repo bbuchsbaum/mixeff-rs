@@ -897,11 +897,18 @@ Legend:
 
 ### Print-Layer Acceptance
 
-- [ ] Default print output shows one canonical summary rather than all internal
-      model views (`bd-01KQ7X0RPMTTQ88MTRYNFC60YP`).
-- [ ] Drilldowns exist or are sketched for explanation, audit,
-      parameterization, and requested/effective changes
-      (`bd-01KQ7X0RPMTTQ88MTRYNFC60YP`).
+- [x] Default print output shows one canonical summary rather than all internal
+      model views — `LinearMixedModel`/`GeneralizedLinearMixedModel` `Display`
+      delegates to `print_summary()` returning [`compiler::ModelPrint`], which
+      shows fit status, formula(s), top diagnostics, inference availability,
+      and a one-line drilldowns pointer (`bd-01KQ7X0RPMTTQ88MTRYNFC60YP`).
+- [x] Drilldowns exist for explanation (`explain_model()` →
+      `ModelExplanation`), audit (`audit_report()` → `ModelAuditReport`),
+      parameterization (`parameterization()` → `compiler::ParameterizationDrilldown`,
+      grouping the artifact's `covariance_parameter_traces` per random term
+      with source syntax, basis, θ/Λ/parmap/VarCorr slots), and
+      requested/effective changes (`changes()` →
+      `Vec<ModelStateChange>`) (`bd-01KQ7X0RPMTTQ88MTRYNFC60YP`).
 
 ### Worked Example Acceptance
 

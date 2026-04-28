@@ -605,6 +605,27 @@ impl CompiledModelArtifact {
     }
 
     /// Build a stable user-facing audit report from the current artifact state.
+    /// Compact default-print summary of the artifact (PRD § 15).
+    ///
+    /// Suitable for `Display`; consumers wanting structured access can
+    /// keep the returned [`super::print::ModelPrint`] around and
+    /// inspect its public fields. Heavier reports
+    /// (`audit_report`, `explain_model`, `parameterization`,
+    /// `changes`) stay one explicit method call away.
+    pub fn print_summary(&self) -> super::print::ModelPrint {
+        super::print::ModelPrint::from_artifact(self)
+    }
+
+    /// Source-to-fitted parameterization drilldown (PRD § 15).
+    ///
+    /// Wraps the artifact's `covariance_parameter_traces` so callers
+    /// can render the per-(term, theta-slot) trace through source
+    /// syntax, `theta`, `Lambda`, `parmap`, and VarCorr entries
+    /// without flattening it manually. See [`super::print::ParameterizationDrilldown`].
+    pub fn parameterization(&self) -> super::print::ParameterizationDrilldown {
+        super::print::ParameterizationDrilldown::from_artifact(self)
+    }
+
     pub fn audit_report(&self) -> ModelAuditReport {
         ModelAuditReport::from_artifact(self)
     }

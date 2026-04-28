@@ -195,6 +195,16 @@ impl GeneralizedLinearMixedModel {
         self.lmm.audit_report()
     }
 
+    /// Compact default print summary (PRD § 15).
+    pub fn print_summary(&self) -> crate::compiler::ModelPrint {
+        self.lmm.print_summary()
+    }
+
+    /// Source-to-fitted parameterization drilldown (PRD § 15).
+    pub fn parameterization(&self) -> crate::compiler::ParameterizationDrilldown {
+        self.lmm.parameterization()
+    }
+
     /// Update the linear predictor η and conditional mean μ.
     pub fn update_eta(&mut self) {
         let n = self.eta.len();
@@ -772,6 +782,16 @@ fn link_label(link: LinkFunction) -> &'static str {
         LinkFunction::Probit => "probit",
         LinkFunction::Inverse => "inverse",
         LinkFunction::Sqrt => "sqrt",
+    }
+}
+
+impl std::fmt::Display for GeneralizedLinearMixedModel {
+    /// Default print: the compact `ModelPrint` summary (PRD § 15).
+    /// Heavier reports (`audit_report`, `parameterization`,
+    /// `changes`, `explain_model`) remain one explicit method call
+    /// away.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.print_summary(), f)
     }
 }
 
