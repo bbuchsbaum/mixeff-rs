@@ -20,14 +20,18 @@
 //! - **refusal**: design is structurally unidentifiable (contract `NotIdentifiable`)
 
 pub mod certificate;
+pub mod separation;
 pub mod spec;
 pub mod transforms;
 
 pub use certificate::{
     certify, effective_status, effective_status_from_artifact, expected_statuses,
     fisher_correlation_eigvals, map_error_to_status, BoundaryKind, Certificate, CrossedSummary,
-    ExpectedStatusSet, SeparationKind, StructuralIssue, SEPARATION_INTERCEPT_SHIFT_TOL,
-    WEAK_ID_THRESHOLD,
+    ExpectedStatusSet, SeparationKind, StructuralIssue, WEAK_ID_THRESHOLD,
+};
+pub use separation::{
+    detect_conditional_separation, detect_fe_separation, detect_separation, FeSeparationKind,
+    SeparationReport,
 };
 pub use spec::{generate, CrossedSpec, GeneratorOutput, GeneratorSpec};
 pub use transforms::{

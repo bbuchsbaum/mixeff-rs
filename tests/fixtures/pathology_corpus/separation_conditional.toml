@@ -1,0 +1,10 @@
+name = "conditional_separation_rare_events"
+stratum = "separation"
+group_sizes = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+fe_truth = [0.0, 0.5]
+re_cov_truth = [[1.0]]
+family = "bernoulli"
+link = "logit"
+seed = 42
+binary_intercept_shift = -1.5
+seed_sweep = [42, 43, 44]

@@ -22,6 +22,7 @@ log = "0.4"
 nlopt = "0.8.1"
 csv = "1"
 toml = { version = "0.8", default-features = false, features = ["parse"] }
+minilp = "0.2"
 
 [dev-dependencies]
 approx = "0.5"

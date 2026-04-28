@@ -17,7 +17,20 @@ status is a member of that set, never equality.
 | `boundary`      | true σ² = 0 (or \|ρ\| = 1)                   | `ConvergedBoundary`, `ConvergedInterior`                          |
 | `reduced_rank`  | rank(Σ_truth) < requested                    | `ConvergedReducedRank`, `ConvergedBoundary`                       |
 | `refusal`       | structural unidentifiability (e.g. singletons) | `NotIdentifiable`, `NotOptimized`, `ConvergedBoundary`           |
-| `separation`    | likelihood unbounded (Bernoulli + extreme shift) | `NotIdentifiable`, `NotOptimized`, `ConvergedPenalised`        |
+| `separation`    | logistic separation (FE / conditional / both) | `NotIdentifiable`, `NotOptimized`, `ConvergedPenalised`         |
+
+The `separation` stratum is sub-classified by the
+[`SeparationKind`](../../../src/pathology/certificate.rs) carried in
+`StructuralIssue::Separation`:
+
+- `FixedEffect(FeSeparationKind)` — Konis (2007) trichotomy detected
+  a separating hyperplane in the FE design alone. Fixture:
+  `separation_fe.toml`.
+- `Conditional { n_groups }` — at least one grouping level has all-
+  zero or all-one outcomes; the per-group random intercept's MLE
+  drifts to ±∞. Fixture: `separation_conditional.toml`.
+- `Both { fe_kind, n_groups }` — both tiers fired, the most
+  pathological combination. Fixture: `separation.toml`.
 
 The acceptable set is intentionally larger than one element for boundary,
 reduced-rank, and refusal strata. Truth on a contract boundary can
@@ -119,10 +132,6 @@ sweep that informs the threshold.
 
 - Composable transform DSL beyond `near_singular_re` —
   `bd-01KQ8FRYQ851X6Q9M33QCTD6PA`
-- Two-tier separation detection (FE + conditional) —
-  `bd-01KQ8FS7HK6TX2TMX0J0XFGYFD`. The current placeholder detector
-  fires on Bernoulli + extreme intercept shift only; LP-based FE
-  separation and per-group conditional separation land there.
 - Spectral interpretability (nearest-submodel suggestion) —
   `bd-01KQ8FSZPCBTWWS2Q11WWMQ2VY`
 - Cross-engine parity scoreboard (lme4 / MixedModels.jl) —

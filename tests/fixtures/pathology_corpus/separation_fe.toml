@@ -1,0 +1,10 @@
+name = "fe_separation_extreme_slope"
+stratum = "separation"
+group_sizes = [20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20]
+fe_truth = [0.0, 1e6]
+re_cov_truth = [[1.0]]
+family = "bernoulli"
+link = "logit"
+seed = 7
+residual_sd = 0.0
+seed_sweep = [7, 8, 9]

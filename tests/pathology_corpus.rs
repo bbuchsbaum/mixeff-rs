@@ -28,11 +28,11 @@ use mixedmodels::error::MixedModelError;
 use mixedmodels::formula::parse_formula;
 use mixedmodels::model::{Family, GeneralizedLinearMixedModel, LinearMixedModel, LinkFunction};
 use mixedmodels::pathology::{
-    block_diagonal_crossings, certify, collinear_fe, effective_status,
+    block_diagonal_crossings, certify, collinear_fe, detect_separation, effective_status,
     effective_status_from_artifact, empty_crossings, expected_statuses, extreme_prevalence,
     generate, map_error_to_status, near_singular_re, pareto_sizes, scale_mismatch, set_group_sizes,
-    singletons_with_slope, BoundaryKind, Certificate, ExpectedStatusSet, GeneratorSpec,
-    SeparationKind, StructuralIssue, SEPARATION_INTERCEPT_SHIFT_TOL, WEAK_ID_THRESHOLD,
+    singletons_with_slope, BoundaryKind, Certificate, ExpectedStatusSet, FeSeparationKind,
+    GeneratorSpec, SeparationKind, StructuralIssue, WEAK_ID_THRESHOLD,
 };
 
 /// Build the four foundation-stratum specs.
@@ -259,15 +259,68 @@ mod fixtures {
         spec
     }
 
+    /// Fixed-effect-only separation fixture for
+    /// `bd-01KQ8FS7HK6TX2TMX0J0XFGYFD`. A Bernoulli/Logit design with
+    /// an enormous slope (1e6) drives the realised response to track
+    /// the sign of the predictor exactly: `|β · x|` dominates the
+    /// random-intercept noise (`σ_RE = 1`) for every observation
+    /// outside an `x ≈ 0` band of width `~ σ_RE / |β|` ≈ `1e-6`, which
+    /// is statistically empty under `x ~ N(0, 1)` at corpus sizes. The
+    /// FE design `[1, x]` therefore admits the hyperplane `x = 0` as
+    /// a complete separator. Group sizes are kept large (20 obs each)
+    /// so the chance of any individual group falling on one side of
+    /// the separator is vanishingly small (≈ 2 · 0.5^20 per group);
+    /// for the chosen seed the realised data has zero conditionally-
+    /// separated groups, isolating FE separation from the conditional
+    /// tier.
+    pub fn fe_separation_extreme_slope() -> GeneratorSpec {
+        let mut spec = GeneratorSpec::lmm(
+            "fe_separation_extreme_slope",
+            7,
+            vec![20; 30],
+            vec![0.0, 1e6],
+            true,
+            0,
+            dmatrix![1.0],
+        );
+        spec.family = Family::Bernoulli;
+        spec.link = LinkFunction::Logit;
+        spec.residual_sd = 0.0;
+        spec
+    }
+
+    /// Conditional-only separation fixture for
+    /// `bd-01KQ8FS7HK6TX2TMX0J0XFGYFD`. A Bernoulli/Logit design with
+    /// rare-event prevalence (intercept shift -1.5 → base p ≈ 0.18)
+    /// and a mild slope (0.5) is unlikely to admit a separating
+    /// hyperplane in `[1, x]`, but with only 4 observations per group
+    /// the per-group probability of all-zero outcomes is roughly
+    /// `0.82^4 ≈ 0.45`, so multiple groups end up conditionally
+    /// separated under a fixed seed. The resulting structural issue is
+    /// `SeparationKind::Conditional`, distinct from FE-only and Both.
+    pub fn conditional_separation_rare_events() -> GeneratorSpec {
+        let mut spec = GeneratorSpec::lmm(
+            "conditional_separation_rare_events",
+            42,
+            vec![4; 20],
+            vec![0.0, 0.5],
+            true,
+            0,
+            dmatrix![1.0],
+        );
+        extreme_prevalence(&mut spec, -1.5);
+        spec
+    }
+
     /// Separation-stratum fixture for `bd-01KQ8FSHVBDS85KS0KM4867VBK`.
-    /// Bernoulli/Logit design with an extreme intercept shift that drives
-    /// the population prevalence below 1e-4, the canonical structural-
-    /// separation pattern. The placeholder certificate detector keys on
-    /// `family == Bernoulli && |intercept_shift| ≥ SEPARATION_INTERCEPT_SHIFT_TOL`,
-    /// flags `StructuralIssue::Separation`, and widens
-    /// [`expected_statuses`] to admit `ConvergedPenalised` alongside
-    /// `NotIdentifiable` and `NotOptimized`. Proper LP-based detection
-    /// lands under `bd-01KQ8FS7HK6TX2TMX0J0XFGYFD`.
+    /// Bernoulli/Logit design with an extreme intercept shift drives
+    /// the realised response to all-zero with overwhelming probability,
+    /// firing both tiers of the separation detector: FE (Konis 2007
+    /// complete separation) and conditional (every group has all-zero
+    /// outcomes). The certificate flags
+    /// `SeparationKind::Both { fe_kind: Complete, n_groups: 30 }` and
+    /// [`expected_statuses`] admits `ConvergedPenalised` alongside
+    /// `NotIdentifiable` and `NotOptimized`.
     pub fn separation_extreme_prevalence() -> GeneratorSpec {
         let mut spec = GeneratorSpec::lmm(
             "separation_extreme_prevalence_negative_15",
@@ -748,27 +801,131 @@ fn easy_fixture_does_not_trigger_weak_identification() {
 // the existence of an MLE.
 
 #[test]
-fn separation_fixture_certifies_separation_structural_issue() {
-    let spec = fixtures::separation_extreme_prevalence();
-    // Sanity: the fixture sits above the placeholder detector threshold.
-    assert!(
-        spec.binary_intercept_shift.abs() >= SEPARATION_INTERCEPT_SHIFT_TOL,
-        "separation fixture must sit above the placeholder detector threshold; \
-         got |shift| = {} but tolerance is {}",
-        spec.binary_intercept_shift.abs(),
-        SEPARATION_INTERCEPT_SHIFT_TOL
-    );
+fn fe_separation_fixture_certifies_fe_only() {
+    // Acceptance for bd-01KQ8FS7HK6TX2TMX0J0XFGYFD bullet 1: an FE-only
+    // separation fixture must produce `SeparationKind::FixedEffect`
+    // and admit refusal/penalised outcomes in expected_statuses.
+    let spec = fixtures::fe_separation_extreme_slope();
     let cert = certify(&spec);
     assert!(
         matches!(
             cert.structural_issue,
             Some(StructuralIssue::Separation {
-                kind: SeparationKind::Unspecified
+                kind: SeparationKind::FixedEffect(FeSeparationKind::Complete),
             })
         ),
-        "expected StructuralIssue::Separation, got {:?}",
+        "expected SeparationKind::FixedEffect(Complete), got {:?}",
         cert.structural_issue
     );
+
+    let exp = expected_statuses(&cert);
+    assert!(exp.contains(FitStatus::NotIdentifiable));
+    assert!(exp.contains(FitStatus::ConvergedPenalised));
+    assert!(!exp.contains(FitStatus::ConvergedInterior));
+
+    // Round-trip the rich report: confirm FE separation is detected
+    // and conditional separation is empty.
+    let report = detect_separation(&spec);
+    assert_eq!(report.fe_kind, Some(FeSeparationKind::Complete));
+    assert!(
+        report.conditional_groups.is_empty(),
+        "expected no conditional separation; got groups {:?}",
+        report.conditional_groups
+    );
+    let beta = report
+        .hyperplane_direction
+        .expect("expected hyperplane direction for FE-separated fixture");
+    // The slope (β[1]) must dominate the intercept (β[0]) since the
+    // separator is ~ x = 0.
+    assert!(
+        beta[1].abs() > beta[0].abs(),
+        "expected slope to dominate intercept in hyperplane β = {beta:?}"
+    );
+}
+
+#[test]
+fn conditional_separation_fixture_certifies_conditional_only() {
+    // Acceptance for bd-01KQ8FS7HK6TX2TMX0J0XFGYFD bullet 2: a
+    // conditional-only separation fixture must produce
+    // `SeparationKind::Conditional` (not `Both`, not `FixedEffect`)
+    // and admit refusal/penalised outcomes in expected_statuses.
+    let spec = fixtures::conditional_separation_rare_events();
+    let cert = certify(&spec);
+    let n_groups_seen = match cert.structural_issue {
+        Some(StructuralIssue::Separation {
+            kind: SeparationKind::Conditional { n_groups },
+        }) => n_groups,
+        other => panic!("expected SeparationKind::Conditional, got {other:?}"),
+    };
+    assert!(
+        n_groups_seen >= 1,
+        "expected at least one conditionally-separated group, got {n_groups_seen}"
+    );
+
+    let exp = expected_statuses(&cert);
+    assert!(exp.contains(FitStatus::NotIdentifiable));
+    assert!(exp.contains(FitStatus::ConvergedPenalised));
+    assert!(!exp.contains(FitStatus::ConvergedInterior));
+
+    let report = detect_separation(&spec);
+    assert!(
+        report.fe_kind.is_none(),
+        "expected no FE separation; got fe_kind = {:?}",
+        report.fe_kind
+    );
+    assert!(
+        !report.conditional_groups.is_empty(),
+        "expected at least one conditionally-separated group"
+    );
+}
+
+#[test]
+fn separation_detector_runs_quickly_on_corpus_sizes() {
+    // Acceptance for bd-01KQ8FS7HK6TX2TMX0J0XFGYFD: LP-based detection
+    // must run "well under fitting time" at corpus sizes. Rather than
+    // benchmarking against an actual fit (which is timing-flaky in CI),
+    // we assert a generous wall-clock budget — separation detection on
+    // the corpus's largest Bernoulli fixture should comfortably complete
+    // in under 250ms even on a debug build.
+    let spec = fixtures::fe_separation_extreme_slope();
+    let start = std::time::Instant::now();
+    let _report = detect_separation(&spec);
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_millis(250),
+        "detect_separation took {elapsed:?} (budget: 250ms)"
+    );
+}
+
+#[test]
+fn separation_extreme_prevalence_certifies_both_tiers() {
+    // Extreme prevalence (shift=-15) drives realised y to all-zero with
+    // overwhelming probability, which trips both tiers of the
+    // separation detector: FE (complete — `signs_i · x_i' β > 0` is
+    // achievable with β = (-1, 0)) and conditional (every group has
+    // all-zero outcomes).
+    let spec = fixtures::separation_extreme_prevalence();
+    let cert = certify(&spec);
+    let n_primary = spec.group_sizes.len();
+    assert!(
+        matches!(
+            cert.structural_issue,
+            Some(StructuralIssue::Separation {
+                kind: SeparationKind::Both {
+                    fe_kind: FeSeparationKind::Complete,
+                    n_groups,
+                }
+            }) if n_groups == n_primary
+        ),
+        "expected StructuralIssue::Separation::Both {{ Complete, {n_primary} }}, got {:?}",
+        cert.structural_issue
+    );
+
+    // Round-trip the rich report and confirm it agrees with the cert.
+    let report = detect_separation(&spec);
+    assert_eq!(report.fe_kind, Some(FeSeparationKind::Complete));
+    assert_eq!(report.conditional_groups.len(), n_primary);
+    assert!(report.hyperplane_direction.is_some());
 }
 
 #[test]

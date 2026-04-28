@@ -218,9 +218,15 @@ pub struct GeneratorOutput {
 
 /// Draw a synthetic dataset deterministically from a spec.
 ///
-/// This is the *only* function in the pathology module that actually
-/// generates data. Identifiability certification ([`crate::pathology::certify`])
-/// must remain pure linear algebra and never call this function.
+/// Identifiability certification ([`crate::pathology::certify`]) is
+/// pure linear algebra over the spec for non-binomial families. For
+/// `Family::Bernoulli`, separation detection is intrinsically
+/// data-dependent (Konis 2007 LP plus a per-group response scan), so
+/// certify drives [`crate::pathology::separation::detect_separation`]
+/// — which calls this function with `spec.seed` — to classify the
+/// separation tier. The realised draw is therefore deterministic
+/// given the spec and used only by the separation tier; all other
+/// strata stay seed-independent.
 pub fn generate(spec: &GeneratorSpec) -> GeneratorOutput {
     let q = spec.re_dim();
     assert_eq!(
