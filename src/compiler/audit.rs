@@ -118,6 +118,8 @@ pub struct GroupingAudit {
     pub n_observations: Option<usize>,
     pub n_levels: Option<usize>,
     pub min_obs_per_level: Option<usize>,
+    #[serde(default)]
+    pub median_obs_per_level: Option<usize>,
     pub max_obs_per_level: Option<usize>,
     pub repeated: Option<bool>,
     pub reason: Option<String>,
@@ -1572,6 +1574,7 @@ fn grouping_audit(
                         n_observations: None,
                         n_levels: None,
                         min_obs_per_level: None,
+                        median_obs_per_level: None,
                         max_obs_per_level: None,
                         repeated: None,
                         reason: Some("missing or non-categorical grouping factor".to_string()),
@@ -1612,6 +1615,7 @@ fn interaction_grouping_audit(
                         n_observations: None,
                         n_levels: None,
                         min_obs_per_level: None,
+                        median_obs_per_level: None,
                         max_obs_per_level: None,
                         repeated: None,
                         reason: Some("one or more grouping factors are missing".to_string()),
@@ -1642,15 +1646,32 @@ fn interaction_grouping_audit(
 fn audit_from_counts(name: String, counts: Vec<usize>, reason: Option<String>) -> GroupingAudit {
     let n_observations = counts.iter().sum::<usize>();
     let min_obs_per_level = counts.iter().copied().min();
+    let median_obs_per_level = median_count(&counts);
     let max_obs_per_level = counts.iter().copied().max();
     GroupingAudit {
         name,
         n_observations: Some(n_observations),
         n_levels: Some(counts.len()),
         min_obs_per_level,
+        median_obs_per_level,
         max_obs_per_level,
         repeated: max_obs_per_level.map(|max| max >= 2),
         reason,
+    }
+}
+
+fn median_count(counts: &[usize]) -> Option<usize> {
+    if counts.is_empty() {
+        return None;
+    }
+
+    let mut sorted = counts.to_vec();
+    sorted.sort_unstable();
+    let mid = sorted.len() / 2;
+    if sorted.len() % 2 == 1 {
+        Some(sorted[mid])
+    } else {
+        Some(sorted[mid - 1] + (sorted[mid] - sorted[mid - 1]) / 2)
     }
 }
 
@@ -2301,6 +2322,7 @@ mod tests {
         assert_eq!(term.group.n_observations, Some(4));
         assert_eq!(term.group.n_levels, Some(2));
         assert_eq!(term.group.min_obs_per_level, Some(2));
+        assert_eq!(term.group.median_obs_per_level, Some(2));
         assert_eq!(term.group.max_obs_per_level, Some(2));
         assert_eq!(term.group.repeated, Some(true));
         assert_eq!(term.requested_covariance_parameters, 3);
@@ -2326,6 +2348,29 @@ mod tests {
             .diagnostics
             .iter()
             .any(|d| d.code == DiagnosticCode::CovarianceTooRich));
+    }
+
+    #[test]
+    fn design_audit_reports_median_grouping_count_for_unbalanced_groups() {
+        let mut data = DataFrame::new();
+        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+        data.add_numeric("x", vec![0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0]);
+        data.add_categorical(
+            "subject",
+            vec!["s1", "s2", "s2", "s3", "s3", "s3", "s3"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        );
+
+        let formula = parse_formula("y ~ x + (1 | subject)").unwrap();
+        let semantic = compile_formula_ir(&formula);
+        let audit = audit_design(&semantic, &data);
+
+        let group = &audit.random_terms[0].group;
+        assert_eq!(group.min_obs_per_level, Some(1));
+        assert_eq!(group.median_obs_per_level, Some(2));
+        assert_eq!(group.max_obs_per_level, Some(4));
     }
 
     #[test]
@@ -2517,6 +2562,7 @@ mod tests {
         assert_eq!(term.group.n_observations, Some(4));
         assert_eq!(term.group.n_levels, Some(4));
         assert_eq!(term.group.min_obs_per_level, Some(1));
+        assert_eq!(term.group.median_obs_per_level, Some(1));
         assert_eq!(term.group.max_obs_per_level, Some(1));
         assert_eq!(term.group.repeated, Some(false));
     }

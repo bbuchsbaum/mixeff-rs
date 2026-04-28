@@ -182,6 +182,7 @@
           "n_observations": 56,
           "n_levels": 15,
           "min_obs_per_level": 1,
+          "median_obs_per_level": 4,
           "max_obs_per_level": 4,
           "repeated": true,
           "reason": null
