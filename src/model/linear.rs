@@ -6551,6 +6551,46 @@ pub struct MixedModelBootstrap {
     pub fits: Vec<BootstrapReplicate>,
 }
 
+/// Confidence-interval construction method for bootstrap summaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BootstrapIntervalMethod {
+    /// Equal-tail percentile interval.
+    Percentile,
+    /// Shortest contiguous interval covering the requested level.
+    Shortest,
+}
+
+/// One quantile row for a bootstrap statistic.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BootstrapQuantile {
+    /// Statistic name: `objective`, `sigma`, `beta[i]`, or `theta[i]`.
+    pub parameter: String,
+    /// Requested probability in `[0, 1]`.
+    pub probability: f64,
+    /// Quantile value.
+    pub value: f64,
+    /// Number of finite replicate values used.
+    pub n: usize,
+}
+
+/// One confidence-interval row for a bootstrap statistic.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BootstrapInterval {
+    /// Statistic name: `objective`, `sigma`, `beta[i]`, or `theta[i]`.
+    pub parameter: String,
+    /// Requested coverage level in `(0, 1)`.
+    pub level: f64,
+    /// Lower endpoint.
+    pub lower: f64,
+    /// Upper endpoint.
+    pub upper: f64,
+    /// Number of finite replicate values used.
+    pub n: usize,
+    /// Interval construction method.
+    pub method: BootstrapIntervalMethod,
+}
+
 impl MixedModelBootstrap {
     /// Number of replicates.
     pub fn len(&self) -> usize {
@@ -6580,6 +6620,76 @@ impl MixedModelBootstrap {
     /// θ parameter vectors across all replicates.
     pub fn thetas(&self) -> Vec<Vec<f64>> {
         self.fits.iter().map(|f| f.theta.clone()).collect()
+    }
+
+    /// Quantiles for all scalar bootstrap statistics.
+    ///
+    /// Non-finite replicate values are ignored parameter-by-parameter. The
+    /// quantile rule is linear interpolation between adjacent order statistics
+    /// (R's type-7 convention).
+    pub fn quantiles(&self, probability: f64) -> Result<Vec<BootstrapQuantile>> {
+        validate_probability(probability)?;
+
+        self.parameter_series()?
+            .into_iter()
+            .map(|(parameter, mut values)| {
+                values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                Ok(BootstrapQuantile {
+                    parameter,
+                    probability,
+                    value: quantile_sorted(&values, probability),
+                    n: values.len(),
+                })
+            })
+            .collect()
+    }
+
+    /// Equal-tail percentile confidence intervals for all scalar bootstrap statistics.
+    pub fn percentile_intervals(&self, level: f64) -> Result<Vec<BootstrapInterval>> {
+        validate_level(level)?;
+        let alpha = (1.0 - level) / 2.0;
+
+        self.parameter_series()?
+            .into_iter()
+            .map(|(parameter, mut values)| {
+                values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                Ok(BootstrapInterval {
+                    parameter,
+                    level,
+                    lower: quantile_sorted(&values, alpha),
+                    upper: quantile_sorted(&values, 1.0 - alpha),
+                    n: values.len(),
+                    method: BootstrapIntervalMethod::Percentile,
+                })
+            })
+            .collect()
+    }
+
+    /// Alias for equal-tail percentile intervals.
+    pub fn confidence_intervals(&self, level: f64) -> Result<Vec<BootstrapInterval>> {
+        self.percentile_intervals(level)
+    }
+
+    /// Shortest contiguous confidence intervals for all scalar bootstrap statistics.
+    ///
+    /// This mirrors the `shortestcovint` summary helper used by MixedModels.jl.
+    pub fn shortest_intervals(&self, level: f64) -> Result<Vec<BootstrapInterval>> {
+        validate_level(level)?;
+
+        self.parameter_series()?
+            .into_iter()
+            .map(|(parameter, mut values)| {
+                let (lower, upper) = shortest_interval(&mut values, level);
+                Ok(BootstrapInterval {
+                    parameter,
+                    level,
+                    lower,
+                    upper,
+                    n: values.len(),
+                    method: BootstrapIntervalMethod::Shortest,
+                })
+            })
+            .collect()
     }
 
     /// Save bootstrap replicates as JSON.
@@ -6622,6 +6732,133 @@ impl MixedModelBootstrap {
 
         Ok(())
     }
+
+    fn parameter_series(&self) -> Result<Vec<(String, Vec<f64>)>> {
+        if self.fits.is_empty() {
+            return Err(MixedModelError::InvalidArgument(
+                "cannot summarize an empty bootstrap sample".to_string(),
+            ));
+        }
+
+        let beta_len = self.fits[0].beta.len();
+        let theta_len = self.fits[0].theta.len();
+        for (idx, fit) in self.fits.iter().enumerate() {
+            if fit.beta.len() != beta_len {
+                return Err(MixedModelError::InvalidArgument(format!(
+                    "bootstrap replicate {idx} beta length ({}) does not match first replicate ({beta_len})",
+                    fit.beta.len()
+                )));
+            }
+            if fit.theta.len() != theta_len {
+                return Err(MixedModelError::InvalidArgument(format!(
+                    "bootstrap replicate {idx} theta length ({}) does not match first replicate ({theta_len})",
+                    fit.theta.len()
+                )));
+            }
+        }
+
+        let mut series = Vec::with_capacity(2 + beta_len + theta_len);
+        series.push((
+            "objective".to_string(),
+            self.fits
+                .iter()
+                .map(|fit| fit.objective)
+                .filter(|value| value.is_finite())
+                .collect(),
+        ));
+        series.push((
+            "sigma".to_string(),
+            self.fits
+                .iter()
+                .map(|fit| fit.sigma)
+                .filter(|value| value.is_finite())
+                .collect(),
+        ));
+
+        for idx in 0..beta_len {
+            series.push((
+                format!("beta[{idx}]"),
+                self.fits
+                    .iter()
+                    .map(|fit| fit.beta[idx])
+                    .filter(|value| value.is_finite())
+                    .collect(),
+            ));
+        }
+        for idx in 0..theta_len {
+            series.push((
+                format!("theta[{idx}]"),
+                self.fits
+                    .iter()
+                    .map(|fit| fit.theta[idx])
+                    .filter(|value| value.is_finite())
+                    .collect(),
+            ));
+        }
+
+        series.retain(|(_, values): &(String, Vec<f64>)| !values.is_empty());
+        if series.is_empty() {
+            return Err(MixedModelError::InvalidArgument(
+                "bootstrap sample has no finite scalar statistics to summarize".to_string(),
+            ));
+        }
+
+        Ok(series)
+    }
+}
+
+fn validate_probability(probability: f64) -> Result<()> {
+    if probability.is_finite() && (0.0..=1.0).contains(&probability) {
+        Ok(())
+    } else {
+        Err(MixedModelError::InvalidArgument(format!(
+            "quantile probability must be in [0,1]; got {probability}"
+        )))
+    }
+}
+
+fn validate_level(level: f64) -> Result<()> {
+    if level.is_finite() && (0.0..1.0).contains(&level) {
+        Ok(())
+    } else {
+        Err(MixedModelError::InvalidArgument(format!(
+            "confidence level must be in (0,1); got {level}"
+        )))
+    }
+}
+
+fn quantile_sorted(values: &[f64], probability: f64) -> f64 {
+    debug_assert!(!values.is_empty());
+    if values.len() == 1 {
+        return values[0];
+    }
+    let h = probability * (values.len() - 1) as f64;
+    let lo = h.floor() as usize;
+    let hi = h.ceil() as usize;
+    if lo == hi {
+        values[lo]
+    } else {
+        values[lo] + (h - lo as f64) * (values[hi] - values[lo])
+    }
+}
+
+fn shortest_interval(values: &mut [f64], level: f64) -> (f64, f64) {
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = values.len();
+    let ilen = ((n as f64) * level).ceil() as usize;
+    if ilen >= n {
+        return (values[0], values[n - 1]);
+    }
+    let mut min_len = f64::INFINITY;
+    let mut best_i = 0;
+    for i in 0..=(n - ilen) {
+        let len = values[i + ilen - 1] - values[i];
+        if len < min_len {
+            min_len = len;
+            best_i = i;
+        }
+    }
+    (values[best_i], values[best_i + ilen - 1])
 }
 
 mod json_f64 {
@@ -10920,6 +11157,129 @@ mod tests {
     }
 
     #[test]
+    fn test_parametricbootstrap_quantile_summaries() {
+        let bsamp = deterministic_bootstrap_sample();
+        let rows = bsamp.quantiles(0.5).unwrap();
+
+        let objective = rows
+            .iter()
+            .find(|row| row.parameter == "objective")
+            .unwrap();
+        assert_eq!(objective.n, 5);
+        assert_eq!(objective.value, 30.0);
+
+        let beta1 = rows.iter().find(|row| row.parameter == "beta[1]").unwrap();
+        assert_eq!(beta1.value, 12.0);
+
+        let theta0 = rows.iter().find(|row| row.parameter == "theta[0]").unwrap();
+        assert_relative_eq!(theta0.value, 0.3, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_parametricbootstrap_percentile_intervals() {
+        let bsamp = deterministic_bootstrap_sample();
+        let rows = bsamp.percentile_intervals(0.8).unwrap();
+
+        let objective = rows
+            .iter()
+            .find(|row| row.parameter == "objective")
+            .unwrap();
+        assert_eq!(objective.method, BootstrapIntervalMethod::Percentile);
+        assert_eq!(objective.n, 5);
+        assert_relative_eq!(objective.lower, 14.0, epsilon = 1e-12);
+        assert_relative_eq!(objective.upper, 46.0, epsilon = 1e-12);
+
+        let sigma = rows.iter().find(|row| row.parameter == "sigma").unwrap();
+        assert_relative_eq!(sigma.lower, 1.4, epsilon = 1e-12);
+        assert_relative_eq!(sigma.upper, 4.6, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_parametricbootstrap_shortest_intervals_filter_nonfinite() {
+        let bsamp = MixedModelBootstrap {
+            fits: vec![
+                BootstrapReplicate {
+                    objective: f64::NAN,
+                    sigma: 0.0,
+                    beta: DVector::from_vec(vec![0.0]),
+                    theta: vec![0.0],
+                },
+                BootstrapReplicate {
+                    objective: 10.0,
+                    sigma: 10.0,
+                    beta: DVector::from_vec(vec![10.0]),
+                    theta: vec![10.0],
+                },
+                BootstrapReplicate {
+                    objective: 11.0,
+                    sigma: 11.0,
+                    beta: DVector::from_vec(vec![11.0]),
+                    theta: vec![11.0],
+                },
+                BootstrapReplicate {
+                    objective: 12.0,
+                    sigma: 12.0,
+                    beta: DVector::from_vec(vec![12.0]),
+                    theta: vec![12.0],
+                },
+                BootstrapReplicate {
+                    objective: 100.0,
+                    sigma: 100.0,
+                    beta: DVector::from_vec(vec![100.0]),
+                    theta: vec![100.0],
+                },
+            ],
+        };
+
+        let rows = bsamp.shortest_intervals(0.6).unwrap();
+        let objective = rows
+            .iter()
+            .find(|row| row.parameter == "objective")
+            .unwrap();
+        assert_eq!(objective.method, BootstrapIntervalMethod::Shortest);
+        assert_eq!(objective.n, 4);
+        assert_eq!((objective.lower, objective.upper), (10.0, 12.0));
+
+        let sigma = rows.iter().find(|row| row.parameter == "sigma").unwrap();
+        assert_eq!(sigma.n, 5);
+        assert_eq!((sigma.lower, sigma.upper), (10.0, 12.0));
+    }
+
+    #[test]
+    fn test_parametricbootstrap_summaries_reject_bad_inputs() {
+        let bsamp = deterministic_bootstrap_sample();
+        assert!(matches!(
+            bsamp.quantiles(1.2),
+            Err(MixedModelError::InvalidArgument(_))
+        ));
+        assert!(matches!(
+            bsamp.percentile_intervals(1.0),
+            Err(MixedModelError::InvalidArgument(_))
+        ));
+
+        let mismatched = MixedModelBootstrap {
+            fits: vec![
+                BootstrapReplicate {
+                    objective: 1.0,
+                    sigma: 1.0,
+                    beta: DVector::from_vec(vec![1.0]),
+                    theta: vec![1.0],
+                },
+                BootstrapReplicate {
+                    objective: 2.0,
+                    sigma: 2.0,
+                    beta: DVector::from_vec(vec![1.0, 2.0]),
+                    theta: vec![1.0],
+                },
+            ],
+        };
+        assert!(matches!(
+            mismatched.quantiles(0.5),
+            Err(MixedModelError::InvalidArgument(_))
+        ));
+    }
+
+    #[test]
     fn test_parametricbootstrap_sigma_near_fitted() {
         // Over many replicates the mean bootstrap σ should be close to the
         // fitted σ (within 50% — bootstrap estimates have high variance for
@@ -10952,5 +11312,21 @@ mod tests {
             mean_sigma,
             fitted_sigma
         );
+    }
+
+    fn deterministic_bootstrap_sample() -> MixedModelBootstrap {
+        MixedModelBootstrap {
+            fits: (0..5)
+                .map(|idx| {
+                    let k = idx as f64;
+                    BootstrapReplicate {
+                        objective: 10.0 * (k + 1.0),
+                        sigma: k + 1.0,
+                        beta: DVector::from_vec(vec![k, 10.0 + k]),
+                        theta: vec![0.1 * (k + 1.0)],
+                    }
+                })
+                .collect(),
+        }
     }
 }

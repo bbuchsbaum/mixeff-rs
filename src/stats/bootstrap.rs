@@ -9,7 +9,10 @@ use std::io::{Read, Write};
 
 use crate::error::{MixedModelError, Result};
 use crate::model::linear::LinearMixedModel;
-pub use crate::model::linear::{parametricbootstrap, BootstrapReplicate, MixedModelBootstrap};
+pub use crate::model::linear::{
+    parametricbootstrap, BootstrapInterval, BootstrapIntervalMethod, BootstrapQuantile,
+    BootstrapReplicate, MixedModelBootstrap,
+};
 
 /// Save bootstrap replicates as JSON.
 ///
