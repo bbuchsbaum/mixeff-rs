@@ -33,7 +33,10 @@ pub use separation::{
     detect_conditional_separation, detect_fe_separation, detect_separation, FeSeparationKind,
     SeparationReport,
 };
-pub use spec::{generate, CrossedSpec, GeneratorOutput, GeneratorSpec};
+pub use spec::{
+    generate, inferred_axes, lint_single_axis, CrossedSpec, GeneratorOutput, GeneratorSpec,
+    PathologyAxis, AGQ_SMALL_CLUSTER_THRESHOLD, GLMM_LINT_AXES,
+};
 pub use transforms::{
     block_diagonal_crossings, collinear_fe, empty_crossings, extreme_prevalence, near_singular_re,
     pareto_sizes, scale_mismatch, set_group_sizes, singletons_with_slope,

@@ -21,7 +21,139 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, Normal};
 
+use super::certificate::{Certificate, StructuralIssue};
 use crate::model::{DataFrame, Family, LinkFunction};
+
+/// Cluster-size threshold below which a Bernoulli/Logit (or Poisson)
+/// fixture is treated as exercising the
+/// [`PathologyAxis::AdaptiveGaussHermite`] axis.
+///
+/// Small clusters drive PIRLS into the regime where the Laplace
+/// approximation is biased and adaptive Gauss-Hermite quadrature is
+/// the conformant fix. The threshold is intentionally conservative —
+/// designs with more than three observations per cluster are usually
+/// fine under Laplace alone for binary outcomes.
+pub const AGQ_SMALL_CLUSTER_THRESHOLD: usize = 3;
+
+/// Pathology subsystem axes used by the GLMM single-axis hygiene
+/// policy (`bd-01KQ8FVHD7WCN88RYJX1Y81NEP`).
+///
+/// Each fixture should exercise at most one of
+/// [`PathologyAxis::Separation`], [`PathologyAxis::AdaptiveGaussHermite`],
+/// or [`PathologyAxis::Overdispersion`] until the single-axis suite is
+/// stable. Combining axes obscures which subsystem (PIRLS, AGQ, link,
+/// dispersion) is at fault when a regression hits — see
+/// `tests/fixtures/pathology_corpus/README.md` for the rationale.
+///
+/// [`PathologyAxis::IdentifiabilityCore`] tags the LMM strata
+/// (easy / boundary / reduced_rank / refusal / weak_id) and is allowed
+/// alongside any axis. [`PathologyAxis::LinkNonlinearity`] is
+/// informational — it does not by itself trip the single-axis lint
+/// because rare-event prevalence is often the *mechanism* for the
+/// `Separation` axis rather than an independent stressor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PathologyAxis {
+    /// Logistic separation (Konis FE trichotomy or per-group all-zero/
+    /// all-one outcomes). Tagged when
+    /// [`Certificate::structural_issue`] is
+    /// [`StructuralIssue::Separation`].
+    Separation,
+    /// Adaptive Gauss-Hermite stress: small clusters (`min_group_size
+    /// ≤ AGQ_SMALL_CLUSTER_THRESHOLD`) on a binary or count outcome
+    /// where the Laplace approximation alone is known to be biased.
+    AdaptiveGaussHermite,
+    /// Poisson overdispersion (variance exceeding mean). Reserved for
+    /// future Poisson fixtures; no axis emitter currently fires this.
+    Overdispersion,
+    /// Link nonlinearity (extreme prevalence on logit, identity reject
+    /// for Normal+Identity, cloglog for rare events). Informational —
+    /// not part of the single-axis lint.
+    LinkNonlinearity,
+    /// LMM identifiability stratum (easy / boundary / reduced_rank /
+    /// refusal / weak_id). Always allowed alongside other axes.
+    IdentifiabilityCore,
+}
+
+/// GLMM-specific axes that participate in the single-axis lint.
+///
+/// Excludes [`PathologyAxis::LinkNonlinearity`] (informational) and
+/// [`PathologyAxis::IdentifiabilityCore`] (LMM strata, orthogonal to
+/// the GLMM hygiene policy).
+pub const GLMM_LINT_AXES: &[PathologyAxis] = &[
+    PathologyAxis::Separation,
+    PathologyAxis::AdaptiveGaussHermite,
+    PathologyAxis::Overdispersion,
+];
+
+/// Infer the pathology axes a `(spec, certificate)` pair exercises.
+///
+/// Pure inspection: never calls the engine, never re-runs the
+/// pathology certificate. Returns a sorted, deduplicated set so
+/// callers get a stable axis list per fixture. Empty for designs with
+/// no detectable pathology stressor (the `easy` stratum's signature).
+pub fn inferred_axes(spec: &GeneratorSpec, certificate: &Certificate) -> Vec<PathologyAxis> {
+    let mut axes = std::collections::BTreeSet::new();
+
+    if matches!(certificate.structural_issue, Some(StructuralIssue::Separation { .. })) {
+        axes.insert(PathologyAxis::Separation);
+    }
+
+    let glmm_family = !matches!(spec.family, Family::Normal);
+    let min_group = spec.group_sizes.iter().copied().min().unwrap_or(usize::MAX);
+    if glmm_family && min_group <= AGQ_SMALL_CLUSTER_THRESHOLD {
+        axes.insert(PathologyAxis::AdaptiveGaussHermite);
+    }
+
+    // Overdispersion: reserved for Poisson fixtures (no emitter today).
+    // The placeholder check stays conservative — only fires when a
+    // future fixture sets `family == Poisson` with response_sd > 0,
+    // which the current GeneratorSpec does not emit. Left in place so
+    // the axis machinery is forward-compatible.
+
+    if matches!(spec.family, Family::Bernoulli) && spec.binary_intercept_shift.abs() > 0.0 {
+        axes.insert(PathologyAxis::LinkNonlinearity);
+    }
+
+    if !glmm_family
+        && (certificate.structural_issue.is_some()
+            || !certificate.boundary_directions.is_empty()
+            || certificate.weak_identification
+            || certificate.re_rank_truth < certificate.re_rank_requested)
+    {
+        axes.insert(PathologyAxis::IdentifiabilityCore);
+    }
+
+    axes.into_iter().collect()
+}
+
+/// Assert that a `(spec, certificate)` pair exercises at most one of
+/// the GLMM-policy axes (separation / AGQ / overdispersion).
+///
+/// Returns `Ok(())` for compliant fixtures or `Err(violation_message)`
+/// listing the offending axes. The `IdentifiabilityCore` and
+/// `LinkNonlinearity` tags are deliberately exempt — see
+/// [`PathologyAxis`] for the rationale.
+pub fn lint_single_axis(
+    spec: &GeneratorSpec,
+    certificate: &Certificate,
+) -> Result<(), String> {
+    let axes = inferred_axes(spec, certificate);
+    let glmm_axes: Vec<PathologyAxis> = axes
+        .iter()
+        .copied()
+        .filter(|axis| GLMM_LINT_AXES.contains(axis))
+        .collect();
+    if glmm_axes.len() > 1 {
+        Err(format!(
+            "fixture '{}' violates single-axis policy: combines {:?}. \
+             See tests/fixtures/pathology_corpus/README.md \
+             (`bd-01KQ8FVHD7WCN88RYJX1Y81NEP`).",
+            spec.label, glmm_axes
+        ))
+    } else {
+        Ok(())
+    }
+}
 
 /// Declarative description of a synthetic mixed-model dataset.
 ///

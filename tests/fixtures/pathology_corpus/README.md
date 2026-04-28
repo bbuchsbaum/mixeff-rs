@@ -75,11 +75,12 @@ same field are last-writer-wins; in particular:
 
 - `set_group_sizes`, `singletons_with_slope`, and feeding `pareto_sizes`
   into `set_group_sizes` are mutually exclusive in practice — call once.
-- Combinations of pathologies (e.g. imbalance × separation) are
-  deliberately deferred until the single-axis suite is stable. The
-  policy follows GLMM stratum hygiene
-  (`bd-01KQ8FVHD7WCN88RYJX1Y81NEP`) — combining axes obscures which
-  subsystem (PIRLS, AGQ, link, dispersion) is at fault.
+- Combinations of GLMM pathologies (e.g. separation × AGQ × Poisson
+  overdispersion) are deliberately deferred until each single-axis
+  stratum has been green for ≥ 2 release cycles. See the
+  [Single-axis policy](#single-axis-policy-bd-01kq8fvhd7wcn88ryjx1y81nep)
+  section below; the lint at `pathology::lint_single_axis` enforces it
+  for every fixture loaded today.
 
 ### Crossed REs and the secondary grouping factor
 
@@ -128,6 +129,45 @@ set in recognition that weakly-identified directions can plausibly
 collapse during fitting. See `calibration.md` for the per-fixture
 sweep that informs the threshold.
 
+## Single-axis policy (`bd-01KQ8FVHD7WCN88RYJX1Y81NEP`)
+
+Until the single-axis pathology suite is stable, every corpus fixture
+must exercise **at most one** of the GLMM-policy axes:
+
+- **`Separation`** — logistic separation (Konis FE trichotomy or per-
+  group all-zero/all-one outcomes); fires when the certificate flags
+  `StructuralIssue::Separation`.
+- **`AdaptiveGaussHermite`** — small-cluster GLMMs where the Laplace
+  approximation is biased; fires when `min_group_size ≤ 3` on a
+  Bernoulli/Logit (or future Poisson) design.
+- **`Overdispersion`** — Poisson with variance exceeding mean (no
+  emitter today; reserved for the Poisson follow-up).
+
+Two informational tags exist alongside these but **do not** participate
+in the lint:
+
+- **`LinkNonlinearity`** — extreme prevalence on logit, identity reject
+  for Normal+Identity, cloglog for rare events. Often the *mechanism*
+  for the `Separation` axis rather than an independent stressor.
+- **`IdentifiabilityCore`** — LMM strata (easy/boundary/reduced_rank/
+  refusal/weak_id), orthogonal to GLMM hygiene.
+
+The lint lives at `pathology::lint_single_axis(spec, cert)` and is
+enforced by `tests/pathology_corpus::every_corpus_fixture_satisfies_single_axis_policy`.
+A negative test (`lint_rejects_constructed_multi_axis_spec`) constructs
+a deliberately-multi-axis spec to confirm the lint actually fires.
+
+### Why one axis per fixture
+
+When a regression hits a multi-axis fixture, root-cause attribution is
+ambiguous: did PIRLS misbehave, did AGQ degrade, did the link choice
+amplify the issue, or did dispersion handling break? Single-axis
+fixtures keep blame surfaces narrow. Cross-axis stress fixtures stay
+deferred until each single-axis stratum has been green for ≥ 2 release
+cycles, at which point they will land in an explicit
+`tests/fixtures/pathology_corpus/combinations/` subdirectory with the
+policy explicitly relaxed for that subset.
+
 ## Out of scope (handled by sibling motes)
 
 - Composable transform DSL beyond `near_singular_re` —
@@ -138,4 +178,3 @@ sweep that informs the threshold.
   `bd-01KQ8FTM1GYAQHG9EKK1V9SNDS`
 - Corpus versioning with `contract_version` —
   `bd-01KQ8FV0FYKVT3CHZWXPYW1NPY`
-- GLMM stratum hygiene — `bd-01KQ8FVHD7WCN88RYJX1Y81NEP`

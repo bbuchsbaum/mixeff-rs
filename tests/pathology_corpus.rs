@@ -30,9 +30,10 @@ use mixedmodels::model::{Family, GeneralizedLinearMixedModel, LinearMixedModel, 
 use mixedmodels::pathology::{
     block_diagonal_crossings, certify, collinear_fe, detect_separation, effective_status,
     effective_status_from_artifact, empty_crossings, expected_statuses, extreme_prevalence,
-    generate, map_error_to_status, near_singular_re, pareto_sizes, scale_mismatch, set_group_sizes,
-    singletons_with_slope, BoundaryKind, Certificate, ExpectedStatusSet, FeSeparationKind,
-    GeneratorSpec, SeparationKind, StructuralIssue, WEAK_ID_THRESHOLD,
+    generate, inferred_axes, lint_single_axis, map_error_to_status, near_singular_re,
+    pareto_sizes, scale_mismatch, set_group_sizes, singletons_with_slope, BoundaryKind,
+    Certificate, ExpectedStatusSet, FeSeparationKind, GeneratorSpec, PathologyAxis,
+    SeparationKind, StructuralIssue, WEAK_ID_THRESHOLD,
 };
 
 /// Build the four foundation-stratum specs.
@@ -994,5 +995,158 @@ fn crossed_sparse_connected_does_not_trigger_disconnected_crossings() {
             Some(StructuralIssue::DisconnectedCrossings { .. })
         ),
         "connected sparse design must not be flagged as disconnected"
+    );
+}
+
+// --- bd-01KQ8FVHD7WCN88RYJX1Y81NEP -------------------------------------
+// GLMM stratum hygiene: every corpus fixture must exercise at most one
+// of {Separation, AdaptiveGaussHermite, Overdispersion}. Combining
+// these axes obscures which subsystem (PIRLS, AGQ, link, dispersion)
+// is at fault when a regression hits. See
+// `tests/fixtures/pathology_corpus/README.md` for the rationale.
+
+fn all_fixture_specs() -> Vec<GeneratorSpec> {
+    vec![
+        fixtures::easy(),
+        fixtures::boundary(),
+        fixtures::reduced_rank(),
+        fixtures::refusal(),
+        fixtures::imbalance(),
+        fixtures::scale_mismatch_fixture(),
+        fixtures::collinear_fe_perfect(),
+        fixtures::extreme_prevalence_low(),
+        fixtures::singletons_via_transform(),
+        fixtures::random_slope_singletons(),
+        fixtures::crossed_block_diagonal(),
+        fixtures::weakly_identified(),
+        fixtures::crossed_sparse_connected(),
+        fixtures::fe_separation_extreme_slope(),
+        fixtures::conditional_separation_rare_events(),
+        fixtures::separation_extreme_prevalence(),
+    ]
+}
+
+#[test]
+fn every_corpus_fixture_satisfies_single_axis_policy() {
+    let mut violations = Vec::new();
+    for spec in all_fixture_specs() {
+        let cert = certify(&spec);
+        if let Err(message) = lint_single_axis(&spec, &cert) {
+            violations.push(message);
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "single-axis policy violations:\n  {}",
+        violations.join("\n  ")
+    );
+}
+
+#[test]
+fn separation_fixtures_carry_only_separation_axis_among_glmm_axes() {
+    // Sanity: the three Bernoulli separation fixtures must tag exactly
+    // PathologyAxis::Separation among the GLMM-policy axes (AGQ and
+    // Overdispersion must be absent). LinkNonlinearity and
+    // IdentifiabilityCore tags are exempt from this assertion since
+    // the lint deliberately ignores them.
+    let separation_specs = [
+        fixtures::fe_separation_extreme_slope(),
+        fixtures::conditional_separation_rare_events(),
+        fixtures::separation_extreme_prevalence(),
+    ];
+    for spec in &separation_specs {
+        let cert = certify(spec);
+        let axes = inferred_axes(spec, &cert);
+        assert!(
+            axes.contains(&PathologyAxis::Separation),
+            "fixture '{}' should tag PathologyAxis::Separation; got {:?}",
+            spec.label,
+            axes
+        );
+        assert!(
+            !axes.contains(&PathologyAxis::AdaptiveGaussHermite),
+            "fixture '{}' must not combine separation with AGQ; got {:?}",
+            spec.label,
+            axes
+        );
+        assert!(
+            !axes.contains(&PathologyAxis::Overdispersion),
+            "fixture '{}' must not combine separation with Overdispersion; got {:?}",
+            spec.label,
+            axes
+        );
+    }
+}
+
+#[test]
+fn lint_rejects_constructed_multi_axis_spec() {
+    // Deliberately construct a Bernoulli fixture that combines
+    // separation (extreme intercept shift) with AGQ stress
+    // (singleton groups) to confirm the lint actually fires when its
+    // invariant is broken. The constructed spec is local to this
+    // test — it does NOT live in `fixtures::` and so the
+    // `every_corpus_fixture_satisfies_single_axis_policy` test stays
+    // green.
+    let mut spec = GeneratorSpec::lmm(
+        "synthetic_multi_axis_violation",
+        99,
+        vec![1; 30], // singleton groups → AGQ stress
+        vec![0.0, 0.5],
+        true,
+        0,
+        nalgebra::dmatrix![1.0],
+    );
+    spec.family = Family::Bernoulli;
+    spec.link = LinkFunction::Logit;
+    spec.residual_sd = 0.0;
+    extreme_prevalence(&mut spec, -15.0); // separation
+
+    let cert = certify(&spec);
+    let axes = inferred_axes(&spec, &cert);
+    assert!(
+        axes.contains(&PathologyAxis::Separation),
+        "synthetic spec should still tag Separation; got {axes:?}"
+    );
+    assert!(
+        axes.contains(&PathologyAxis::AdaptiveGaussHermite),
+        "synthetic spec should tag AGQ from singleton groups; got {axes:?}"
+    );
+
+    let result = lint_single_axis(&spec, &cert);
+    assert!(
+        result.is_err(),
+        "lint must reject Separation + AGQ combination; got Ok"
+    );
+    let message = result.unwrap_err();
+    assert!(
+        message.contains("Separation") && message.contains("AdaptiveGaussHermite"),
+        "lint error must name both offending axes; got {message}"
+    );
+}
+
+#[test]
+fn easy_fixture_tags_no_glmm_policy_axes() {
+    // Counter-example: the canonical `easy` fixture is Gaussian and
+    // structurally identified, so it must tag *no* GLMM-policy axes
+    // (and at most IdentifiabilityCore among LMM-only tags is irrelevant
+    // here — easy doesn't trip even that).
+    let spec = fixtures::easy();
+    let cert = certify(&spec);
+    let axes = inferred_axes(&spec, &cert);
+    let glmm_axes: Vec<_> = axes
+        .iter()
+        .copied()
+        .filter(|a| {
+            matches!(
+                a,
+                PathologyAxis::Separation
+                    | PathologyAxis::AdaptiveGaussHermite
+                    | PathologyAxis::Overdispersion
+            )
+        })
+        .collect();
+    assert!(
+        glmm_axes.is_empty(),
+        "easy fixture should tag zero GLMM-policy axes; got {glmm_axes:?}"
     );
 }
