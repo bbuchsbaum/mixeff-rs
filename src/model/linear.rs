@@ -7339,17 +7339,20 @@ mod tests {
     }
 
     fn grouped_slope_data(n_groups: usize) -> DataFrame {
+        grouped_slope_data_with_obs(n_groups, 2)
+    }
+
+    fn grouped_slope_data_with_obs(n_groups: usize, obs_per_group: usize) -> DataFrame {
         let mut data = DataFrame::new();
         let mut y = Vec::new();
         let mut x = Vec::new();
         let mut group = Vec::new();
         for idx in 0..n_groups {
-            y.push(idx as f64);
-            y.push(idx as f64 + 1.0);
-            x.push(0.0);
-            x.push(1.0);
-            group.push(format!("g{}", idx + 1));
-            group.push(format!("g{}", idx + 1));
+            for obs in 0..obs_per_group {
+                y.push(idx as f64 + obs as f64);
+                x.push(obs as f64);
+                group.push(format!("g{}", idx + 1));
+            }
         }
         data.add_numeric("y", y);
         data.add_numeric("x", x);
@@ -8241,7 +8244,7 @@ mod tests {
 
     #[test]
     fn test_lmm_design_compiled_reduces_full_covariance_before_fit() {
-        let data = grouped_slope_data(6);
+        let data = grouped_slope_data_with_obs(6, 3);
         let formula = parse_formula("y ~ x + (1 + x | group)").unwrap();
 
         let model = LinearMixedModel::new_with_compiler_policy(
@@ -8301,6 +8304,25 @@ mod tests {
             .unwrap()
             .to_string()
             .contains("design_compiled refused"));
+    }
+
+    #[test]
+    fn test_lmm_design_compiled_refuses_row_saturated_random_effect() {
+        let data = grouped_slope_data(100);
+        let formula = parse_formula("y ~ x + (1 + x | group)").unwrap();
+
+        let err = LinearMixedModel::new_with_compiler_policy(
+            formula,
+            &data,
+            None,
+            CompilerPolicy::design_compiled(),
+        )
+        .expect_err("row-saturated random-effect terms should be refused");
+        let message = err.to_string();
+
+        assert!(message.contains("number of observations (200)"));
+        assert!(message.contains("random coefficients (200)"));
+        assert!(message.contains("residual scale"));
     }
 
     #[test]

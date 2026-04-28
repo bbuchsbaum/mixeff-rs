@@ -160,12 +160,11 @@ fn design_compiled_data() -> DataFrame {
     let mut group = Vec::new();
 
     for group_index in 0..6 {
-        y.push(group_index as f64);
-        y.push(group_index as f64 + 1.0);
-        x.push(0.0);
-        x.push(1.0);
-        group.push(format!("g{}", group_index + 1));
-        group.push(format!("g{}", group_index + 1));
+        for obs_index in 0..3 {
+            y.push(group_index as f64 + obs_index as f64);
+            x.push(obs_index as f64);
+            group.push(format!("g{}", group_index + 1));
+        }
     }
 
     let mut data = DataFrame::new();

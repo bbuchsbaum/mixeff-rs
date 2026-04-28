@@ -305,12 +305,12 @@
             "levels_per_basis_direction": 13.333333333333334,
             "levels_per_covariance_parameter": 6.666666666666667,
             "rows_per_covariance_parameter": 20.0,
-            "total_rows_can_mislead": false,
-            "explanation": "120 rows are clustered into 40 grouping levels; grouping levels are the effective n for random-effect distribution support",
-            "recommendation": "information budget is sufficient under v0 thresholds"
+            "total_rows_can_mislead": true,
+            "explanation": "120 rows are clustered into 40 grouping levels; covariance support is limited by grouping levels, not by total rows",
+            "recommendation": "random-effect coefficients saturate the rows for this term; drop unsupported random slopes, split/simplify the random-effect structure, treat the grouping factor as fixed when appropriate, or collect more observations per grouping level"
           },
-          "status": "sufficient",
-          "reason": null
+          "status": "too_rich",
+          "reason": "number of observations (120) is <= random coefficients (120) for grouping factor 'subject' with basis dimension 3; random-effect variances and the residual scale are probably not separately identifiable"
         },
         "basis": [
           {
@@ -358,6 +358,27 @@
                 "intercept",
                 "cond"
               ]
+            }
+          },
+          {
+            "code": "covariance_too_rich",
+            "severity": "warning",
+            "stage": "design_audit",
+            "message": "number of observations (120) is <= random coefficients (120) for grouping factor 'subject' with basis dimension 3; random-effect variances and the residual scale are probably not separately identifiable",
+            "affected_terms": [
+              "(1 + cond | subject)"
+            ],
+            "suggested_actions": [],
+            "payload": {
+              "basis_dimension": 3,
+              "min_levels_full_covariance": 30,
+              "min_levels_random_intercept_fit": 2,
+              "min_levels_random_intercept_reliability": 5,
+              "min_levels_variance": 7,
+              "n_levels": 40,
+              "n_random_effects": 120,
+              "requested_covariance_parameters": 6,
+              "row_saturated": true
             }
           }
         ]
@@ -421,6 +442,27 @@
             "cond"
           ]
         }
+      },
+      {
+        "code": "covariance_too_rich",
+        "severity": "warning",
+        "stage": "design_audit",
+        "message": "number of observations (120) is <= random coefficients (120) for grouping factor 'subject' with basis dimension 3; random-effect variances and the residual scale are probably not separately identifiable",
+        "affected_terms": [
+          "(1 + cond | subject)"
+        ],
+        "suggested_actions": [],
+        "payload": {
+          "basis_dimension": 3,
+          "min_levels_full_covariance": 30,
+          "min_levels_random_intercept_fit": 2,
+          "min_levels_random_intercept_reliability": 5,
+          "min_levels_variance": 7,
+          "n_levels": 40,
+          "n_random_effects": 120,
+          "requested_covariance_parameters": 6,
+          "row_saturated": true
+        }
       }
     ]
   },
@@ -438,7 +480,32 @@
     },
     "apply_design_time_reductions": false
   },
-  "policy_recommendations": [],
+  "policy_recommendations": [
+    {
+      "term_id": "r0",
+      "source_syntax": "(1 + cond | subject)",
+      "action": "refuse_random_term_distribution",
+      "reason": "number of observations (120) is <= random coefficients (120) for grouping factor 'subject' with basis dimension 3; random-effect variances and the residual scale are probably not separately identifiable",
+      "current_covariance": "full",
+      "recommended_covariance": null,
+      "inference_consequence": "confirmatory fixed-effect p-values should be withheld or recomputed after a declared design-level change",
+      "diagnostics": [
+        {
+          "code": "covariance_too_rich",
+          "severity": "warning",
+          "stage": "design_audit",
+          "message": "number of observations (120) is <= random coefficients (120) for grouping factor 'subject' with basis dimension 3; random-effect variances and the residual scale are probably not separately identifiable",
+          "affected_terms": [
+            "(1 + cond | subject)"
+          ],
+          "suggested_actions": [],
+          "payload": {
+            "n_levels": 40
+          }
+        }
+      ]
+    }
+  ],
   "effective_covariance": [],
   "reductions": [],
   "covariance_transitions": [],
@@ -885,6 +952,27 @@
           "intercept",
           "cond"
         ]
+      }
+    },
+    {
+      "code": "covariance_too_rich",
+      "severity": "warning",
+      "stage": "design_audit",
+      "message": "number of observations (120) is <= random coefficients (120) for grouping factor 'subject' with basis dimension 3; random-effect variances and the residual scale are probably not separately identifiable",
+      "affected_terms": [
+        "(1 + cond | subject)"
+      ],
+      "suggested_actions": [],
+      "payload": {
+        "basis_dimension": 3,
+        "min_levels_full_covariance": 30,
+        "min_levels_random_intercept_fit": 2,
+        "min_levels_random_intercept_reliability": 5,
+        "min_levels_variance": 7,
+        "n_levels": 40,
+        "n_random_effects": 120,
+        "requested_covariance_parameters": 6,
+        "row_saturated": true
       }
     }
   ]

@@ -285,10 +285,10 @@
             "rows_per_covariance_parameter": 2.0,
             "total_rows_can_mislead": true,
             "explanation": "6 rows are clustered into 3 grouping levels; covariance support is limited by grouping levels, not by total rows",
-            "recommendation": "full covariance asks for 3 parameter(s); use design_compiled with diagonal/reduced-rank covariance, treat the grouping factor as fixed when it is designed or directly compared, or collect at least 15 grouping levels"
+            "recommendation": "random-effect coefficients saturate the rows for this term; drop unsupported random slopes, split/simplify the random-effect structure, treat the grouping factor as fixed when appropriate, or collect more observations per grouping level"
           },
           "status": "too_rich",
-          "reason": "3 levels are below the v0 full-covariance threshold 15 for 3 covariance parameters"
+          "reason": "number of observations (6) is <= random coefficients (6) for grouping factor 'subject' with basis dimension 2; random-effect variances and the residual scale are probably not separately identifiable"
         },
         "basis": [
           {
@@ -313,7 +313,7 @@
             "code": "covariance_too_rich",
             "severity": "warning",
             "stage": "design_audit",
-            "message": "3 levels are below the v0 full-covariance threshold 15 for 3 covariance parameters",
+            "message": "number of observations (6) is <= random coefficients (6) for grouping factor 'subject' with basis dimension 2; random-effect variances and the residual scale are probably not separately identifiable",
             "affected_terms": [
               "(1 + x | subject)"
             ],
@@ -325,7 +325,9 @@
               "min_levels_random_intercept_reliability": 5,
               "min_levels_variance": 5,
               "n_levels": 3,
-              "requested_covariance_parameters": 3
+              "n_random_effects": 6,
+              "requested_covariance_parameters": 3,
+              "row_saturated": true
             }
           },
           {
@@ -400,7 +402,7 @@
         "code": "covariance_too_rich",
         "severity": "warning",
         "stage": "design_audit",
-        "message": "3 levels are below the v0 full-covariance threshold 15 for 3 covariance parameters",
+        "message": "number of observations (6) is <= random coefficients (6) for grouping factor 'subject' with basis dimension 2; random-effect variances and the residual scale are probably not separately identifiable",
         "affected_terms": [
           "(1 + x | subject)"
         ],
@@ -412,7 +414,9 @@
           "min_levels_random_intercept_reliability": 5,
           "min_levels_variance": 5,
           "n_levels": 3,
-          "requested_covariance_parameters": 3
+          "n_random_effects": 6,
+          "requested_covariance_parameters": 3,
+          "row_saturated": true
         }
       },
       {
@@ -453,7 +457,7 @@
       "term_id": "r0",
       "source_syntax": "(1 + x | subject)",
       "action": "refuse_random_term_distribution",
-      "reason": "3 levels are below the v0 variance-direction threshold 5",
+      "reason": "number of observations (6) is <= random coefficients (6) for grouping factor 'subject' with basis dimension 2; random-effect variances and the residual scale are probably not separately identifiable",
       "current_covariance": "full",
       "recommended_covariance": null,
       "inference_consequence": "confirmatory fixed-effect p-values should be withheld or recomputed after a declared design-level change",
@@ -462,7 +466,7 @@
           "code": "covariance_too_rich",
           "severity": "warning",
           "stage": "design_audit",
-          "message": "3 levels are below the v0 variance-direction threshold 5",
+          "message": "number of observations (6) is <= random coefficients (6) for grouping factor 'subject' with basis dimension 2; random-effect variances and the residual scale are probably not separately identifiable",
           "affected_terms": [
             "(1 + x | subject)"
           ],
@@ -698,7 +702,7 @@
       "code": "covariance_too_rich",
       "severity": "warning",
       "stage": "design_audit",
-      "message": "3 levels are below the v0 full-covariance threshold 15 for 3 covariance parameters",
+      "message": "number of observations (6) is <= random coefficients (6) for grouping factor 'subject' with basis dimension 2; random-effect variances and the residual scale are probably not separately identifiable",
       "affected_terms": [
         "(1 + x | subject)"
       ],
@@ -710,7 +714,9 @@
         "min_levels_random_intercept_reliability": 5,
         "min_levels_variance": 5,
         "n_levels": 3,
-        "requested_covariance_parameters": 3
+        "n_random_effects": 6,
+        "requested_covariance_parameters": 3,
+        "row_saturated": true
       }
     },
     {

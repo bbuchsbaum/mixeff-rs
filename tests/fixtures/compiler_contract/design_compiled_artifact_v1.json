@@ -301,7 +301,7 @@
       "reason": null
     },
     "fixed_effects": {
-      "n_rows": 12,
+      "n_rows": 18,
       "n_columns": 2,
       "rank": {
         "rank": 2,
@@ -346,11 +346,11 @@
         "term_id": "r0",
         "group": {
           "name": "group",
-          "n_observations": 12,
+          "n_observations": 18,
           "n_levels": 6,
-          "min_obs_per_level": 2,
-          "median_obs_per_level": 2,
-          "max_obs_per_level": 2,
+          "min_obs_per_level": 3,
+          "median_obs_per_level": 3,
+          "max_obs_per_level": 3,
           "repeated": true,
           "reason": null
         },
@@ -364,17 +364,17 @@
           "min_levels_variance": 5,
           "min_levels_full_covariance": 15,
           "effective_n": {
-            "n_rows": 12,
+            "n_rows": 18,
             "n_levels": 6,
-            "min_obs_per_level": 2,
-            "max_obs_per_level": 2,
+            "min_obs_per_level": 3,
+            "max_obs_per_level": 3,
             "basis_dimension": 2,
             "covariance_parameters": 3,
             "levels_per_basis_direction": 3.0,
             "levels_per_covariance_parameter": 2.0,
-            "rows_per_covariance_parameter": 4.0,
+            "rows_per_covariance_parameter": 6.0,
             "total_rows_can_mislead": true,
-            "explanation": "12 rows are clustered into 6 grouping levels; covariance support is limited by grouping levels, not by total rows",
+            "explanation": "18 rows are clustered into 6 grouping levels; covariance support is limited by grouping levels, not by total rows",
             "recommendation": "full covariance asks for 3 parameter(s); use design_compiled with diagonal/reduced-rank covariance, treat the grouping factor as fixed when it is designed or directly compared, or collect at least 15 grouping levels"
           },
           "status": "too_rich",
@@ -392,8 +392,8 @@
           {
             "name": "x",
             "kind": "slope",
-            "min_within_group_sd": 0.7071067811865476,
-            "max_within_group_sd": 0.7071067811865476,
+            "min_within_group_sd": 1.0,
+            "max_within_group_sd": 1.0,
             "supported": true,
             "reason": null
           }
@@ -415,7 +415,9 @@
               "min_levels_random_intercept_reliability": 5,
               "min_levels_variance": 5,
               "n_levels": 6,
-              "requested_covariance_parameters": 3
+              "n_random_effects": 12,
+              "requested_covariance_parameters": 3,
+              "row_saturated": false
             }
           }
         ]
@@ -446,10 +448,10 @@
             "group"
           ],
           "path": "marginal",
-          "n_observations": 12,
+          "n_observations": 18,
           "n_levels": 6,
-          "min_obs_per_level": 2,
-          "max_obs_per_level": 2,
+          "min_obs_per_level": 3,
+          "max_obs_per_level": 3,
           "repeated": true,
           "covered_by_terms": [
             "r0"
@@ -475,7 +477,9 @@
           "min_levels_random_intercept_reliability": 5,
           "min_levels_variance": 5,
           "n_levels": 6,
-          "requested_covariance_parameters": 3
+          "n_random_effects": 12,
+          "requested_covariance_parameters": 3,
+          "row_saturated": false
         }
       }
     ]
@@ -714,7 +718,9 @@
         "min_levels_random_intercept_reliability": 5,
         "min_levels_variance": 5,
         "n_levels": 6,
-        "requested_covariance_parameters": 3
+        "n_random_effects": 12,
+        "requested_covariance_parameters": 3,
+        "row_saturated": false
       }
     },
     {

@@ -223,6 +223,16 @@ fn recommendations_for_term(
         }
         InformationBudgetStatus::TooRich => {
             if let Some(n_levels) = budget.n_levels {
+                if is_row_saturated_random_effect(audit) {
+                    recommendations.push(refuse_random_distribution_recommendation(
+                        term,
+                        audit,
+                        budget.reason.clone().unwrap_or_else(|| {
+                            "random-effect coefficients saturate the available rows".to_string()
+                        }),
+                    ));
+                    return recommendations;
+                }
                 if is_scalar_random_intercept_budget(audit) {
                     recommendations.push(refuse_random_distribution_recommendation(
                         term,
@@ -283,6 +293,17 @@ fn is_scalar_random_intercept_budget(audit: &RandomTermAudit) -> bool {
             .first()
             .map(|basis| basis.kind == "intercept")
             .unwrap_or(false)
+}
+
+fn is_row_saturated_random_effect(audit: &RandomTermAudit) -> bool {
+    let effective_n = &audit.information_budget.effective_n;
+    match (effective_n.n_rows, effective_n.n_levels) {
+        (Some(rows), Some(levels)) => {
+            let n_random_effects = levels.saturating_mul(effective_n.basis_dimension);
+            effective_n.basis_dimension > 0 && rows <= n_random_effects
+        }
+        _ => false,
+    }
 }
 
 fn drop_unsupported_basis_recommendation(
@@ -430,17 +451,20 @@ mod tests {
     use crate::model::data::DataFrame;
 
     fn grouped_data(n_groups: usize) -> DataFrame {
+        grouped_data_with_obs(n_groups, 2)
+    }
+
+    fn grouped_data_with_obs(n_groups: usize, obs_per_group: usize) -> DataFrame {
         let mut data = DataFrame::new();
         let mut y = Vec::new();
         let mut x = Vec::new();
         let mut group = Vec::new();
         for idx in 0..n_groups {
-            y.push(idx as f64);
-            y.push(idx as f64 + 1.0);
-            x.push(0.0);
-            x.push(1.0);
-            group.push(format!("g{}", idx + 1));
-            group.push(format!("g{}", idx + 1));
+            for obs in 0..obs_per_group {
+                y.push(idx as f64 + obs as f64);
+                x.push(obs as f64);
+                group.push(format!("g{}", idx + 1));
+            }
         }
         data.add_numeric("y", y);
         data.add_numeric("x", x);
@@ -493,7 +517,7 @@ mod tests {
     fn maximal_feasible_reduces_full_covariance_when_correlations_are_too_rich() {
         let formula = parse_formula("y ~ x + (1 + x | group)").unwrap();
         let semantic = compile_formula_ir(&formula);
-        let audit = audit_design(&semantic, &grouped_data(6));
+        let audit = audit_design(&semantic, &grouped_data_with_obs(6, 3));
 
         let recommendations =
             recommend_policy(&semantic, &audit, &CompilerPolicy::maximal_feasible());
@@ -503,6 +527,22 @@ mod tests {
             .expect("full covariance should be reduced");
         assert_eq!(rec.current_covariance, "full");
         assert_eq!(rec.recommended_covariance.as_deref(), Some("diagonal"));
+    }
+
+    #[test]
+    fn maximal_feasible_refuses_row_saturated_random_distribution() {
+        let formula = parse_formula("y ~ x + (1 + x | group)").unwrap();
+        let semantic = compile_formula_ir(&formula);
+        let audit = audit_design(&semantic, &grouped_data(100));
+
+        let recommendations =
+            recommend_policy(&semantic, &audit, &CompilerPolicy::maximal_feasible());
+        let rec = recommendations
+            .iter()
+            .find(|rec| rec.action == PolicyAction::RefuseRandomTermDistribution)
+            .expect("row-saturated random term should be refused");
+        assert!(rec.reason.contains("number of observations (200)"));
+        assert!(rec.reason.contains("random coefficients (200)"));
     }
 
     #[test]

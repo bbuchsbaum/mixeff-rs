@@ -325,7 +325,9 @@
         "min_levels_random_intercept_reliability": 5,
         "min_levels_variance": 17,
         "n_levels": 10,
-        "requested_covariance_parameters": 36
+        "n_random_effects": 80,
+        "requested_covariance_parameters": 36,
+        "row_saturated": false
       }
     }
   ]

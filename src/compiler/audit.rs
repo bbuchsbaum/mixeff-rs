@@ -1916,7 +1916,17 @@ fn information_budget(
             Some("random-effect basis is empty".to_string()),
         ),
         Some(n_levels) => {
-            if is_scalar_random_intercept_budget(
+            if let Some((n_rows, n_random_effects)) =
+                row_saturated_random_effect(group, basis_dimension)
+            {
+                (
+                    InformationBudgetStatus::TooRich,
+                    Some(format!(
+                        "number of observations ({n_rows}) is <= random coefficients ({n_random_effects}) for grouping factor '{}' with basis dimension {basis_dimension}; random-effect variances and the residual scale are probably not separately identifiable",
+                        group.name
+                    )),
+                )
+            } else if is_scalar_random_intercept_budget(
                 covariance,
                 basis_dimension,
                 requested_covariance_parameters,
@@ -2032,6 +2042,7 @@ fn effective_n_report(
             covariance_parameters,
             min_levels_variance,
             min_levels_full_covariance,
+            row_saturated_random_effect(group, basis_dimension).is_some(),
         ),
     }
 }
@@ -2062,8 +2073,12 @@ fn effective_n_recommendation(
     covariance_parameters: usize,
     min_levels_variance: usize,
     min_levels_full_covariance: Option<usize>,
+    row_saturated: bool,
 ) -> String {
     match status {
+        InformationBudgetStatus::TooRich if row_saturated => {
+            "random-effect coefficients saturate the rows for this term; drop unsupported random slopes, split/simplify the random-effect structure, treat the grouping factor as fixed when appropriate, or collect more observations per grouping level".to_string()
+        }
         InformationBudgetStatus::Sufficient => {
             "information budget is sufficient under v0 thresholds".to_string()
         }
@@ -2126,6 +2141,16 @@ fn is_scalar_random_intercept_budget(
         && requested_covariance_parameters == 1
 }
 
+fn row_saturated_random_effect(
+    group: &GroupingAudit,
+    basis_dimension: usize,
+) -> Option<(usize, usize)> {
+    let n_rows = group.n_observations?;
+    let n_levels = group.n_levels?;
+    let n_random_effects = n_levels.checked_mul(basis_dimension)?;
+    (basis_dimension > 0 && n_rows <= n_random_effects).then_some((n_rows, n_random_effects))
+}
+
 fn covariance_family_label(covariance: &CovarianceForm) -> String {
     match covariance {
         CovarianceForm::Scalar => "scalar".to_string(),
@@ -2183,6 +2208,26 @@ fn information_budget_diagnostic(
     diagnostic.payload.insert(
         "requested_covariance_parameters".to_string(),
         serde_json::json!(budget.requested_covariance_parameters),
+    );
+    diagnostic.payload.insert(
+        "n_random_effects".to_string(),
+        serde_json::json!(budget
+            .effective_n
+            .n_levels
+            .and_then(|levels| levels.checked_mul(budget.basis_dimension))),
+    );
+    diagnostic.payload.insert(
+        "row_saturated".to_string(),
+        serde_json::json!(matches!(
+            (
+                budget.effective_n.n_rows,
+                budget
+                    .effective_n
+                    .n_levels
+                    .and_then(|levels| levels.checked_mul(budget.basis_dimension)),
+            ),
+            (Some(rows), Some(n_random_effects)) if rows <= n_random_effects
+        )),
     );
     diagnostic.payload.insert(
         "min_levels_variance".to_string(),
@@ -2314,16 +2359,19 @@ mod tests {
     }
 
     fn many_subject_data(n_subjects: usize) -> DataFrame {
-        let mut y = Vec::with_capacity(n_subjects * 2);
-        let mut x = Vec::with_capacity(n_subjects * 2);
-        let mut subject = Vec::with_capacity(n_subjects * 2);
+        many_subject_data_with_obs(n_subjects, 2)
+    }
+
+    fn many_subject_data_with_obs(n_subjects: usize, obs_per_subject: usize) -> DataFrame {
+        let mut y = Vec::with_capacity(n_subjects * obs_per_subject);
+        let mut x = Vec::with_capacity(n_subjects * obs_per_subject);
+        let mut subject = Vec::with_capacity(n_subjects * obs_per_subject);
         for idx in 0..n_subjects {
-            y.push(idx as f64);
-            y.push(idx as f64 + 1.0);
-            x.push(0.0);
-            x.push(1.0);
-            subject.push(format!("s{}", idx + 1));
-            subject.push(format!("s{}", idx + 1));
+            for obs in 0..obs_per_subject {
+                y.push(idx as f64 + obs as f64);
+                x.push(obs as f64);
+                subject.push(format!("s{}", idx + 1));
+            }
         }
 
         let mut data = DataFrame::new();
@@ -2542,9 +2590,7 @@ mod tests {
         assert_close(effective_n.levels_per_covariance_parameter, 2.0 / 3.0);
         assert_close(effective_n.rows_per_covariance_parameter, 4.0 / 3.0);
         assert!(effective_n.total_rows_can_mislead);
-        assert!(effective_n
-            .recommendation
-            .contains("diagonal/reduced-rank covariance"));
+        assert!(effective_n.recommendation.contains("saturate"));
         assert!(audit
             .diagnostics
             .iter()
@@ -2578,7 +2624,7 @@ mod tests {
     fn design_audit_reports_sufficient_random_effect_information_budget() {
         let formula = parse_formula("y ~ x + (1 + x | subject)").unwrap();
         let semantic = compile_formula_ir(&formula);
-        let audit = audit_design(&semantic, &many_subject_data(18));
+        let audit = audit_design(&semantic, &many_subject_data_with_obs(18, 3));
 
         let budget = &audit.random_terms[0].information_budget;
         assert_eq!(budget.n_levels, Some(18));
@@ -2587,13 +2633,46 @@ mod tests {
         assert_eq!(budget.min_levels_variance, 5);
         assert_eq!(budget.min_levels_full_covariance, Some(15));
         assert_eq!(budget.status, InformationBudgetStatus::Sufficient);
-        assert_eq!(budget.effective_n.n_rows, Some(36));
+        assert_eq!(budget.effective_n.n_rows, Some(54));
         assert_eq!(budget.effective_n.n_levels, Some(18));
         assert_close(budget.effective_n.levels_per_basis_direction, 9.0);
         assert_close(budget.effective_n.levels_per_covariance_parameter, 6.0);
-        assert_close(budget.effective_n.rows_per_covariance_parameter, 12.0);
+        assert_close(budget.effective_n.rows_per_covariance_parameter, 18.0);
         assert!(!budget.effective_n.total_rows_can_mislead);
         assert!(budget.effective_n.recommendation.contains("sufficient"));
+    }
+
+    #[test]
+    fn design_audit_flags_row_saturated_random_effect_term() {
+        let formula = parse_formula("y ~ x + (1 + x | subject)").unwrap();
+        let semantic = compile_formula_ir(&formula);
+        let audit = audit_design(&semantic, &many_subject_data(100));
+
+        let term = &audit.random_terms[0];
+        let budget = &term.information_budget;
+        assert_eq!(budget.n_levels, Some(100));
+        assert_eq!(budget.basis_dimension, 2);
+        assert_eq!(budget.status, InformationBudgetStatus::TooRich);
+        assert!(budget
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("number of observations (200) is <= random coefficients (200)"));
+        assert!(budget.effective_n.recommendation.contains("saturate"));
+
+        let diagnostic = audit
+            .diagnostics
+            .iter()
+            .find(|d| d.code == DiagnosticCode::CovarianceTooRich)
+            .expect("row-saturated random term should be diagnosed");
+        assert_eq!(
+            diagnostic.payload.get("n_random_effects"),
+            Some(&serde_json::json!(200))
+        );
+        assert_eq!(
+            diagnostic.payload.get("row_saturated"),
+            Some(&serde_json::json!(true))
+        );
     }
 
     #[test]
