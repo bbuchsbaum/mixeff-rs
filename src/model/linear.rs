@@ -1070,6 +1070,20 @@ impl LinearMixedModel {
                         .to_string(),
                 ));
             }
+            Optimizer::PrimaBobyqa
+            | Optimizer::PrimaCobyla
+            | Optimizer::PrimaLincoa
+            | Optimizer::PrimaNewuoa => {
+                // Prima* variants are declared so the R layer / OptSummary surface
+                // can carry a backend selection, but the FFI binding required to
+                // actually run these optimizers is not yet wired
+                // (bd-01KQ9TECWH14T6P6S5K5D3DMW7).
+                return Err(MixedModelError::Optimization(
+                    "PRIMA optimizer backend is declared but not wired to the LMM optimizer path; \
+                     pick a non-PRIMA optimizer until the prima FFI lands"
+                        .to_string(),
+                ));
+            }
         }
         self.refresh_optimizer_certificate();
         self.refresh_effective_covariance_summaries();
@@ -4849,6 +4863,10 @@ fn optimizer_name(optimizer: Optimizer) -> &'static str {
         Optimizer::PatternSearch => "pattern_search",
         Optimizer::NloptNewuoa => "newuoa",
         Optimizer::NloptBobyqa => "bobyqa",
+        Optimizer::PrimaBobyqa => "bobyqa",
+        Optimizer::PrimaCobyla => "cobyla",
+        Optimizer::PrimaLincoa => "lincoa",
+        Optimizer::PrimaNewuoa => "newuoa",
     }
 }
 

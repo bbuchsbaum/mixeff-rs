@@ -20,6 +20,76 @@ pub enum Optimizer {
     NloptNewuoa,
     /// NLopt BOBYQA for bound-constrained θ vectors.
     NloptBobyqa,
+    /// PRIMA BOBYQA — Powell's bound-constrained derivative-free optimizer.
+    PrimaBobyqa,
+    /// PRIMA COBYLA — Powell's general-constraints derivative-free optimizer.
+    PrimaCobyla,
+    /// PRIMA LINCOA — Powell's linearly-constrained derivative-free optimizer.
+    PrimaLincoa,
+    /// PRIMA NEWUOA — Powell's unconstrained derivative-free optimizer.
+    PrimaNewuoa,
+}
+
+/// Optimization backend providing the optimizer.
+///
+/// Mirrors `OptSummary.backend` from MixedModels.jl. The default backend is
+/// `Native` (the COBYLA crate and the in-tree pattern-search optimizer).
+/// `Nlopt` is the upstream default in the Julia reference and is the active
+/// backend for any `Optimizer::Nlopt*` variant. `Prima` is reserved for the
+/// PRIMA derivative-free family; the FFI binding required to actually run
+/// these optimizers is not yet wired (see issue
+/// `bd-01KQ9TECWH14T6P6S5K5D3DMW7`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptimizerBackend {
+    /// In-tree Rust optimizers (COBYLA crate, pattern search).
+    Native,
+    /// NLopt-backed optimizers (BOBYQA, NEWUOA).
+    Nlopt,
+    /// PRIMA-backed optimizers (bobyqa/cobyla/lincoa/newuoa).
+    Prima,
+}
+
+impl Optimizer {
+    /// Canonical backend for this optimizer.
+    pub fn canonical_backend(self) -> OptimizerBackend {
+        match self {
+            Optimizer::Cobyla | Optimizer::PatternSearch => OptimizerBackend::Native,
+            Optimizer::NloptNewuoa | Optimizer::NloptBobyqa => OptimizerBackend::Nlopt,
+            Optimizer::PrimaBobyqa
+            | Optimizer::PrimaCobyla
+            | Optimizer::PrimaLincoa
+            | Optimizer::PrimaNewuoa => OptimizerBackend::Prima,
+        }
+    }
+}
+
+impl OptimizerBackend {
+    /// Human-readable label, lowercase to match Julia's `:nlopt` / `:prima`.
+    pub fn label(self) -> &'static str {
+        match self {
+            OptimizerBackend::Native => "native",
+            OptimizerBackend::Nlopt => "nlopt",
+            OptimizerBackend::Prima => "prima",
+        }
+    }
+
+    /// The list of `OptSummary` fields used by this backend, in the order
+    /// they should appear in MIME renderings. Mirrors Julia's
+    /// `opt_params(::Val{:backend})`.
+    pub fn opt_params(self) -> &'static [&'static str] {
+        match self {
+            OptimizerBackend::Native | OptimizerBackend::Nlopt => &[
+                "ftol_rel",
+                "ftol_abs",
+                "xtol_rel",
+                "xtol_abs",
+                "initial_step",
+                "maxfeval",
+                "maxtime",
+            ],
+            OptimizerBackend::Prima => &["rhobeg", "rhoend", "maxfeval"],
+        }
+    }
 }
 
 /// One entry in the fit log, recording the parameter vector and the
@@ -93,6 +163,21 @@ pub struct OptSummary {
     /// Which optimizer to use.
     pub optimizer: Optimizer,
 
+    /// Optimization backend providing the optimizer. Defaults to
+    /// `OptimizerBackend::Native`; set to `Prima` to dispatch to the PRIMA
+    /// family (requires the PRIMA FFI to be wired — see
+    /// `bd-01KQ9TECWH14T6P6S5K5D3DMW7`).
+    pub backend: OptimizerBackend,
+
+    // ---- PRIMA-specific tolerances ----
+    /// PRIMA initial trust-region radius. Default `1.0`, matching
+    /// MixedModels.jl. Ignored by NLopt and the in-tree backend.
+    pub rhobeg: f64,
+
+    /// PRIMA final trust-region radius. Default `1e-6`, matching
+    /// MixedModels.jl. Ignored by NLopt and the in-tree backend.
+    pub rhoend: f64,
+
     // ---- Model-fitting options ----
     /// Whether to use REML (restricted maximum likelihood) rather
     /// than ML.
@@ -143,6 +228,10 @@ impl OptSummary {
             max_time: -1.0,
 
             optimizer: Optimizer::Cobyla,
+            backend: OptimizerBackend::Native,
+            // PRIMA defaults from MixedModels.jl: rhobeg = 1.0, rhoend = rhobeg / 1e6.
+            rhobeg: 1.0,
+            rhoend: 1e-6,
 
             reml: true,
             n_agq: 1,
@@ -177,9 +266,9 @@ impl OptSummary {
 
     /// The optimization backend label used for display.
     pub fn backend_name(&self) -> &'static str {
-        match self.optimizer {
-            Optimizer::NloptNewuoa | Optimizer::NloptBobyqa => "nlopt",
-            Optimizer::Cobyla | Optimizer::PatternSearch => "native",
+        match self.optimizer.canonical_backend() {
+            OptimizerBackend::Native => self.backend.label(),
+            backend => backend.label(),
         }
     }
 
@@ -190,16 +279,26 @@ impl OptSummary {
             Optimizer::PatternSearch => "pattern_search",
             Optimizer::NloptNewuoa => "newuoa",
             Optimizer::NloptBobyqa => "bobyqa",
+            Optimizer::PrimaBobyqa => "bobyqa",
+            Optimizer::PrimaCobyla => "cobyla",
+            Optimizer::PrimaLincoa => "lincoa",
+            Optimizer::PrimaNewuoa => "newuoa",
         }
     }
 
-    /// The Julia-style optimizer code used in MIME renderers.
+    /// The Julia-style optimizer code used in MIME renderers. NLopt-backed
+    /// optimizers use the `LN_*` codes from NLopt; PRIMA-backed optimizers
+    /// use the lowercase Julia symbol (`bobyqa`, `cobyla`, ...).
     pub fn optimizer_code(&self) -> &'static str {
         match self.optimizer {
             Optimizer::Cobyla => "LN_COBYLA",
             Optimizer::PatternSearch => "PATTERN_SEARCH",
             Optimizer::NloptNewuoa => "LN_NEWUOA",
             Optimizer::NloptBobyqa => "LN_BOBYQA",
+            Optimizer::PrimaBobyqa => "bobyqa",
+            Optimizer::PrimaCobyla => "cobyla",
+            Optimizer::PrimaLincoa => "lincoa",
+            Optimizer::PrimaNewuoa => "newuoa",
         }
     }
 
