@@ -759,12 +759,22 @@ fn rank_mixture_audit_report_matches_wire_fixture() {
         .unwrap()
         .contains("unsupported direction PC2: -0.394*intercept + 0.919*x"));
     let optimizer = json_section_by_title(&value, "Optimizer");
-    assert_eq!(optimizer["lines"][3]["label"], "optimizer stop");
-    assert_eq!(optimizer["lines"][3]["status"], "ok");
-    assert_eq!(optimizer["lines"][6]["label"], "gradient evidence");
-    assert_eq!(optimizer["lines"][6]["status"], "ok");
-    assert_eq!(optimizer["lines"][10]["label"], "convergence verification");
-    assert_eq!(optimizer["lines"][10]["status"], "error");
+    assert_eq!(optimizer["lines"][1]["label"], "convergence interpretation");
+    assert!(optimizer["lines"][1]["detail"]
+        .as_str()
+        .unwrap()
+        .contains("unsupported directions are weakly identified"));
+    assert_eq!(optimizer["lines"][4]["label"], "optimizer stop");
+    assert_eq!(optimizer["lines"][4]["status"], "ok");
+    assert_eq!(optimizer["lines"][7]["label"], "gradient evidence");
+    assert_eq!(optimizer["lines"][7]["status"], "ok");
+    assert_eq!(optimizer["lines"][10]["label"], "convergence next steps");
+    assert!(optimizer["lines"][10]["detail"]
+        .as_str()
+        .unwrap()
+        .contains("inspect Effective Covariance"));
+    assert_eq!(optimizer["lines"][12]["label"], "convergence verification");
+    assert_eq!(optimizer["lines"][12]["status"], "error");
     assert_wire_fixture(
         "tests/fixtures/compiler_contract/rank_mixture_model_audit_report_v1.json",
         &json,

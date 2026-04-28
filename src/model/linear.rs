@@ -7432,6 +7432,8 @@ mod tests {
         let fitted_report = model.audit_report().to_text();
         assert!(fitted_report.contains("ConvergedInterior"));
         assert!(fitted_report.contains("pattern_search"));
+        assert!(fitted_report.contains("convergence interpretation"));
+        assert!(fitted_report.contains("run verify_convergence()"));
     }
 
     #[test]
@@ -7455,6 +7457,13 @@ mod tests {
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == DiagnosticCode::BoundaryParameter));
+        assert!(certificate.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == DiagnosticCode::BoundaryParameter
+                && diagnostic
+                    .suggested_actions
+                    .iter()
+                    .any(|action| action.contains("valid fitted boundary"))
+        }));
         assert!(matches!(
             certificate.evidence.gradient.method,
             EvidenceMethod::FiniteDifference

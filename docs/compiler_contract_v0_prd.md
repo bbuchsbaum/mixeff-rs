@@ -875,10 +875,12 @@ Legend:
 
 - [x] Compiler decisions are deterministic for fixed inputs.
 - [x] Diagnostic ordering is stable.
-- [ ] Benchmark hooks exist for formula-to-IR, explanation, and design audit
-      (`bd-01KQ7X0MS57DRCGKDTQY0B5EVJ`).
-- [ ] Benchmark hooks exist for failure-path diagnosis
-      (`bd-01KQ7X0MS57DRCGKDTQY0B5EVJ`).
+- [x] Benchmark hooks exist for formula-to-IR, explanation, and design audit
+      (`examples/bench_compiler_contract.rs`,
+      `bd-01KQ7X0MS57DRCGKDTQY0B5EVJ`).
+- [x] Benchmark hooks exist for failure-path diagnosis
+      (`examples/bench_compiler_contract.rs`,
+      `bd-01KQ7X0MS57DRCGKDTQY0B5EVJ`).
 - [x] No v0 diagnostic requires dense row-by-row covariance matrix materializing
       by default.
 - [x] A reproducibility record is serialized with fit/audit artifacts.

@@ -66,7 +66,7 @@ impl ModelAuditReport {
             schema_name: MODEL_AUDIT_REPORT_SCHEMA.to_string(),
             schema_version: MODEL_AUDIT_REPORT_SCHEMA_VERSION,
             requested_formula: artifact.requested_formula.clone(),
-            diagnostics: artifact.diagnostics.clone(),
+            diagnostics: report_diagnostics(artifact),
             sections,
         }
     }
@@ -827,6 +827,7 @@ fn optimizer_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
         status: fit_status(certificate.status),
         detail: format!("{:?}", certificate.status),
     }];
+    lines.push(convergence_interpretation_line(certificate));
     lines.push(AuditReportLine {
         label: "optimizer".to_string(),
         status: AuditReportStatus::Info,
@@ -935,6 +936,7 @@ fn optimizer_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
         status: evidence_quality_status(&certificate.evidence.certification_quality),
         detail: evidence_quality_detail(&certificate.evidence.certification_quality),
     });
+    lines.push(convergence_next_steps_line(certificate));
 
     let not_assessed = certificate
         .checks
@@ -962,6 +964,287 @@ fn optimizer_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
     AuditReportSection {
         title: "Optimizer".to_string(),
         lines,
+    }
+}
+
+fn convergence_interpretation_line(
+    certificate: &super::audit::OptimizerCertificate,
+) -> AuditReportLine {
+    let (status, detail) = convergence_interpretation(certificate);
+    AuditReportLine {
+        label: "convergence interpretation".to_string(),
+        status,
+        detail,
+    }
+}
+
+fn convergence_interpretation(
+    certificate: &super::audit::OptimizerCertificate,
+) -> (AuditReportStatus, String) {
+    let mut status = fit_status(certificate.status);
+    let mut parts = Vec::new();
+
+    if !certificate.evidence.optimizer_stop.acceptable_stop {
+        status = max_status(status, AuditReportStatus::Warning);
+        parts.push(
+            "optimizer did not report an acceptable stop; convergence is not certified".to_string(),
+        );
+    } else {
+        parts.push("optimizer reported an acceptable stop".to_string());
+    }
+
+    match certificate.status {
+        FitStatus::ConvergedInterior => {
+            parts.push("solution is interior to the theta bounds".to_string());
+        }
+        FitStatus::ConvergedBoundary => {
+            status = max_status(status, AuditReportStatus::Info);
+            parts.push(
+                "solution is on a parameter boundary; this is not by itself an optimizer failure"
+                    .to_string(),
+            );
+        }
+        FitStatus::ConvergedReducedRank => {
+            status = max_status(status, AuditReportStatus::Info);
+            parts.push(
+                "effective covariance is reduced rank; unsupported directions are weakly identified, not proof of zero population variance"
+                    .to_string(),
+            );
+        }
+        FitStatus::ConvergedPenalised => {
+            status = max_status(status, AuditReportStatus::Info);
+            parts.push(
+                "fit is penalised; it should not be read as an ordinary maximum-likelihood estimate"
+                    .to_string(),
+            );
+        }
+        FitStatus::NotIdentifiable => {
+            status = max_status(status, AuditReportStatus::Warning);
+            parts.push("model is not identifiable under the current contract".to_string());
+        }
+        FitStatus::NotOptimized => {
+            status = max_status(status, AuditReportStatus::Warning);
+            parts.push("optimization did not produce a certified fitted optimum".to_string());
+        }
+        FitStatus::NotAssessed => {
+            status = max_status(status, AuditReportStatus::NotAssessed);
+            parts.push("optimizer certificate has not been assessed".to_string());
+        }
+    }
+
+    match &certificate.evidence.gradient.method {
+        super::audit::EvidenceMethod::NotAvailable { reason }
+        | super::audit::EvidenceMethod::NotAssessed { reason } => {
+            status = max_status(status, AuditReportStatus::NotAssessed);
+            parts.push(format!("stationarity is not certified: {reason}"));
+        }
+        method => {
+            parts.push(format!(
+                "stationarity checked by {}",
+                evidence_method_label(method)
+            ));
+        }
+    }
+
+    if let super::audit::EvidenceQuality::Failed { reason } =
+        &certificate.evidence.certification_quality
+    {
+        status = max_status(status, AuditReportStatus::Warning);
+        if reason.contains("gradient") || reason.contains("KKT") {
+            parts.push(format!("stationarity is not certified: {reason}"));
+        } else {
+            parts.push(format!("certification failed: {reason}"));
+        }
+    }
+
+    match &certificate.evidence.hessian.quality {
+        super::audit::EvidenceQuality::Failed { reason } => {
+            status = max_status(status, AuditReportStatus::Warning);
+            parts.push(format!(
+                "Hessian check failed or is flat; weak identification is possible: {reason}"
+            ));
+        }
+        super::audit::EvidenceQuality::Unavailable { reason }
+        | super::audit::EvidenceQuality::NotAssessed { reason } => {
+            status = max_status(status, AuditReportStatus::NotAssessed);
+            parts.push(format!(
+                "Hessian weak-identification check is unavailable: {reason}"
+            ));
+        }
+        quality => {
+            parts.push(format!(
+                "Hessian evidence is {}",
+                evidence_quality_label(quality)
+            ));
+        }
+    }
+
+    if let Some(verification) = &certificate.verification {
+        match verification.status {
+            super::audit::ConvergenceVerificationStatus::RestartAgrees
+            | super::audit::ConvergenceVerificationStatus::OptimizerConsensus => {
+                parts.push(
+                    "bounded verification agrees with the fitted optimum; remaining warnings are more likely numerical or structural than optimizer instability"
+                        .to_string(),
+                );
+            }
+            super::audit::ConvergenceVerificationStatus::Fragile => {
+                status = max_status(status, AuditReportStatus::Warning);
+                parts.push(
+                    "bounded verification is fragile; compare objectives and theta before routine inference"
+                        .to_string(),
+                );
+            }
+            super::audit::ConvergenceVerificationStatus::Unstable => {
+                status = max_status(status, AuditReportStatus::Error);
+                parts.push("bounded verification did not reproduce the fitted optimum".to_string());
+            }
+            super::audit::ConvergenceVerificationStatus::NotRun => {
+                status = max_status(status, AuditReportStatus::NotAssessed);
+                parts.push("bounded convergence verification was not run".to_string());
+            }
+        }
+    } else {
+        status = max_status(status, AuditReportStatus::NotAssessed);
+        parts.push("bounded convergence verification was not run".to_string());
+    }
+
+    (status, parts.join("; "))
+}
+
+fn convergence_next_steps_line(
+    certificate: &super::audit::OptimizerCertificate,
+) -> AuditReportLine {
+    let mut actions = Vec::new();
+
+    if !certificate.evidence.optimizer_stop.acceptable_stop {
+        actions.push("increase optimizer budget or try an alternate optimizer".to_string());
+    }
+    if certificate.verification.is_none() {
+        actions.push(
+            "run verify_convergence() to compare restart and alternate-optimizer agreement"
+                .to_string(),
+        );
+    }
+    if matches!(
+        certificate.evidence.gradient.method,
+        super::audit::EvidenceMethod::NotAvailable { .. }
+            | super::audit::EvidenceMethod::NotAssessed { .. }
+    ) {
+        actions.push(
+            "gate inference on derivative-backed or finite-difference stationarity evidence"
+                .to_string(),
+        );
+    }
+    if matches!(
+        certificate.evidence.hessian.quality,
+        super::audit::EvidenceQuality::Unavailable { .. }
+            | super::audit::EvidenceQuality::NotAssessed { .. }
+    ) {
+        actions.push(
+            "gate weak-identification claims until Hessian evidence is available".to_string(),
+        );
+    }
+    if matches!(
+        certificate.evidence.hessian.quality,
+        super::audit::EvidenceQuality::Failed { .. }
+    ) || matches!(
+        certificate.evidence.certification_quality,
+        super::audit::EvidenceQuality::Failed { .. }
+    ) {
+        actions.push(
+            "scale predictors, simplify the random-effects structure, or collect more grouping levels"
+                .to_string(),
+        );
+    }
+    if matches!(
+        certificate.status,
+        FitStatus::ConvergedBoundary | FitStatus::ConvergedReducedRank
+    ) {
+        actions.push(
+            "inspect Effective Covariance and consider diagonal covariance, a simpler random-effect term, or design_compiled policy"
+                .to_string(),
+        );
+    }
+    if let Some(verification) = &certificate.verification {
+        match verification.status {
+            super::audit::ConvergenceVerificationStatus::RestartAgrees
+            | super::audit::ConvergenceVerificationStatus::OptimizerConsensus => {
+                actions.push(
+                    "treat optimizer-agreement evidence as reassuring, while keeping any boundary or rank caveats"
+                        .to_string(),
+                );
+            }
+            super::audit::ConvergenceVerificationStatus::Fragile
+            | super::audit::ConvergenceVerificationStatus::Unstable => {
+                actions.push(
+                    "compare objectives, theta, and beta across verification runs".to_string(),
+                );
+            }
+            super::audit::ConvergenceVerificationStatus::NotRun => {}
+        }
+    }
+
+    actions.sort();
+    actions.dedup();
+
+    AuditReportLine {
+        label: "convergence next steps".to_string(),
+        status: if actions.is_empty() {
+            AuditReportStatus::Ok
+        } else {
+            action_status(certificate)
+        },
+        detail: if actions.is_empty() {
+            "none beyond routine model checks".to_string()
+        } else {
+            actions.join(" | ")
+        },
+    }
+}
+
+fn action_status(certificate: &super::audit::OptimizerCertificate) -> AuditReportStatus {
+    if matches!(
+        certificate
+            .verification
+            .as_ref()
+            .map(|verification| verification.status),
+        Some(super::audit::ConvergenceVerificationStatus::Unstable)
+    ) {
+        AuditReportStatus::Error
+    } else if !certificate.evidence.optimizer_stop.acceptable_stop
+        || matches!(
+            certificate.evidence.hessian.quality,
+            super::audit::EvidenceQuality::Failed { .. }
+        )
+        || matches!(
+            certificate.evidence.certification_quality,
+            super::audit::EvidenceQuality::Failed { .. }
+        )
+        || matches!(
+            certificate
+                .verification
+                .as_ref()
+                .map(|verification| verification.status),
+            Some(super::audit::ConvergenceVerificationStatus::Fragile)
+        )
+    {
+        AuditReportStatus::Warning
+    } else if certificate.verification.is_none()
+        || matches!(
+            certificate.evidence.gradient.method,
+            super::audit::EvidenceMethod::NotAvailable { .. }
+                | super::audit::EvidenceMethod::NotAssessed { .. }
+        )
+        || matches!(
+            certificate.evidence.hessian.quality,
+            super::audit::EvidenceQuality::Unavailable { .. }
+                | super::audit::EvidenceQuality::NotAssessed { .. }
+        )
+    {
+        AuditReportStatus::NotAssessed
+    } else {
+        AuditReportStatus::Info
     }
 }
 
@@ -1112,7 +1395,8 @@ fn inference_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
 }
 
 fn diagnostics_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
-    if artifact.diagnostics.is_empty() {
+    let diagnostics = report_diagnostics(artifact);
+    if diagnostics.is_empty() {
         return AuditReportSection {
             title: "Diagnostics".to_string(),
             lines: vec![AuditReportLine {
@@ -1125,8 +1409,7 @@ fn diagnostics_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
 
     AuditReportSection {
         title: "Diagnostics".to_string(),
-        lines: artifact
-            .diagnostics
+        lines: diagnostics
             .iter()
             .map(|diagnostic| AuditReportLine {
                 label: diagnostic_code_label(&diagnostic.code).to_string(),
@@ -1134,6 +1417,31 @@ fn diagnostics_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
                 detail: diagnostic_detail(diagnostic),
             })
             .collect(),
+    }
+}
+
+fn report_diagnostics(artifact: &CompiledModelArtifact) -> Vec<Diagnostic> {
+    let mut diagnostics = artifact.diagnostics.clone();
+    if let Some(certificate) = &artifact.optimizer_certificate {
+        for diagnostic in &certificate.diagnostics {
+            let duplicate = diagnostics.iter().any(|existing| {
+                existing.code == diagnostic.code
+                    && existing.message == diagnostic.message
+                    && existing.affected_terms == diagnostic.affected_terms
+            });
+            if !duplicate {
+                diagnostics.push(diagnostic.clone());
+            }
+        }
+    }
+    diagnostics
+}
+
+fn max_status(left: AuditReportStatus, right: AuditReportStatus) -> AuditReportStatus {
+    if status_rank(right) > status_rank(left) {
+        right
+    } else {
+        left
     }
 }
 

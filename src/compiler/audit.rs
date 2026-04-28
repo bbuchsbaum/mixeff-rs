@@ -2851,7 +2851,12 @@ impl OptimizerCertificate {
                     DiagnosticSeverity::Info,
                     DiagnosticStage::Certification,
                     "optimizer certificate is unavailable before fitting",
-                )],
+                )
+                .with_suggested_actions(vec![
+                    "fit the model before reading convergence evidence".to_string(),
+                    "run verify_convergence() after fitting if optimizer agreement matters"
+                        .to_string(),
+                ])],
             };
         }
 
@@ -2874,15 +2879,23 @@ impl OptimizerCertificate {
                 code: optsum.return_value.clone(),
                 message: "optimizer did not report an acceptable convergence stop".to_string(),
             });
-            diagnostics.push(Diagnostic::new(
-                DiagnosticCode::OptimizerNotAssessed,
-                DiagnosticSeverity::Warning,
-                DiagnosticStage::Certification,
-                format!(
-                    "optimizer stopped with return code '{}'",
-                    optsum.return_value
-                ),
-            ));
+            diagnostics.push(
+                Diagnostic::new(
+                    DiagnosticCode::OptimizerNotAssessed,
+                    DiagnosticSeverity::Warning,
+                    DiagnosticStage::Certification,
+                    format!(
+                        "optimizer stopped with return code '{}'",
+                        optsum.return_value
+                    ),
+                )
+                .with_suggested_actions(vec![
+                    "increase the optimizer function-evaluation or time budget".to_string(),
+                    "try an alternate optimizer and compare the objective and theta".to_string(),
+                    "scale predictors or the response if finite-difference gradients look unstable"
+                        .to_string(),
+                ]),
+            );
         }
 
         for &index in &boundary_indices {
@@ -2894,7 +2907,12 @@ impl OptimizerCertificate {
                 DiagnosticStage::Certification,
                 format!("theta[{index}] is on its lower bound"),
             )
-            .with_affected_terms(vec![format!("theta[{index}]")]);
+            .with_affected_terms(vec![format!("theta[{index}]")])
+            .with_suggested_actions(vec![
+                "treat a boundary covariance estimate as a valid fitted boundary, not by itself an optimizer failure".to_string(),
+                "inspect the Effective Covariance section for unsupported random-effect directions".to_string(),
+                "consider diagonal covariance, a simpler random-effect term, or design_compiled policy if the boundary direction is not scientifically central".to_string(),
+            ]);
             diagnostic
                 .payload
                 .insert("theta_index".to_string(), serde_json::json!(index));

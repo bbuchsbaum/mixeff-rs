@@ -177,6 +177,11 @@
           "detail": "ConvergedReducedRank"
         },
         {
+          "label": "convergence interpretation",
+          "status": "error",
+          "detail": "optimizer reported an acceptable stop; effective covariance is reduced rank; unsupported directions are weakly identified, not proof of zero population variance; stationarity checked by finite_difference; stationarity is not certified: free-gradient norm 2.611324e1 exceeds tolerance 2.860272e-3; Hessian evidence is approximate (finite-difference active-subspace Hessian is positive semidefinite); bounded verification did not reproduce the fitted optimum"
+        },
+        {
           "label": "optimizer",
           "status": "info",
           "detail": "bobyqa"
@@ -215,6 +220,11 @@
           "label": "certification quality",
           "status": "warning",
           "detail": "failed (free-gradient norm 2.611324e1 exceeds tolerance 2.860272e-3)"
+        },
+        {
+          "label": "convergence next steps",
+          "status": "error",
+          "detail": "compare objectives, theta, and beta across verification runs | inspect Effective Covariance and consider diagonal covariance, a simpler random-effect term, or design_compiled policy | scale predictors, simplify the random-effects structure, or collect more grouping levels"
         },
         {
           "label": "derivative checks",
