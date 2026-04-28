@@ -129,6 +129,14 @@ fn block_logdet_factor(block: &MatrixBlock) -> f64 {
             .filter(|&d| d > 0.0)
             .map(f64::ln)
             .sum(),
+        MatrixBlock::Sparse(mat) => {
+            let dense = MatrixBlock::Sparse(mat.clone()).as_dense();
+            (0..dense.nrows().min(dense.ncols()))
+                .map(|i| dense[(i, i)])
+                .filter(|&d| d > 0.0)
+                .map(f64::ln)
+                .sum()
+        }
     }
 }
 

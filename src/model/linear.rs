@@ -10,11 +10,13 @@
 //! only θ to be optimized numerically.
 
 use nalgebra::{DMatrix, DVector, SymmetricEigen};
+use nalgebra_sparse::{coo::CooMatrix, csc::CscMatrix};
 #[cfg(feature = "nlopt")]
 use nlopt::{
     Algorithm as NloptAlgorithm, FailState as NloptFailState, Nlopt, Target as NloptTarget,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::compiler::{
     compile_formula_ir, BasisLoading, CompiledModelArtifact, CompilerPolicy,
@@ -141,6 +143,7 @@ impl Default for ConvergenceVerificationOptions {
 #[derive(Debug, Clone)]
 pub enum MatrixBlock {
     Dense(DMatrix<f64>),
+    Sparse(CscMatrix<f64>),
     Diagonal(DVector<f64>),
     /// Uniform block diagonal: `nlevels` blocks each of size `vsize × vsize`.
     /// Total matrix is `(nlevels * vsize) × (nlevels * vsize)`.
@@ -151,6 +154,7 @@ impl MatrixBlock {
     pub fn nrows(&self) -> usize {
         match self {
             MatrixBlock::Dense(m) => m.nrows(),
+            MatrixBlock::Sparse(m) => m.nrows(),
             MatrixBlock::Diagonal(v) => v.len(),
             MatrixBlock::BlockDiagonal(blocks) => blocks.iter().map(|b| b.nrows()).sum(),
         }
@@ -159,6 +163,7 @@ impl MatrixBlock {
     pub fn ncols(&self) -> usize {
         match self {
             MatrixBlock::Dense(m) => m.ncols(),
+            MatrixBlock::Sparse(m) => m.ncols(),
             MatrixBlock::Diagonal(v) => v.len(),
             MatrixBlock::BlockDiagonal(blocks) => blocks.iter().map(|b| b.ncols()).sum(),
         }
@@ -167,6 +172,13 @@ impl MatrixBlock {
     pub fn as_dense(&self) -> DMatrix<f64> {
         match self {
             MatrixBlock::Dense(m) => m.clone(),
+            MatrixBlock::Sparse(m) => {
+                let mut result = DMatrix::zeros(m.nrows(), m.ncols());
+                for (row, col, value) in m.triplet_iter() {
+                    result[(row, col)] += *value;
+                }
+                result
+            }
             MatrixBlock::Diagonal(v) => DMatrix::from_diagonal(v),
             MatrixBlock::BlockDiagonal(blocks) => {
                 let total = blocks.iter().map(|b| b.nrows()).sum();
@@ -189,6 +201,7 @@ impl MatrixBlock {
     pub fn as_dense_ref(&self) -> Option<&DMatrix<f64>> {
         match self {
             MatrixBlock::Dense(m) => Some(m),
+            MatrixBlock::Sparse(_) => None,
             _ => None,
         }
     }
@@ -196,6 +209,7 @@ impl MatrixBlock {
     pub fn as_dense_mut(&mut self) -> Option<&mut DMatrix<f64>> {
         match self {
             MatrixBlock::Dense(m) => Some(m),
+            MatrixBlock::Sparse(_) => None,
             _ => None,
         }
     }
@@ -213,6 +227,93 @@ impl MatrixBlock {
             _ => None,
         }
     }
+}
+
+const DEFAULT_DENSE_BLOCK_LIMIT_BYTES: u128 = 16 * 1024 * 1024 * 1024;
+
+fn dense_block_limit_bytes() -> u128 {
+    std::env::var("MIXEDMODELS_MAX_DENSE_BLOCK_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<u128>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_DENSE_BLOCK_LIMIT_BYTES)
+}
+
+fn dense_block_bytes(nrows: usize, ncols: usize) -> u128 {
+    (nrows as u128)
+        .saturating_mul(ncols as u128)
+        .saturating_mul(std::mem::size_of::<f64>() as u128)
+}
+
+fn ensure_dense_block_within_limit(
+    nrows: usize,
+    ncols: usize,
+    context: impl Into<String>,
+) -> Result<()> {
+    ensure_dense_block_within_explicit_limit(nrows, ncols, context, dense_block_limit_bytes())
+}
+
+fn ensure_dense_block_within_explicit_limit(
+    nrows: usize,
+    ncols: usize,
+    context: impl Into<String>,
+    limit: u128,
+) -> Result<()> {
+    let bytes = dense_block_bytes(nrows, ncols);
+    if bytes > limit {
+        return Err(MixedModelError::ProblemTooLarge(format!(
+            "{} would require a dense {} x {} f64 block ({:.2} GiB), above the configured limit ({:.2} GiB). \
+             For large partially crossed random effects, use a more storage-aware formulation or raise MIXEDMODELS_MAX_DENSE_BLOCK_BYTES only if this allocation is intentional.",
+            context.into(),
+            nrows,
+            ncols,
+            bytes as f64 / 1024.0_f64.powi(3),
+            limit as f64 / 1024.0_f64.powi(3)
+        )));
+    }
+    Ok(())
+}
+
+fn validate_dense_block_plan(reterms: &[ReMat], fixed_response_cols: usize) -> Result<()> {
+    for i in 0..reterms.len() {
+        let ri = reterms[i].n_ranef();
+        ensure_dense_block_within_limit(
+            fixed_response_cols,
+            ri,
+            format!(
+                "[X|y]'Z block for grouping factor '{}'",
+                reterms[i].grouping_name
+            ),
+        )?;
+
+        for j in 0..i {
+            if reterms[i].vsize != 1 || reterms[j].vsize != 1 {
+                let rj = reterms[j].n_ranef();
+                ensure_dense_block_within_limit(
+                    ri,
+                    rj,
+                    format!(
+                        "off-diagonal random-effects cross-product block '{}' x '{}'",
+                        reterms[i].grouping_name, reterms[j].grouping_name
+                    ),
+                )?;
+            }
+        }
+
+        if (0..i).any(|j| !is_nested(&reterms[j], &reterms[i])) {
+            for row in i..reterms.len() {
+                ensure_dense_block_within_limit(
+                    reterms[row].n_ranef(),
+                    ri,
+                    format!(
+                        "crossed random-effects fill-in block '{}' x '{}'",
+                        reterms[row].grouping_name, reterms[i].grouping_name
+                    ),
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Convert row-major lower triangle index to linear index.
@@ -249,6 +350,18 @@ fn copy_block(dst: &mut MatrixBlock, src: &MatrixBlock) {
                 } else {
                     *dst_blk = src_blk.clone();
                 }
+            }
+        }
+        (MatrixBlock::Sparse(dst_mat), MatrixBlock::Sparse(src_mat)) => {
+            if dst_mat.nrows() == src_mat.nrows()
+                && dst_mat.ncols() == src_mat.ncols()
+                && dst_mat.nnz() == src_mat.nnz()
+                && dst_mat.col_offsets() == src_mat.col_offsets()
+                && dst_mat.row_indices() == src_mat.row_indices()
+            {
+                dst_mat.values_mut().copy_from_slice(src_mat.values());
+            } else {
+                *dst_mat = src_mat.clone();
             }
         }
         (dst_block, src_block) => {
@@ -400,12 +513,15 @@ fn update_l_from_parts(
         // Update L[j,j] by subtracting L[j,0..j] * L[j,0..j]'
         for jj in 0..j {
             let off_idx = block_index(j, jj);
-            with_block_pair_mut(l_blocks, diag_idx, off_idx, |diag, off| {
-                if let Some(off_dense) = off.as_dense_ref() {
-                    rank_k_downdate(diag, off_dense);
-                } else {
-                    let off_dense = off.as_dense();
-                    rank_k_downdate(diag, &off_dense);
+            with_block_pair_mut(l_blocks, diag_idx, off_idx, |diag, off| match off {
+                MatrixBlock::Sparse(off_sparse) => rank_k_downdate_sparse(diag, off_sparse),
+                _ => {
+                    if let Some(off_dense) = off.as_dense_ref() {
+                        rank_k_downdate(diag, off_dense);
+                    } else {
+                        let off_dense = off.as_dense();
+                        rank_k_downdate(diag, &off_dense);
+                    }
                 }
             });
         }
@@ -545,7 +661,7 @@ impl LinearMixedModel {
         };
 
         // Create cross-product blocks A and Cholesky blocks L
-        let (a_blocks, l_blocks) = create_al(&reterms, &xy_mat);
+        let (a_blocks, l_blocks) = create_al(&reterms, &xy_mat)?;
 
         // Build theta vector from all reterms
         let theta: Vec<f64> = reterms.iter().flat_map(|rt| rt.get_theta()).collect();
@@ -2788,7 +2904,7 @@ impl LinearMixedModel {
         }
 
         let x = self.feterm.full_rank_x().into_owned();
-        let (a_blocks, mut l_blocks) = create_structural_al(&self.reterms, &x);
+        let (a_blocks, mut l_blocks) = create_structural_al(&self.reterms, &x)?;
         update_l_from_parts(&a_blocks, &mut l_blocks, &self.reterms)?;
         profile_response_matrix_with_l_blocks(
             &self.reterms,
@@ -2936,6 +3052,19 @@ impl LinearMixedModel {
                     }
                     v
                 }
+                MatrixBlock::Sparse(mat) => {
+                    let dense = MatrixBlock::Sparse(mat.clone()).as_dense();
+                    let mut v = DVector::zeros(nranef_j);
+                    for i in 0..nranef_j {
+                        let mut val = rhs[i];
+                        for ci in 0..i {
+                            val -= dense[(i, ci)] * v[ci];
+                        }
+                        let d = dense[(i, i)];
+                        v[i] = if d.abs() > f64::EPSILON { val / d } else { 0.0 };
+                    }
+                    v
+                }
             };
             v_vecs.push(v_j);
         }
@@ -3003,6 +3132,19 @@ impl LinearMixedModel {
                             val -= mat[(ci, i)] * u[ci];
                         }
                         let d = mat[(i, i)];
+                        u[i] = if d.abs() > f64::EPSILON { val / d } else { 0.0 };
+                    }
+                    u
+                }
+                MatrixBlock::Sparse(mat) => {
+                    let dense = MatrixBlock::Sparse(mat.clone()).as_dense();
+                    let mut u = DVector::zeros(nranef_j);
+                    for i in (0..nranef_j).rev() {
+                        let mut val = rhs[i];
+                        for ci in (i + 1)..nranef_j {
+                            val -= dense[(ci, i)] * u[ci];
+                        }
+                        let d = dense[(i, i)];
                         u[i] = if d.abs() > f64::EPSILON { val / d } else { 0.0 };
                     }
                     u
@@ -3329,6 +3471,18 @@ impl LinearMixedModel {
                                 if d.abs() > f64::EPSILON { val / d } else { 0.0 };
                         }
                     }
+                    MatrixBlock::Sparse(mat) => {
+                        let dense = MatrixBlock::Sparse(mat.clone()).as_dense();
+                        for idx in 0..nranef_j {
+                            let mut val = rhs[idx];
+                            for ci in 0..idx {
+                                val -= dense[(idx, ci)] * w[offsets[j] + ci];
+                            }
+                            let d = dense[(idx, idx)];
+                            w[offsets[j] + idx] =
+                                if d.abs() > f64::EPSILON { val / d } else { 0.0 };
+                        }
+                    }
                 }
             }
 
@@ -3470,6 +3624,20 @@ impl LinearMixedModel {
                         }
                         MatrixBlock::Dense(mat) => {
                             let mat = mat.clone();
+                            for col in 0..vs_j {
+                                for idx in 0..nranef_i {
+                                    let mut val = scratch[(off_i + idx, col)];
+                                    for ci in 0..idx {
+                                        val -= mat[(idx, ci)] * scratch[(off_i + ci, col)];
+                                    }
+                                    let d = mat[(idx, idx)];
+                                    scratch[(off_i + idx, col)] =
+                                        if d.abs() > f64::EPSILON { val / d } else { 0.0 };
+                                }
+                            }
+                        }
+                        MatrixBlock::Sparse(mat) => {
+                            let mat = MatrixBlock::Sparse(mat.clone()).as_dense();
                             for col in 0..vs_j {
                                 for idx in 0..nranef_i {
                                     let mut val = scratch[(off_i + idx, col)];
@@ -5060,9 +5228,11 @@ fn promote_crossed_fill_in_blocks(l: &mut [MatrixBlock], reterms: &[ReMat]) {
 }
 
 /// Create the A (cross-product) and L (Cholesky) block arrays.
-fn create_al(reterms: &[ReMat], xy: &FeMat) -> (Vec<MatrixBlock>, Vec<MatrixBlock>) {
+fn create_al(reterms: &[ReMat], xy: &FeMat) -> Result<(Vec<MatrixBlock>, Vec<MatrixBlock>)> {
+    validate_dense_block_plan(reterms, xy.wtxy.ncols())?;
+
     if reterms.len() == 1 && reterms[0].vsize == 2 && reterms[0].n_ranef() >= 512 {
-        return create_al_single_vsize2(&reterms[0], xy);
+        return Ok(create_al_single_vsize2(&reterms[0], xy));
     }
 
     let k = reterms.len();
@@ -5101,7 +5271,7 @@ fn create_al(reterms: &[ReMat], xy: &FeMat) -> (Vec<MatrixBlock>, Vec<MatrixBloc
 
     promote_crossed_fill_in_blocks(&mut l, reterms);
 
-    (a, l)
+    Ok((a, l))
 }
 
 fn create_al_single_vsize2(re: &ReMat, xy: &FeMat) -> (Vec<MatrixBlock>, Vec<MatrixBlock>) {
@@ -5153,7 +5323,9 @@ fn create_al_single_vsize2(re: &ReMat, xy: &FeMat) -> (Vec<MatrixBlock>, Vec<Mat
 fn create_structural_al(
     reterms: &[ReMat],
     x: &DMatrix<f64>,
-) -> (Vec<MatrixBlock>, Vec<MatrixBlock>) {
+) -> Result<(Vec<MatrixBlock>, Vec<MatrixBlock>)> {
+    validate_dense_block_plan(reterms, x.ncols())?;
+
     let k = reterms.len();
     let total = k + 1;
     let n_blocks = total * (total + 1) / 2;
@@ -5184,7 +5356,7 @@ fn create_structural_al(
 
     promote_crossed_fill_in_blocks(&mut l, reterms);
 
-    (a, l)
+    Ok((a, l))
 }
 
 /// Compute Z_i' Z_j for two random effects terms.
@@ -5219,8 +5391,38 @@ fn compute_re_cross_product(a: &ReMat, b: &ReMat) -> MatrixBlock {
             }
         }
         MatrixBlock::BlockDiagonal(blocks)
+    } else if a.vsize == 1 && b.vsize == 1 && !is_nested(b, a) {
+        // Truly crossed scalar-intercept terms: keep the raw cross-product sparse.
+        // A partially crossed random-intercept block can be enormous in shape
+        // while having only O(n_obs) structural nonzeros.
+        let mut entries = BTreeMap::<(usize, usize), f64>::new();
+        let n = a.refs.len();
+
+        for obs in 0..n {
+            let ri = a.refs[obs] as usize;
+            let rj = b.refs[obs] as usize;
+            for si in 0..a.vsize {
+                for sj in 0..b.vsize {
+                    let value = a.wtz[(si, obs)] * b.wtz[(sj, obs)];
+                    if value != 0.0 {
+                        *entries
+                            .entry((ri * a.vsize + si, rj * b.vsize + sj))
+                            .or_insert(0.0) += value;
+                    }
+                }
+            }
+        }
+        let mut result = CooMatrix::new(nranef_a, nranef_b);
+        for ((row, col), value) in entries {
+            if value != 0.0 {
+                result.push(row, col, value);
+            }
+        }
+        MatrixBlock::Sparse(CscMatrix::from(&result))
     } else {
-        // General case: dense result (different terms)
+        // General case: dense result. This includes reverse-ordered nested
+        // scalar terms, where preserving the previous dense algebra keeps the
+        // optimizer path stable.
         let mut result = DMatrix::zeros(nranef_a, nranef_b);
         let n = a.refs.len();
 
@@ -5390,6 +5592,13 @@ fn subtract_left_block_product(dst: &mut DMatrix<f64>, lhs: &MatrixBlock, rhs: &
                 row_offset += s;
             }
         }
+        MatrixBlock::Sparse(mat) => {
+            for (row, inner, value) in mat.triplet_iter() {
+                for col in 0..rhs.ncols() {
+                    dst[(row, col)] -= value * rhs[(inner, col)];
+                }
+            }
+        }
         MatrixBlock::Dense(mat) => {
             for row in 0..mat.nrows() {
                 for col in 0..rhs.ncols() {
@@ -5482,6 +5691,10 @@ fn solve_lower_block_rhs(rhs: &mut DMatrix<f64>, l: &MatrixBlock) {
                     rhs[(row, col)] = sum / diag;
                 }
             }
+        }
+        MatrixBlock::Sparse(_) => {
+            let dense = l.as_dense();
+            solve_lower_block_rhs(rhs, &MatrixBlock::Dense(dense));
         }
     }
 }
@@ -5871,6 +6084,36 @@ fn copy_scale_inflate(l: &mut MatrixBlock, a: &MatrixBlock, re: &ReMat) {
 fn copy_and_scale_offdiag(l: &mut MatrixBlock, a: &MatrixBlock, re_i: &ReMat, re_j: &ReMat) {
     let si = re_i.vsize;
     let sj = re_j.vsize;
+
+    if si == 1 && sj == 1 {
+        let scale = re_i.lambda[(0, 0)] * re_j.lambda[(0, 0)];
+        if let MatrixBlock::Sparse(a_sparse) = a {
+            let result = match l {
+                MatrixBlock::Sparse(result)
+                    if result.nrows() == a_sparse.nrows()
+                        && result.ncols() == a_sparse.ncols()
+                        && result.nnz() == a_sparse.nnz()
+                        && result.col_offsets() == a_sparse.col_offsets()
+                        && result.row_indices() == a_sparse.row_indices() =>
+                {
+                    result
+                }
+                _ => {
+                    *l = MatrixBlock::Sparse(a_sparse.clone());
+                    match l {
+                        MatrixBlock::Sparse(result) => result,
+                        _ => unreachable!(),
+                    }
+                }
+            };
+            result.values_mut().copy_from_slice(a_sparse.values());
+            for value in result.values_mut() {
+                *value *= scale;
+            }
+            return;
+        }
+    }
+
     with_dense_block(a, |a_dense| {
         let nranef_i = a_dense.nrows();
         let nranef_j = a_dense.ncols();
@@ -6100,6 +6343,54 @@ fn rank_k_downdate(c: &mut MatrixBlock, a: &DMatrix<f64>) {
                 row_offset += s;
             }
         }
+        MatrixBlock::Sparse(_) => {
+            let mut dense = c.as_dense();
+            dense.gemm(-1.0, a, &a.transpose(), 1.0);
+            *c = MatrixBlock::Dense(dense);
+        }
+    }
+}
+
+/// Rank-k downdate from a sparse block: C -= A * A'.
+fn rank_k_downdate_sparse(c: &mut MatrixBlock, a: &CscMatrix<f64>) {
+    match c {
+        MatrixBlock::Dense(c_mat) => {
+            for col_idx in 0..a.ncols() {
+                let col = a.col(col_idx);
+                let rows = col.row_indices();
+                let values = col.values();
+                for left in 0..rows.len() {
+                    let row_i = rows[left];
+                    let value_i = values[left];
+                    for right in 0..rows.len() {
+                        let row_j = rows[right];
+                        c_mat[(row_i, row_j)] -= value_i * values[right];
+                    }
+                }
+            }
+        }
+        MatrixBlock::Diagonal(c_diag) => {
+            for (row, _, value) in a.triplet_iter() {
+                c_diag[row] -= value * value;
+            }
+        }
+        _ => {
+            let mut dense = c.as_dense();
+            for col_idx in 0..a.ncols() {
+                let col = a.col(col_idx);
+                let rows = col.row_indices();
+                let values = col.values();
+                for left in 0..rows.len() {
+                    let row_i = rows[left];
+                    let value_i = values[left];
+                    for right in 0..rows.len() {
+                        let row_j = rows[right];
+                        dense[(row_i, row_j)] -= value_i * values[right];
+                    }
+                }
+            }
+            *c = MatrixBlock::Dense(dense);
+        }
     }
 }
 
@@ -6111,6 +6402,11 @@ fn subtract_product(c: &mut MatrixBlock, a: &DMatrix<f64>, b: &DMatrix<f64>) {
         }
         MatrixBlock::BlockDiagonal(_) => {
             // Promote to dense — off-diagonal updates destroy block-diagonal structure
+            let mut c_dense = c.as_dense();
+            c_dense.gemm(-1.0, a, &b.transpose(), 1.0);
+            *c = MatrixBlock::Dense(c_dense);
+        }
+        MatrixBlock::Sparse(_) => {
             let mut c_dense = c.as_dense();
             c_dense.gemm(-1.0, a, &b.transpose(), 1.0);
             *c = MatrixBlock::Dense(c_dense);
@@ -6236,6 +6532,11 @@ fn cholesky_block(block: &mut MatrixBlock) -> Result<()> {
             }
             Ok(())
         }
+        MatrixBlock::Sparse(_) => {
+            let dense = block.as_dense();
+            *block = MatrixBlock::Dense(dense);
+            cholesky_block(block)
+        }
     }
 }
 
@@ -6254,6 +6555,21 @@ fn rdiv_lower_transpose(a: &mut MatrixBlock, l: &MatrixBlock) {
                     }
                     for i in 0..a_mat.nrows() {
                         a_mat[(i, j)] /= denom;
+                    }
+                }
+            }
+            MatrixBlock::Sparse(a_sparse) => {
+                for j in 0..a_sparse.ncols() {
+                    let denom = l_diag[j];
+                    let mut col = a_sparse.col_mut(j);
+                    if denom.abs() < 1e-30 {
+                        for value in col.values_mut() {
+                            *value = 0.0;
+                        }
+                    } else {
+                        for value in col.values_mut() {
+                            *value /= denom;
+                        }
                     }
                 }
             }
@@ -6337,7 +6653,7 @@ fn rdiv_lower_transpose(a: &mut MatrixBlock, l: &MatrixBlock) {
                         col_offset += s;
                     }
                 }
-                MatrixBlock::BlockDiagonal(_) => {
+                MatrixBlock::BlockDiagonal(_) | MatrixBlock::Sparse(_) => {
                     // Both block-diagonal: promote A to dense, then solve
                     let mut a_dense = a.as_dense();
                     let mut col_offset = 0;
@@ -6444,7 +6760,7 @@ fn rdiv_lower_transpose(a: &mut MatrixBlock, l: &MatrixBlock) {
                         *a = MatrixBlock::Dense(a_dense);
                     }
                 },
-                MatrixBlock::BlockDiagonal(_) => {
+                MatrixBlock::BlockDiagonal(_) | MatrixBlock::Sparse(_) => {
                     // Promote to dense and solve
                     let mut a_dense = a.as_dense();
                     for j in 0..n {
@@ -6517,6 +6833,10 @@ fn logdet_block(block: &MatrixBlock) -> f64 {
                 }
             }
             ld * 2.0
+        }
+        MatrixBlock::Sparse(mat) => {
+            let dense = MatrixBlock::Sparse(mat.clone()).as_dense();
+            logdet_block(&MatrixBlock::Dense(dense))
         }
     }
 }
@@ -8054,6 +8374,79 @@ mod tests {
         assert_eq!(block_index(2, 0), 3);
         assert_eq!(block_index(2, 1), 4);
         assert_eq!(block_index(2, 2), 5);
+    }
+
+    #[test]
+    fn test_dense_crossed_block_guard_reports_problem_too_large() {
+        let err = ensure_dense_block_within_explicit_limit(
+            1_400_000,
+            100_000,
+            "issue-702-scale crossed random-effects block",
+            16 * 1024 * 1024 * 1024,
+        )
+        .expect_err("issue-702-scale dense block should be refused before allocation");
+
+        assert!(matches!(err, MixedModelError::ProblemTooLarge(_)));
+        assert!(err.to_string().contains("1043."));
+        assert!(err.to_string().contains("issue-702-scale"));
+    }
+
+    #[test]
+    fn test_dense_crossed_block_guard_accepts_small_blocks() {
+        ensure_dense_block_within_explicit_limit(
+            100,
+            80,
+            "small crossed random-effects block",
+            16 * 1024 * 1024 * 1024,
+        )
+        .expect("small dense blocks should remain valid");
+    }
+
+    #[test]
+    fn test_crossed_scalar_re_cross_product_stays_sparse() {
+        let mut data = DataFrame::new();
+        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        data.add_categorical(
+            "person",
+            vec!["p1", "p1", "p2", "p3", "p3", "p1"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        );
+        data.add_categorical(
+            "firm",
+            vec!["f1", "f2", "f2", "f1", "f3", "f1"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        );
+
+        let formula = parse_formula("y ~ 1 + (1 | person) + (1 | firm)").unwrap();
+        let model = LinearMixedModel::new(formula, &data, None).unwrap();
+
+        assert!(
+            matches!(model.a_blocks[block_index(1, 0)], MatrixBlock::Sparse(_)),
+            "crossed scalar RE off-diagonal A block should not be materialized dense"
+        );
+        let MatrixBlock::Sparse(cross) = &model.a_blocks[block_index(1, 0)] else {
+            unreachable!();
+        };
+        assert_eq!(cross.nrows(), model.reterms[1].n_ranef());
+        assert_eq!(cross.ncols(), model.reterms[0].n_ranef());
+        assert!(cross.nnz() <= data.nrow());
+
+        let dense = MatrixBlock::Sparse(cross.clone()).as_dense();
+        let person_p1 = model.reterms[0]
+            .levels
+            .iter()
+            .position(|level| level == "p1")
+            .unwrap();
+        let firm_f1 = model.reterms[1]
+            .levels
+            .iter()
+            .position(|level| level == "f1")
+            .unwrap();
+        assert_eq!(dense[(firm_f1, person_p1)], 2.0);
     }
 
     #[test]

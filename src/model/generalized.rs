@@ -643,6 +643,11 @@ impl GeneralizedLinearMixedModel {
                         (0..n).map(|i| blk[(i, i)].abs().ln()).sum::<f64>()
                     })
                     .sum::<f64>(),
+                crate::model::linear::MatrixBlock::Sparse(m) => {
+                    let dense = crate::model::linear::MatrixBlock::Sparse(m.clone()).as_dense();
+                    let n = dense.nrows().min(dense.ncols());
+                    (0..n).map(|i| dense[(i, i)].abs().ln()).sum::<f64>()
+                }
             };
         }
         2.0 * logdet
@@ -870,6 +875,11 @@ fn matrix_block_diag(block: &crate::model::linear::MatrixBlock) -> Vec<f64> {
                 }
             }
             out
+        }
+        MatrixBlock::Sparse(m) => {
+            let dense = MatrixBlock::Sparse(m.clone()).as_dense();
+            let n = dense.nrows().min(dense.ncols());
+            (0..n).map(|i| dense[(i, i)]).collect()
         }
     }
 }

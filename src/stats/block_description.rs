@@ -182,8 +182,15 @@ fn short_type(a: &MatrixBlock, l: &MatrixBlock) -> &'static str {
         (MatrixBlock::Dense(_), MatrixBlock::Dense(_)) => "Dense",
         (MatrixBlock::Dense(_), MatrixBlock::Diagonal(_)) => "Dense/Diag",
         (MatrixBlock::Dense(_), MatrixBlock::BlockDiagonal(_)) => "Dense/BlkDiag",
+        (MatrixBlock::Dense(_), MatrixBlock::Sparse(_)) => "Dense/Sparse",
+        (MatrixBlock::Sparse(_), MatrixBlock::Dense(_)) => "Sparse/Dense",
+        (MatrixBlock::Sparse(_), MatrixBlock::Diagonal(_)) => "Sparse/Diag",
+        (MatrixBlock::Sparse(_), MatrixBlock::BlockDiagonal(_)) => "Sparse/BlkDiag",
+        (MatrixBlock::Sparse(_), MatrixBlock::Sparse(_)) => "Sparse",
         (MatrixBlock::Diagonal(_), MatrixBlock::BlockDiagonal(_)) => "Diag/BlkDiag",
+        (MatrixBlock::Diagonal(_), MatrixBlock::Sparse(_)) => "Diag/Sparse",
         (MatrixBlock::BlockDiagonal(_), MatrixBlock::Diagonal(_)) => "BlkDiag/Diag",
+        (MatrixBlock::BlockDiagonal(_), MatrixBlock::Sparse(_)) => "BlkDiag/Sparse",
     }
 }
 

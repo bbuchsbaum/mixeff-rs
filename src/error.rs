@@ -32,6 +32,9 @@ pub enum MixedModelError {
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
 
+    #[error("Problem too large: {0}")]
+    ProblemTooLarge(String),
+
     #[error("Singular model: {0}")]
     Singular(String),
 
