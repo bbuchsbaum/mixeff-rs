@@ -149,6 +149,113 @@ impl VarCorr {
 
         out
     }
+
+    /// Render the variance-components table as HTML.
+    pub fn to_html(&self) -> String {
+        let (headers, rows) = self.cell_grid();
+        let mut out = String::from("<table><tr>");
+
+        for cell in &headers {
+            out.push_str(&format!("<th align=\"right\">{cell}</th>"));
+        }
+        out.push_str("</tr>");
+
+        for row in &rows {
+            out.push_str("<tr>");
+            for (idx, cell) in row.iter().enumerate() {
+                let align = if idx < 2 { "left" } else { "right" };
+                out.push_str(&format!("<td align=\"{align}\">{cell}</td>"));
+            }
+            out.push_str("</tr>");
+        }
+
+        out.push_str("</table>\n");
+        out
+    }
+
+    /// Render the variance-components table as LaTeX.
+    pub fn to_latex(&self) -> String {
+        let (headers, rows) = self.cell_grid();
+        let n_cols = headers.len();
+        // First two columns left-aligned (group, column name), rest right-aligned.
+        let col_spec: String = (0..n_cols)
+            .map(|i| if i < 2 { "l" } else { "r" })
+            .collect::<Vec<_>>()
+            .join(" | ");
+
+        let mut out = String::new();
+        out.push_str("\\begin{tabular}\n");
+        out.push_str(&format!("{{{col_spec}}}\n"));
+        out.push_str(&headers.join(" & "));
+        out.push_str(" \\\\\n\\hline\n");
+
+        for row in &rows {
+            out.push_str(&row.join(" & "));
+            out.push_str(" \\\\\n");
+        }
+
+        out.push_str("\\end{tabular}\n");
+        out
+    }
+
+    fn cell_grid(&self) -> (Vec<String>, Vec<Vec<String>>) {
+        let has_corr = self
+            .components
+            .iter()
+            .any(|comp| !comp.correlations.is_empty());
+
+        let mut headers = vec![
+            String::new(),
+            "Column".to_string(),
+            "Variance".to_string(),
+            "Std.Dev".to_string(),
+        ];
+        if has_corr {
+            headers.push("Corr.".to_string());
+        }
+
+        let mut rows: Vec<Vec<String>> = Vec::new();
+        for comp in &self.components {
+            for (i, name) in comp.names.iter().enumerate() {
+                let var = comp.std_dev[i] * comp.std_dev[i];
+                let group = if i == 0 { comp.group.as_str() } else { "" };
+                let mut row = vec![
+                    group.to_string(),
+                    name.clone(),
+                    format!("{var:.6}"),
+                    format!("{:.6}", comp.std_dev[i]),
+                ];
+                if has_corr {
+                    let corr_text = if i == 0 || comp.correlations.is_empty() {
+                        String::new()
+                    } else {
+                        let offset = i * (i - 1) / 2;
+                        (0..i)
+                            .map(|j| format!("{:+.2}", comp.correlations[offset + j]))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    };
+                    row.push(corr_text);
+                }
+                rows.push(row);
+            }
+        }
+
+        if let Some(sigma) = self.residual_sd {
+            let mut row = vec![
+                "Residual".to_string(),
+                String::new(),
+                format!("{:.6}", sigma * sigma),
+                format!("{sigma:.6}"),
+            ];
+            if has_corr {
+                row.push(String::new());
+            }
+            rows.push(row);
+        }
+
+        (headers, rows)
+    }
 }
 
 impl fmt::Display for VarCorr {
@@ -296,5 +403,64 @@ mod tests {
         assert_eq!(vc.components[0].names, vec!["(Intercept)"]);
         assert_eq!(vc.components[1].group, "item");
         assert_eq!(vc.components[1].names, vec!["(Intercept)", "days"]);
+    }
+
+    #[test]
+    fn test_html_with_corr_and_residual() {
+        let vc = VarCorr::from_reterms(&[scalar_reterm(), vector_reterm()], 3.0, Some(3.0));
+        let out = vc.to_html();
+
+        assert!(out.starts_with("<table><tr>"));
+        assert!(out.contains("<th align=\"right\">Column</th>"));
+        assert!(out.contains("<th align=\"right\">Variance</th>"));
+        assert!(out.contains("<th align=\"right\">Std.Dev</th>"));
+        assert!(out.contains("<th align=\"right\">Corr.</th>"));
+        assert!(out.contains(
+            "<td align=\"left\">subj</td><td align=\"left\">(Intercept)</td><td align=\"right\">5.062500</td>"
+        ));
+        assert!(out.contains("<td align=\"right\">+0.45</td>"));
+        assert!(out.contains("<td align=\"left\">Residual</td>"));
+        assert!(out.ends_with("</table>\n"));
+    }
+
+    #[test]
+    fn test_html_without_corr_or_residual() {
+        let vc = VarCorr::from_reterms(&[scalar_reterm()], 2.0, None);
+        let out = vc.to_html();
+
+        assert!(out.contains("<th align=\"right\">Variance</th>"));
+        assert!(!out.contains("Corr."));
+        assert!(!out.contains("Residual"));
+    }
+
+    #[test]
+    fn test_latex_with_corr_and_residual() {
+        let vc = VarCorr::from_reterms(&[scalar_reterm(), vector_reterm()], 3.0, Some(3.0));
+        let out = vc.to_latex();
+
+        assert!(out.starts_with(concat!(
+            "\\begin{tabular}\n",
+            "{l | l | r | r | r}\n",
+            " & Column & Variance & Std.Dev & Corr. \\\\\n",
+            "\\hline\n",
+        )));
+        assert!(out.contains("subj & (Intercept) & 5.062500 & 2.250000 &"));
+        assert!(out.contains("Residual &  & 9.000000 & 3.000000"));
+        assert!(out.ends_with("\\end{tabular}\n"));
+    }
+
+    #[test]
+    fn test_latex_without_corr_or_residual() {
+        let vc = VarCorr::from_reterms(&[scalar_reterm()], 2.0, None);
+        let out = vc.to_latex();
+
+        assert!(out.starts_with(concat!(
+            "\\begin{tabular}\n",
+            "{l | l | r | r}\n",
+            " & Column & Variance & Std.Dev \\\\\n",
+            "\\hline\n",
+        )));
+        assert!(!out.contains("Corr."));
+        assert!(!out.contains("Residual"));
     }
 }

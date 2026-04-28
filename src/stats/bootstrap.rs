@@ -1,37 +1,17 @@
-//! Parametric bootstrap for mixed-effects models.
+//! Parametric bootstrap helpers.
 //!
-//! Provides `parametric_bootstrap()` for generating bootstrap samples
-//! from a fitted mixed model, and the `MixedModelBootstrap` type for
-//! storing and summarizing results.
+//! The fitted-model side of the parametric bootstrap lives in
+//! [`crate::model::linear::parametricbootstrap`]; this module re-exports the
+//! result types and exposes the `shortest_cov_int` utility used to summarize
+//! replicate distributions.
 
-use nalgebra::DMatrix;
-
-/// Result of a parametric bootstrap.
-#[derive(Debug, Clone)]
-pub struct MixedModelBootstrap {
-    /// Bootstrap replicates: each entry contains (objective, sigma, beta, theta).
-    pub fits: Vec<BootstrapReplicate>,
-    /// Lower triangular lambda matrices (templates from original fit).
-    pub lambda: Vec<DMatrix<f64>>,
-    /// Indices of free parameters in each lambda.
-    pub inds: Vec<Vec<usize>>,
-    /// Lower bounds on theta.
-    pub lower_bounds: Vec<f64>,
-    /// Number of replicates.
-    pub n_samples: usize,
-}
-
-/// A single bootstrap replicate.
-#[derive(Debug, Clone)]
-pub struct BootstrapReplicate {
-    pub objective: f64,
-    pub sigma: f64,
-    pub beta: Vec<f64>,
-    pub theta: Vec<f64>,
-    pub se: Vec<f64>,
-}
+pub use crate::model::linear::{parametricbootstrap, BootstrapReplicate, MixedModelBootstrap};
 
 /// Shortest coverage interval containing `level` proportion of values.
+///
+/// Sorts `v` ascending in place, then scans every contiguous window of size
+/// `ceil(n * level)` and returns the narrowest one. Mirrors the
+/// `shortestcovint` summary helper used by the Julia bootstrap surface.
 pub fn shortest_cov_int(v: &mut [f64], level: f64) -> (f64, f64) {
     assert!((0.0..1.0).contains(&level), "level must be in (0, 1)");
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -57,9 +37,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_shortest_cov_int() {
+    fn test_shortest_cov_int_narrow_window() {
         let mut v: Vec<f64> = (0..100).map(|i| i as f64).collect();
         let (lo, hi) = shortest_cov_int(&mut v, 0.95);
+        // 95-element window over uniformly-spaced integers spans at most 94.
         assert!(hi - lo <= 95.0);
+        assert!(lo >= 0.0 && hi <= 99.0);
+    }
+
+    #[test]
+    fn test_shortest_cov_int_full_coverage() {
+        let mut v = vec![1.0, 5.0, 7.0];
+        let (lo, hi) = shortest_cov_int(&mut v, 0.99);
+        // ceil(3 * 0.99) == 3, so the only window is the full vector.
+        assert_eq!((lo, hi), (1.0, 7.0));
+    }
+
+    #[test]
+    fn test_shortest_cov_int_picks_tightest_cluster() {
+        // Tight cluster at [10, 11, 12] vs. spread elsewhere: with level=0.6
+        // (ceil(5 * 0.6) = 3) the tight cluster wins.
+        let mut v = vec![0.0, 10.0, 11.0, 12.0, 100.0];
+        let (lo, hi) = shortest_cov_int(&mut v, 0.6);
+        assert_eq!((lo, hi), (10.0, 12.0));
     }
 }
