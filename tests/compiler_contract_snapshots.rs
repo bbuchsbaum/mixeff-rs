@@ -43,6 +43,13 @@ fn sleepstudy_artifact() -> CompiledModelArtifact {
     model.compiler_artifact().clone()
 }
 
+fn sleepstudy_artifact_for_formula(formula_text: &str) -> CompiledModelArtifact {
+    let (data, _meta) = datasets::load("sleepstudy").unwrap();
+    let formula = parse_formula(formula_text).unwrap();
+    let model = LinearMixedModel::new(formula, &data, None).unwrap();
+    model.compiler_artifact().clone()
+}
+
 fn penicillin_artifact() -> CompiledModelArtifact {
     let (data, meta) = datasets::load("penicillin").unwrap();
     let formula = parse_formula(&meta.fits[0].formula).unwrap();
@@ -318,6 +325,65 @@ fn json_section_by_title<'a>(value: &'a serde_json::Value, title: &str) -> &'a s
         .unwrap_or_else(|| panic!("missing report section {title}"))
 }
 
+fn random_term_card_fixture_value(report: &ModelAuditReport) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "random_term_cards".to_string(),
+        serde_json::to_value(&report.random_term_cards).unwrap(),
+    );
+    object.insert(
+        "cross_card_constraints".to_string(),
+        serde_json::to_value(&report.cross_card_constraints).unwrap(),
+    );
+    serde_json::Value::Object(object)
+}
+
+fn json_diff_paths(left: &serde_json::Value, right: &serde_json::Value) -> Vec<String> {
+    let mut paths = Vec::new();
+    collect_json_diff_paths("", left, right, &mut paths);
+    paths.sort();
+    paths
+}
+
+fn collect_json_diff_paths(
+    path: &str,
+    left: &serde_json::Value,
+    right: &serde_json::Value,
+    paths: &mut Vec<String>,
+) {
+    match (left, right) {
+        (serde_json::Value::Object(left), serde_json::Value::Object(right)) => {
+            let keys = left
+                .keys()
+                .chain(right.keys())
+                .collect::<std::collections::BTreeSet<_>>();
+            for key in keys {
+                let next_path = format!("{path}/{key}");
+                match (left.get(key), right.get(key)) {
+                    (Some(left), Some(right)) => {
+                        collect_json_diff_paths(&next_path, left, right, paths);
+                    }
+                    _ => paths.push(next_path),
+                }
+            }
+        }
+        (serde_json::Value::Array(left), serde_json::Value::Array(right)) => {
+            let len = left.len().max(right.len());
+            for index in 0..len {
+                let next_path = format!("{path}/{index}");
+                match (left.get(index), right.get(index)) {
+                    (Some(left), Some(right)) => {
+                        collect_json_diff_paths(&next_path, left, right, paths);
+                    }
+                    _ => paths.push(next_path),
+                }
+            }
+        }
+        _ if left == right => {}
+        _ => paths.push(path.to_string()),
+    }
+}
+
 fn assert_wire_fixture(relative_path: &str, actual: &str) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);
     if std::env::var_os(UPDATE_ENV).is_some() {
@@ -425,11 +491,21 @@ fn audit_report_matches_wire_fixture() {
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
 
     assert_eq!(value["schema_name"], "mixedmodels.model_audit_report");
-    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["schema_version"], 2);
     assert_eq!(
         value["requested_formula"],
         "y ~ 1 + x + x2 + (1 + x | subject)"
     );
+    assert_eq!(value["random_term_cards"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        value["random_term_cards"][0]["schema_name"],
+        "mixedmodels.random_term_card"
+    );
+    assert_eq!(
+        value["random_term_cards"][0]["design_support"]["status"],
+        "too_rich"
+    );
+    assert_eq!(value["cross_card_constraints"].as_array().unwrap().len(), 0);
     assert_eq!(
         json_section_by_title(&value, "Dependence Paths")["lines"][2]["detail"],
         "none"
@@ -499,6 +575,68 @@ fn sleepstudy_audit_report_matches_wire_fixture() {
     );
     assert_wire_fixture(
         "tests/fixtures/compiler_contract/sleepstudy_model_audit_report_v1.json",
+        &json,
+    );
+}
+
+#[test]
+fn sleepstudy_random_term_card_matches_wire_fixture() {
+    let artifact = sleepstudy_artifact();
+    let report = ModelAuditReport::from_artifact(&artifact);
+    assert_eq!(report.random_term_cards.len(), 1);
+    assert!(report.cross_card_constraints.is_empty());
+
+    let card = &report.random_term_cards[0];
+    assert_eq!(card.schema_name, "mixedmodels.random_term_card");
+    assert_eq!(card.schema_version, 1);
+    assert_eq!(card.term_id, "r0");
+    assert_eq!(card.group.label(), "Subject");
+    assert_eq!(card.blocks.len(), 1);
+    assert_eq!(card.blocks[0].basis, vec!["intercept", "Days"]);
+    assert_eq!(card.blocks[0].theta_parameters, 3);
+    assert_eq!(card.design_support.group_levels, Some(18));
+    assert_eq!(card.design_support.min_rows_per_group, Some(10));
+    assert_eq!(card.design_support.median_rows_per_group, Some(10));
+    assert_eq!(
+        card.blocks[0].english,
+        "`Subject` units differ in baseline and `Days` slope; the model estimates whether these are associated."
+    );
+
+    let json = pretty_json(card);
+    assert_wire_fixture(
+        "tests/fixtures/compiler_contract/sleepstudy_random_term_card_v1.json",
+        &json,
+    );
+}
+
+#[test]
+fn sleepstudy_double_bar_and_split_cards_match_wire_fixture() {
+    let double_bar_artifact =
+        sleepstudy_artifact_for_formula("Reaction ~ Days + (1 + Days || Subject)");
+    let split_artifact =
+        sleepstudy_artifact_for_formula("Reaction ~ Days + (1 | Subject) + (0 + Days | Subject)");
+
+    let double_bar_report = ModelAuditReport::from_artifact(&double_bar_artifact);
+    let split_report = ModelAuditReport::from_artifact(&split_artifact);
+    let double_bar = random_term_card_fixture_value(&double_bar_report);
+    let split = random_term_card_fixture_value(&split_report);
+
+    assert_eq!(
+        json_diff_paths(&double_bar, &split),
+        vec![
+            "/cross_card_constraints/0/reason",
+            "/random_term_cards/0/original_fragment",
+            "/random_term_cards/1/original_fragment",
+        ]
+    );
+
+    let fixture = serde_json::json!({
+        "double_bar": double_bar,
+        "split_blocks": split,
+    });
+    let json = pretty_json(&fixture);
+    assert_wire_fixture(
+        "tests/fixtures/compiler_contract/sleepstudy_double_bar_split_random_term_cards_v1.json",
         &json,
     );
 }

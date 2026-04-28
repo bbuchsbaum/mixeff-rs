@@ -7,11 +7,16 @@ use super::artifact::{
     CompiledModelArtifact, DerivativeAvailability, EffectiveRankStatus, InferenceAvailability,
     ModelKind, ModelStateStatus, ObjectiveApproximation, OptimizerCertificateScope,
 };
-use super::audit::{InformationBudgetStatus, RankStatus};
+use super::audit::{BasisAudit, InformationBudgetStatus, RandomTermAudit, RankStatus};
 use super::diagnostics::{Diagnostic, DiagnosticCode, DiagnosticSeverity, FitStatus};
+use super::ir::{CovarianceForm, RandomCoefficient, RandomCoefficientKind, RandomTermIr};
+use super::random_term_card::{
+    CrossCardConstraint, DesignSupport, ImpliedConstraintKind, RandomTermBlock, RandomTermCard,
+    RoleOrigin, WithinGroupVariation, RANDOM_TERM_CARD_SCHEMA, RANDOM_TERM_CARD_SCHEMA_VERSION,
+};
 
 pub const MODEL_AUDIT_REPORT_SCHEMA: &str = "mixedmodels.model_audit_report";
-pub const MODEL_AUDIT_REPORT_SCHEMA_VERSION: u32 = 1;
+pub const MODEL_AUDIT_REPORT_SCHEMA_VERSION: u32 = 2;
 
 /// Stable user-facing summary of a compiled/fitted model artifact.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -20,6 +25,8 @@ pub struct ModelAuditReport {
     pub schema_version: u32,
     pub requested_formula: String,
     pub sections: Vec<AuditReportSection>,
+    pub random_term_cards: Vec<RandomTermCard>,
+    pub cross_card_constraints: Vec<CrossCardConstraint>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -54,6 +61,10 @@ impl ModelAuditReport {
         sections.push(fixed_effect_section(artifact));
         sections.push(random_effect_section(artifact));
         sections.push(random_effect_information_budget_section(artifact));
+        let random_term_cards = random_term_cards(artifact);
+        let cross_card_constraints = cross_card_constraints(artifact);
+        sections.push(random_term_cards_section(&random_term_cards));
+        sections.push(cross_card_constraints_section(&cross_card_constraints));
         sections.push(dependence_path_section(artifact));
         sections.push(parameterization_trace_section(artifact));
         sections.push(effective_covariance_section(artifact));
@@ -66,6 +77,8 @@ impl ModelAuditReport {
             schema_name: MODEL_AUDIT_REPORT_SCHEMA.to_string(),
             schema_version: MODEL_AUDIT_REPORT_SCHEMA_VERSION,
             requested_formula: artifact.requested_formula.clone(),
+            random_term_cards,
+            cross_card_constraints,
             diagnostics: report_diagnostics(artifact),
             sections,
         }
@@ -518,6 +531,415 @@ fn random_effect_information_budget_detail(term: &super::audit::RandomTermAudit)
         effective_n.recommendation,
         effective_n.explanation
     )
+}
+
+fn random_term_cards_section(cards: &[RandomTermCard]) -> AuditReportSection {
+    let lines = if cards.is_empty() {
+        vec![AuditReportLine {
+            label: "cards".to_string(),
+            status: AuditReportStatus::NotAssessed,
+            detail: "none".to_string(),
+        }]
+    } else {
+        cards
+            .iter()
+            .map(|card| AuditReportLine {
+                label: card.term_id.clone(),
+                status: information_budget_status(card.design_support.status),
+                detail: random_term_card_detail(card),
+            })
+            .collect()
+    };
+
+    AuditReportSection {
+        title: "Random Term Cards".to_string(),
+        lines,
+    }
+}
+
+fn cross_card_constraints_section(constraints: &[CrossCardConstraint]) -> AuditReportSection {
+    let lines = if constraints.is_empty() {
+        vec![AuditReportLine {
+            label: "constraints".to_string(),
+            status: AuditReportStatus::Ok,
+            detail: "none".to_string(),
+        }]
+    } else {
+        constraints
+            .iter()
+            .enumerate()
+            .map(|(index, constraint)| AuditReportLine {
+                label: format!("c{index}"),
+                status: AuditReportStatus::Info,
+                detail: format!(
+                    "cards={}, basis={}, reason={}",
+                    constraint.between_cards.join(" <-> "),
+                    constraint.between_basis.join(" <-> "),
+                    constraint.reason
+                ),
+            })
+            .collect()
+    };
+
+    AuditReportSection {
+        title: "Cross-Card Constraints".to_string(),
+        lines,
+    }
+}
+
+fn random_term_card_detail(card: &RandomTermCard) -> String {
+    let blocks = card
+        .blocks
+        .iter()
+        .map(|block| {
+            format!(
+                "basis=[{}], covariance={}, params={}",
+                block.basis.join(", "),
+                covariance_form_label(&block.covariance),
+                block.theta_parameters
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "original={}, canonical={}, group={}, blocks={}",
+        card.original_fragment,
+        card.canonical_fragment,
+        card.group.label(),
+        blocks
+    )
+}
+
+fn random_term_cards(artifact: &CompiledModelArtifact) -> Vec<RandomTermCard> {
+    let audits_by_term = artifact
+        .design_audit
+        .as_ref()
+        .map(|audit| {
+            audit
+                .random_terms
+                .iter()
+                .map(|term| (term.term_id.as_str(), term))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let within_group_threshold = artifact.compiler_policy.thresholds.min_within_group_sd;
+
+    artifact
+        .semantic_model
+        .random_terms
+        .iter()
+        .map(|term| {
+            let role_origin = artifact
+                .semantic_model
+                .role_origins
+                .get(&term.id)
+                .cloned()
+                .unwrap_or_else(|| RoleOrigin::observed(term.role));
+            random_term_card(
+                term,
+                audits_by_term.get(term.id.as_str()).copied(),
+                within_group_threshold,
+                role_origin,
+            )
+        })
+        .collect()
+}
+
+fn random_term_card(
+    term: &RandomTermIr,
+    audit: Option<&RandomTermAudit>,
+    within_group_threshold: f64,
+    role_origin: RoleOrigin,
+) -> RandomTermCard {
+    let block = random_term_block(term, audit);
+    RandomTermCard {
+        schema_name: RANDOM_TERM_CARD_SCHEMA.to_string(),
+        schema_version: RANDOM_TERM_CARD_SCHEMA_VERSION,
+        term_id: term.id.clone(),
+        original_fragment: term.source_syntax.user_text().to_string(),
+        canonical_fragment: term.source_syntax.text.clone(),
+        group: term.group.clone(),
+        blocks: vec![block],
+        implied_constraints: Vec::new(),
+        design_support: design_support(term, audit, within_group_threshold),
+        role_origin,
+    }
+}
+
+fn random_term_block(term: &RandomTermIr, audit: Option<&RandomTermAudit>) -> RandomTermBlock {
+    let basis = card_basis_names(term, audit);
+    let intercept = card_has_intercept(term, audit);
+    let slopes = card_slope_names(term, audit);
+    let theta_parameters = audit
+        .map(|audit| audit.requested_covariance_parameters)
+        .unwrap_or_else(|| covariance_parameter_count(&term.covariance, basis.len()));
+    RandomTermBlock {
+        basis,
+        intercept,
+        slopes: slopes.clone(),
+        covariance: term.covariance.clone(),
+        theta_parameters,
+        english: random_term_block_english(term, intercept, &slopes),
+    }
+}
+
+fn design_support(
+    term: &RandomTermIr,
+    audit: Option<&RandomTermAudit>,
+    within_group_threshold: f64,
+) -> DesignSupport {
+    let within_group_variation = audit
+        .map(|audit| within_group_variation(&audit.basis, within_group_threshold))
+        .unwrap_or_else(|| {
+            term.basis
+                .iter()
+                .map(|basis| {
+                    (
+                        card_basis_display_name(basis),
+                        WithinGroupVariation::NotAssessed,
+                    )
+                })
+                .collect()
+        });
+    DesignSupport {
+        group_levels: audit.and_then(|audit| audit.group.n_levels),
+        min_rows_per_group: audit.and_then(|audit| audit.group.min_obs_per_level),
+        median_rows_per_group: audit.and_then(|audit| audit.group.median_obs_per_level),
+        within_group_variation,
+        status: audit
+            .map(|audit| audit.information_budget.status)
+            .unwrap_or(InformationBudgetStatus::NotAssessable),
+    }
+}
+
+fn within_group_variation(
+    basis: &[BasisAudit],
+    within_group_threshold: f64,
+) -> BTreeMap<String, WithinGroupVariation> {
+    basis
+        .iter()
+        .map(|basis| {
+            let status = match (basis.min_within_group_sd, basis.max_within_group_sd) {
+                (Some(min), Some(_)) if min > within_group_threshold => {
+                    WithinGroupVariation::Present
+                }
+                (Some(_), Some(max)) if max <= within_group_threshold => {
+                    WithinGroupVariation::Absent
+                }
+                (Some(min), Some(max)) if min.is_finite() && (min - max).abs() <= f64::EPSILON => {
+                    WithinGroupVariation::Constant
+                }
+                (Some(_), Some(_)) => WithinGroupVariation::Present,
+                _ => WithinGroupVariation::NotAssessed,
+            };
+            (basis.name.clone(), status)
+        })
+        .collect()
+}
+
+fn card_basis_names(term: &RandomTermIr, audit: Option<&RandomTermAudit>) -> Vec<String> {
+    audit
+        .map(|audit| audit.basis.iter().map(|basis| basis.name.clone()).collect())
+        .filter(|basis: &Vec<String>| !basis.is_empty())
+        .unwrap_or_else(|| {
+            term.basis
+                .iter()
+                .map(card_basis_display_name)
+                .collect::<Vec<_>>()
+        })
+}
+
+fn card_has_intercept(term: &RandomTermIr, audit: Option<&RandomTermAudit>) -> bool {
+    audit
+        .map(|audit| audit.basis.iter().any(|basis| basis.kind == "intercept"))
+        .unwrap_or_else(|| {
+            term.basis
+                .iter()
+                .any(|basis| basis.kind == RandomCoefficientKind::Intercept)
+        })
+}
+
+fn card_slope_names(term: &RandomTermIr, audit: Option<&RandomTermAudit>) -> Vec<String> {
+    audit
+        .map(|audit| {
+            audit
+                .basis
+                .iter()
+                .filter(|basis| basis.kind != "intercept")
+                .map(|basis| basis.name.clone())
+                .collect()
+        })
+        .unwrap_or_else(|| {
+            term.basis
+                .iter()
+                .filter(|basis| {
+                    matches!(
+                        basis.kind,
+                        RandomCoefficientKind::Slope | RandomCoefficientKind::Interaction
+                    )
+                })
+                .map(card_basis_display_name)
+                .collect()
+        })
+}
+
+fn card_basis_display_name(basis: &RandomCoefficient) -> String {
+    if basis.kind == RandomCoefficientKind::Intercept {
+        "Intercept".to_string()
+    } else {
+        basis.name.clone()
+    }
+}
+
+fn random_term_block_english(
+    term: &RandomTermIr,
+    has_intercept: bool,
+    slopes: &[String],
+) -> String {
+    let group = quoted_identifier(&term.group.label());
+    match (has_intercept, slopes) {
+        (true, []) => format!("{group} units may differ in average outcome."),
+        (false, [slope]) => format!(
+            "{group} units may differ in their {} slope.",
+            quoted_identifier(slope)
+        ),
+        (true, [slope]) if term.covariance == CovarianceForm::Full => format!(
+            "{group} units differ in baseline and {} slope; the model estimates whether these are associated.",
+            quoted_identifier(slope)
+        ),
+        (true, [slope]) => format!(
+            "{group} units may differ in average outcome and their {} slope.",
+            quoted_identifier(slope)
+        ),
+        (false, slopes) if !slopes.is_empty() => format!(
+            "{group} units may differ in their slopes for {}.",
+            quoted_list(slopes)
+        ),
+        (true, slopes) if !slopes.is_empty() => format!(
+            "{group} units may differ in average outcome and slopes for {}.",
+            quoted_list(slopes)
+        ),
+        _ => format!("{group} units may differ across the requested random-effect basis."),
+    }
+}
+
+fn quoted_list(items: &[String]) -> String {
+    items
+        .iter()
+        .map(|item| quoted_identifier(item))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn quoted_identifier(identifier: &str) -> String {
+    format!("`{}`", identifier.replace('`', "\\`"))
+}
+
+fn covariance_parameter_count(covariance: &CovarianceForm, basis_size: usize) -> usize {
+    match covariance {
+        CovarianceForm::Scalar => 1,
+        CovarianceForm::Diagonal => basis_size,
+        CovarianceForm::Full => basis_size * (basis_size + 1) / 2,
+        CovarianceForm::Structured { .. } => basis_size,
+        CovarianceForm::ReducedRank { rank } => rank.unwrap_or(1) * basis_size,
+        CovarianceForm::Unsupported { .. } => 0,
+    }
+}
+
+fn covariance_form_label(covariance: &CovarianceForm) -> String {
+    match covariance {
+        CovarianceForm::Scalar => "scalar".to_string(),
+        CovarianceForm::Diagonal => "diagonal".to_string(),
+        CovarianceForm::Full => "full".to_string(),
+        CovarianceForm::Structured { kind } => format!("structured:{kind}"),
+        CovarianceForm::ReducedRank { rank } => match rank {
+            Some(rank) => format!("reduced_rank:{rank}"),
+            None => "reduced_rank".to_string(),
+        },
+        CovarianceForm::Unsupported { reason } => format!("unsupported:{reason}"),
+    }
+}
+
+fn cross_card_constraints(artifact: &CompiledModelArtifact) -> Vec<CrossCardConstraint> {
+    let terms = &artifact.semantic_model.random_terms;
+    let mut constraints = Vec::new();
+
+    let mut by_block_group: BTreeMap<&str, Vec<&RandomTermIr>> = BTreeMap::new();
+    for term in terms {
+        if let Some(block_group) = &term.block_group {
+            by_block_group
+                .entry(block_group.as_str())
+                .or_default()
+                .push(term);
+        }
+    }
+    for block_terms in by_block_group.values() {
+        for left_index in 0..block_terms.len() {
+            for right_index in (left_index + 1)..block_terms.len() {
+                if let Some(constraint) = cross_card_constraint(
+                    block_terms[left_index],
+                    block_terms[right_index],
+                    "double_bar_syntax",
+                ) {
+                    constraints.push(constraint);
+                }
+            }
+        }
+    }
+
+    for left_index in 0..terms.len() {
+        for right_index in (left_index + 1)..terms.len() {
+            let left = &terms[left_index];
+            let right = &terms[right_index];
+            if left.group != right.group {
+                continue;
+            }
+            if left.block_group.is_some() && left.block_group == right.block_group {
+                continue;
+            }
+            if let Some(constraint) =
+                cross_card_constraint(left, right, "separate_random_effect_blocks")
+            {
+                constraints.push(constraint);
+            }
+        }
+    }
+
+    constraints.sort_by(|left, right| {
+        left.between_cards
+            .cmp(&right.between_cards)
+            .then_with(|| left.between_basis.cmp(&right.between_basis))
+            .then_with(|| left.reason.cmp(&right.reason))
+    });
+    constraints
+}
+
+fn cross_card_constraint(
+    left: &RandomTermIr,
+    right: &RandomTermIr,
+    reason_kind: &'static str,
+) -> Option<CrossCardConstraint> {
+    let left_basis = left.basis.first().map(card_basis_display_name)?;
+    let right_basis = right.basis.first().map(card_basis_display_name)?;
+    if left_basis == right_basis {
+        return None;
+    }
+    let left_label = quoted_identifier(&left_basis);
+    let right_label = quoted_identifier(&right_basis);
+    let reason = match reason_kind {
+        "double_bar_syntax" => format!(
+            "double-bar syntax fixes the covariance between {left_label} and {right_label} to zero."
+        ),
+        _ => format!(
+            "separate random-effect blocks fix the covariance between {left_label} and {right_label} to zero."
+        ),
+    };
+    Some(CrossCardConstraint {
+        kind: ImpliedConstraintKind::ZeroCovariance,
+        between_cards: vec![left.id.clone(), right.id.clone()],
+        between_basis: vec![left_basis, right_basis],
+        reason,
+    })
 }
 
 fn dependence_path_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
@@ -1779,6 +2201,8 @@ mod tests {
         assert!(text.contains("Requested Model"));
         assert!(text.contains("Random Effects"));
         assert!(text.contains("Random-Effect Information Budget"));
+        assert!(text.contains("Random Term Cards"));
+        assert!(text.contains("Cross-Card Constraints"));
         assert!(text.contains("levels/param=0.67"));
         assert!(text.contains("total rows can be misleading"));
         assert!(text.contains("Policy Recommendations"));
@@ -1813,6 +2237,144 @@ mod tests {
         let json = serde_json::to_string(&report).unwrap();
         let decoded: ModelAuditReport = serde_json::from_str(&json).unwrap();
 
+        assert_eq!(report.schema_version, 2);
+        assert_eq!(report.random_term_cards.len(), 1);
+        assert_eq!(report.random_term_cards[0].term_id, "r0");
+        assert_eq!(
+            report.random_term_cards[0].design_support.group_levels,
+            Some(2)
+        );
+        assert!(report.cross_card_constraints.is_empty());
         assert_eq!(decoded, report);
+    }
+
+    #[test]
+    fn random_term_cards_use_semantic_role_origin_side_table() {
+        let formula = parse_formula("y ~ x + (1 | subject)").unwrap();
+        let semantic = compile_formula_ir(&formula);
+        let mut artifact = CompiledModelArtifact::new(formula.to_string(), semantic);
+        artifact.attach_design_audit(&small_grouped_data());
+
+        let role_origin = RoleOrigin {
+            declared_by_user: true,
+            observed_from_data: false,
+            role: super::super::ir::GroupingRole::Item,
+        };
+        artifact
+            .semantic_model
+            .role_origins
+            .insert("r0".to_string(), role_origin.clone());
+
+        let report = ModelAuditReport::from_artifact(&artifact);
+        assert_eq!(report.random_term_cards[0].role_origin, role_origin);
+    }
+
+    #[test]
+    fn double_bar_and_split_blocks_have_structurally_identical_cards() {
+        let double_bar_formula = parse_formula("y ~ x + (1 + x || subject)").unwrap();
+        let mut double_bar = CompiledModelArtifact::new(
+            double_bar_formula.to_string(),
+            compile_formula_ir(&double_bar_formula),
+        );
+        double_bar.attach_design_audit(&small_grouped_data());
+
+        let split_formula = parse_formula("y ~ x + (1 | subject) + (0 + x | subject)").unwrap();
+        let mut split = CompiledModelArtifact::new(
+            split_formula.to_string(),
+            compile_formula_ir(&split_formula),
+        );
+        split.attach_design_audit(&small_grouped_data());
+
+        let double_bar_report = ModelAuditReport::from_artifact(&double_bar);
+        let split_report = ModelAuditReport::from_artifact(&split);
+
+        assert_eq!(double_bar_report.random_term_cards.len(), 2);
+        assert_eq!(split_report.random_term_cards.len(), 2);
+        assert_eq!(
+            cards_without_original_fragments(double_bar_report.random_term_cards.clone()),
+            cards_without_original_fragments(split_report.random_term_cards.clone())
+        );
+        assert_eq!(double_bar_report.cross_card_constraints.len(), 1);
+        assert_eq!(split_report.cross_card_constraints.len(), 1);
+        assert_ne!(
+            double_bar_report.cross_card_constraints[0].reason,
+            split_report.cross_card_constraints[0].reason
+        );
+        assert!(double_bar_report.cross_card_constraints[0]
+            .reason
+            .contains("double-bar syntax"));
+        assert!(split_report.cross_card_constraints[0]
+            .reason
+            .contains("separate random-effect blocks"));
+        assert_eq!(
+            constraints_without_reasons(double_bar_report.cross_card_constraints.clone()),
+            constraints_without_reasons(split_report.cross_card_constraints.clone())
+        );
+    }
+
+    #[test]
+    fn random_term_card_wording_is_nonempty_single_sentence_and_non_moralizing() {
+        let formula = parse_formula("y ~ x + (1 + x || subject)").unwrap();
+        let mut artifact =
+            CompiledModelArtifact::new(formula.to_string(), compile_formula_ir(&formula));
+        artifact.attach_design_audit(&small_grouped_data());
+        let report = ModelAuditReport::from_artifact(&artifact);
+
+        for card in &report.random_term_cards {
+            for block in &card.blocks {
+                assert_clean_wording(&block.english);
+            }
+            for constraint in &card.implied_constraints {
+                assert_clean_wording(&constraint.reason);
+            }
+        }
+        for constraint in &report.cross_card_constraints {
+            assert_clean_wording(&constraint.reason);
+        }
+    }
+
+    fn cards_without_original_fragments(
+        mut cards: Vec<super::super::random_term_card::RandomTermCard>,
+    ) -> Vec<super::super::random_term_card::RandomTermCard> {
+        for card in &mut cards {
+            card.original_fragment.clear();
+        }
+        cards
+    }
+
+    fn constraints_without_reasons(
+        mut constraints: Vec<super::super::random_term_card::CrossCardConstraint>,
+    ) -> Vec<super::super::random_term_card::CrossCardConstraint> {
+        for constraint in &mut constraints {
+            constraint.reason.clear();
+        }
+        constraints
+    }
+
+    fn assert_clean_wording(text: &str) {
+        assert!(!text.trim().is_empty());
+        assert!(
+            sentence_terminator_count(text) == 1 && text.trim_end().ends_with('.'),
+            "wording must be one sentence with terminal punctuation: {text}"
+        );
+        let lower = text.to_ascii_lowercase();
+        for forbidden in [
+            "suggested starting model",
+            "we recommend",
+            "you should",
+            "try ",
+            "drop the random slope",
+        ] {
+            assert!(
+                !lower.contains(forbidden),
+                "wording contains forbidden phrase `{forbidden}`: {text}"
+            );
+        }
+    }
+
+    fn sentence_terminator_count(text: &str) -> usize {
+        text.chars()
+            .filter(|character| matches!(character, '.' | '?' | '!'))
+            .count()
     }
 }

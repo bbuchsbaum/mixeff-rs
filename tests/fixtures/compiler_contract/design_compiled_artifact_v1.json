@@ -68,6 +68,13 @@
         }
       }
     ],
+    "role_origins": {
+      "r0": {
+        "declared_by_user": false,
+        "observed_from_data": true,
+        "role": "unknown"
+      }
+    },
     "diagnostics": []
   },
   "effective_formula": "y ~ 1 + x + (1 + x || group)",
@@ -147,6 +154,18 @@
         }
       }
     ],
+    "role_origins": {
+      "r0": {
+        "declared_by_user": false,
+        "observed_from_data": true,
+        "role": "unknown"
+      },
+      "r1": {
+        "declared_by_user": false,
+        "observed_from_data": true,
+        "role": "unknown"
+      }
+    },
     "diagnostics": [
       {
         "code": "formula_canonicalized",

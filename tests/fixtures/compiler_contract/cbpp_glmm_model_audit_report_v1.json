@@ -1,6 +1,6 @@
 {
   "schema_name": "mixedmodels.model_audit_report",
-  "schema_version": 1,
+  "schema_version": 2,
   "requested_formula": "incidence ~ 1 + period + (1 | herd)",
   "sections": [
     {
@@ -119,6 +119,26 @@
       ]
     },
     {
+      "title": "Random Term Cards",
+      "lines": [
+        {
+          "label": "r0",
+          "status": "ok",
+          "detail": "original=(1 | herd), canonical=(1 | herd), group=herd, blocks=basis=[intercept], covariance=scalar, params=1"
+        }
+      ]
+    },
+    {
+      "title": "Cross-Card Constraints",
+      "lines": [
+        {
+          "label": "constraints",
+          "status": "ok",
+          "detail": "none"
+        }
+      ]
+    },
+    {
       "title": "Dependence Paths",
       "lines": [
         {
@@ -204,5 +224,47 @@
       ]
     }
   ],
+  "random_term_cards": [
+    {
+      "schema_name": "mixedmodels.random_term_card",
+      "schema_version": 1,
+      "term_id": "r0",
+      "original_fragment": "(1 | herd)",
+      "canonical_fragment": "(1 | herd)",
+      "group": {
+        "single": {
+          "name": "herd"
+        }
+      },
+      "blocks": [
+        {
+          "basis": [
+            "intercept"
+          ],
+          "intercept": true,
+          "slopes": [],
+          "covariance": "scalar",
+          "theta_parameters": 1,
+          "english": "`herd` units may differ in average outcome."
+        }
+      ],
+      "implied_constraints": [],
+      "design_support": {
+        "group_levels": 15,
+        "min_rows_per_group": 1,
+        "median_rows_per_group": 4,
+        "within_group_variation": {
+          "intercept": "not_assessed"
+        },
+        "status": "sufficient"
+      },
+      "role_origin": {
+        "declared_by_user": false,
+        "observed_from_data": true,
+        "role": "unknown"
+      }
+    }
+  ],
+  "cross_card_constraints": [],
   "diagnostics": []
 }

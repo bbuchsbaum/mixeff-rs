@@ -1,6 +1,6 @@
 {
   "schema_name": "mixedmodels.model_audit_report",
-  "schema_version": 1,
+  "schema_version": 2,
   "requested_formula": "y ~ 1 + x + x2 + (1 + x | subject)",
   "sections": [
     {
@@ -119,6 +119,26 @@
       ]
     },
     {
+      "title": "Random Term Cards",
+      "lines": [
+        {
+          "label": "r0",
+          "status": "warning",
+          "detail": "original=(1 + x | subject), canonical=(1 + x | subject), group=subject, blocks=basis=[intercept, x], covariance=full, params=3"
+        }
+      ]
+    },
+    {
+      "title": "Cross-Card Constraints",
+      "lines": [
+        {
+          "label": "constraints",
+          "status": "ok",
+          "detail": "none"
+        }
+      ]
+    },
+    {
       "title": "Dependence Paths",
       "lines": [
         {
@@ -214,6 +234,52 @@
       ]
     }
   ],
+  "random_term_cards": [
+    {
+      "schema_name": "mixedmodels.random_term_card",
+      "schema_version": 1,
+      "term_id": "r0",
+      "original_fragment": "(1 + x | subject)",
+      "canonical_fragment": "(1 + x | subject)",
+      "group": {
+        "single": {
+          "name": "subject"
+        }
+      },
+      "blocks": [
+        {
+          "basis": [
+            "intercept",
+            "x"
+          ],
+          "intercept": true,
+          "slopes": [
+            "x"
+          ],
+          "covariance": "full",
+          "theta_parameters": 3,
+          "english": "`subject` units differ in baseline and `x` slope; the model estimates whether these are associated."
+        }
+      ],
+      "implied_constraints": [],
+      "design_support": {
+        "group_levels": 3,
+        "min_rows_per_group": 2,
+        "median_rows_per_group": 2,
+        "within_group_variation": {
+          "intercept": "not_assessed",
+          "x": "present"
+        },
+        "status": "too_rich"
+      },
+      "role_origin": {
+        "declared_by_user": false,
+        "observed_from_data": true,
+        "role": "unknown"
+      }
+    }
+  ],
+  "cross_card_constraints": [],
   "diagnostics": [
     {
       "code": "fixed_effect_rank_deficient",

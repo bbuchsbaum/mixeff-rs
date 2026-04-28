@@ -481,6 +481,11 @@ Two implementation options for upstream to choose:
    `role_origins: BTreeMap<String, RoleOrigin>` keyed by
    `RandomTermIr.id`. Purely additive; existing IR shape unchanged.
 
+Implemented choice: Option 2. `SemanticModel.role_origins` stores
+one `RoleOrigin` per `RandomTermIr.id`; v1 populates each entry as
+`declared_by_user = false, observed_from_data = true` and mirrors
+the resolved `RandomTermIr.role`.
+
 mixeff's PRD §9.8 expects both `declared_by_user` and
 `observed_from_data` booleans plus the resolved `GroupingRole`. The
 v1 R wrapper will only set `declared_by_user = false,
@@ -682,95 +687,93 @@ Legend (matches `compiler_contract_v0_prd.md`):
 
 ### DiagnosticCode Acceptance
 
-- [ ] `DiagnosticCode` enum carries the five new variants in the
+- [x] `DiagnosticCode` enum carries the five new variants in the
       order specified in §FR1.
-- [ ] Each variant serializes to its `snake_case` form via
+- [x] Each variant serializes to its `snake_case` form via
       `serde(rename_all = "snake_case")`.
-- [ ] Each variant has at least one fixture emitting it under
+- [x] Each variant has at least one fixture emitting it under
       conditions that match the §FR1 trigger description.
-- [ ] `ScopeNote` fires for `y ~ time + (1 | subject)` when `time`
+- [x] `ScopeNote` fires for `y ~ time + (1 | subject)` when `time`
       varies within `subject`.
-- [ ] `SupportNote` fires when
+- [x] `SupportNote` fires when
       `RandomEffectInformationBudget.status == WeaklySupported`.
-- [ ] `SyntaxExpansion` fires for `(1 | a/b)` and `(1 | a*b)`,
+- [x] `SyntaxExpansion` fires for `(1 | a/b)` and `(1 | a*b)`,
       with `payload.expansion_kind` set to `"nested"` and
       `"crossed_with_cell"` respectively.
-- [ ] `CovarianceAssumption` fires for `(1 + x || g)` and
+- [x] `CovarianceAssumption` fires for `(1 + x || g)` and
       `(1 | g) + (0 + x | g)` with distinct `payload.reason` values
       (`"double_bar_syntax"` and `"separate_random_effect_blocks"`).
-- [ ] `StructuralRefusal` fires alongside the existing
+- [x] `StructuralRefusal` fires alongside the existing
       `RandomSlopeUnsupported` when a slope variable does not vary
       within group; both diagnostics carry the same `affected_terms`.
 
 ### RandomTermCard Acceptance
 
-- [ ] `RandomTermCard` is defined in
+- [x] `RandomTermCard` is defined in
       `src/compiler/random_term_card.rs` and re-exported via
       `src/compiler/mod.rs`.
-- [ ] `RANDOM_TERM_CARD_SCHEMA = "mixedmodels.random_term_card"`,
+- [x] `RANDOM_TERM_CARD_SCHEMA = "mixedmodels.random_term_card"`,
       `RANDOM_TERM_CARD_SCHEMA_VERSION = 1`.
-- [ ] Cards round-trip cleanly through `serde_json` (one
+- [x] Cards round-trip cleanly through `serde_json` (one
       programmatic test).
-- [ ] `ModelAuditReport.random_term_cards` is populated for every
+- [x] `ModelAuditReport.random_term_cards` is populated for every
       compiled artifact post-`attach_design_audit`. Empty `Vec` is
       acceptable for fixed-effects-only formulas.
-- [ ] `MODEL_AUDIT_REPORT_SCHEMA_VERSION` bumped to `2` and a JSON
+- [x] `MODEL_AUDIT_REPORT_SCHEMA_VERSION` bumped to `2` and a JSON
       snapshot test pins the new shape.
-- [ ] `term_id` matches `RandomTermIr.id` for joinability.
-- [ ] `original_fragment == canonical_fragment` whenever
+- [x] `term_id` matches `RandomTermIr.id` for joinability.
+- [x] `original_fragment == canonical_fragment` whenever
       `SourceSyntax.written` is `None`; otherwise
       `original_fragment == source_syntax.written.unwrap()`.
-- [ ] `(1 + x || g)` and `(1 | g) + (0 + x | g)` produce cards with
+- [x] `(1 + x || g)` and `(1 | g) + (0 + x | g)` produce cards with
       identical `canonical_fragment`, `blocks`, `implied_constraints`,
       and `design_support` — they differ **only** in
       `original_fragment` and the constraint's `reason` string.
       This is the §9.5.2 "same model, different font" contract.
-- [ ] `design_support.status` equals
+- [x] `design_support.status` equals
       `RandomEffectInformationBudget.status` verbatim for the same
       term.
-- [ ] Each `RandomTermBlock.english` is non-empty, non-NA, and a
+- [x] Each `RandomTermBlock.english` is non-empty, non-NA, and a
       single-sentence string.
-- [ ] Each `ImpliedConstraint.reason` is non-empty and distinguishes
-      `||` from split-block sources.
+- [x] Each report-level `CrossCardConstraint.reason` is non-empty
+      and distinguishes `||` from split-block sources under the
+      accepted Option B design.
 
 ### Block Decomposition Acceptance (§FR3)
 
-- [ ] The implementing maintainer records the chosen option (A or B)
+- [x] The implementing maintainer records the chosen option (A or B)
       and its rationale in this PRD's `Notes/Architectural Notes`
-      section as part of the implementation PR. Until that note
-      lands, treat §FR3 as "decision pending" — the consequence is
-      that the cross-card-constraint shape (FR2's
-      `implied_constraints` vs an `ModelAuditReport`-level
-      `cross_card_constraints`) is also pending.
-- [ ] `(1 + x | g)` produces one card with one block (full
+      section as part of the implementation PR. Option B is locked
+      in the upstream mote: `||` emits per-basis `RandomTermIr`
+      entries with shared `block_group`, and cross-card constraints
+      live on `ModelAuditReport.cross_card_constraints`.
+- [x] `(1 + x | g)` produces one card with one block (full
       covariance).
-- [ ] `(1 + x || g)` produces one card with two blocks and one
-      `ImpliedConstraint::ZeroCovariance`.
-- [ ] `(1 | g) + (0 + x | g)` produces two cards (one per
-      `RandomTermIr`), each with one block, plus the implied
-      zero-covariance recorded as a `ImpliedConstraint` between the
-      two cards. (This requires a cross-card constraint vector, OR
-      the `||` and split-block forms produce structurally different
-      card lists — see Notes below for which we land on.)
-- [ ] `(1 | a/b)` produces two cards (one per expanded term) and a
+- [x] `(1 + x || g)` produces two cards (one per split
+      `RandomTermIr`), each with one scalar block, plus a
+      report-level `CrossCardConstraint::ZeroCovariance`.
+- [x] `(1 | g) + (0 + x | g)` produces two cards (one per
+      `RandomTermIr`), each with one scalar block, plus a
+      report-level `CrossCardConstraint::ZeroCovariance`.
+- [x] `(1 | a/b)` produces two cards (one per expanded term) and a
       `SyntaxExpansion` diagnostic with the original written form.
 
 ### Worked-Example Acceptance
 
 - [x] *(existing)* The five worked-example fixtures pinned in
       `compiler_contract_v0_prd.md` lines 913–922 continue to pass.
-- [ ] A new sleepstudy fixture pins the full `RandomTermCard` JSON
+- [x] A new sleepstudy fixture pins the full `RandomTermCard` JSON
       for `Reaction ~ Days + (Days | Subject)`. Field-by-field
       identity check; English wording locked.
-- [ ] A new `(1 + x || g)`/split-block fixture pins the
+- [x] A new `(1 + x || g)`/split-block fixture pins the
       "same model, different font" structural identity contract.
 
 ### Wording Acceptance
 
-- [ ] Every `english` and `reason` string is authored upstream and
+- [x] Every `english` and `reason` string is authored upstream and
       survives review. Wording table in §FR4 is treated as
       starting-point only.
-- [ ] No `english` or `reason` string contains the §9.5.5
+- [x] No `english` or `reason` string contains the §9.5.5
       forbidden phrases — `"suggested starting model"`,
       `"we recommend"`, `"you should"`, `"try ... instead"`,
       `"drop the random slope"`. The R wrapper enforces this with
@@ -779,9 +782,9 @@ Legend (matches `compiler_contract_v0_prd.md`):
 
 ### Schema Versioning Acceptance
 
-- [ ] The `RandomTermCardSchema` round-trip test mirrors
+- [x] The `RandomTermCardSchema` round-trip test mirrors
       `SemanticModel`'s round-trip test pattern.
-- [ ] `MODEL_AUDIT_REPORT_SCHEMA_VERSION` bump is reflected in the
+- [x] `MODEL_AUDIT_REPORT_SCHEMA_VERSION` bump is reflected in the
       audit-report round-trip fixture.
 
 ## Worked Example
@@ -889,16 +892,18 @@ both blocks or two cards each carry one.
   `ModelAuditReport::Display::fmt`. That `Display` impl, after this
   PRD lands, must include the `random_term_cards` section. The R
   layer never reformats `english`.
-- Block decomposition (FR3) is the only structural decision in this
-  PRD. Maintainer judgment chooses Option A vs B; the R wrapper's
-  acceptance criteria only require that `||` and split-block forms
-  produce a structurally identical *card list*, modulo
-  `original_fragment` and the `reason` string.
+- Block decomposition (FR3) uses Option B. `||` forms produce
+  per-basis `RandomTermIr` entries with a shared `block_group`,
+  and report-level `cross_card_constraints` record the zero
+  covariance. This gives `||` and split-block forms structurally
+  identical card lists modulo `original_fragment` and the
+  constraint `reason` string.
 - `RoleOrigin` is the highest-risk new wiring. v1 needs only
   `observed_from_data = true, declared_by_user = false` because
   mixeff's Phase 1.F (`roles()` v1 string-form) does not flow back
-  into the FFI. Future-proof the field; do not block on the
-  declaration channel.
+  into the FFI. The `SemanticModel.role_origins` side-table is in
+  place so that future declarations can flow without reshaping
+  `RandomTermIr`.
 
 ### Suggested First Issues
 
@@ -934,9 +939,10 @@ Step 3 unblocks 4–7.
   appearance; `implied_constraints` ordered lexicographically by
   `between` (matching the rest of the project's diagnostic ordering
   convention).
-- `RandomTermCard.role_origin.role` mirrors
-  `RandomTermIr.role` until upstream introduces a separate
-  declared-vs-observed channel.
+- `SemanticModel.role_origins` is keyed by `RandomTermIr.id`.
+  `RandomTermCard.role_origin` is read from that side-table and
+  falls back to `RandomTermIr.role` only when deserializing older
+  artifacts that lack the additive field.
 - The `english` strings should not interpolate variable names
   through `format!` directly; use a small helper that escapes
   identifiers consistently with the existing

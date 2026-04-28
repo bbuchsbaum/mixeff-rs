@@ -1,0 +1,43 @@
+{
+  "schema_name": "mixedmodels.random_term_card",
+  "schema_version": 1,
+  "term_id": "r0",
+  "original_fragment": "(1 + Days | Subject)",
+  "canonical_fragment": "(1 + Days | Subject)",
+  "group": {
+    "single": {
+      "name": "Subject"
+    }
+  },
+  "blocks": [
+    {
+      "basis": [
+        "intercept",
+        "Days"
+      ],
+      "intercept": true,
+      "slopes": [
+        "Days"
+      ],
+      "covariance": "full",
+      "theta_parameters": 3,
+      "english": "`Subject` units differ in baseline and `Days` slope; the model estimates whether these are associated."
+    }
+  ],
+  "implied_constraints": [],
+  "design_support": {
+    "group_levels": 18,
+    "min_rows_per_group": 10,
+    "median_rows_per_group": 10,
+    "within_group_variation": {
+      "Days": "present",
+      "intercept": "not_assessed"
+    },
+    "status": "sufficient"
+  },
+  "role_origin": {
+    "declared_by_user": false,
+    "observed_from_data": true,
+    "role": "unknown"
+  }
+}

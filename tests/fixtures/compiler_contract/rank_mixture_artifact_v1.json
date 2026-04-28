@@ -68,6 +68,13 @@
         }
       }
     ],
+    "role_origins": {
+      "r0": {
+        "declared_by_user": false,
+        "observed_from_data": true,
+        "role": "unknown"
+      }
+    },
     "diagnostics": []
   },
   "effective_formula": null,

@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::formula::{FixedTerm, Formula, GroupingFactor, RandomTerm, RandomTermExpansion};
 
 use super::diagnostics::{Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticStage};
+use super::random_term_card::RoleOrigin;
 
 pub const SEMANTIC_MODEL_SCHEMA: &str = "mixedmodels.semantic_model";
 pub const SEMANTIC_MODEL_SCHEMA_VERSION: u32 = 1;
@@ -17,6 +18,8 @@ pub struct SemanticModel {
     pub response: String,
     pub fixed_terms: Vec<String>,
     pub random_terms: Vec<RandomTermIr>,
+    #[serde(default)]
+    pub role_origins: BTreeMap<String, RoleOrigin>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -170,6 +173,10 @@ impl SemanticModel {
             &mut diagnostics,
         );
         emit_covariance_assumption_diagnostics(&random_terms, &mut diagnostics);
+        let role_origins = random_terms
+            .iter()
+            .map(|term| (term.id.clone(), RoleOrigin::observed(term.role)))
+            .collect();
 
         Self {
             schema_name: SEMANTIC_MODEL_SCHEMA.to_string(),
@@ -181,6 +188,7 @@ impl SemanticModel {
                 .map(ToString::to_string)
                 .collect(),
             random_terms,
+            role_origins,
             diagnostics,
         }
     }
@@ -820,6 +828,15 @@ mod tests {
         let model = compile_formula_ir(&formula);
         let json = serde_json::to_string(&model).unwrap();
         let decoded: SemanticModel = serde_json::from_str(&json).unwrap();
+        assert_eq!(model.role_origins.len(), 2);
+        assert_eq!(
+            model.role_origins.get("r0"),
+            Some(&RoleOrigin::observed(GroupingRole::Unknown))
+        );
+        assert_eq!(
+            model.role_origins.get("r1"),
+            Some(&RoleOrigin::observed(GroupingRole::Unknown))
+        );
         assert_eq!(decoded, model);
     }
 

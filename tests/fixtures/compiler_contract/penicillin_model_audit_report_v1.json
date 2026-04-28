@@ -1,6 +1,6 @@
 {
   "schema_name": "mixedmodels.model_audit_report",
-  "schema_version": 1,
+  "schema_version": 2,
   "requested_formula": "diameter ~ 1 + (1 | plate) + (1 | sample)",
   "sections": [
     {
@@ -129,6 +129,31 @@
       ]
     },
     {
+      "title": "Random Term Cards",
+      "lines": [
+        {
+          "label": "r0",
+          "status": "ok",
+          "detail": "original=(1 | plate), canonical=(1 | plate), group=plate, blocks=basis=[intercept], covariance=scalar, params=1"
+        },
+        {
+          "label": "r1",
+          "status": "ok",
+          "detail": "original=(1 | sample), canonical=(1 | sample), group=sample, blocks=basis=[intercept], covariance=scalar, params=1"
+        }
+      ]
+    },
+    {
+      "title": "Cross-Card Constraints",
+      "lines": [
+        {
+          "label": "constraints",
+          "status": "ok",
+          "detail": "none"
+        }
+      ]
+    },
+    {
       "title": "Dependence Paths",
       "lines": [
         {
@@ -219,5 +244,86 @@
       ]
     }
   ],
+  "random_term_cards": [
+    {
+      "schema_name": "mixedmodels.random_term_card",
+      "schema_version": 1,
+      "term_id": "r0",
+      "original_fragment": "(1 | plate)",
+      "canonical_fragment": "(1 | plate)",
+      "group": {
+        "single": {
+          "name": "plate"
+        }
+      },
+      "blocks": [
+        {
+          "basis": [
+            "intercept"
+          ],
+          "intercept": true,
+          "slopes": [],
+          "covariance": "scalar",
+          "theta_parameters": 1,
+          "english": "`plate` units may differ in average outcome."
+        }
+      ],
+      "implied_constraints": [],
+      "design_support": {
+        "group_levels": 24,
+        "min_rows_per_group": 6,
+        "median_rows_per_group": 6,
+        "within_group_variation": {
+          "intercept": "not_assessed"
+        },
+        "status": "sufficient"
+      },
+      "role_origin": {
+        "declared_by_user": false,
+        "observed_from_data": true,
+        "role": "unknown"
+      }
+    },
+    {
+      "schema_name": "mixedmodels.random_term_card",
+      "schema_version": 1,
+      "term_id": "r1",
+      "original_fragment": "(1 | sample)",
+      "canonical_fragment": "(1 | sample)",
+      "group": {
+        "single": {
+          "name": "sample"
+        }
+      },
+      "blocks": [
+        {
+          "basis": [
+            "intercept"
+          ],
+          "intercept": true,
+          "slopes": [],
+          "covariance": "scalar",
+          "theta_parameters": 1,
+          "english": "`sample` units may differ in average outcome."
+        }
+      ],
+      "implied_constraints": [],
+      "design_support": {
+        "group_levels": 6,
+        "min_rows_per_group": 24,
+        "median_rows_per_group": 24,
+        "within_group_variation": {
+          "intercept": "not_assessed"
+        },
+        "status": "sufficient"
+      },
+      "role_origin": {
+        "declared_by_user": false,
+        "observed_from_data": true,
+        "role": "unknown"
+      }
+    }
+  ],
+  "cross_card_constraints": [],
   "diagnostics": []
 }

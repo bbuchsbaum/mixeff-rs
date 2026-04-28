@@ -1,6 +1,6 @@
 {
   "schema_name": "mixedmodels.model_audit_report",
-  "schema_version": 1,
+  "schema_version": 2,
   "requested_formula": "y ~ 1 + A + B + C + A:B + A:C + B:C + A:B:C + (1 + A + B + C + A:B + A:C + B:C + A:B:C | group)",
   "sections": [
     {
@@ -119,6 +119,26 @@
       ]
     },
     {
+      "title": "Random Term Cards",
+      "lines": [
+        {
+          "label": "r0",
+          "status": "warning",
+          "detail": "original=(A * B * C | group), canonical=(1 + A + B + C + A:B + A:C + B:C + A:B:C | group), group=group, blocks=basis=[intercept, A, B, C, A:B, A:C, B:C, A:B:C], covariance=full, params=36"
+        }
+      ]
+    },
+    {
+      "title": "Cross-Card Constraints",
+      "lines": [
+        {
+          "label": "constraints",
+          "status": "ok",
+          "detail": "none"
+        }
+      ]
+    },
+    {
       "title": "Dependence Paths",
       "lines": [
         {
@@ -209,6 +229,70 @@
       ]
     }
   ],
+  "random_term_cards": [
+    {
+      "schema_name": "mixedmodels.random_term_card",
+      "schema_version": 1,
+      "term_id": "r0",
+      "original_fragment": "(A * B * C | group)",
+      "canonical_fragment": "(1 + A + B + C + A:B + A:C + B:C + A:B:C | group)",
+      "group": {
+        "single": {
+          "name": "group"
+        }
+      },
+      "blocks": [
+        {
+          "basis": [
+            "intercept",
+            "A",
+            "B",
+            "C",
+            "A:B",
+            "A:C",
+            "B:C",
+            "A:B:C"
+          ],
+          "intercept": true,
+          "slopes": [
+            "A",
+            "B",
+            "C",
+            "A:B",
+            "A:C",
+            "B:C",
+            "A:B:C"
+          ],
+          "covariance": "full",
+          "theta_parameters": 36,
+          "english": "`group` units may differ in average outcome and slopes for `A`, `B`, `C`, `A:B`, `A:C`, `B:C`, `A:B:C`."
+        }
+      ],
+      "implied_constraints": [],
+      "design_support": {
+        "group_levels": 10,
+        "min_rows_per_group": 15,
+        "median_rows_per_group": 15,
+        "within_group_variation": {
+          "A": "present",
+          "A:B": "present",
+          "A:B:C": "present",
+          "A:C": "present",
+          "B": "present",
+          "B:C": "present",
+          "C": "present",
+          "intercept": "not_assessed"
+        },
+        "status": "too_rich"
+      },
+      "role_origin": {
+        "declared_by_user": false,
+        "observed_from_data": true,
+        "role": "unknown"
+      }
+    }
+  ],
+  "cross_card_constraints": [],
   "diagnostics": [
     {
       "code": "formula_canonicalized",

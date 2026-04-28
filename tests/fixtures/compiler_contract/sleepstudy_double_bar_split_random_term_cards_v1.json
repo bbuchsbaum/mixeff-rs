@@ -1,0 +1,198 @@
+{
+  "double_bar": {
+    "cross_card_constraints": [
+      {
+        "between_basis": [
+          "Intercept",
+          "Days"
+        ],
+        "between_cards": [
+          "r0",
+          "r1"
+        ],
+        "reason": "double-bar syntax fixes the covariance between `Intercept` and `Days` to zero.",
+        "type": "zero_covariance"
+      }
+    ],
+    "random_term_cards": [
+      {
+        "blocks": [
+          {
+            "basis": [
+              "intercept"
+            ],
+            "covariance": "scalar",
+            "english": "`Subject` units may differ in average outcome.",
+            "intercept": true,
+            "slopes": [],
+            "theta_parameters": 1
+          }
+        ],
+        "canonical_fragment": "(1 | Subject)",
+        "design_support": {
+          "group_levels": 18,
+          "median_rows_per_group": 10,
+          "min_rows_per_group": 10,
+          "status": "sufficient",
+          "within_group_variation": {
+            "intercept": "not_assessed"
+          }
+        },
+        "group": {
+          "single": {
+            "name": "Subject"
+          }
+        },
+        "implied_constraints": [],
+        "original_fragment": "(1 + Days || Subject)",
+        "role_origin": {
+          "declared_by_user": false,
+          "observed_from_data": true,
+          "role": "unknown"
+        },
+        "schema_name": "mixedmodels.random_term_card",
+        "schema_version": 1,
+        "term_id": "r0"
+      },
+      {
+        "blocks": [
+          {
+            "basis": [
+              "Days"
+            ],
+            "covariance": "scalar",
+            "english": "`Subject` units may differ in their `Days` slope.",
+            "intercept": false,
+            "slopes": [
+              "Days"
+            ],
+            "theta_parameters": 1
+          }
+        ],
+        "canonical_fragment": "(0 + Days | Subject)",
+        "design_support": {
+          "group_levels": 18,
+          "median_rows_per_group": 10,
+          "min_rows_per_group": 10,
+          "status": "sufficient",
+          "within_group_variation": {
+            "Days": "present"
+          }
+        },
+        "group": {
+          "single": {
+            "name": "Subject"
+          }
+        },
+        "implied_constraints": [],
+        "original_fragment": "(1 + Days || Subject)",
+        "role_origin": {
+          "declared_by_user": false,
+          "observed_from_data": true,
+          "role": "unknown"
+        },
+        "schema_name": "mixedmodels.random_term_card",
+        "schema_version": 1,
+        "term_id": "r1"
+      }
+    ]
+  },
+  "split_blocks": {
+    "cross_card_constraints": [
+      {
+        "between_basis": [
+          "Intercept",
+          "Days"
+        ],
+        "between_cards": [
+          "r0",
+          "r1"
+        ],
+        "reason": "separate random-effect blocks fix the covariance between `Intercept` and `Days` to zero.",
+        "type": "zero_covariance"
+      }
+    ],
+    "random_term_cards": [
+      {
+        "blocks": [
+          {
+            "basis": [
+              "intercept"
+            ],
+            "covariance": "scalar",
+            "english": "`Subject` units may differ in average outcome.",
+            "intercept": true,
+            "slopes": [],
+            "theta_parameters": 1
+          }
+        ],
+        "canonical_fragment": "(1 | Subject)",
+        "design_support": {
+          "group_levels": 18,
+          "median_rows_per_group": 10,
+          "min_rows_per_group": 10,
+          "status": "sufficient",
+          "within_group_variation": {
+            "intercept": "not_assessed"
+          }
+        },
+        "group": {
+          "single": {
+            "name": "Subject"
+          }
+        },
+        "implied_constraints": [],
+        "original_fragment": "(1 | Subject)",
+        "role_origin": {
+          "declared_by_user": false,
+          "observed_from_data": true,
+          "role": "unknown"
+        },
+        "schema_name": "mixedmodels.random_term_card",
+        "schema_version": 1,
+        "term_id": "r0"
+      },
+      {
+        "blocks": [
+          {
+            "basis": [
+              "Days"
+            ],
+            "covariance": "scalar",
+            "english": "`Subject` units may differ in their `Days` slope.",
+            "intercept": false,
+            "slopes": [
+              "Days"
+            ],
+            "theta_parameters": 1
+          }
+        ],
+        "canonical_fragment": "(0 + Days | Subject)",
+        "design_support": {
+          "group_levels": 18,
+          "median_rows_per_group": 10,
+          "min_rows_per_group": 10,
+          "status": "sufficient",
+          "within_group_variation": {
+            "Days": "present"
+          }
+        },
+        "group": {
+          "single": {
+            "name": "Subject"
+          }
+        },
+        "implied_constraints": [],
+        "original_fragment": "(0 + Days | Subject)",
+        "role_origin": {
+          "declared_by_user": false,
+          "observed_from_data": true,
+          "role": "unknown"
+        },
+        "schema_name": "mixedmodels.random_term_card",
+        "schema_version": 1,
+        "term_id": "r1"
+      }
+    ]
+  }
+}

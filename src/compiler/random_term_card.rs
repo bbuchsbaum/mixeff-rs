@@ -71,13 +71,22 @@ pub struct RoleOrigin {
     pub role: GroupingRole,
 }
 
+impl RoleOrigin {
+    pub fn observed(role: GroupingRole) -> Self {
+        Self {
+            declared_by_user: false,
+            observed_from_data: true,
+            role,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CrossCardConstraint {
     #[serde(rename = "type")]
     pub kind: ImpliedConstraintKind,
-    pub term_ids: Vec<String>,
-    pub group: GroupingFactorIr,
-    pub between: Vec<String>,
+    pub between_cards: Vec<String>,
+    pub between_basis: Vec<String>,
     pub reason: String,
 }
 
@@ -124,11 +133,7 @@ mod tests {
                 within_group_variation,
                 status: InformationBudgetStatus::Sufficient,
             },
-            role_origin: RoleOrigin {
-                declared_by_user: false,
-                observed_from_data: true,
-                role: GroupingRole::SampledUnit,
-            },
+            role_origin: RoleOrigin::observed(GroupingRole::SampledUnit),
         };
 
         let json = serde_json::to_string(&card).unwrap();
@@ -140,11 +145,8 @@ mod tests {
     fn cross_card_constraint_round_trips_json() {
         let constraint = CrossCardConstraint {
             kind: ImpliedConstraintKind::ZeroCovariance,
-            term_ids: vec!["r0".to_string(), "r1".to_string()],
-            group: GroupingFactorIr::Single {
-                name: "Subject".to_string(),
-            },
-            between: vec!["Intercept".to_string(), "Days".to_string()],
+            between_cards: vec!["r0".to_string(), "r1".to_string()],
+            between_basis: vec!["Intercept".to_string(), "Days".to_string()],
             reason:
                 "Separate random-effect blocks fix the covariance between `Intercept` and `Days` to zero."
                     .to_string(),

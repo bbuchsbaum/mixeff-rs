@@ -1,6 +1,6 @@
 {
   "schema_name": "mixedmodels.model_audit_report",
-  "schema_version": 1,
+  "schema_version": 2,
   "requested_formula": "Reaction ~ 1 + Days + (1 + Days | Subject)",
   "sections": [
     {
@@ -119,6 +119,26 @@
       ]
     },
     {
+      "title": "Random Term Cards",
+      "lines": [
+        {
+          "label": "r0",
+          "status": "ok",
+          "detail": "original=(1 + Days | Subject), canonical=(1 + Days | Subject), group=Subject, blocks=basis=[intercept, Days], covariance=full, params=3"
+        }
+      ]
+    },
+    {
+      "title": "Cross-Card Constraints",
+      "lines": [
+        {
+          "label": "constraints",
+          "status": "ok",
+          "detail": "none"
+        }
+      ]
+    },
+    {
       "title": "Dependence Paths",
       "lines": [
         {
@@ -204,5 +224,51 @@
       ]
     }
   ],
+  "random_term_cards": [
+    {
+      "schema_name": "mixedmodels.random_term_card",
+      "schema_version": 1,
+      "term_id": "r0",
+      "original_fragment": "(1 + Days | Subject)",
+      "canonical_fragment": "(1 + Days | Subject)",
+      "group": {
+        "single": {
+          "name": "Subject"
+        }
+      },
+      "blocks": [
+        {
+          "basis": [
+            "intercept",
+            "Days"
+          ],
+          "intercept": true,
+          "slopes": [
+            "Days"
+          ],
+          "covariance": "full",
+          "theta_parameters": 3,
+          "english": "`Subject` units differ in baseline and `Days` slope; the model estimates whether these are associated."
+        }
+      ],
+      "implied_constraints": [],
+      "design_support": {
+        "group_levels": 18,
+        "min_rows_per_group": 10,
+        "median_rows_per_group": 10,
+        "within_group_variation": {
+          "Days": "present",
+          "intercept": "not_assessed"
+        },
+        "status": "sufficient"
+      },
+      "role_origin": {
+        "declared_by_user": false,
+        "observed_from_data": true,
+        "role": "unknown"
+      }
+    }
+  ],
+  "cross_card_constraints": [],
   "diagnostics": []
 }
