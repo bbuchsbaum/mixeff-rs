@@ -64,6 +64,10 @@ pub enum FormulaError {
     #[error("random-effect term has no model terms before '|'")]
     EmptyRandomTerms,
 
+    /// The right-hand side of `~` has no terms (e.g. `"y ~"`).
+    #[error("formula has no terms on the right-hand side of '~'")]
+    EmptyRhs,
+
     /// Generic parse error with a custom message.
     #[error("{0}")]
     Other(String),
@@ -813,6 +817,13 @@ pub fn parse_formula(input: &str) -> Result<Formula, FormulaError> {
     // --- RHS ---
     let (mut fixed, random) = parser.parse_rhs()?;
 
+    // Reject formulae with nothing on the RHS (e.g. "y ~"). Without this
+    // check the implicit-intercept rule would silently canonicalize them
+    // to "y ~ 1", which masks user typos and diverges from R/lme4.
+    if fixed.is_empty() && random.is_empty() {
+        return Err(FormulaError::EmptyRhs);
+    }
+
     // --- Implicit intercept ---
     // If no explicit `Intercept` or `NoIntercept` was given in the fixed terms,
     // insert an implicit intercept at the front.
@@ -902,6 +913,17 @@ mod tests {
         // Implicit intercept should be inserted.
         assert_eq!(f.fixed_terms[0], FixedTerm::Intercept);
         assert_eq!(f.fixed_terms.len(), 3);
+    }
+
+    #[test]
+    fn empty_rhs_is_rejected() {
+        // "y ~" used to canonicalize to "y ~ 1" via the implicit-intercept
+        // rule. We now reject it to match R/lme4.
+        assert!(matches!(parse_formula("y ~"), Err(FormulaError::EmptyRhs)));
+        assert!(matches!(
+            parse_formula("y ~   "),
+            Err(FormulaError::EmptyRhs)
+        ));
     }
 
     #[test]
