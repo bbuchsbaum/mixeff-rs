@@ -13,6 +13,7 @@ pub mod explain;
 pub mod ir;
 pub mod policy;
 pub mod print;
+pub mod random_term_card;
 pub mod report;
 pub mod theta_map;
 
@@ -49,7 +50,6 @@ pub use estimability::{
     RandomVarianceEstimability, ReliabilityGrade,
 };
 pub use explain::{explain_model, ModelExplanation};
-pub use print::{ModelPrint, ParameterizationDrilldown, MODEL_PRINT_TOP_DIAGNOSTICS};
 pub use ir::{
     compile_formula_ir, CovarianceForm, CovarianceStory, GroupingFactorIr, GroupingRole,
     InterceptPolicy, RandomCoefficient, RandomCoefficientKind, RandomTermIr, SemanticModel,
@@ -58,6 +58,12 @@ pub use ir::{
 pub use policy::{
     recommend_policy, CompilerPolicy, CompilerThresholds, PolicyAction, PolicyRecommendation,
     RandomStrategy,
+};
+pub use print::{ModelPrint, ParameterizationDrilldown, MODEL_PRINT_TOP_DIAGNOSTICS};
+pub use random_term_card::{
+    CrossCardConstraint, DesignSupport, ImpliedConstraint, ImpliedConstraintKind, RandomTermBlock,
+    RandomTermCard, RoleOrigin, WithinGroupVariation, RANDOM_TERM_CARD_SCHEMA,
+    RANDOM_TERM_CARD_SCHEMA_VERSION,
 };
 pub use report::{AuditReportLine, AuditReportSection, AuditReportStatus, ModelAuditReport};
 pub use theta_map::{
