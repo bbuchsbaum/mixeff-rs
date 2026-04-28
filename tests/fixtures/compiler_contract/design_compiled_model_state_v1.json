@@ -74,20 +74,37 @@
     "random_terms": [
       {
         "term_id": "r0",
-        "source_syntax": "(1 + x || group)",
+        "source_syntax": "(1 | group)",
         "group": "group",
         "semantic_basis": [
+          "intercept"
+        ],
+        "optimizer_basis": [
           "intercept",
+          "x"
+        ],
+        "covariance": "scalar",
+        "basis_dimension": 2,
+        "covariance_parameters": 3,
+        "information_status": "too_rich",
+        "requested_rank": null,
+        "supported_rank": null
+      },
+      {
+        "term_id": "r1",
+        "source_syntax": "(0 + x | group)",
+        "group": "group",
+        "semantic_basis": [
           "x"
         ],
         "optimizer_basis": [
           "intercept",
           "x"
         ],
-        "covariance": "diagonal",
+        "covariance": "scalar",
         "basis_dimension": 2,
-        "covariance_parameters": 3,
-        "information_status": "too_rich",
+        "covariance_parameters": 1,
+        "information_status": null,
         "requested_rank": null,
         "supported_rank": null
       }
@@ -105,20 +122,37 @@
     "random_terms": [
       {
         "term_id": "r0",
-        "source_syntax": "(1 + x || group)",
+        "source_syntax": "(1 | group)",
         "group": "group",
         "semantic_basis": [
+          "intercept"
+        ],
+        "optimizer_basis": [
           "intercept",
+          "x"
+        ],
+        "covariance": "scalar",
+        "basis_dimension": 2,
+        "covariance_parameters": 3,
+        "information_status": "too_rich",
+        "requested_rank": null,
+        "supported_rank": null
+      },
+      {
+        "term_id": "r1",
+        "source_syntax": "(0 + x | group)",
+        "group": "group",
+        "semantic_basis": [
           "x"
         ],
         "optimizer_basis": [
           "intercept",
           "x"
         ],
-        "covariance": "diagonal",
+        "covariance": "scalar",
         "basis_dimension": 2,
-        "covariance_parameters": 3,
-        "information_status": "too_rich",
+        "covariance_parameters": 1,
+        "information_status": null,
         "requested_rank": null,
         "supported_rank": null
       }

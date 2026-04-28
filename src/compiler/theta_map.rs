@@ -124,6 +124,22 @@ impl ThetaMap {
         }
     }
 
+    pub fn from_split_scalar_random_term_with_optimizer_basis(
+        term_index: usize,
+        term: &RandomTermIr,
+        global_start: usize,
+        optimizer_basis: Vec<String>,
+        lambda_index: usize,
+    ) -> Self {
+        ThetaMap::Scalar(ThetaMapBlock::from_split_scalar_random_term(
+            term_index,
+            term,
+            global_start,
+            optimizer_basis,
+            lambda_index,
+        ))
+    }
+
     pub fn block(&self) -> &ThetaMapBlock {
         match self {
             ThetaMap::Scalar(block)
@@ -177,6 +193,39 @@ impl ThetaMapBlock {
                     .map(|_| (term_index, slot.lambda_row, slot.lambda_col))
             })
             .collect();
+
+        Self {
+            schema_name: THETA_MAP_SCHEMA.to_string(),
+            schema_version: THETA_MAP_SCHEMA_VERSION,
+            term_id: term.id.clone(),
+            term_index,
+            group: term.group.label(),
+            user_basis,
+            optimizer_basis,
+            theta_slots,
+            source_parmap,
+        }
+    }
+
+    fn from_split_scalar_random_term(
+        term_index: usize,
+        term: &RandomTermIr,
+        global_start: usize,
+        optimizer_basis: Vec<String>,
+        lambda_index: usize,
+    ) -> Self {
+        let user_basis: Vec<String> = term.basis.iter().map(|b| b.name.clone()).collect();
+        let theta_slots = vec![make_slot_with_lambda(
+            term_index,
+            0,
+            lambda_index,
+            lambda_index,
+            lambda_index,
+            lambda_index,
+            global_start,
+            &optimizer_basis,
+        )];
+        let source_parmap = vec![(term_index, lambda_index, lambda_index)];
 
         Self {
             schema_name: THETA_MAP_SCHEMA.to_string(),
@@ -277,6 +326,28 @@ fn make_slot(
     global_index: usize,
     basis: &[String],
 ) -> ThetaSlot {
+    make_slot_with_lambda(
+        term_index,
+        local_index,
+        row,
+        col,
+        row,
+        col,
+        global_index,
+        basis,
+    )
+}
+
+fn make_slot_with_lambda(
+    term_index: usize,
+    local_index: usize,
+    row: usize,
+    col: usize,
+    lambda_row: usize,
+    lambda_col: usize,
+    global_index: usize,
+    basis: &[String],
+) -> ThetaSlot {
     let row_name = basis.get(row).map(String::as_str).unwrap_or("unknown");
     let col_name = basis.get(col).map(String::as_str).unwrap_or("unknown");
     ThetaSlot {
@@ -285,8 +356,8 @@ fn make_slot(
         term_index,
         basis_row: row,
         basis_col: col,
-        lambda_row: row,
-        lambda_col: col,
+        lambda_row,
+        lambda_col,
         name: format!("theta[{term_index}:{row_name},{col_name}]"),
         constraint: if row == col {
             ParameterConstraint::LowerBound { lower: 0.0 }
@@ -317,16 +388,28 @@ mod tests {
     }
 
     #[test]
-    fn diagonal_map_has_only_diagonal_slots() {
+    fn split_double_bar_maps_are_scalar_slots() {
         let formula = parse_formula("y ~ x + (1 + x || subject)").unwrap();
         let semantic = compile_formula_ir(&formula);
-        let map = ThetaMap::from_random_term(0, &semantic.random_terms[0], 0);
+        assert_eq!(semantic.random_terms.len(), 2);
 
-        assert!(matches!(map, ThetaMap::Diagonal(_)));
-        let slots = &map.block().theta_slots;
-        assert_eq!(slots.len(), 2);
-        assert_eq!((slots[0].lambda_row, slots[0].lambda_col), (0, 0));
-        assert_eq!((slots[1].lambda_row, slots[1].lambda_col), (1, 1));
+        let intercept_map = ThetaMap::from_random_term(0, &semantic.random_terms[0], 0);
+        assert!(matches!(intercept_map, ThetaMap::Scalar(_)));
+        let intercept_slots = &intercept_map.block().theta_slots;
+        assert_eq!(intercept_slots.len(), 1);
+        assert_eq!(
+            (intercept_slots[0].lambda_row, intercept_slots[0].lambda_col),
+            (0, 0)
+        );
+
+        let slope_map = ThetaMap::from_random_term(1, &semantic.random_terms[1], 1);
+        assert!(matches!(slope_map, ThetaMap::Scalar(_)));
+        let slope_slots = &slope_map.block().theta_slots;
+        assert_eq!(slope_slots.len(), 1);
+        assert_eq!(
+            (slope_slots[0].lambda_row, slope_slots[0].lambda_col),
+            (0, 0)
+        );
     }
 
     #[test]

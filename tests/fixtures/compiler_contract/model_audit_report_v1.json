@@ -205,6 +205,11 @@
           "label": "covariance_too_rich",
           "status": "warning",
           "detail": "3 levels are below the v0 full-covariance threshold 15 for 3 covariance parameters; affected=(1 + x | subject)"
+        },
+        {
+          "label": "scope_note",
+          "status": "info",
+          "detail": "`x2` varies within `subject`, so a `subject`-level slope is structurally possible; affected=r0; suggested=`x2` varies within `subject`, so a `subject`-level slope is structurally possible."
         }
       ]
     }
@@ -237,6 +242,23 @@
         "min_levels_variance": 5,
         "n_levels": 3,
         "requested_covariance_parameters": 3
+      }
+    },
+    {
+      "code": "scope_note",
+      "severity": "info",
+      "stage": "design_audit",
+      "message": "`x2` varies within `subject`, so a `subject`-level slope is structurally possible",
+      "affected_terms": [
+        "r0"
+      ],
+      "suggested_actions": [
+        "`x2` varies within `subject`, so a `subject`-level slope is structurally possible."
+      ],
+      "payload": {
+        "fixed_effect": "x2",
+        "group": "subject",
+        "varies_within_group": true
       }
     }
   ]

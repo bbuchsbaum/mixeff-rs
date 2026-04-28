@@ -1,0 +1,3051 @@
+{
+  "schema": {
+    "schema_name": "mixedmodels.compiled_model_artifact",
+    "schema_version": 1,
+    "crate_version": "0.1.0"
+  },
+  "model_boundary": {
+    "model_kind": "linear_mixed_model",
+    "response_distribution": "gaussian",
+    "link": "identity",
+    "objective_approximation": "exact_gaussian",
+    "optimizer_certificate_scope": "exact_objective",
+    "covariance_derivatives": {
+      "not_available": {
+        "reason": "compiler v0 does not expose covariance derivative certificates"
+      }
+    },
+    "inference_availability": {
+      "not_assessed": {
+        "reason": "finite-sample inference is not implemented in compiler v0"
+      }
+    }
+  },
+  "requested_formula": "y ~ 1 + x + (1 | subject) + (1 + x | school) + (1 + x | school:class) + (1 + x || batch) + (1 | item) + (0 + x | item)",
+  "semantic_model": {
+    "schema_name": "mixedmodels.semantic_model",
+    "schema_version": 1,
+    "response": "y",
+    "fixed_terms": [
+      "1",
+      "x"
+    ],
+    "random_terms": [
+      {
+        "id": "r0",
+        "group": {
+          "single": {
+            "name": "subject"
+          }
+        },
+        "basis": [
+          {
+            "name": "intercept",
+            "kind": "intercept",
+            "source": "1"
+          }
+        ],
+        "covariance": "scalar",
+        "intercept": "included",
+        "role": "unknown",
+        "source_syntax": {
+          "text": "(1 | subject)"
+        },
+        "covariance_story": {
+          "summary": "subject: varying coefficients [intercept]",
+          "assumptions": [
+            "subject levels may differ in baseline response",
+            "single variance direction is estimated"
+          ],
+          "dependence": [
+            "observations sharing subject are correlated through this term's random coefficients"
+          ]
+        }
+      },
+      {
+        "id": "r1",
+        "group": {
+          "single": {
+            "name": "school"
+          }
+        },
+        "basis": [
+          {
+            "name": "intercept",
+            "kind": "intercept",
+            "source": "1"
+          },
+          {
+            "name": "x",
+            "kind": "slope",
+            "source": "x"
+          }
+        ],
+        "covariance": "full",
+        "intercept": "included",
+        "role": "unknown",
+        "source_syntax": {
+          "text": "(1 + x | school)",
+          "written": "(1 + x | school/class)"
+        },
+        "covariance_story": {
+          "summary": "school: varying coefficients [intercept, x]",
+          "assumptions": [
+            "school levels may differ in baseline response",
+            "random coefficients may covary in the compiled basis"
+          ],
+          "dependence": [
+            "observations sharing school are correlated through this term's random coefficients"
+          ]
+        }
+      },
+      {
+        "id": "r2",
+        "group": {
+          "cell": {
+            "names": [
+              "school",
+              "class"
+            ]
+          }
+        },
+        "basis": [
+          {
+            "name": "intercept",
+            "kind": "intercept",
+            "source": "1"
+          },
+          {
+            "name": "x",
+            "kind": "slope",
+            "source": "x"
+          }
+        ],
+        "covariance": "full",
+        "intercept": "included",
+        "role": "unknown",
+        "source_syntax": {
+          "text": "(1 + x | school:class)",
+          "written": "(1 + x | school/class)"
+        },
+        "covariance_story": {
+          "summary": "school:class: varying coefficients [intercept, x]",
+          "assumptions": [
+            "school:class levels may differ in baseline response",
+            "random coefficients may covary in the compiled basis"
+          ],
+          "dependence": [
+            "only observations sharing the same school:class cell are correlated through this term"
+          ]
+        }
+      },
+      {
+        "id": "r3",
+        "group": {
+          "single": {
+            "name": "batch"
+          }
+        },
+        "basis": [
+          {
+            "name": "intercept",
+            "kind": "intercept",
+            "source": "1"
+          }
+        ],
+        "covariance": "scalar",
+        "block_group": "bg3",
+        "intercept": "included",
+        "role": "unknown",
+        "source_syntax": {
+          "text": "(1 | batch)",
+          "written": "(1 + x || batch)"
+        },
+        "covariance_story": {
+          "summary": "batch: varying coefficients [intercept]",
+          "assumptions": [
+            "batch levels may differ in baseline response",
+            "single variance direction is estimated"
+          ],
+          "dependence": [
+            "observations sharing batch are correlated through this term's random coefficients"
+          ]
+        }
+      },
+      {
+        "id": "r4",
+        "group": {
+          "single": {
+            "name": "batch"
+          }
+        },
+        "basis": [
+          {
+            "name": "x",
+            "kind": "slope",
+            "source": "x"
+          }
+        ],
+        "covariance": "scalar",
+        "block_group": "bg3",
+        "intercept": "omitted",
+        "role": "unknown",
+        "source_syntax": {
+          "text": "(0 + x | batch)",
+          "written": "(1 + x || batch)"
+        },
+        "covariance_story": {
+          "summary": "batch: varying coefficients [x]",
+          "assumptions": [
+            "batch levels are not given a shared baseline offset by this term",
+            "single variance direction is estimated"
+          ],
+          "dependence": [
+            "observations sharing batch are correlated through this term's random coefficients"
+          ]
+        }
+      },
+      {
+        "id": "r5",
+        "group": {
+          "single": {
+            "name": "item"
+          }
+        },
+        "basis": [
+          {
+            "name": "intercept",
+            "kind": "intercept",
+            "source": "1"
+          }
+        ],
+        "covariance": "scalar",
+        "intercept": "included",
+        "role": "unknown",
+        "source_syntax": {
+          "text": "(1 | item)"
+        },
+        "covariance_story": {
+          "summary": "item: varying coefficients [intercept]",
+          "assumptions": [
+            "item levels may differ in baseline response",
+            "single variance direction is estimated"
+          ],
+          "dependence": [
+            "observations sharing item are correlated through this term's random coefficients"
+          ]
+        }
+      },
+      {
+        "id": "r6",
+        "group": {
+          "single": {
+            "name": "item"
+          }
+        },
+        "basis": [
+          {
+            "name": "x",
+            "kind": "slope",
+            "source": "x"
+          }
+        ],
+        "covariance": "scalar",
+        "intercept": "omitted",
+        "role": "unknown",
+        "source_syntax": {
+          "text": "(0 + x | item)"
+        },
+        "covariance_story": {
+          "summary": "item: varying coefficients [x]",
+          "assumptions": [
+            "item levels are not given a shared baseline offset by this term",
+            "single variance direction is estimated"
+          ],
+          "dependence": [
+            "observations sharing item are correlated through this term's random coefficients"
+          ]
+        }
+      }
+    ],
+    "diagnostics": [
+      {
+        "code": "random_slope_without_intercept",
+        "severity": "info",
+        "stage": "semantic_ir",
+        "message": "random slope term omits a random intercept; this leaves baseline grouping dependence unmodeled unless represented elsewhere",
+        "affected_terms": [
+          "(0 + x | item)"
+        ],
+        "suggested_actions": [
+          "consider adding a random intercept if baseline grouping dependence is expected"
+        ]
+      },
+      {
+        "code": "formula_canonicalized",
+        "severity": "info",
+        "stage": "semantic_ir",
+        "message": "random-effect term was canonicalized as (1 + x | school) + (1 + x | school:class)",
+        "affected_terms": [
+          "(1 + x | school/class)"
+        ],
+        "suggested_actions": [],
+        "payload": {
+          "canonical_terms": [
+            "(1 + x | school)",
+            "(1 + x | school:class)"
+          ]
+        }
+      },
+      {
+        "code": "formula_canonicalized",
+        "severity": "info",
+        "stage": "semantic_ir",
+        "message": "random-effect term was canonicalized as (1 | batch) + (0 + x | batch)",
+        "affected_terms": [
+          "(1 + x || batch)"
+        ],
+        "suggested_actions": [],
+        "payload": {
+          "canonical_terms": [
+            "(1 | batch)",
+            "(0 + x | batch)"
+          ]
+        }
+      },
+      {
+        "code": "syntax_expansion",
+        "severity": "info",
+        "stage": "semantic_ir",
+        "message": "random-effect shorthand expands to (1 + x | school) + (1 + x | school:class)",
+        "affected_terms": [
+          "(1 + x | school/class)"
+        ],
+        "suggested_actions": [
+          "`(1 + x | school/class)` expands to `(1 + x | school) + (1 + x | school:class)` - the canonical form."
+        ],
+        "payload": {
+          "canonical": "(1 + x | school) + (1 + x | school:class)",
+          "expansion_kind": "nested",
+          "written": "(1 + x | school/class)"
+        }
+      },
+      {
+        "code": "covariance_assumption",
+        "severity": "info",
+        "stage": "semantic_ir",
+        "message": "the covariance between 'Intercept' and 'x' is fixed at zero by || syntax",
+        "affected_terms": [
+          "(1 + x || batch)"
+        ],
+        "suggested_actions": [
+          "the covariance between 'Intercept' and 'x' is fixed at zero by || syntax"
+        ],
+        "payload": {
+          "between": [
+            "Intercept",
+            "x"
+          ],
+          "group": "batch",
+          "reason": "double_bar_syntax"
+        }
+      },
+      {
+        "code": "covariance_assumption",
+        "severity": "info",
+        "stage": "semantic_ir",
+        "message": "the covariance between 'Intercept' and 'x' is fixed at zero by separate random-effect blocks",
+        "affected_terms": [
+          "(1 | item)",
+          "(0 + x | item)"
+        ],
+        "suggested_actions": [
+          "the covariance between 'Intercept' and 'x' is fixed at zero by separate random-effect blocks"
+        ],
+        "payload": {
+          "between": [
+            "Intercept",
+            "x"
+          ],
+          "group": "item",
+          "reason": "separate_random_effect_blocks"
+        }
+      }
+    ]
+  },
+  "effective_formula": null,
+  "effective_semantic_model": null,
+  "theta_maps": [
+    {
+      "family": "scalar",
+      "map": {
+        "schema_name": "mixedmodels.theta_map",
+        "schema_version": 1,
+        "term_id": "r0",
+        "term_index": 0,
+        "group": "subject",
+        "user_basis": [
+          "intercept"
+        ],
+        "optimizer_basis": [
+          "intercept"
+        ],
+        "theta_slots": [
+          {
+            "global_index": 0,
+            "local_index": 0,
+            "term_index": 0,
+            "basis_row": 0,
+            "basis_col": 0,
+            "lambda_row": 0,
+            "lambda_col": 0,
+            "name": "theta[0:intercept,intercept]",
+            "constraint": {
+              "lower_bound": {
+                "lower": 0.0
+              }
+            },
+            "status": "free"
+          }
+        ],
+        "source_parmap": [
+          [
+            0,
+            0,
+            0
+          ]
+        ]
+      }
+    },
+    {
+      "family": "full_cholesky",
+      "map": {
+        "schema_name": "mixedmodels.theta_map",
+        "schema_version": 1,
+        "term_id": "r1",
+        "term_index": 1,
+        "group": "school",
+        "user_basis": [
+          "intercept",
+          "x"
+        ],
+        "optimizer_basis": [
+          "intercept",
+          "x"
+        ],
+        "theta_slots": [
+          {
+            "global_index": 1,
+            "local_index": 0,
+            "term_index": 1,
+            "basis_row": 0,
+            "basis_col": 0,
+            "lambda_row": 0,
+            "lambda_col": 0,
+            "name": "theta[1:intercept,intercept]",
+            "constraint": {
+              "lower_bound": {
+                "lower": 0.0
+              }
+            },
+            "status": "free"
+          },
+          {
+            "global_index": 2,
+            "local_index": 1,
+            "term_index": 1,
+            "basis_row": 1,
+            "basis_col": 0,
+            "lambda_row": 1,
+            "lambda_col": 0,
+            "name": "theta[1:x,intercept]",
+            "constraint": "unconstrained",
+            "status": "free"
+          },
+          {
+            "global_index": 3,
+            "local_index": 2,
+            "term_index": 1,
+            "basis_row": 1,
+            "basis_col": 1,
+            "lambda_row": 1,
+            "lambda_col": 1,
+            "name": "theta[1:x,x]",
+            "constraint": {
+              "lower_bound": {
+                "lower": 0.0
+              }
+            },
+            "status": "free"
+          }
+        ],
+        "source_parmap": [
+          [
+            1,
+            0,
+            0
+          ],
+          [
+            1,
+            1,
+            0
+          ],
+          [
+            1,
+            1,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "family": "full_cholesky",
+      "map": {
+        "schema_name": "mixedmodels.theta_map",
+        "schema_version": 1,
+        "term_id": "r2",
+        "term_index": 2,
+        "group": "school:class",
+        "user_basis": [
+          "intercept",
+          "x"
+        ],
+        "optimizer_basis": [
+          "intercept",
+          "x"
+        ],
+        "theta_slots": [
+          {
+            "global_index": 4,
+            "local_index": 0,
+            "term_index": 2,
+            "basis_row": 0,
+            "basis_col": 0,
+            "lambda_row": 0,
+            "lambda_col": 0,
+            "name": "theta[2:intercept,intercept]",
+            "constraint": {
+              "lower_bound": {
+                "lower": 0.0
+              }
+            },
+            "status": "free"
+          },
+          {
+            "global_index": 5,
+            "local_index": 1,
+            "term_index": 2,
+            "basis_row": 1,
+            "basis_col": 0,
+            "lambda_row": 1,
+            "lambda_col": 0,
+            "name": "theta[2:x,intercept]",
+            "constraint": "unconstrained",
+            "status": "free"
+          },
+          {
+            "global_index": 6,
+            "local_index": 2,
+            "term_index": 2,
+            "basis_row": 1,
+            "basis_col": 1,
+            "lambda_row": 1,
+            "lambda_col": 1,
+            "name": "theta[2:x,x]",
+            "constraint": {
+              "lower_bound": {
+                "lower": 0.0
+              }
+            },
+            "status": "free"
+          }
+        ],
+        "source_parmap": [
+          [
+            2,
+            0,
+            0
+          ],
+          [
+            2,
+            1,
+            0
+          ],
+          [
+            2,
+            1,
+            1
+          ]
+        ]
+      }
+    },
+    {
+      "family": "scalar",
+      "map": {
+        "schema_name": "mixedmodels.theta_map",
+        "schema_version": 1,
+        "term_id": "r3",
+        "term_index": 3,
+        "group": "batch",
+        "user_basis": [
+          "intercept"
+        ],
+        "optimizer_basis": [
+          "intercept"
+        ],
+        "theta_slots": [
+          {
+            "global_index": 7,
+            "local_index": 0,
+            "term_index": 3,
+            "basis_row": 0,
+            "basis_col": 0,
+            "lambda_row": 0,
+            "lambda_col": 0,
+            "name": "theta[3:intercept,intercept]",
+            "constraint": {
+              "lower_bound": {
+                "lower": 0.0
+              }
+            },
+            "status": "free"
+          }
+        ],
+        "source_parmap": [
+          [
+            3,
+            0,
+            0
+          ]
+        ]
+      }
+    },
+    {
+      "family": "scalar",
+      "map": {
+        "schema_name": "mixedmodels.theta_map",
+        "schema_version": 1,
+        "term_id": "r4",
+        "term_index": 4,
+        "group": "batch",
+        "user_basis": [
+          "x"
+        ],
+        "optimizer_basis": [
+          "x"
+        ],
+        "theta_slots": [
+          {
+            "global_index": 8,
+            "local_index": 0,
+            "term_index": 4,
+            "basis_row": 0,
+            "basis_col": 0,
+            "lambda_row": 0,
+            "lambda_col": 0,
+            "name": "theta[4:x,x]",
+            "constraint": {
+              "lower_bound": {
+                "lower": 0.0
+              }
+            },
+            "status": "free"
+          }
+        ],
+        "source_parmap": [
+          [
+            4,
+            0,
+            0
+          ]
+        ]
+      }
+    },
+    {
+      "family": "scalar",
+      "map": {
+        "schema_name": "mixedmodels.theta_map",
+        "schema_version": 1,
+        "term_id": "r5",
+        "term_index": 5,
+        "group": "item",
+        "user_basis": [
+          "intercept"
+        ],
+        "optimizer_basis": [
+          "intercept"
+        ],
+        "theta_slots": [
+          {
+            "global_index": 9,
+            "local_index": 0,
+            "term_index": 5,
+            "basis_row": 0,
+            "basis_col": 0,
+            "lambda_row": 0,
+            "lambda_col": 0,
+            "name": "theta[5:intercept,intercept]",
+            "constraint": {
+              "lower_bound": {
+                "lower": 0.0
+              }
+            },
+            "status": "free"
+          }
+        ],
+        "source_parmap": [
+          [
+            5,
+            0,
+            0
+          ]
+        ]
+      }
+    },
+    {
+      "family": "scalar",
+      "map": {
+        "schema_name": "mixedmodels.theta_map",
+        "schema_version": 1,
+        "term_id": "r6",
+        "term_index": 6,
+        "group": "item",
+        "user_basis": [
+          "x"
+        ],
+        "optimizer_basis": [
+          "x"
+        ],
+        "theta_slots": [
+          {
+            "global_index": 10,
+            "local_index": 0,
+            "term_index": 6,
+            "basis_row": 0,
+            "basis_col": 0,
+            "lambda_row": 0,
+            "lambda_col": 0,
+            "name": "theta[6:x,x]",
+            "constraint": {
+              "lower_bound": {
+                "lower": 0.0
+              }
+            },
+            "status": "free"
+          }
+        ],
+        "source_parmap": [
+          [
+            6,
+            0,
+            0
+          ]
+        ]
+      }
+    }
+  ],
+  "design_audit": {
+    "schema_name": "mixedmodels.design_audit",
+    "schema_version": 1,
+    "fixed_effect_rank": {
+      "rank": 2,
+      "expected": 2,
+      "status": "full_rank",
+      "reason": null
+    },
+    "fixed_effects": {
+      "n_rows": 8,
+      "n_columns": 2,
+      "rank": {
+        "rank": 2,
+        "expected": 2,
+        "status": "full_rank",
+        "reason": null
+      },
+      "columns": [
+        {
+          "name": "(Intercept)",
+          "source_term": "1",
+          "kind": "intercept"
+        },
+        {
+          "name": "x",
+          "source_term": "x",
+          "kind": "numeric"
+        }
+      ],
+      "terms": [
+        {
+          "term": "1",
+          "n_columns": 1,
+          "status": "estimable",
+          "aliased_columns": [],
+          "diagnostics": []
+        },
+        {
+          "term": "x",
+          "n_columns": 1,
+          "status": "estimable",
+          "aliased_columns": [],
+          "diagnostics": []
+        }
+      ],
+      "aliased_columns": [],
+      "empty_cells": [],
+      "diagnostics": []
+    },
+    "random_terms": [
+      {
+        "term_id": "r0",
+        "group": {
+          "name": "subject",
+          "n_observations": 8,
+          "n_levels": 2,
+          "min_obs_per_level": 4,
+          "median_obs_per_level": 4,
+          "max_obs_per_level": 4,
+          "repeated": true,
+          "reason": null
+        },
+        "basis_size": 1,
+        "requested_covariance_parameters": 1,
+        "information_budget": {
+          "n_levels": 2,
+          "basis_dimension": 1,
+          "covariance_family": "scalar",
+          "requested_covariance_parameters": 1,
+          "min_levels_variance": 5,
+          "min_levels_full_covariance": null,
+          "effective_n": {
+            "n_rows": 8,
+            "n_levels": 2,
+            "min_obs_per_level": 4,
+            "max_obs_per_level": 4,
+            "basis_dimension": 1,
+            "covariance_parameters": 1,
+            "levels_per_basis_direction": 2.0,
+            "levels_per_covariance_parameter": 2.0,
+            "rows_per_covariance_parameter": 8.0,
+            "total_rows_can_mislead": true,
+            "explanation": "8 rows are clustered into 2 grouping levels; covariance support is limited by grouping levels, not by total rows",
+            "recommendation": "scalar random intercept is fit-eligible but low-reliability; report weak precision/boundary risk and prefer more than 5 grouping levels for routine inference"
+          },
+          "status": "weakly_supported",
+          "reason": "2 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5"
+        },
+        "basis": [
+          {
+            "name": "intercept",
+            "kind": "intercept",
+            "min_within_group_sd": null,
+            "max_within_group_sd": null,
+            "supported": true,
+            "reason": null
+          }
+        ],
+        "diagnostics": [
+          {
+            "code": "random_effect_few_levels",
+            "severity": "warning",
+            "stage": "design_audit",
+            "message": "2 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5",
+            "affected_terms": [
+              "(1 | subject)"
+            ],
+            "suggested_actions": [],
+            "payload": {
+              "basis_dimension": 1,
+              "min_levels_full_covariance": null,
+              "min_levels_random_intercept_fit": 2,
+              "min_levels_random_intercept_reliability": 5,
+              "min_levels_variance": 5,
+              "n_levels": 2,
+              "requested_covariance_parameters": 1
+            }
+          },
+          {
+            "code": "support_note",
+            "severity": "info",
+            "stage": "design_audit",
+            "message": "the requested covariance structure is information-hungry relative to the observed grouping levels",
+            "affected_terms": [
+              "r0"
+            ],
+            "suggested_actions": [
+              "The requested covariance structure is information-hungry relative to the observed grouping levels."
+            ],
+            "payload": {
+              "covariance_family": "scalar",
+              "group": "subject",
+              "n_levels": 2,
+              "policy_threshold": 5,
+              "requested_covariance_parameters": 1
+            }
+          },
+          {
+            "code": "scope_note",
+            "severity": "info",
+            "stage": "design_audit",
+            "message": "`x` varies within `subject`, so a `subject`-level slope is structurally possible",
+            "affected_terms": [
+              "r0"
+            ],
+            "suggested_actions": [
+              "`x` varies within `subject`, so a `subject`-level slope is structurally possible."
+            ],
+            "payload": {
+              "fixed_effect": "x",
+              "group": "subject",
+              "varies_within_group": true
+            }
+          }
+        ]
+      },
+      {
+        "term_id": "r1",
+        "group": {
+          "name": "school",
+          "n_observations": 8,
+          "n_levels": 2,
+          "min_obs_per_level": 4,
+          "median_obs_per_level": 4,
+          "max_obs_per_level": 4,
+          "repeated": true,
+          "reason": null
+        },
+        "basis_size": 2,
+        "requested_covariance_parameters": 3,
+        "information_budget": {
+          "n_levels": 2,
+          "basis_dimension": 2,
+          "covariance_family": "full",
+          "requested_covariance_parameters": 3,
+          "min_levels_variance": 5,
+          "min_levels_full_covariance": 15,
+          "effective_n": {
+            "n_rows": 8,
+            "n_levels": 2,
+            "min_obs_per_level": 4,
+            "max_obs_per_level": 4,
+            "basis_dimension": 2,
+            "covariance_parameters": 3,
+            "levels_per_basis_direction": 1.0,
+            "levels_per_covariance_parameter": 0.6666666666666666,
+            "rows_per_covariance_parameter": 2.6666666666666665,
+            "total_rows_can_mislead": true,
+            "explanation": "8 rows are clustered into 2 grouping levels; covariance support is limited by grouping levels, not by total rows",
+            "recommendation": "full covariance asks for 3 parameter(s); use design_compiled with diagonal/reduced-rank covariance, treat the grouping factor as fixed when it is designed or directly compared, or collect at least 15 grouping levels"
+          },
+          "status": "too_rich",
+          "reason": "2 levels are below the v0 full-covariance threshold 15 for 3 covariance parameters"
+        },
+        "basis": [
+          {
+            "name": "intercept",
+            "kind": "intercept",
+            "min_within_group_sd": null,
+            "max_within_group_sd": null,
+            "supported": true,
+            "reason": null
+          },
+          {
+            "name": "x",
+            "kind": "slope",
+            "min_within_group_sd": 0.5773502691896257,
+            "max_within_group_sd": 0.5773502691896257,
+            "supported": true,
+            "reason": null
+          }
+        ],
+        "diagnostics": [
+          {
+            "code": "covariance_too_rich",
+            "severity": "warning",
+            "stage": "design_audit",
+            "message": "2 levels are below the v0 full-covariance threshold 15 for 3 covariance parameters",
+            "affected_terms": [
+              "(1 + x | school)"
+            ],
+            "suggested_actions": [],
+            "payload": {
+              "basis_dimension": 2,
+              "min_levels_full_covariance": 15,
+              "min_levels_random_intercept_fit": 2,
+              "min_levels_random_intercept_reliability": 5,
+              "min_levels_variance": 5,
+              "n_levels": 2,
+              "requested_covariance_parameters": 3
+            }
+          }
+        ]
+      },
+      {
+        "term_id": "r2",
+        "group": {
+          "name": "school:class",
+          "n_observations": 8,
+          "n_levels": 4,
+          "min_obs_per_level": 2,
+          "median_obs_per_level": 2,
+          "max_obs_per_level": 2,
+          "repeated": true,
+          "reason": null
+        },
+        "basis_size": 2,
+        "requested_covariance_parameters": 3,
+        "information_budget": {
+          "n_levels": 4,
+          "basis_dimension": 2,
+          "covariance_family": "full",
+          "requested_covariance_parameters": 3,
+          "min_levels_variance": 5,
+          "min_levels_full_covariance": 15,
+          "effective_n": {
+            "n_rows": 8,
+            "n_levels": 4,
+            "min_obs_per_level": 2,
+            "max_obs_per_level": 2,
+            "basis_dimension": 2,
+            "covariance_parameters": 3,
+            "levels_per_basis_direction": 2.0,
+            "levels_per_covariance_parameter": 1.3333333333333333,
+            "rows_per_covariance_parameter": 2.6666666666666665,
+            "total_rows_can_mislead": true,
+            "explanation": "8 rows are clustered into 4 grouping levels; covariance support is limited by grouping levels, not by total rows",
+            "recommendation": "full covariance asks for 3 parameter(s); use design_compiled with diagonal/reduced-rank covariance, treat the grouping factor as fixed when it is designed or directly compared, or collect at least 15 grouping levels"
+          },
+          "status": "too_rich",
+          "reason": "4 levels are below the v0 full-covariance threshold 15 for 3 covariance parameters"
+        },
+        "basis": [
+          {
+            "name": "intercept",
+            "kind": "intercept",
+            "min_within_group_sd": null,
+            "max_within_group_sd": null,
+            "supported": true,
+            "reason": null
+          },
+          {
+            "name": "x",
+            "kind": "slope",
+            "min_within_group_sd": 0.0,
+            "max_within_group_sd": 0.0,
+            "supported": false,
+            "reason": "all repeated groups have within-group sd <= 1e-8"
+          }
+        ],
+        "diagnostics": [
+          {
+            "code": "random_slope_unsupported",
+            "severity": "warning",
+            "stage": "design_audit",
+            "message": "random slope 'x' has no detectable within-group variation",
+            "affected_terms": [
+              "(1 + x | school:class)"
+            ],
+            "suggested_actions": []
+          },
+          {
+            "code": "structural_refusal",
+            "severity": "info",
+            "stage": "design_audit",
+            "message": "`x` does not vary within `school:class`, so a `school:class`-level `x` slope cannot be estimated from this design",
+            "affected_terms": [
+              "(1 + x | school:class)"
+            ],
+            "suggested_actions": [
+              "`x` does not vary within `school:class`, so a `school:class`-level `x` slope cannot be estimated from this design."
+            ],
+            "payload": {
+              "group": "school:class",
+              "reason": "slope_variable_does_not_vary_within_group",
+              "slope": "x"
+            }
+          },
+          {
+            "code": "covariance_too_rich",
+            "severity": "warning",
+            "stage": "design_audit",
+            "message": "4 levels are below the v0 full-covariance threshold 15 for 3 covariance parameters",
+            "affected_terms": [
+              "(1 + x | school:class)"
+            ],
+            "suggested_actions": [],
+            "payload": {
+              "basis_dimension": 2,
+              "min_levels_full_covariance": 15,
+              "min_levels_random_intercept_fit": 2,
+              "min_levels_random_intercept_reliability": 5,
+              "min_levels_variance": 5,
+              "n_levels": 4,
+              "requested_covariance_parameters": 3
+            }
+          }
+        ]
+      },
+      {
+        "term_id": "r3",
+        "group": {
+          "name": "batch",
+          "n_observations": 8,
+          "n_levels": 2,
+          "min_obs_per_level": 4,
+          "median_obs_per_level": 4,
+          "max_obs_per_level": 4,
+          "repeated": true,
+          "reason": null
+        },
+        "basis_size": 1,
+        "requested_covariance_parameters": 1,
+        "information_budget": {
+          "n_levels": 2,
+          "basis_dimension": 1,
+          "covariance_family": "scalar",
+          "requested_covariance_parameters": 1,
+          "min_levels_variance": 5,
+          "min_levels_full_covariance": null,
+          "effective_n": {
+            "n_rows": 8,
+            "n_levels": 2,
+            "min_obs_per_level": 4,
+            "max_obs_per_level": 4,
+            "basis_dimension": 1,
+            "covariance_parameters": 1,
+            "levels_per_basis_direction": 2.0,
+            "levels_per_covariance_parameter": 2.0,
+            "rows_per_covariance_parameter": 8.0,
+            "total_rows_can_mislead": true,
+            "explanation": "8 rows are clustered into 2 grouping levels; covariance support is limited by grouping levels, not by total rows",
+            "recommendation": "scalar random intercept is fit-eligible but low-reliability; report weak precision/boundary risk and prefer more than 5 grouping levels for routine inference"
+          },
+          "status": "weakly_supported",
+          "reason": "2 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5"
+        },
+        "basis": [
+          {
+            "name": "intercept",
+            "kind": "intercept",
+            "min_within_group_sd": null,
+            "max_within_group_sd": null,
+            "supported": true,
+            "reason": null
+          }
+        ],
+        "diagnostics": [
+          {
+            "code": "random_effect_few_levels",
+            "severity": "warning",
+            "stage": "design_audit",
+            "message": "2 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5",
+            "affected_terms": [
+              "(1 | batch)"
+            ],
+            "suggested_actions": [],
+            "payload": {
+              "basis_dimension": 1,
+              "min_levels_full_covariance": null,
+              "min_levels_random_intercept_fit": 2,
+              "min_levels_random_intercept_reliability": 5,
+              "min_levels_variance": 5,
+              "n_levels": 2,
+              "requested_covariance_parameters": 1
+            }
+          },
+          {
+            "code": "support_note",
+            "severity": "info",
+            "stage": "design_audit",
+            "message": "the requested covariance structure is information-hungry relative to the observed grouping levels",
+            "affected_terms": [
+              "r3"
+            ],
+            "suggested_actions": [
+              "The requested covariance structure is information-hungry relative to the observed grouping levels."
+            ],
+            "payload": {
+              "covariance_family": "scalar",
+              "group": "batch",
+              "n_levels": 2,
+              "policy_threshold": 5,
+              "requested_covariance_parameters": 1
+            }
+          }
+        ]
+      },
+      {
+        "term_id": "r4",
+        "group": {
+          "name": "batch",
+          "n_observations": 8,
+          "n_levels": 2,
+          "min_obs_per_level": 4,
+          "median_obs_per_level": 4,
+          "max_obs_per_level": 4,
+          "repeated": true,
+          "reason": null
+        },
+        "basis_size": 1,
+        "requested_covariance_parameters": 1,
+        "information_budget": {
+          "n_levels": 2,
+          "basis_dimension": 1,
+          "covariance_family": "scalar",
+          "requested_covariance_parameters": 1,
+          "min_levels_variance": 5,
+          "min_levels_full_covariance": null,
+          "effective_n": {
+            "n_rows": 8,
+            "n_levels": 2,
+            "min_obs_per_level": 4,
+            "max_obs_per_level": 4,
+            "basis_dimension": 1,
+            "covariance_parameters": 1,
+            "levels_per_basis_direction": 2.0,
+            "levels_per_covariance_parameter": 2.0,
+            "rows_per_covariance_parameter": 8.0,
+            "total_rows_can_mislead": true,
+            "explanation": "8 rows are clustered into 2 grouping levels; covariance support is limited by grouping levels, not by total rows",
+            "recommendation": "scalar random intercept is fit-eligible but low-reliability; report weak precision/boundary risk and prefer more than 5 grouping levels for routine inference"
+          },
+          "status": "weakly_supported",
+          "reason": "2 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5"
+        },
+        "basis": [
+          {
+            "name": "x",
+            "kind": "slope",
+            "min_within_group_sd": 0.5773502691896257,
+            "max_within_group_sd": 0.5773502691896257,
+            "supported": true,
+            "reason": null
+          }
+        ],
+        "diagnostics": [
+          {
+            "code": "random_effect_few_levels",
+            "severity": "warning",
+            "stage": "design_audit",
+            "message": "2 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5",
+            "affected_terms": [
+              "(0 + x | batch)"
+            ],
+            "suggested_actions": [],
+            "payload": {
+              "basis_dimension": 1,
+              "min_levels_full_covariance": null,
+              "min_levels_random_intercept_fit": 2,
+              "min_levels_random_intercept_reliability": 5,
+              "min_levels_variance": 5,
+              "n_levels": 2,
+              "requested_covariance_parameters": 1
+            }
+          },
+          {
+            "code": "support_note",
+            "severity": "info",
+            "stage": "design_audit",
+            "message": "the requested covariance structure is information-hungry relative to the observed grouping levels",
+            "affected_terms": [
+              "r4"
+            ],
+            "suggested_actions": [
+              "The requested covariance structure is information-hungry relative to the observed grouping levels."
+            ],
+            "payload": {
+              "covariance_family": "scalar",
+              "group": "batch",
+              "n_levels": 2,
+              "policy_threshold": 5,
+              "requested_covariance_parameters": 1
+            }
+          }
+        ]
+      },
+      {
+        "term_id": "r5",
+        "group": {
+          "name": "item",
+          "n_observations": 8,
+          "n_levels": 4,
+          "min_obs_per_level": 2,
+          "median_obs_per_level": 2,
+          "max_obs_per_level": 2,
+          "repeated": true,
+          "reason": null
+        },
+        "basis_size": 1,
+        "requested_covariance_parameters": 1,
+        "information_budget": {
+          "n_levels": 4,
+          "basis_dimension": 1,
+          "covariance_family": "scalar",
+          "requested_covariance_parameters": 1,
+          "min_levels_variance": 5,
+          "min_levels_full_covariance": null,
+          "effective_n": {
+            "n_rows": 8,
+            "n_levels": 4,
+            "min_obs_per_level": 2,
+            "max_obs_per_level": 2,
+            "basis_dimension": 1,
+            "covariance_parameters": 1,
+            "levels_per_basis_direction": 4.0,
+            "levels_per_covariance_parameter": 4.0,
+            "rows_per_covariance_parameter": 8.0,
+            "total_rows_can_mislead": true,
+            "explanation": "8 rows are clustered into 4 grouping levels; covariance support is limited by grouping levels, not by total rows",
+            "recommendation": "scalar random intercept is fit-eligible but low-reliability; report weak precision/boundary risk and prefer more than 5 grouping levels for routine inference"
+          },
+          "status": "weakly_supported",
+          "reason": "4 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5"
+        },
+        "basis": [
+          {
+            "name": "intercept",
+            "kind": "intercept",
+            "min_within_group_sd": null,
+            "max_within_group_sd": null,
+            "supported": true,
+            "reason": null
+          }
+        ],
+        "diagnostics": [
+          {
+            "code": "random_effect_few_levels",
+            "severity": "warning",
+            "stage": "design_audit",
+            "message": "4 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5",
+            "affected_terms": [
+              "(1 | item)"
+            ],
+            "suggested_actions": [],
+            "payload": {
+              "basis_dimension": 1,
+              "min_levels_full_covariance": null,
+              "min_levels_random_intercept_fit": 2,
+              "min_levels_random_intercept_reliability": 5,
+              "min_levels_variance": 5,
+              "n_levels": 4,
+              "requested_covariance_parameters": 1
+            }
+          },
+          {
+            "code": "support_note",
+            "severity": "info",
+            "stage": "design_audit",
+            "message": "the requested covariance structure is information-hungry relative to the observed grouping levels",
+            "affected_terms": [
+              "r5"
+            ],
+            "suggested_actions": [
+              "The requested covariance structure is information-hungry relative to the observed grouping levels."
+            ],
+            "payload": {
+              "covariance_family": "scalar",
+              "group": "item",
+              "n_levels": 4,
+              "policy_threshold": 5,
+              "requested_covariance_parameters": 1
+            }
+          }
+        ]
+      },
+      {
+        "term_id": "r6",
+        "group": {
+          "name": "item",
+          "n_observations": 8,
+          "n_levels": 4,
+          "min_obs_per_level": 2,
+          "median_obs_per_level": 2,
+          "max_obs_per_level": 2,
+          "repeated": true,
+          "reason": null
+        },
+        "basis_size": 1,
+        "requested_covariance_parameters": 1,
+        "information_budget": {
+          "n_levels": 4,
+          "basis_dimension": 1,
+          "covariance_family": "scalar",
+          "requested_covariance_parameters": 1,
+          "min_levels_variance": 5,
+          "min_levels_full_covariance": null,
+          "effective_n": {
+            "n_rows": 8,
+            "n_levels": 4,
+            "min_obs_per_level": 2,
+            "max_obs_per_level": 2,
+            "basis_dimension": 1,
+            "covariance_parameters": 1,
+            "levels_per_basis_direction": 4.0,
+            "levels_per_covariance_parameter": 4.0,
+            "rows_per_covariance_parameter": 8.0,
+            "total_rows_can_mislead": true,
+            "explanation": "8 rows are clustered into 4 grouping levels; covariance support is limited by grouping levels, not by total rows",
+            "recommendation": "scalar random intercept is fit-eligible but low-reliability; report weak precision/boundary risk and prefer more than 5 grouping levels for routine inference"
+          },
+          "status": "weakly_supported",
+          "reason": "4 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5"
+        },
+        "basis": [
+          {
+            "name": "x",
+            "kind": "slope",
+            "min_within_group_sd": 0.7071067811865476,
+            "max_within_group_sd": 0.7071067811865476,
+            "supported": true,
+            "reason": null
+          }
+        ],
+        "diagnostics": [
+          {
+            "code": "random_effect_few_levels",
+            "severity": "warning",
+            "stage": "design_audit",
+            "message": "4 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5",
+            "affected_terms": [
+              "(0 + x | item)"
+            ],
+            "suggested_actions": [],
+            "payload": {
+              "basis_dimension": 1,
+              "min_levels_full_covariance": null,
+              "min_levels_random_intercept_fit": 2,
+              "min_levels_random_intercept_reliability": 5,
+              "min_levels_variance": 5,
+              "n_levels": 4,
+              "requested_covariance_parameters": 1
+            }
+          },
+          {
+            "code": "support_note",
+            "severity": "info",
+            "stage": "design_audit",
+            "message": "the requested covariance structure is information-hungry relative to the observed grouping levels",
+            "affected_terms": [
+              "r6"
+            ],
+            "suggested_actions": [
+              "The requested covariance structure is information-hungry relative to the observed grouping levels."
+            ],
+            "payload": {
+              "covariance_family": "scalar",
+              "group": "item",
+              "n_levels": 4,
+              "policy_threshold": 5,
+              "requested_covariance_parameters": 1
+            }
+          }
+        ]
+      }
+    ],
+    "covariance_kernels": {
+      "kernels": [
+        {
+          "term_id": "r0",
+          "group": "subject",
+          "parts": [
+            "subject"
+          ],
+          "path": "marginal",
+          "has_intercept": true,
+          "basis": [
+            "intercept"
+          ],
+          "covariance_family": "scalar",
+          "source_syntax": "(1 | subject)"
+        },
+        {
+          "term_id": "r1",
+          "group": "school",
+          "parts": [
+            "school"
+          ],
+          "path": "marginal",
+          "has_intercept": true,
+          "basis": [
+            "intercept",
+            "x"
+          ],
+          "covariance_family": "full",
+          "source_syntax": "(1 + x | school)"
+        },
+        {
+          "term_id": "r2",
+          "group": "school:class",
+          "parts": [
+            "school",
+            "class"
+          ],
+          "path": "cell",
+          "has_intercept": true,
+          "basis": [
+            "intercept",
+            "x"
+          ],
+          "covariance_family": "full",
+          "source_syntax": "(1 + x | school:class)"
+        },
+        {
+          "term_id": "r3",
+          "group": "batch",
+          "parts": [
+            "batch"
+          ],
+          "path": "marginal",
+          "has_intercept": true,
+          "basis": [
+            "intercept"
+          ],
+          "covariance_family": "scalar",
+          "source_syntax": "(1 | batch)"
+        },
+        {
+          "term_id": "r4",
+          "group": "batch",
+          "parts": [
+            "batch"
+          ],
+          "path": "marginal",
+          "has_intercept": false,
+          "basis": [
+            "x"
+          ],
+          "covariance_family": "scalar",
+          "source_syntax": "(0 + x | batch)"
+        },
+        {
+          "term_id": "r5",
+          "group": "item",
+          "parts": [
+            "item"
+          ],
+          "path": "marginal",
+          "has_intercept": true,
+          "basis": [
+            "intercept"
+          ],
+          "covariance_family": "scalar",
+          "source_syntax": "(1 | item)"
+        },
+        {
+          "term_id": "r6",
+          "group": "item",
+          "parts": [
+            "item"
+          ],
+          "path": "marginal",
+          "has_intercept": false,
+          "basis": [
+            "x"
+          ],
+          "covariance_family": "scalar",
+          "source_syntax": "(0 + x | item)"
+        }
+      ],
+      "repeated_units": [
+        {
+          "unit": "batch",
+          "parts": [
+            "batch"
+          ],
+          "path": "marginal",
+          "n_observations": 8,
+          "n_levels": 2,
+          "min_obs_per_level": 4,
+          "max_obs_per_level": 4,
+          "repeated": true,
+          "covered_by_terms": [
+            "r3"
+          ]
+        },
+        {
+          "unit": "class",
+          "parts": [
+            "class"
+          ],
+          "path": "marginal",
+          "n_observations": 8,
+          "n_levels": 2,
+          "min_obs_per_level": 4,
+          "max_obs_per_level": 4,
+          "repeated": true,
+          "covered_by_terms": []
+        },
+        {
+          "unit": "item",
+          "parts": [
+            "item"
+          ],
+          "path": "marginal",
+          "n_observations": 8,
+          "n_levels": 4,
+          "min_obs_per_level": 2,
+          "max_obs_per_level": 2,
+          "repeated": true,
+          "covered_by_terms": [
+            "r5"
+          ]
+        },
+        {
+          "unit": "school",
+          "parts": [
+            "school"
+          ],
+          "path": "marginal",
+          "n_observations": 8,
+          "n_levels": 2,
+          "min_obs_per_level": 4,
+          "max_obs_per_level": 4,
+          "repeated": true,
+          "covered_by_terms": [
+            "r1"
+          ]
+        },
+        {
+          "unit": "subject",
+          "parts": [
+            "subject"
+          ],
+          "path": "marginal",
+          "n_observations": 8,
+          "n_levels": 2,
+          "min_obs_per_level": 4,
+          "max_obs_per_level": 4,
+          "repeated": true,
+          "covered_by_terms": [
+            "r0"
+          ]
+        },
+        {
+          "unit": "school:class",
+          "parts": [
+            "school",
+            "class"
+          ],
+          "path": "cell",
+          "n_observations": 8,
+          "n_levels": 4,
+          "min_obs_per_level": 2,
+          "max_obs_per_level": 2,
+          "repeated": true,
+          "covered_by_terms": [
+            "r2"
+          ]
+        }
+      ],
+      "missing_dependence_paths": [
+        {
+          "unit": "class",
+          "parts": [
+            "class"
+          ],
+          "path": "marginal",
+          "n_levels": 2,
+          "max_obs_per_level": 4,
+          "reason": "'class' appears inside a composite grouping, but cell-level kernels do not model marginal class-wide dependence",
+          "suggested_random_term": "(1 | class)"
+        }
+      ]
+    },
+    "diagnostics": [
+      {
+        "code": "random_effect_few_levels",
+        "severity": "warning",
+        "stage": "design_audit",
+        "message": "2 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5",
+        "affected_terms": [
+          "(1 | subject)"
+        ],
+        "suggested_actions": [],
+        "payload": {
+          "basis_dimension": 1,
+          "min_levels_full_covariance": null,
+          "min_levels_random_intercept_fit": 2,
+          "min_levels_random_intercept_reliability": 5,
+          "min_levels_variance": 5,
+          "n_levels": 2,
+          "requested_covariance_parameters": 1
+        }
+      },
+      {
+        "code": "support_note",
+        "severity": "info",
+        "stage": "design_audit",
+        "message": "the requested covariance structure is information-hungry relative to the observed grouping levels",
+        "affected_terms": [
+          "r0"
+        ],
+        "suggested_actions": [
+          "The requested covariance structure is information-hungry relative to the observed grouping levels."
+        ],
+        "payload": {
+          "covariance_family": "scalar",
+          "group": "subject",
+          "n_levels": 2,
+          "policy_threshold": 5,
+          "requested_covariance_parameters": 1
+        }
+      },
+      {
+        "code": "covariance_too_rich",
+        "severity": "warning",
+        "stage": "design_audit",
+        "message": "2 levels are below the v0 full-covariance threshold 15 for 3 covariance parameters",
+        "affected_terms": [
+          "(1 + x | school)"
+        ],
+        "suggested_actions": [],
+        "payload": {
+          "basis_dimension": 2,
+          "min_levels_full_covariance": 15,
+          "min_levels_random_intercept_fit": 2,
+          "min_levels_random_intercept_reliability": 5,
+          "min_levels_variance": 5,
+          "n_levels": 2,
+          "requested_covariance_parameters": 3
+        }
+      },
+      {
+        "code": "structural_refusal",
+        "severity": "info",
+        "stage": "design_audit",
+        "message": "`x` does not vary within `school:class`, so a `school:class`-level `x` slope cannot be estimated from this design",
+        "affected_terms": [
+          "(1 + x | school:class)"
+        ],
+        "suggested_actions": [
+          "`x` does not vary within `school:class`, so a `school:class`-level `x` slope cannot be estimated from this design."
+        ],
+        "payload": {
+          "group": "school:class",
+          "reason": "slope_variable_does_not_vary_within_group",
+          "slope": "x"
+        }
+      },
+      {
+        "code": "covariance_too_rich",
+        "severity": "warning",
+        "stage": "design_audit",
+        "message": "4 levels are below the v0 full-covariance threshold 15 for 3 covariance parameters",
+        "affected_terms": [
+          "(1 + x | school:class)"
+        ],
+        "suggested_actions": [],
+        "payload": {
+          "basis_dimension": 2,
+          "min_levels_full_covariance": 15,
+          "min_levels_random_intercept_fit": 2,
+          "min_levels_random_intercept_reliability": 5,
+          "min_levels_variance": 5,
+          "n_levels": 4,
+          "requested_covariance_parameters": 3
+        }
+      },
+      {
+        "code": "random_effect_few_levels",
+        "severity": "warning",
+        "stage": "design_audit",
+        "message": "2 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5",
+        "affected_terms": [
+          "(1 | batch)"
+        ],
+        "suggested_actions": [],
+        "payload": {
+          "basis_dimension": 1,
+          "min_levels_full_covariance": null,
+          "min_levels_random_intercept_fit": 2,
+          "min_levels_random_intercept_reliability": 5,
+          "min_levels_variance": 5,
+          "n_levels": 2,
+          "requested_covariance_parameters": 1
+        }
+      },
+      {
+        "code": "support_note",
+        "severity": "info",
+        "stage": "design_audit",
+        "message": "the requested covariance structure is information-hungry relative to the observed grouping levels",
+        "affected_terms": [
+          "r3"
+        ],
+        "suggested_actions": [
+          "The requested covariance structure is information-hungry relative to the observed grouping levels."
+        ],
+        "payload": {
+          "covariance_family": "scalar",
+          "group": "batch",
+          "n_levels": 2,
+          "policy_threshold": 5,
+          "requested_covariance_parameters": 1
+        }
+      },
+      {
+        "code": "random_effect_few_levels",
+        "severity": "warning",
+        "stage": "design_audit",
+        "message": "2 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5",
+        "affected_terms": [
+          "(0 + x | batch)"
+        ],
+        "suggested_actions": [],
+        "payload": {
+          "basis_dimension": 1,
+          "min_levels_full_covariance": null,
+          "min_levels_random_intercept_fit": 2,
+          "min_levels_random_intercept_reliability": 5,
+          "min_levels_variance": 5,
+          "n_levels": 2,
+          "requested_covariance_parameters": 1
+        }
+      },
+      {
+        "code": "support_note",
+        "severity": "info",
+        "stage": "design_audit",
+        "message": "the requested covariance structure is information-hungry relative to the observed grouping levels",
+        "affected_terms": [
+          "r4"
+        ],
+        "suggested_actions": [
+          "The requested covariance structure is information-hungry relative to the observed grouping levels."
+        ],
+        "payload": {
+          "covariance_family": "scalar",
+          "group": "batch",
+          "n_levels": 2,
+          "policy_threshold": 5,
+          "requested_covariance_parameters": 1
+        }
+      },
+      {
+        "code": "random_effect_few_levels",
+        "severity": "warning",
+        "stage": "design_audit",
+        "message": "4 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5",
+        "affected_terms": [
+          "(1 | item)"
+        ],
+        "suggested_actions": [],
+        "payload": {
+          "basis_dimension": 1,
+          "min_levels_full_covariance": null,
+          "min_levels_random_intercept_fit": 2,
+          "min_levels_random_intercept_reliability": 5,
+          "min_levels_variance": 5,
+          "n_levels": 4,
+          "requested_covariance_parameters": 1
+        }
+      },
+      {
+        "code": "support_note",
+        "severity": "info",
+        "stage": "design_audit",
+        "message": "the requested covariance structure is information-hungry relative to the observed grouping levels",
+        "affected_terms": [
+          "r5"
+        ],
+        "suggested_actions": [
+          "The requested covariance structure is information-hungry relative to the observed grouping levels."
+        ],
+        "payload": {
+          "covariance_family": "scalar",
+          "group": "item",
+          "n_levels": 4,
+          "policy_threshold": 5,
+          "requested_covariance_parameters": 1
+        }
+      },
+      {
+        "code": "random_effect_few_levels",
+        "severity": "warning",
+        "stage": "design_audit",
+        "message": "4 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5",
+        "affected_terms": [
+          "(0 + x | item)"
+        ],
+        "suggested_actions": [],
+        "payload": {
+          "basis_dimension": 1,
+          "min_levels_full_covariance": null,
+          "min_levels_random_intercept_fit": 2,
+          "min_levels_random_intercept_reliability": 5,
+          "min_levels_variance": 5,
+          "n_levels": 4,
+          "requested_covariance_parameters": 1
+        }
+      },
+      {
+        "code": "support_note",
+        "severity": "info",
+        "stage": "design_audit",
+        "message": "the requested covariance structure is information-hungry relative to the observed grouping levels",
+        "affected_terms": [
+          "r6"
+        ],
+        "suggested_actions": [
+          "The requested covariance structure is information-hungry relative to the observed grouping levels."
+        ],
+        "payload": {
+          "covariance_family": "scalar",
+          "group": "item",
+          "n_levels": 4,
+          "policy_threshold": 5,
+          "requested_covariance_parameters": 1
+        }
+      },
+      {
+        "code": "scope_note",
+        "severity": "info",
+        "stage": "design_audit",
+        "message": "`x` varies within `subject`, so a `subject`-level slope is structurally possible",
+        "affected_terms": [
+          "r0"
+        ],
+        "suggested_actions": [
+          "`x` varies within `subject`, so a `subject`-level slope is structurally possible."
+        ],
+        "payload": {
+          "fixed_effect": "x",
+          "group": "subject",
+          "varies_within_group": true
+        }
+      },
+      {
+        "code": "repeated_unit_unmodeled",
+        "severity": "warning",
+        "stage": "design_audit",
+        "message": "repeated marginal unit 'class' is not covered by a random-intercept dependence path",
+        "affected_terms": [
+          "class"
+        ],
+        "suggested_actions": [
+          "add a random intercept term such as (1 | class) if 'class' is a sampled or repeated unit",
+          "model 'class' as a fixed effect only when its levels are designed or directly compared"
+        ],
+        "payload": {
+          "max_obs_per_level": 4,
+          "n_levels": 2,
+          "parts": [
+            "class"
+          ],
+          "path": "marginal",
+          "reason": "'class' appears inside a composite grouping, but cell-level kernels do not model marginal class-wide dependence",
+          "suggested_random_term": "(1 | class)",
+          "unit": "class"
+        }
+      }
+    ]
+  },
+  "compiler_policy": {
+    "random_strategy": "maximal_feasible",
+    "thresholds": {
+      "min_levels_random_intercept_fit": 2,
+      "min_levels_random_intercept_reliability": 5,
+      "max_condition_number": 10000000000.0,
+      "min_within_group_sd": 1e-8,
+      "max_basis_pairwise_abs_corr": 0.999,
+      "min_observations_per_supported_level": 2,
+      "effective_rank_relative_tolerance": 1e-6,
+      "effective_rank_absolute_tolerance": 1e-10
+    },
+    "apply_design_time_reductions": false
+  },
+  "policy_recommendations": [
+    {
+      "term_id": "r1",
+      "source_syntax": "(1 + x | school)",
+      "action": "refuse_random_term_distribution",
+      "reason": "2 levels are below the v0 variance-direction threshold 5",
+      "current_covariance": "full",
+      "recommended_covariance": null,
+      "inference_consequence": "confirmatory fixed-effect p-values should be withheld or recomputed after a declared design-level change",
+      "diagnostics": [
+        {
+          "code": "covariance_too_rich",
+          "severity": "warning",
+          "stage": "design_audit",
+          "message": "2 levels are below the v0 variance-direction threshold 5",
+          "affected_terms": [
+            "(1 + x | school)"
+          ],
+          "suggested_actions": [],
+          "payload": {
+            "n_levels": 2
+          }
+        }
+      ]
+    },
+    {
+      "term_id": "r2",
+      "source_syntax": "(1 + x | school:class)",
+      "action": "drop_unsupported_basis",
+      "reason": "basis direction(s) unsupported by within-group variation: x",
+      "current_covariance": "full",
+      "recommended_covariance": "scalar_or_diagonal_on_supported_basis",
+      "inference_consequence": "fixed-effect inference would be conditional on the supported random-effect basis",
+      "diagnostics": [
+        {
+          "code": "random_slope_unsupported",
+          "severity": "warning",
+          "stage": "design_audit",
+          "message": "basis direction(s) unsupported by within-group variation: x",
+          "affected_terms": [
+            "(1 + x | school:class)"
+          ],
+          "suggested_actions": [],
+          "payload": {
+            "unsupported_basis": [
+              "x"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "term_id": "r2",
+      "source_syntax": "(1 + x | school:class)",
+      "action": "refuse_random_term_distribution",
+      "reason": "4 levels are below the v0 variance-direction threshold 5",
+      "current_covariance": "full",
+      "recommended_covariance": null,
+      "inference_consequence": "confirmatory fixed-effect p-values should be withheld or recomputed after a declared design-level change",
+      "diagnostics": [
+        {
+          "code": "covariance_too_rich",
+          "severity": "warning",
+          "stage": "design_audit",
+          "message": "4 levels are below the v0 variance-direction threshold 5",
+          "affected_terms": [
+            "(1 + x | school:class)"
+          ],
+          "suggested_actions": [],
+          "payload": {
+            "n_levels": 4
+          }
+        }
+      ]
+    },
+    {
+      "term_id": "r4",
+      "source_syntax": "(0 + x | batch)",
+      "action": "refuse_random_term_distribution",
+      "reason": "2 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5",
+      "current_covariance": "scalar",
+      "recommended_covariance": null,
+      "inference_consequence": "confirmatory fixed-effect p-values should be withheld or recomputed after a declared design-level change",
+      "diagnostics": [
+        {
+          "code": "covariance_too_rich",
+          "severity": "warning",
+          "stage": "design_audit",
+          "message": "2 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5",
+          "affected_terms": [
+            "(0 + x | batch)"
+          ],
+          "suggested_actions": [],
+          "payload": {
+            "n_levels": 2
+          }
+        }
+      ]
+    },
+    {
+      "term_id": "r6",
+      "source_syntax": "(0 + x | item)",
+      "action": "refuse_random_term_distribution",
+      "reason": "4 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5",
+      "current_covariance": "scalar",
+      "recommended_covariance": null,
+      "inference_consequence": "confirmatory fixed-effect p-values should be withheld or recomputed after a declared design-level change",
+      "diagnostics": [
+        {
+          "code": "covariance_too_rich",
+          "severity": "warning",
+          "stage": "design_audit",
+          "message": "4 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5",
+          "affected_terms": [
+            "(0 + x | item)"
+          ],
+          "suggested_actions": [],
+          "payload": {
+            "n_levels": 4
+          }
+        }
+      ]
+    }
+  ],
+  "effective_covariance": [],
+  "reductions": [],
+  "covariance_transitions": [],
+  "covariance_parameter_traces": [
+    {
+      "term_id": "r0",
+      "source_syntax": "(1 | subject)",
+      "semantic_term_index": 0,
+      "optimizer_term_index": 0,
+      "group": "subject",
+      "covariance_family": "scalar",
+      "user_basis": [
+        "intercept"
+      ],
+      "optimizer_basis": [
+        "intercept"
+      ],
+      "theta": {
+        "global_index": 0,
+        "local_index": 0,
+        "name": "theta[0:intercept,intercept]",
+        "constraint": {
+          "lower_bound": {
+            "lower": 0.0
+          }
+        },
+        "status": "free",
+        "value": null
+      },
+      "lambda": {
+        "row": 0,
+        "col": 0,
+        "row_basis": "intercept",
+        "col_basis": "intercept",
+        "value": null
+      },
+      "parmap_entry": null,
+      "varcorr_entries": [
+        {
+          "kind": "standard_deviation",
+          "label": "sd(intercept)",
+          "basis": [
+            "intercept"
+          ],
+          "value": null
+        }
+      ]
+    },
+    {
+      "term_id": "r1",
+      "source_syntax": "(1 + x | school)",
+      "semantic_term_index": 1,
+      "optimizer_term_index": 1,
+      "group": "school",
+      "covariance_family": "full_cholesky",
+      "user_basis": [
+        "intercept",
+        "x"
+      ],
+      "optimizer_basis": [
+        "intercept",
+        "x"
+      ],
+      "theta": {
+        "global_index": 1,
+        "local_index": 0,
+        "name": "theta[1:intercept,intercept]",
+        "constraint": {
+          "lower_bound": {
+            "lower": 0.0
+          }
+        },
+        "status": "free",
+        "value": null
+      },
+      "lambda": {
+        "row": 0,
+        "col": 0,
+        "row_basis": "intercept",
+        "col_basis": "intercept",
+        "value": null
+      },
+      "parmap_entry": null,
+      "varcorr_entries": [
+        {
+          "kind": "standard_deviation",
+          "label": "sd(intercept)",
+          "basis": [
+            "intercept"
+          ],
+          "value": null
+        }
+      ]
+    },
+    {
+      "term_id": "r1",
+      "source_syntax": "(1 + x | school)",
+      "semantic_term_index": 1,
+      "optimizer_term_index": 1,
+      "group": "school",
+      "covariance_family": "full_cholesky",
+      "user_basis": [
+        "intercept",
+        "x"
+      ],
+      "optimizer_basis": [
+        "intercept",
+        "x"
+      ],
+      "theta": {
+        "global_index": 2,
+        "local_index": 1,
+        "name": "theta[1:x,intercept]",
+        "constraint": "unconstrained",
+        "status": "free",
+        "value": null
+      },
+      "lambda": {
+        "row": 1,
+        "col": 0,
+        "row_basis": "x",
+        "col_basis": "intercept",
+        "value": null
+      },
+      "parmap_entry": null,
+      "varcorr_entries": [
+        {
+          "kind": "standard_deviation",
+          "label": "sd(x)",
+          "basis": [
+            "x"
+          ],
+          "value": null
+        },
+        {
+          "kind": "correlation",
+          "label": "corr(x,intercept)",
+          "basis": [
+            "x",
+            "intercept"
+          ],
+          "value": null
+        }
+      ]
+    },
+    {
+      "term_id": "r1",
+      "source_syntax": "(1 + x | school)",
+      "semantic_term_index": 1,
+      "optimizer_term_index": 1,
+      "group": "school",
+      "covariance_family": "full_cholesky",
+      "user_basis": [
+        "intercept",
+        "x"
+      ],
+      "optimizer_basis": [
+        "intercept",
+        "x"
+      ],
+      "theta": {
+        "global_index": 3,
+        "local_index": 2,
+        "name": "theta[1:x,x]",
+        "constraint": {
+          "lower_bound": {
+            "lower": 0.0
+          }
+        },
+        "status": "free",
+        "value": null
+      },
+      "lambda": {
+        "row": 1,
+        "col": 1,
+        "row_basis": "x",
+        "col_basis": "x",
+        "value": null
+      },
+      "parmap_entry": null,
+      "varcorr_entries": [
+        {
+          "kind": "standard_deviation",
+          "label": "sd(x)",
+          "basis": [
+            "x"
+          ],
+          "value": null
+        },
+        {
+          "kind": "correlation",
+          "label": "corr(x,intercept)",
+          "basis": [
+            "x",
+            "intercept"
+          ],
+          "value": null
+        }
+      ]
+    },
+    {
+      "term_id": "r2",
+      "source_syntax": "(1 + x | school:class)",
+      "semantic_term_index": 2,
+      "optimizer_term_index": 2,
+      "group": "school:class",
+      "covariance_family": "full_cholesky",
+      "user_basis": [
+        "intercept",
+        "x"
+      ],
+      "optimizer_basis": [
+        "intercept",
+        "x"
+      ],
+      "theta": {
+        "global_index": 4,
+        "local_index": 0,
+        "name": "theta[2:intercept,intercept]",
+        "constraint": {
+          "lower_bound": {
+            "lower": 0.0
+          }
+        },
+        "status": "free",
+        "value": null
+      },
+      "lambda": {
+        "row": 0,
+        "col": 0,
+        "row_basis": "intercept",
+        "col_basis": "intercept",
+        "value": null
+      },
+      "parmap_entry": null,
+      "varcorr_entries": [
+        {
+          "kind": "standard_deviation",
+          "label": "sd(intercept)",
+          "basis": [
+            "intercept"
+          ],
+          "value": null
+        }
+      ]
+    },
+    {
+      "term_id": "r2",
+      "source_syntax": "(1 + x | school:class)",
+      "semantic_term_index": 2,
+      "optimizer_term_index": 2,
+      "group": "school:class",
+      "covariance_family": "full_cholesky",
+      "user_basis": [
+        "intercept",
+        "x"
+      ],
+      "optimizer_basis": [
+        "intercept",
+        "x"
+      ],
+      "theta": {
+        "global_index": 5,
+        "local_index": 1,
+        "name": "theta[2:x,intercept]",
+        "constraint": "unconstrained",
+        "status": "free",
+        "value": null
+      },
+      "lambda": {
+        "row": 1,
+        "col": 0,
+        "row_basis": "x",
+        "col_basis": "intercept",
+        "value": null
+      },
+      "parmap_entry": null,
+      "varcorr_entries": [
+        {
+          "kind": "standard_deviation",
+          "label": "sd(x)",
+          "basis": [
+            "x"
+          ],
+          "value": null
+        },
+        {
+          "kind": "correlation",
+          "label": "corr(x,intercept)",
+          "basis": [
+            "x",
+            "intercept"
+          ],
+          "value": null
+        }
+      ]
+    },
+    {
+      "term_id": "r2",
+      "source_syntax": "(1 + x | school:class)",
+      "semantic_term_index": 2,
+      "optimizer_term_index": 2,
+      "group": "school:class",
+      "covariance_family": "full_cholesky",
+      "user_basis": [
+        "intercept",
+        "x"
+      ],
+      "optimizer_basis": [
+        "intercept",
+        "x"
+      ],
+      "theta": {
+        "global_index": 6,
+        "local_index": 2,
+        "name": "theta[2:x,x]",
+        "constraint": {
+          "lower_bound": {
+            "lower": 0.0
+          }
+        },
+        "status": "free",
+        "value": null
+      },
+      "lambda": {
+        "row": 1,
+        "col": 1,
+        "row_basis": "x",
+        "col_basis": "x",
+        "value": null
+      },
+      "parmap_entry": null,
+      "varcorr_entries": [
+        {
+          "kind": "standard_deviation",
+          "label": "sd(x)",
+          "basis": [
+            "x"
+          ],
+          "value": null
+        },
+        {
+          "kind": "correlation",
+          "label": "corr(x,intercept)",
+          "basis": [
+            "x",
+            "intercept"
+          ],
+          "value": null
+        }
+      ]
+    },
+    {
+      "term_id": "r3",
+      "source_syntax": "(1 | batch)",
+      "semantic_term_index": 3,
+      "optimizer_term_index": 3,
+      "group": "batch",
+      "covariance_family": "scalar",
+      "user_basis": [
+        "intercept"
+      ],
+      "optimizer_basis": [
+        "intercept"
+      ],
+      "theta": {
+        "global_index": 7,
+        "local_index": 0,
+        "name": "theta[3:intercept,intercept]",
+        "constraint": {
+          "lower_bound": {
+            "lower": 0.0
+          }
+        },
+        "status": "free",
+        "value": null
+      },
+      "lambda": {
+        "row": 0,
+        "col": 0,
+        "row_basis": "intercept",
+        "col_basis": "intercept",
+        "value": null
+      },
+      "parmap_entry": null,
+      "varcorr_entries": [
+        {
+          "kind": "standard_deviation",
+          "label": "sd(intercept)",
+          "basis": [
+            "intercept"
+          ],
+          "value": null
+        }
+      ]
+    },
+    {
+      "term_id": "r4",
+      "source_syntax": "(0 + x | batch)",
+      "semantic_term_index": 4,
+      "optimizer_term_index": 4,
+      "group": "batch",
+      "covariance_family": "scalar",
+      "user_basis": [
+        "x"
+      ],
+      "optimizer_basis": [
+        "x"
+      ],
+      "theta": {
+        "global_index": 8,
+        "local_index": 0,
+        "name": "theta[4:x,x]",
+        "constraint": {
+          "lower_bound": {
+            "lower": 0.0
+          }
+        },
+        "status": "free",
+        "value": null
+      },
+      "lambda": {
+        "row": 0,
+        "col": 0,
+        "row_basis": "x",
+        "col_basis": "x",
+        "value": null
+      },
+      "parmap_entry": null,
+      "varcorr_entries": [
+        {
+          "kind": "standard_deviation",
+          "label": "sd(x)",
+          "basis": [
+            "x"
+          ],
+          "value": null
+        }
+      ]
+    },
+    {
+      "term_id": "r5",
+      "source_syntax": "(1 | item)",
+      "semantic_term_index": 5,
+      "optimizer_term_index": 5,
+      "group": "item",
+      "covariance_family": "scalar",
+      "user_basis": [
+        "intercept"
+      ],
+      "optimizer_basis": [
+        "intercept"
+      ],
+      "theta": {
+        "global_index": 9,
+        "local_index": 0,
+        "name": "theta[5:intercept,intercept]",
+        "constraint": {
+          "lower_bound": {
+            "lower": 0.0
+          }
+        },
+        "status": "free",
+        "value": null
+      },
+      "lambda": {
+        "row": 0,
+        "col": 0,
+        "row_basis": "intercept",
+        "col_basis": "intercept",
+        "value": null
+      },
+      "parmap_entry": null,
+      "varcorr_entries": [
+        {
+          "kind": "standard_deviation",
+          "label": "sd(intercept)",
+          "basis": [
+            "intercept"
+          ],
+          "value": null
+        }
+      ]
+    },
+    {
+      "term_id": "r6",
+      "source_syntax": "(0 + x | item)",
+      "semantic_term_index": 6,
+      "optimizer_term_index": 6,
+      "group": "item",
+      "covariance_family": "scalar",
+      "user_basis": [
+        "x"
+      ],
+      "optimizer_basis": [
+        "x"
+      ],
+      "theta": {
+        "global_index": 10,
+        "local_index": 0,
+        "name": "theta[6:x,x]",
+        "constraint": {
+          "lower_bound": {
+            "lower": 0.0
+          }
+        },
+        "status": "free",
+        "value": null
+      },
+      "lambda": {
+        "row": 0,
+        "col": 0,
+        "row_basis": "x",
+        "col_basis": "x",
+        "value": null
+      },
+      "parmap_entry": null,
+      "varcorr_entries": [
+        {
+          "kind": "standard_deviation",
+          "label": "sd(x)",
+          "basis": [
+            "x"
+          ],
+          "value": null
+        }
+      ]
+    }
+  ],
+  "reproducibility": {
+    "fit_intent": "confirmatory_as_specified",
+    "seed": null,
+    "random_state_used": false,
+    "thresholds": [
+      [
+        "min_levels_random_intercept_fit",
+        "2"
+      ],
+      [
+        "min_levels_random_intercept_reliability",
+        "5"
+      ],
+      [
+        "min_levels_variance",
+        "max(5, 2*d_basis + 1)"
+      ],
+      [
+        "min_levels_full_cov",
+        "max(10, 5*n_cov_params)"
+      ],
+      [
+        "max_condition_number",
+        "10000000000"
+      ],
+      [
+        "min_within_group_sd",
+        "0.00000001"
+      ],
+      [
+        "max_basis_pairwise_abs_corr",
+        "0.999"
+      ],
+      [
+        "min_observations_per_supported_level",
+        "2"
+      ],
+      [
+        "effective_rank_relative_tolerance",
+        "0.000001"
+      ],
+      [
+        "effective_rank_absolute_tolerance",
+        "0.0000000001"
+      ],
+      [
+        "apply_design_time_reductions",
+        "false"
+      ]
+    ]
+  },
+  "optimizer_certificate": null,
+  "diagnostics": [
+    {
+      "code": "random_slope_without_intercept",
+      "severity": "info",
+      "stage": "semantic_ir",
+      "message": "random slope term omits a random intercept; this leaves baseline grouping dependence unmodeled unless represented elsewhere",
+      "affected_terms": [
+        "(0 + x | item)"
+      ],
+      "suggested_actions": [
+        "consider adding a random intercept if baseline grouping dependence is expected"
+      ]
+    },
+    {
+      "code": "formula_canonicalized",
+      "severity": "info",
+      "stage": "semantic_ir",
+      "message": "random-effect term was canonicalized as (1 + x | school) + (1 + x | school:class)",
+      "affected_terms": [
+        "(1 + x | school/class)"
+      ],
+      "suggested_actions": [],
+      "payload": {
+        "canonical_terms": [
+          "(1 + x | school)",
+          "(1 + x | school:class)"
+        ]
+      }
+    },
+    {
+      "code": "formula_canonicalized",
+      "severity": "info",
+      "stage": "semantic_ir",
+      "message": "random-effect term was canonicalized as (1 | batch) + (0 + x | batch)",
+      "affected_terms": [
+        "(1 + x || batch)"
+      ],
+      "suggested_actions": [],
+      "payload": {
+        "canonical_terms": [
+          "(1 | batch)",
+          "(0 + x | batch)"
+        ]
+      }
+    },
+    {
+      "code": "syntax_expansion",
+      "severity": "info",
+      "stage": "semantic_ir",
+      "message": "random-effect shorthand expands to (1 + x | school) + (1 + x | school:class)",
+      "affected_terms": [
+        "(1 + x | school/class)"
+      ],
+      "suggested_actions": [
+        "`(1 + x | school/class)` expands to `(1 + x | school) + (1 + x | school:class)` - the canonical form."
+      ],
+      "payload": {
+        "canonical": "(1 + x | school) + (1 + x | school:class)",
+        "expansion_kind": "nested",
+        "written": "(1 + x | school/class)"
+      }
+    },
+    {
+      "code": "covariance_assumption",
+      "severity": "info",
+      "stage": "semantic_ir",
+      "message": "the covariance between 'Intercept' and 'x' is fixed at zero by || syntax",
+      "affected_terms": [
+        "(1 + x || batch)"
+      ],
+      "suggested_actions": [
+        "the covariance between 'Intercept' and 'x' is fixed at zero by || syntax"
+      ],
+      "payload": {
+        "between": [
+          "Intercept",
+          "x"
+        ],
+        "group": "batch",
+        "reason": "double_bar_syntax"
+      }
+    },
+    {
+      "code": "covariance_assumption",
+      "severity": "info",
+      "stage": "semantic_ir",
+      "message": "the covariance between 'Intercept' and 'x' is fixed at zero by separate random-effect blocks",
+      "affected_terms": [
+        "(1 | item)",
+        "(0 + x | item)"
+      ],
+      "suggested_actions": [
+        "the covariance between 'Intercept' and 'x' is fixed at zero by separate random-effect blocks"
+      ],
+      "payload": {
+        "between": [
+          "Intercept",
+          "x"
+        ],
+        "group": "item",
+        "reason": "separate_random_effect_blocks"
+      }
+    },
+    {
+      "code": "random_effect_few_levels",
+      "severity": "warning",
+      "stage": "design_audit",
+      "message": "2 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5",
+      "affected_terms": [
+        "(1 | subject)"
+      ],
+      "suggested_actions": [],
+      "payload": {
+        "basis_dimension": 1,
+        "min_levels_full_covariance": null,
+        "min_levels_random_intercept_fit": 2,
+        "min_levels_random_intercept_reliability": 5,
+        "min_levels_variance": 5,
+        "n_levels": 2,
+        "requested_covariance_parameters": 1
+      }
+    },
+    {
+      "code": "support_note",
+      "severity": "info",
+      "stage": "design_audit",
+      "message": "the requested covariance structure is information-hungry relative to the observed grouping levels",
+      "affected_terms": [
+        "r0"
+      ],
+      "suggested_actions": [
+        "The requested covariance structure is information-hungry relative to the observed grouping levels."
+      ],
+      "payload": {
+        "covariance_family": "scalar",
+        "group": "subject",
+        "n_levels": 2,
+        "policy_threshold": 5,
+        "requested_covariance_parameters": 1
+      }
+    },
+    {
+      "code": "covariance_too_rich",
+      "severity": "warning",
+      "stage": "design_audit",
+      "message": "2 levels are below the v0 full-covariance threshold 15 for 3 covariance parameters",
+      "affected_terms": [
+        "(1 + x | school)"
+      ],
+      "suggested_actions": [],
+      "payload": {
+        "basis_dimension": 2,
+        "min_levels_full_covariance": 15,
+        "min_levels_random_intercept_fit": 2,
+        "min_levels_random_intercept_reliability": 5,
+        "min_levels_variance": 5,
+        "n_levels": 2,
+        "requested_covariance_parameters": 3
+      }
+    },
+    {
+      "code": "structural_refusal",
+      "severity": "info",
+      "stage": "design_audit",
+      "message": "`x` does not vary within `school:class`, so a `school:class`-level `x` slope cannot be estimated from this design",
+      "affected_terms": [
+        "(1 + x | school:class)"
+      ],
+      "suggested_actions": [
+        "`x` does not vary within `school:class`, so a `school:class`-level `x` slope cannot be estimated from this design."
+      ],
+      "payload": {
+        "group": "school:class",
+        "reason": "slope_variable_does_not_vary_within_group",
+        "slope": "x"
+      }
+    },
+    {
+      "code": "covariance_too_rich",
+      "severity": "warning",
+      "stage": "design_audit",
+      "message": "4 levels are below the v0 full-covariance threshold 15 for 3 covariance parameters",
+      "affected_terms": [
+        "(1 + x | school:class)"
+      ],
+      "suggested_actions": [],
+      "payload": {
+        "basis_dimension": 2,
+        "min_levels_full_covariance": 15,
+        "min_levels_random_intercept_fit": 2,
+        "min_levels_random_intercept_reliability": 5,
+        "min_levels_variance": 5,
+        "n_levels": 4,
+        "requested_covariance_parameters": 3
+      }
+    },
+    {
+      "code": "random_effect_few_levels",
+      "severity": "warning",
+      "stage": "design_audit",
+      "message": "2 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5",
+      "affected_terms": [
+        "(1 | batch)"
+      ],
+      "suggested_actions": [],
+      "payload": {
+        "basis_dimension": 1,
+        "min_levels_full_covariance": null,
+        "min_levels_random_intercept_fit": 2,
+        "min_levels_random_intercept_reliability": 5,
+        "min_levels_variance": 5,
+        "n_levels": 2,
+        "requested_covariance_parameters": 1
+      }
+    },
+    {
+      "code": "support_note",
+      "severity": "info",
+      "stage": "design_audit",
+      "message": "the requested covariance structure is information-hungry relative to the observed grouping levels",
+      "affected_terms": [
+        "r3"
+      ],
+      "suggested_actions": [
+        "The requested covariance structure is information-hungry relative to the observed grouping levels."
+      ],
+      "payload": {
+        "covariance_family": "scalar",
+        "group": "batch",
+        "n_levels": 2,
+        "policy_threshold": 5,
+        "requested_covariance_parameters": 1
+      }
+    },
+    {
+      "code": "random_effect_few_levels",
+      "severity": "warning",
+      "stage": "design_audit",
+      "message": "2 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5",
+      "affected_terms": [
+        "(0 + x | batch)"
+      ],
+      "suggested_actions": [],
+      "payload": {
+        "basis_dimension": 1,
+        "min_levels_full_covariance": null,
+        "min_levels_random_intercept_fit": 2,
+        "min_levels_random_intercept_reliability": 5,
+        "min_levels_variance": 5,
+        "n_levels": 2,
+        "requested_covariance_parameters": 1
+      }
+    },
+    {
+      "code": "support_note",
+      "severity": "info",
+      "stage": "design_audit",
+      "message": "the requested covariance structure is information-hungry relative to the observed grouping levels",
+      "affected_terms": [
+        "r4"
+      ],
+      "suggested_actions": [
+        "The requested covariance structure is information-hungry relative to the observed grouping levels."
+      ],
+      "payload": {
+        "covariance_family": "scalar",
+        "group": "batch",
+        "n_levels": 2,
+        "policy_threshold": 5,
+        "requested_covariance_parameters": 1
+      }
+    },
+    {
+      "code": "random_effect_few_levels",
+      "severity": "warning",
+      "stage": "design_audit",
+      "message": "4 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5",
+      "affected_terms": [
+        "(1 | item)"
+      ],
+      "suggested_actions": [],
+      "payload": {
+        "basis_dimension": 1,
+        "min_levels_full_covariance": null,
+        "min_levels_random_intercept_fit": 2,
+        "min_levels_random_intercept_reliability": 5,
+        "min_levels_variance": 5,
+        "n_levels": 4,
+        "requested_covariance_parameters": 1
+      }
+    },
+    {
+      "code": "support_note",
+      "severity": "info",
+      "stage": "design_audit",
+      "message": "the requested covariance structure is information-hungry relative to the observed grouping levels",
+      "affected_terms": [
+        "r5"
+      ],
+      "suggested_actions": [
+        "The requested covariance structure is information-hungry relative to the observed grouping levels."
+      ],
+      "payload": {
+        "covariance_family": "scalar",
+        "group": "item",
+        "n_levels": 4,
+        "policy_threshold": 5,
+        "requested_covariance_parameters": 1
+      }
+    },
+    {
+      "code": "random_effect_few_levels",
+      "severity": "warning",
+      "stage": "design_audit",
+      "message": "4 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5",
+      "affected_terms": [
+        "(0 + x | item)"
+      ],
+      "suggested_actions": [],
+      "payload": {
+        "basis_dimension": 1,
+        "min_levels_full_covariance": null,
+        "min_levels_random_intercept_fit": 2,
+        "min_levels_random_intercept_reliability": 5,
+        "min_levels_variance": 5,
+        "n_levels": 4,
+        "requested_covariance_parameters": 1
+      }
+    },
+    {
+      "code": "support_note",
+      "severity": "info",
+      "stage": "design_audit",
+      "message": "the requested covariance structure is information-hungry relative to the observed grouping levels",
+      "affected_terms": [
+        "r6"
+      ],
+      "suggested_actions": [
+        "The requested covariance structure is information-hungry relative to the observed grouping levels."
+      ],
+      "payload": {
+        "covariance_family": "scalar",
+        "group": "item",
+        "n_levels": 4,
+        "policy_threshold": 5,
+        "requested_covariance_parameters": 1
+      }
+    },
+    {
+      "code": "scope_note",
+      "severity": "info",
+      "stage": "design_audit",
+      "message": "`x` varies within `subject`, so a `subject`-level slope is structurally possible",
+      "affected_terms": [
+        "r0"
+      ],
+      "suggested_actions": [
+        "`x` varies within `subject`, so a `subject`-level slope is structurally possible."
+      ],
+      "payload": {
+        "fixed_effect": "x",
+        "group": "subject",
+        "varies_within_group": true
+      }
+    },
+    {
+      "code": "repeated_unit_unmodeled",
+      "severity": "warning",
+      "stage": "design_audit",
+      "message": "repeated marginal unit 'class' is not covered by a random-intercept dependence path",
+      "affected_terms": [
+        "class"
+      ],
+      "suggested_actions": [
+        "add a random intercept term such as (1 | class) if 'class' is a sampled or repeated unit",
+        "model 'class' as a fixed effect only when its levels are designed or directly compared"
+      ],
+      "payload": {
+        "max_obs_per_level": 4,
+        "n_levels": 2,
+        "parts": [
+          "class"
+        ],
+        "path": "marginal",
+        "reason": "'class' appears inside a composite grouping, but cell-level kernels do not model marginal class-wide dependence",
+        "suggested_random_term": "(1 | class)",
+        "unit": "class"
+      }
+    }
+  ]
+}

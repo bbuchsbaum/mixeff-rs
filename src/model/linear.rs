@@ -7611,7 +7611,17 @@ mod tests {
 
         assert!(model.formula.random_terms[0].zerocorr);
         assert_eq!(model.theta().len(), 2);
-        assert_eq!(artifact.theta_maps[0].n_free(), 2);
+        assert_eq!(artifact.theta_maps.len(), 2);
+        assert_eq!(
+            artifact
+                .theta_maps
+                .iter()
+                .map(ThetaMap::n_free)
+                .sum::<usize>(),
+            2
+        );
+        assert_eq!(artifact.theta_maps[0].block().term_index, 0);
+        assert_eq!(artifact.theta_maps[1].block().term_index, 0);
         assert_eq!(
             artifact.effective_formula.as_deref(),
             Some("y ~ 1 + x + (1 + x || group)")
@@ -9378,6 +9388,21 @@ mod tests {
         assert_eq!(theta.len(), 2, "zerocorr model has 2 theta params");
         assert_relative_eq!(theta[0], 0.9458043022417869, epsilon = 0.01);
         assert_relative_eq!(theta[1], 0.22692740996014607, epsilon = 0.01);
+        let artifact = model.compiler_artifact();
+        assert_eq!(artifact.semantic_model.random_terms.len(), 2);
+        assert_eq!(artifact.theta_maps.len(), 2);
+        assert!(artifact
+            .semantic_model
+            .random_terms
+            .iter()
+            .all(|term| term.block_group.as_deref() == Some("bg0")));
+        assert!(artifact
+            .covariance_parameter_traces
+            .iter()
+            .all(|trace| trace
+                .parmap_entry
+                .as_ref()
+                .is_some_and(|entry| entry.matches_theta_map)));
 
         let coef = MixedModelFit::coef(&model);
         assert_relative_eq!(coef[0], 251.4051048484854, epsilon = 0.1);

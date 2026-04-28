@@ -180,6 +180,59 @@ fn design_compiled_artifact() -> CompiledModelArtifact {
     model.compiler_artifact().clone()
 }
 
+fn pedagogical_diagnostics_data() -> DataFrame {
+    let mut data = DataFrame::new();
+    data.add_numeric("y", vec![1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]);
+    data.add_numeric("x", vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0]);
+    data.add_categorical(
+        "subject",
+        vec!["s1", "s1", "s1", "s1", "s2", "s2", "s2", "s2"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    );
+    data.add_categorical(
+        "school",
+        vec!["A", "A", "A", "A", "B", "B", "B", "B"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    );
+    data.add_categorical(
+        "class",
+        vec!["c1", "c1", "c2", "c2", "c1", "c1", "c2", "c2"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    );
+    data.add_categorical(
+        "batch",
+        vec!["b1", "b1", "b1", "b1", "b2", "b2", "b2", "b2"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    );
+    data.add_categorical(
+        "item",
+        vec!["i1", "i2", "i1", "i2", "i3", "i4", "i3", "i4"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    );
+    data
+}
+
+fn pedagogical_diagnostics_artifact() -> CompiledModelArtifact {
+    let formula = parse_formula(
+        "y ~ x + (1 | subject) + (1 + x | school/class) + (1 + x || batch) + (1 | item) + (0 + x | item)",
+    )
+    .unwrap();
+    let semantic = compile_formula_ir(&formula);
+    let mut artifact = CompiledModelArtifact::new(formula.to_string(), semantic);
+    artifact.attach_design_audit(&pedagogical_diagnostics_data());
+    artifact
+}
+
 fn singular_prefit_artifact() -> CompiledModelArtifact {
     let (data, meta) = datasets::load("singular").unwrap();
     let formula = parse_formula(&meta.fits[0].formula).unwrap();
@@ -815,7 +868,17 @@ fn design_compiled_artifact_matches_wire_fixture() {
         value["reproducibility"]["fit_intent"],
         "confirmatory_design_compiled"
     );
-    assert_eq!(value["theta_maps"][0]["family"], "diagonal");
+    assert_eq!(value["theta_maps"].as_array().unwrap().len(), 2);
+    assert_eq!(value["theta_maps"][0]["family"], "scalar");
+    assert_eq!(value["theta_maps"][1]["family"], "scalar");
+    assert_eq!(
+        value["effective_semantic_model"]["random_terms"][0]["block_group"],
+        "bg0"
+    );
+    assert_eq!(
+        value["effective_semantic_model"]["random_terms"][1]["block_group"],
+        "bg0"
+    );
     assert_eq!(value["reductions"][0]["trigger"], "design_time");
     assert_wire_fixture(
         "tests/fixtures/compiler_contract/design_compiled_artifact_v1.json",
@@ -839,6 +902,30 @@ fn design_compiled_model_state_matches_wire_fixture() {
     assert_eq!(value["changes"][0]["trigger"], "design_time");
     assert_wire_fixture(
         "tests/fixtures/compiler_contract/design_compiled_model_state_v1.json",
+        &json,
+    );
+}
+
+#[test]
+fn pedagogical_diagnostics_artifact_matches_wire_fixture() {
+    let artifact = pedagogical_diagnostics_artifact();
+    let json = pretty_json(&artifact);
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+    assert!(json.contains("\"code\": \"scope_note\""));
+    assert!(json.contains("\"code\": \"support_note\""));
+    assert!(json.contains("\"code\": \"syntax_expansion\""));
+    assert!(json.contains("\"code\": \"covariance_assumption\""));
+    assert!(json.contains("\"code\": \"structural_refusal\""));
+    assert!(json.contains("\"expansion_kind\": \"nested\""));
+    assert!(json.contains("\"reason\": \"double_bar_syntax\""));
+    assert!(json.contains("\"reason\": \"separate_random_effect_blocks\""));
+    assert_eq!(
+        value["design_audit"]["random_terms"][0]["group"]["median_obs_per_level"],
+        serde_json::json!(4)
+    );
+    assert_wire_fixture(
+        "tests/fixtures/compiler_contract/pedagogical_diagnostics_artifact_v1.json",
         &json,
     );
 }

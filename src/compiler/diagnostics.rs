@@ -80,6 +80,12 @@ pub enum DiagnosticCode {
     InferenceUnavailable,
     SerializationNotAssessed,
     Unsupported,
+    // Pedagogical taxonomy - append-only ordering. Do not alphabetize.
+    ScopeNote,
+    SupportNote,
+    SyntaxExpansion,
+    CovarianceAssumption,
+    StructuralRefusal,
 }
 
 /// Machine-readable diagnostic with optional structured payload.
@@ -146,5 +152,23 @@ mod tests {
         let decoded: Diagnostic = serde_json::from_str(&json).unwrap();
 
         assert_eq!(decoded, diagnostic);
+    }
+
+    #[test]
+    fn pedagogical_diagnostic_codes_use_stable_snake_case_names() {
+        let cases = [
+            (DiagnosticCode::ScopeNote, "\"scope_note\""),
+            (DiagnosticCode::SupportNote, "\"support_note\""),
+            (DiagnosticCode::SyntaxExpansion, "\"syntax_expansion\""),
+            (
+                DiagnosticCode::CovarianceAssumption,
+                "\"covariance_assumption\"",
+            ),
+            (DiagnosticCode::StructuralRefusal, "\"structural_refusal\""),
+        ];
+
+        for (code, expected) in cases {
+            assert_eq!(serde_json::to_string(&code).unwrap(), expected);
+        }
     }
 }

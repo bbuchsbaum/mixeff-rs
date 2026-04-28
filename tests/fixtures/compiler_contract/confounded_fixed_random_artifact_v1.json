@@ -262,6 +262,23 @@
               "n_levels": 6,
               "random_term": "(1 | subject)"
             }
+          },
+          {
+            "code": "scope_note",
+            "severity": "info",
+            "stage": "design_audit",
+            "message": "`x` varies within `subject`, so a `subject`-level slope is structurally possible",
+            "affected_terms": [
+              "r0"
+            ],
+            "suggested_actions": [
+              "`x` varies within `subject`, so a `subject`-level slope is structurally possible."
+            ],
+            "payload": {
+              "fixed_effect": "x",
+              "group": "subject",
+              "varies_within_group": true
+            }
           }
         ]
       }
@@ -321,6 +338,23 @@
           "group": "subject",
           "n_levels": 6,
           "random_term": "(1 | subject)"
+        }
+      },
+      {
+        "code": "scope_note",
+        "severity": "info",
+        "stage": "design_audit",
+        "message": "`x` varies within `subject`, so a `subject`-level slope is structurally possible",
+        "affected_terms": [
+          "r0"
+        ],
+        "suggested_actions": [
+          "`x` varies within `subject`, so a `subject`-level slope is structurally possible."
+        ],
+        "payload": {
+          "fixed_effect": "x",
+          "group": "subject",
+          "varies_within_group": true
         }
       }
     ]
@@ -466,6 +500,23 @@
         "group": "subject",
         "n_levels": 6,
         "random_term": "(1 | subject)"
+      }
+    },
+    {
+      "code": "scope_note",
+      "severity": "info",
+      "stage": "design_audit",
+      "message": "`x` varies within `subject`, so a `subject`-level slope is structurally possible",
+      "affected_terms": [
+        "r0"
+      ],
+      "suggested_actions": [
+        "`x` varies within `subject`, so a `subject`-level slope is structurally possible."
+      ],
+      "payload": {
+        "fixed_effect": "x",
+        "group": "subject",
+        "varies_within_group": true
       }
     }
   ]

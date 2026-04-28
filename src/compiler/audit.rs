@@ -314,6 +314,16 @@ pub fn audit_design(semantic_model: &SemanticModel, data: &DataFrame) -> DesignA
         diagnostics.push(diagnostic);
     }
 
+    for (term_id, diagnostic) in scope_note_diagnostics(semantic_model, data) {
+        if let Some(term_audit) = random_terms
+            .iter_mut()
+            .find(|term_audit| term_audit.term_id == term_id)
+        {
+            term_audit.diagnostics.push(diagnostic.clone());
+        }
+        diagnostics.push(diagnostic);
+    }
+
     let covariance_kernels = audit_covariance_kernels(semantic_model, data);
     diagnostics.extend(
         covariance_kernels
@@ -400,6 +410,77 @@ fn fixed_random_redundancy_diagnostics(
             Some((term.id.clone(), diagnostic))
         })
         .collect()
+}
+
+fn scope_note_diagnostics(
+    semantic_model: &SemanticModel,
+    data: &DataFrame,
+) -> Vec<(String, Diagnostic)> {
+    let fixed_numeric_terms = semantic_model
+        .fixed_terms
+        .iter()
+        .map(String::as_str)
+        .filter(|term| *term != "1" && !term.contains(':'))
+        .filter(|term| data.numeric(term).is_some())
+        .collect::<Vec<_>>();
+
+    let mut diagnostics = Vec::new();
+    for term in &semantic_model.random_terms {
+        let Some(refs) = grouping_refs(&term.group, data) else {
+            continue;
+        };
+        for &fixed_effect in &fixed_numeric_terms {
+            if group_has_random_slope(semantic_model, &term.group, fixed_effect) {
+                continue;
+            }
+            let Some(values) = data.numeric(fixed_effect) else {
+                continue;
+            };
+            let refs = Some(refs.clone());
+            let basis = audit_values(fixed_effect, "numeric", &refs, values.iter().copied());
+            if basis.supported != Some(true) {
+                continue;
+            }
+
+            let group = term.group.label();
+            let mut diagnostic = Diagnostic::new(
+                DiagnosticCode::ScopeNote,
+                DiagnosticSeverity::Info,
+                DiagnosticStage::DesignAudit,
+                format!(
+                    "`{}` varies within `{group}`, so a `{group}`-level slope is structurally possible",
+                    fixed_effect
+                ),
+            )
+            .with_affected_terms(vec![term.id.clone()])
+            .with_suggested_actions(vec![format!(
+                "`{}` varies within `{group}`, so a `{group}`-level slope is structurally possible.",
+                fixed_effect
+            )]);
+            diagnostic
+                .payload
+                .insert("group".to_string(), serde_json::json!(group));
+            diagnostic
+                .payload
+                .insert("fixed_effect".to_string(), serde_json::json!(fixed_effect));
+            diagnostic
+                .payload
+                .insert("varies_within_group".to_string(), serde_json::json!(true));
+            diagnostics.push((term.id.clone(), diagnostic));
+        }
+    }
+
+    diagnostics
+}
+
+fn group_has_random_slope(
+    semantic_model: &SemanticModel,
+    group: &GroupingFactorIr,
+    fixed_effect: &str,
+) -> bool {
+    semantic_model.random_terms.iter().any(|term| {
+        term.group == *group && term.basis.iter().any(|basis| basis.name == fixed_effect)
+    })
 }
 
 fn audit_covariance_kernels(
@@ -710,6 +791,36 @@ fn single_grouping_counts(name: &str, data: &DataFrame) -> Option<Vec<usize>> {
     let cat = data.categorical(name)?;
     let refs = cat.refs.iter().map(|&r| r as usize).collect::<Vec<_>>();
     Some(counts_from_refs(cat.n_levels(), &refs))
+}
+
+fn grouping_refs(group: &GroupingFactorIr, data: &DataFrame) -> Option<Vec<usize>> {
+    match group {
+        GroupingFactorIr::Single { name } => data
+            .categorical(name)
+            .map(|cat| cat.refs.iter().map(|&r| r as usize).collect()),
+        GroupingFactorIr::Interaction { names } | GroupingFactorIr::Cell { names } => {
+            composite_grouping_refs(names, data)
+        }
+    }
+}
+
+fn composite_grouping_refs(names: &[String], data: &DataFrame) -> Option<Vec<usize>> {
+    let cats = names
+        .iter()
+        .map(|name| data.categorical(name))
+        .collect::<Option<Vec<_>>>()?;
+    let mut level_map = std::collections::BTreeMap::new();
+    let mut refs = Vec::with_capacity(data.nrow());
+    for row in 0..data.nrow() {
+        let key = cats
+            .iter()
+            .map(|cat| cat.values[row].clone())
+            .collect::<Vec<_>>();
+        let next = level_map.len();
+        let idx = *level_map.entry(key).or_insert(next);
+        refs.push(idx);
+    }
+    Some(refs)
 }
 
 fn composite_grouping_counts(names: &[String], data: &DataFrame) -> Option<Vec<usize>> {
@@ -1274,24 +1385,32 @@ fn audit_random_term(
 
     for basis_audit in &basis {
         if basis_audit.supported == Some(false) {
-            diagnostics.push(
-                Diagnostic::new(
-                    DiagnosticCode::RandomSlopeUnsupported,
-                    DiagnosticSeverity::Warning,
-                    DiagnosticStage::DesignAudit,
-                    format!(
-                        "random slope '{}' has no detectable within-group variation",
-                        basis_audit.name
-                    ),
-                )
-                .with_affected_terms(vec![term.source_syntax.text.clone()]),
-            );
+            let unsupported = Diagnostic::new(
+                DiagnosticCode::RandomSlopeUnsupported,
+                DiagnosticSeverity::Warning,
+                DiagnosticStage::DesignAudit,
+                format!(
+                    "random slope '{}' has no detectable within-group variation",
+                    basis_audit.name
+                ),
+            )
+            .with_affected_terms(vec![term.source_syntax.text.clone()]);
+            diagnostics.push(unsupported.clone());
+
+            let structural = structural_refusal_diagnostic(term, basis_audit);
+            global_diagnostics.push(structural.clone());
+            diagnostics.push(structural);
         }
     }
     if information_budget.status == InformationBudgetStatus::WeaklySupported
         || information_budget.status == InformationBudgetStatus::TooRich
     {
         let diagnostic = information_budget_diagnostic(term, &information_budget);
+        global_diagnostics.push(diagnostic.clone());
+        diagnostics.push(diagnostic);
+    }
+    if information_budget.status == InformationBudgetStatus::WeaklySupported {
+        let diagnostic = support_note_diagnostic(term, &information_budget);
         global_diagnostics.push(diagnostic.clone());
         diagnostics.push(diagnostic);
     }
@@ -2084,6 +2203,88 @@ fn information_budget_diagnostic(
     diagnostic
 }
 
+fn support_note_diagnostic(
+    term: &RandomTermIr,
+    budget: &RandomEffectInformationBudget,
+) -> Diagnostic {
+    let mut diagnostic = Diagnostic::new(
+        DiagnosticCode::SupportNote,
+        DiagnosticSeverity::Info,
+        DiagnosticStage::DesignAudit,
+        "the requested covariance structure is information-hungry relative to the observed grouping levels",
+    )
+    .with_affected_terms(vec![term.id.clone()])
+    .with_suggested_actions(vec![
+        "The requested covariance structure is information-hungry relative to the observed grouping levels.".to_string(),
+    ]);
+    diagnostic
+        .payload
+        .insert("group".to_string(), serde_json::json!(term.group.label()));
+    diagnostic.payload.insert(
+        "covariance_family".to_string(),
+        serde_json::json!(budget.covariance_family),
+    );
+    diagnostic.payload.insert(
+        "requested_covariance_parameters".to_string(),
+        serde_json::json!(budget.requested_covariance_parameters),
+    );
+    diagnostic
+        .payload
+        .insert("n_levels".to_string(), serde_json::json!(budget.n_levels));
+    diagnostic.payload.insert(
+        "policy_threshold".to_string(),
+        serde_json::json!(support_note_policy_threshold(budget)),
+    );
+    diagnostic
+}
+
+fn support_note_policy_threshold(budget: &RandomEffectInformationBudget) -> usize {
+    budget.min_levels_full_covariance.unwrap_or_else(|| {
+        if budget.basis_dimension == 1
+            && budget.requested_covariance_parameters == 1
+            && budget.min_levels_full_covariance.is_none()
+        {
+            min_levels_random_intercept_reliability()
+        } else {
+            budget.min_levels_variance
+        }
+    })
+}
+
+fn structural_refusal_diagnostic(term: &RandomTermIr, basis: &BasisAudit) -> Diagnostic {
+    let mut diagnostic = Diagnostic::new(
+        DiagnosticCode::StructuralRefusal,
+        DiagnosticSeverity::Info,
+        DiagnosticStage::DesignAudit,
+        format!(
+            "`{}` does not vary within `{}`, so a `{}`-level `{}` slope cannot be estimated from this design",
+            basis.name,
+            term.group.label(),
+            term.group.label(),
+            basis.name
+        ),
+    )
+    .with_affected_terms(vec![term.source_syntax.text.clone()])
+    .with_suggested_actions(vec![format!(
+        "`{}` does not vary within `{}`, so a `{}`-level `{}` slope cannot be estimated from this design.",
+        basis.name,
+        term.group.label(),
+        term.group.label(),
+        basis.name
+    )]);
+    diagnostic
+        .payload
+        .insert("group".to_string(), serde_json::json!(term.group.label()));
+    diagnostic
+        .payload
+        .insert("slope".to_string(), serde_json::json!(basis.name));
+    diagnostic.payload.insert(
+        "reason".to_string(),
+        serde_json::json!("slope_variable_does_not_vary_within_group"),
+    );
+    diagnostic
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2536,19 +2737,81 @@ mod tests {
                 .get("min_levels_random_intercept_reliability"),
             Some(&serde_json::json!(5))
         );
+
+        let support_note = audit.random_terms[0]
+            .diagnostics
+            .iter()
+            .find(|d| d.code == DiagnosticCode::SupportNote)
+            .expect("weakly supported random term should emit a support note");
+        assert_eq!(support_note.severity, DiagnosticSeverity::Info);
+        assert_eq!(support_note.stage, DiagnosticStage::DesignAudit);
+        assert_eq!(
+            support_note.payload.get("group"),
+            Some(&serde_json::json!("subject"))
+        );
+        assert_eq!(
+            support_note.payload.get("covariance_family"),
+            Some(&serde_json::json!("scalar"))
+        );
+        assert_eq!(
+            support_note.payload.get("policy_threshold"),
+            Some(&serde_json::json!(5))
+        );
     }
 
     #[test]
-    fn design_audit_reports_diagonal_budget_without_full_covariance_threshold() {
+    fn design_audit_emits_scope_note_for_unmodeled_possible_slope() {
+        let formula = parse_formula("y ~ x + (1 | subject)").unwrap();
+        let semantic = compile_formula_ir(&formula);
+        let audit = audit_design(&semantic, &repeated_subject_data());
+
+        let diagnostic = audit.random_terms[0]
+            .diagnostics
+            .iter()
+            .find(|d| d.code == DiagnosticCode::ScopeNote)
+            .expect("within-group fixed-effect variation should emit a scope note");
+        assert_eq!(diagnostic.severity, DiagnosticSeverity::Info);
+        assert_eq!(diagnostic.affected_terms, vec!["r0".to_string()]);
+        assert_eq!(
+            diagnostic.payload.get("group"),
+            Some(&serde_json::json!("subject"))
+        );
+        assert_eq!(
+            diagnostic.payload.get("fixed_effect"),
+            Some(&serde_json::json!("x"))
+        );
+        assert_eq!(
+            diagnostic.payload.get("varies_within_group"),
+            Some(&serde_json::json!(true))
+        );
+    }
+
+    #[test]
+    fn design_audit_suppresses_scope_note_when_slope_is_in_split_block() {
+        let formula = parse_formula("y ~ x + (1 | subject) + (0 + x | subject)").unwrap();
+        let semantic = compile_formula_ir(&formula);
+        let audit = audit_design(&semantic, &repeated_subject_data());
+
+        assert!(!audit
+            .diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::ScopeNote));
+    }
+
+    #[test]
+    fn design_audit_reports_split_double_bar_scalar_budgets() {
         let formula = parse_formula("y ~ x + (1 + x || subject)").unwrap();
         let semantic = compile_formula_ir(&formula);
         let audit = audit_design(&semantic, &many_subject_data(6));
 
-        let budget = &audit.random_terms[0].information_budget;
-        assert_eq!(budget.covariance_family, "diagonal");
-        assert_eq!(budget.requested_covariance_parameters, 2);
-        assert_eq!(budget.min_levels_full_covariance, None);
-        assert_eq!(budget.status, InformationBudgetStatus::Sufficient);
+        assert_eq!(audit.random_terms.len(), 2);
+        for term in &audit.random_terms {
+            let budget = &term.information_budget;
+            assert_eq!(budget.covariance_family, "scalar");
+            assert_eq!(budget.requested_covariance_parameters, 1);
+            assert_eq!(budget.min_levels_full_covariance, None);
+            assert_eq!(budget.status, InformationBudgetStatus::Sufficient);
+        }
     }
 
     #[test]
@@ -2655,6 +2918,32 @@ mod tests {
             .diagnostics
             .iter()
             .any(|d| d.code == DiagnosticCode::RandomSlopeUnsupported));
+        let unsupported = term
+            .diagnostics
+            .iter()
+            .find(|d| d.code == DiagnosticCode::RandomSlopeUnsupported)
+            .expect("random slope unsupported diagnostic should remain");
+        let structural = term
+            .diagnostics
+            .iter()
+            .find(|d| d.code == DiagnosticCode::StructuralRefusal)
+            .expect("structural refusal should accompany unsupported slope");
+        assert_eq!(structural.severity, DiagnosticSeverity::Info);
+        assert_eq!(structural.affected_terms, unsupported.affected_terms);
+        assert_eq!(
+            structural.payload.get("group"),
+            Some(&serde_json::json!("subject"))
+        );
+        assert_eq!(
+            structural.payload.get("slope"),
+            Some(&serde_json::json!("x"))
+        );
+        assert_eq!(
+            structural.payload.get("reason"),
+            Some(&serde_json::json!(
+                "slope_variable_does_not_vary_within_group"
+            ))
+        );
     }
 
     #[test]

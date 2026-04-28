@@ -1717,6 +1717,11 @@ fn diagnostic_code_label(code: &DiagnosticCode) -> &'static str {
         DiagnosticCode::InferenceUnavailable => "inference_unavailable",
         DiagnosticCode::SerializationNotAssessed => "serialization_not_assessed",
         DiagnosticCode::Unsupported => "unsupported",
+        DiagnosticCode::ScopeNote => "scope_note",
+        DiagnosticCode::SupportNote => "support_note",
+        DiagnosticCode::SyntaxExpansion => "syntax_expansion",
+        DiagnosticCode::CovarianceAssumption => "covariance_assumption",
+        DiagnosticCode::StructuralRefusal => "structural_refusal",
     }
 }
 

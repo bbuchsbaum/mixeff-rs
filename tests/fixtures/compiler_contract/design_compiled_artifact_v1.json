@@ -92,25 +92,54 @@
             "name": "intercept",
             "kind": "intercept",
             "source": "1"
-          },
+          }
+        ],
+        "covariance": "scalar",
+        "block_group": "bg0",
+        "intercept": "included",
+        "role": "unknown",
+        "source_syntax": {
+          "text": "(1 | group)",
+          "written": "(1 + x | group)"
+        },
+        "covariance_story": {
+          "summary": "group: varying coefficients [intercept]",
+          "assumptions": [
+            "group levels may differ in baseline response",
+            "single variance direction is estimated"
+          ],
+          "dependence": [
+            "observations sharing group are correlated through this term's random coefficients"
+          ]
+        }
+      },
+      {
+        "id": "r1",
+        "group": {
+          "single": {
+            "name": "group"
+          }
+        },
+        "basis": [
           {
             "name": "x",
             "kind": "slope",
             "source": "x"
           }
         ],
-        "covariance": "diagonal",
-        "intercept": "included",
+        "covariance": "scalar",
+        "block_group": "bg0",
+        "intercept": "omitted",
         "role": "unknown",
         "source_syntax": {
-          "text": "(1 + x || group)",
+          "text": "(0 + x | group)",
           "written": "(1 + x | group)"
         },
         "covariance_story": {
-          "summary": "group: varying coefficients [intercept, x]",
+          "summary": "group: varying coefficients [x]",
           "assumptions": [
-            "group levels may differ in baseline response",
-            "random coefficients vary independently in the compiled basis"
+            "group levels are not given a shared baseline offset by this term",
+            "single variance direction is estimated"
           ],
           "dependence": [
             "observations sharing group are correlated through this term's random coefficients"
@@ -123,22 +152,43 @@
         "code": "formula_canonicalized",
         "severity": "info",
         "stage": "semantic_ir",
-        "message": "random-effect term was canonicalized as (1 + x || group)",
+        "message": "random-effect term was canonicalized as (1 | group) + (0 + x | group)",
         "affected_terms": [
           "(1 + x | group)"
         ],
         "suggested_actions": [],
         "payload": {
           "canonical_terms": [
-            "(1 + x || group)"
+            "(1 | group)",
+            "(0 + x | group)"
           ]
+        }
+      },
+      {
+        "code": "covariance_assumption",
+        "severity": "info",
+        "stage": "semantic_ir",
+        "message": "the covariance between 'Intercept' and 'x' is fixed at zero by || syntax",
+        "affected_terms": [
+          "(1 + x | group)"
+        ],
+        "suggested_actions": [
+          "the covariance between 'Intercept' and 'x' is fixed at zero by || syntax"
+        ],
+        "payload": {
+          "between": [
+            "Intercept",
+            "x"
+          ],
+          "group": "group",
+          "reason": "double_bar_syntax"
         }
       }
     ]
   },
   "theta_maps": [
     {
-      "family": "diagonal",
+      "family": "scalar",
       "map": {
         "schema_name": "mixedmodels.theta_map",
         "schema_version": 1,
@@ -146,8 +196,7 @@
         "term_index": 0,
         "group": "group",
         "user_basis": [
-          "intercept",
-          "x"
+          "intercept"
         ],
         "optimizer_basis": [
           "intercept",
@@ -169,10 +218,36 @@
               }
             },
             "status": "free"
-          },
+          }
+        ],
+        "source_parmap": [
+          [
+            0,
+            0,
+            0
+          ]
+        ]
+      }
+    },
+    {
+      "family": "scalar",
+      "map": {
+        "schema_name": "mixedmodels.theta_map",
+        "schema_version": 1,
+        "term_id": "r1",
+        "term_index": 0,
+        "group": "group",
+        "user_basis": [
+          "x"
+        ],
+        "optimizer_basis": [
+          "intercept",
+          "x"
+        ],
+        "theta_slots": [
           {
             "global_index": 1,
-            "local_index": 1,
+            "local_index": 0,
             "term_index": 0,
             "basis_row": 1,
             "basis_col": 1,
@@ -188,11 +263,6 @@
           }
         ],
         "source_parmap": [
-          [
-            0,
-            0,
-            0
-          ],
           [
             0,
             1,
@@ -455,14 +525,13 @@
   "covariance_parameter_traces": [
     {
       "term_id": "r0",
-      "source_syntax": "(1 + x || group)",
+      "source_syntax": "(1 | group)",
       "semantic_term_index": 0,
       "optimizer_term_index": 0,
       "group": "group",
-      "covariance_family": "diagonal",
+      "covariance_family": "scalar",
       "user_basis": [
-        "intercept",
-        "x"
+        "intercept"
       ],
       "optimizer_basis": [
         "intercept",
@@ -506,14 +575,13 @@
       ]
     },
     {
-      "term_id": "r0",
-      "source_syntax": "(1 + x || group)",
-      "semantic_term_index": 0,
+      "term_id": "r1",
+      "source_syntax": "(0 + x | group)",
+      "semantic_term_index": 1,
       "optimizer_term_index": 0,
       "group": "group",
-      "covariance_family": "diagonal",
+      "covariance_family": "scalar",
       "user_basis": [
-        "intercept",
         "x"
       ],
       "optimizer_basis": [
@@ -522,7 +590,7 @@
       ],
       "theta": {
         "global_index": 1,
-        "local_index": 1,
+        "local_index": 0,
         "name": "theta[0:x,x]",
         "constraint": {
           "lower_bound": {
@@ -634,15 +702,36 @@
       "code": "formula_canonicalized",
       "severity": "info",
       "stage": "semantic_ir",
-      "message": "random-effect term was canonicalized as (1 + x || group)",
+      "message": "random-effect term was canonicalized as (1 | group) + (0 + x | group)",
       "affected_terms": [
         "(1 + x | group)"
       ],
       "suggested_actions": [],
       "payload": {
         "canonical_terms": [
-          "(1 + x || group)"
+          "(1 | group)",
+          "(0 + x | group)"
         ]
+      }
+    },
+    {
+      "code": "covariance_assumption",
+      "severity": "info",
+      "stage": "semantic_ir",
+      "message": "the covariance between 'Intercept' and 'x' is fixed at zero by || syntax",
+      "affected_terms": [
+        "(1 + x | group)"
+      ],
+      "suggested_actions": [
+        "the covariance between 'Intercept' and 'x' is fixed at zero by || syntax"
+      ],
+      "payload": {
+        "between": [
+          "Intercept",
+          "x"
+        ],
+        "group": "group",
+        "reason": "double_bar_syntax"
       }
     }
   ]

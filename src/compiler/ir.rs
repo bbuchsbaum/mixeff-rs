@@ -27,6 +27,8 @@ pub struct RandomTermIr {
     pub group: GroupingFactorIr,
     pub basis: Vec<RandomCoefficient>,
     pub covariance: CovarianceForm,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_group: Option<String>,
     pub intercept: InterceptPolicy,
     pub role: GroupingRole,
     pub source_syntax: SourceSyntax,
@@ -148,12 +150,15 @@ pub fn compile_formula_ir(formula: &Formula) -> SemanticModel {
 impl SemanticModel {
     pub fn from_formula(formula: &Formula) -> Self {
         let mut diagnostics = Vec::new();
-        let random_terms = formula
-            .random_terms
-            .iter()
-            .enumerate()
-            .map(|(idx, term)| RandomTermIr::from_formula_term(idx, term, &mut diagnostics))
-            .collect::<Vec<_>>();
+        let mut random_terms = Vec::new();
+        for (source_index, term) in formula.random_terms.iter().enumerate() {
+            let compiled_terms =
+                RandomTermIr::from_formula_term(source_index, term, &mut diagnostics);
+            for mut compiled in compiled_terms {
+                compiled.id = format!("r{}", random_terms.len());
+                random_terms.push(compiled);
+            }
+        }
 
         emit_formula_canonicalization_diagnostics(
             &formula.random_terms,
@@ -164,6 +169,7 @@ impl SemanticModel {
             &formula.random_terms,
             &mut diagnostics,
         );
+        emit_covariance_assumption_diagnostics(&random_terms, &mut diagnostics);
 
         Self {
             schema_name: SEMANTIC_MODEL_SCHEMA.to_string(),
@@ -182,10 +188,10 @@ impl SemanticModel {
 
 impl RandomTermIr {
     fn from_formula_term(
-        index: usize,
+        source_index: usize,
         term: &RandomTerm,
         diagnostics: &mut Vec<Diagnostic>,
-    ) -> Self {
+    ) -> Vec<Self> {
         let source = term.to_string();
         let written = term.source.as_ref().map(|source| source.written.clone());
         let group = grouping_ir(&term.grouping);
@@ -264,19 +270,50 @@ impl RandomTermIr {
             );
         }
 
+        if term.zerocorr && basis.len() > 1 {
+            let block_group = Some(format!("bg{source_index}"));
+            return basis
+                .into_iter()
+                .map(|coefficient| {
+                    let split_intercept = if coefficient.kind == RandomCoefficientKind::Intercept {
+                        InterceptPolicy::Included
+                    } else {
+                        InterceptPolicy::Omitted
+                    };
+                    let split_basis = vec![coefficient];
+                    let covariance = CovarianceForm::Scalar;
+                    let split_source = random_term_text(&split_basis, &group, split_intercept);
+                    let story =
+                        covariance_story(&group, &split_basis, &covariance, split_intercept);
+                    Self {
+                        id: String::new(),
+                        group: group.clone(),
+                        basis: split_basis,
+                        covariance,
+                        block_group: block_group.clone(),
+                        intercept: split_intercept,
+                        role: GroupingRole::Unknown,
+                        source_syntax: SourceSyntax::new(split_source, written.clone()),
+                        covariance_story: story,
+                    }
+                })
+                .collect();
+        }
+
         let covariance = covariance_form(term.zerocorr, basis.len());
         let story = covariance_story(&group, &basis, &covariance, intercept);
 
-        Self {
-            id: format!("r{index}"),
+        vec![Self {
+            id: String::new(),
             group,
             basis,
             covariance,
+            block_group: None,
             intercept,
             role: GroupingRole::Unknown,
             source_syntax: SourceSyntax::new(source, written),
             covariance_story: story,
-        }
+        }]
     }
 }
 
@@ -288,19 +325,20 @@ fn emit_formula_canonicalization_diagnostics(
     let mut by_source: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut expansions: BTreeMap<String, RandomTermExpansion> = BTreeMap::new();
 
-    for (formula_term, ir_term) in formula_terms.iter().zip(ir_terms.iter()) {
+    for ir_term in ir_terms {
+        let Some(written) = &ir_term.source_syntax.written else {
+            continue;
+        };
+        by_source
+            .entry(written.clone())
+            .or_default()
+            .push(ir_term.source_syntax.text.clone());
+    }
+
+    for formula_term in formula_terms {
         let Some(source) = &formula_term.source else {
             continue;
         };
-
-        if !canonical_text_equivalent(&source.written, &ir_term.source_syntax.text)
-            || source.expansion.is_some()
-        {
-            by_source
-                .entry(source.written.clone())
-                .or_default()
-                .push(ir_term.source_syntax.text.clone());
-        }
 
         if let Some(expansion) = source.expansion {
             expansions
@@ -309,7 +347,12 @@ fn emit_formula_canonicalization_diagnostics(
         }
     }
 
+    let canonical_by_source = by_source.clone();
+
     for (written, canonical_terms) in by_source {
+        if canonical_terms.len() == 1 && canonical_text_equivalent(&written, &canonical_terms[0]) {
+            continue;
+        }
         let canonical = canonical_terms.join(" + ");
         let mut diagnostic = Diagnostic::new(
             DiagnosticCode::FormulaCanonicalized,
@@ -326,6 +369,31 @@ fn emit_formula_canonicalization_diagnostics(
     }
 
     for (written, expansion) in expansions {
+        if let Some(canonical_terms) = canonical_by_source.get(&written) {
+            let canonical = canonical_terms.join(" + ");
+            let mut diagnostic = Diagnostic::new(
+                DiagnosticCode::SyntaxExpansion,
+                DiagnosticSeverity::Info,
+                DiagnosticStage::SemanticIr,
+                format!("random-effect shorthand expands to {canonical}"),
+            )
+            .with_affected_terms(vec![written.clone()])
+            .with_suggested_actions(vec![format!(
+                "`{written}` expands to `{canonical}` - the canonical form."
+            )]);
+            diagnostic
+                .payload
+                .insert("written".to_string(), serde_json::json!(written.clone()));
+            diagnostic
+                .payload
+                .insert("canonical".to_string(), serde_json::json!(canonical));
+            diagnostic.payload.insert(
+                "expansion_kind".to_string(),
+                serde_json::json!(expansion_kind_label(expansion)),
+            );
+            diagnostics.push(diagnostic);
+        }
+
         if expansion == RandomTermExpansion::CrossedGrouping {
             diagnostics.push(
                 Diagnostic::new(
@@ -341,6 +409,13 @@ fn emit_formula_canonicalization_diagnostics(
                 ]),
             );
         }
+    }
+}
+
+fn expansion_kind_label(expansion: RandomTermExpansion) -> &'static str {
+    match expansion {
+        RandomTermExpansion::NestedGrouping => "nested",
+        RandomTermExpansion::CrossedGrouping => "crossed_with_cell",
     }
 }
 
@@ -395,6 +470,140 @@ fn emit_duplicate_and_conflicting_covariance_diagnostics(
             covariance_terms.insert(covariance_key, (term.zerocorr, source));
         }
     }
+}
+
+fn emit_covariance_assumption_diagnostics(
+    ir_terms: &[RandomTermIr],
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let mut by_block_group: BTreeMap<&str, Vec<&RandomTermIr>> = BTreeMap::new();
+    for term in ir_terms {
+        if let Some(block_group) = &term.block_group {
+            by_block_group
+                .entry(block_group.as_str())
+                .or_default()
+                .push(term);
+        }
+    }
+
+    for terms in by_block_group.values() {
+        for left_index in 0..terms.len() {
+            for right_index in (left_index + 1)..terms.len() {
+                let left = terms[left_index];
+                let right = terms[right_index];
+                let Some(left_basis) = left.basis.first() else {
+                    continue;
+                };
+                let Some(right_basis) = right.basis.first() else {
+                    continue;
+                };
+                diagnostics.push(covariance_assumption_diagnostic(
+                    left.group.label(),
+                    [
+                        basis_display_name(left_basis),
+                        basis_display_name(right_basis),
+                    ],
+                    "double_bar_syntax",
+                    vec![left.source_syntax.user_text().to_string()],
+                ));
+            }
+        }
+    }
+
+    for left_index in 0..ir_terms.len() {
+        for right_index in (left_index + 1)..ir_terms.len() {
+            let left_term = &ir_terms[left_index];
+            let right_term = &ir_terms[right_index];
+            if left_term.group != right_term.group {
+                continue;
+            }
+            if left_term.block_group.is_some() && left_term.block_group == right_term.block_group {
+                continue;
+            }
+
+            for left_basis in &left_term.basis {
+                for right_basis in &right_term.basis {
+                    let left = basis_display_name(left_basis);
+                    let right = basis_display_name(right_basis);
+                    if left == right {
+                        continue;
+                    }
+                    diagnostics.push(covariance_assumption_diagnostic(
+                        left_term.group.label(),
+                        [left, right],
+                        "separate_random_effect_blocks",
+                        vec![
+                            left_term.source_syntax.user_text().to_string(),
+                            right_term.source_syntax.user_text().to_string(),
+                        ],
+                    ));
+                }
+            }
+        }
+    }
+}
+
+fn basis_display_name(basis: &RandomCoefficient) -> String {
+    if basis.kind == RandomCoefficientKind::Intercept {
+        "Intercept".to_string()
+    } else {
+        basis.name.clone()
+    }
+}
+
+fn covariance_assumption_diagnostic(
+    group: String,
+    between: [String; 2],
+    reason: &'static str,
+    affected_terms: Vec<String>,
+) -> Diagnostic {
+    let message = match reason {
+        "double_bar_syntax" => format!(
+            "the covariance between '{}' and '{}' is fixed at zero by || syntax",
+            between[0], between[1]
+        ),
+        "separate_random_effect_blocks" => format!(
+            "the covariance between '{}' and '{}' is fixed at zero by separate random-effect blocks",
+            between[0], between[1]
+        ),
+        _ => "a covariance is fixed at zero by formula syntax".to_string(),
+    };
+    let mut diagnostic = Diagnostic::new(
+        DiagnosticCode::CovarianceAssumption,
+        DiagnosticSeverity::Info,
+        DiagnosticStage::SemanticIr,
+        message.clone(),
+    )
+    .with_affected_terms(affected_terms)
+    .with_suggested_actions(vec![message]);
+    diagnostic
+        .payload
+        .insert("group".to_string(), serde_json::json!(group));
+    diagnostic
+        .payload
+        .insert("between".to_string(), serde_json::json!(between));
+    diagnostic
+        .payload
+        .insert("reason".to_string(), serde_json::json!(reason));
+    diagnostic
+}
+
+fn random_term_text(
+    basis: &[RandomCoefficient],
+    group: &GroupingFactorIr,
+    intercept: InterceptPolicy,
+) -> String {
+    let lhs = if basis.len() == 1 && basis[0].kind == RandomCoefficientKind::Intercept {
+        "1".to_string()
+    } else {
+        let mut parts = Vec::new();
+        if intercept == InterceptPolicy::Omitted {
+            parts.push("0".to_string());
+        }
+        parts.extend(basis.iter().map(|basis| basis.source.clone()));
+        parts.join(" + ")
+    };
+    format!("({lhs} | {})", group.label())
 }
 
 fn random_term_identity_key(term: &RandomTerm, include_covariance: bool) -> String {
@@ -572,10 +781,23 @@ mod tests {
     }
 
     #[test]
-    fn compiles_zero_correlation_as_diagonal() {
+    fn compiles_zero_correlation_as_scalar_block_group() {
         let formula = parse_formula("y ~ x + (1 + x || subject)").unwrap();
         let model = compile_formula_ir(&formula);
-        assert_eq!(model.random_terms[0].covariance, CovarianceForm::Diagonal);
+        assert_eq!(model.random_terms.len(), 2);
+        assert_eq!(model.random_terms[0].covariance, CovarianceForm::Scalar);
+        assert_eq!(model.random_terms[1].covariance, CovarianceForm::Scalar);
+        assert_eq!(model.random_terms[0].block_group.as_deref(), Some("bg0"));
+        assert_eq!(model.random_terms[1].block_group.as_deref(), Some("bg0"));
+        assert_eq!(model.random_terms[0].source_syntax.text, "(1 | subject)");
+        assert_eq!(
+            model.random_terms[1].source_syntax.text,
+            "(0 + x | subject)"
+        );
+        assert_eq!(
+            model.random_terms[0].source_syntax.written.as_deref(),
+            Some("(1 + x || subject)")
+        );
     }
 
     #[test]
@@ -655,6 +877,104 @@ mod tests {
             .iter()
             .any(|d| d.code == DiagnosticCode::CrossingLikelyUnintended
                 && d.affected_terms == vec!["(1 | subject*item)"]));
+    }
+
+    #[test]
+    fn emits_syntax_expansion_diagnostic_for_nested_grouping() {
+        let formula = parse_formula("y ~ x + (1 | school/class)").unwrap();
+        let model = compile_formula_ir(&formula);
+
+        let diagnostic = model
+            .diagnostics
+            .iter()
+            .find(|d| d.code == DiagnosticCode::SyntaxExpansion)
+            .expect("nested grouping expansion should be diagnosed");
+        assert_eq!(diagnostic.severity, DiagnosticSeverity::Info);
+        assert_eq!(diagnostic.stage, DiagnosticStage::SemanticIr);
+        assert_eq!(
+            diagnostic.payload.get("written"),
+            Some(&serde_json::json!("(1 | school/class)"))
+        );
+        assert_eq!(
+            diagnostic.payload.get("canonical"),
+            Some(&serde_json::json!("(1 | school) + (1 | school:class)"))
+        );
+        assert_eq!(
+            diagnostic.payload.get("expansion_kind"),
+            Some(&serde_json::json!("nested"))
+        );
+    }
+
+    #[test]
+    fn emits_syntax_expansion_diagnostic_for_crossed_grouping() {
+        let formula = parse_formula("y ~ x + (1 | subject*item)").unwrap();
+        let model = compile_formula_ir(&formula);
+
+        let diagnostic = model
+            .diagnostics
+            .iter()
+            .find(|d| d.code == DiagnosticCode::SyntaxExpansion)
+            .expect("crossed grouping expansion should be diagnosed");
+        assert_eq!(
+            diagnostic.payload.get("canonical"),
+            Some(&serde_json::json!(
+                "(1 | subject) + (1 | item) + (1 | subject:item)"
+            ))
+        );
+        assert_eq!(
+            diagnostic.payload.get("expansion_kind"),
+            Some(&serde_json::json!("crossed_with_cell"))
+        );
+    }
+
+    #[test]
+    fn emits_covariance_assumption_for_double_bar_syntax() {
+        let formula = parse_formula("y ~ x + (1 + x || subject)").unwrap();
+        let model = compile_formula_ir(&formula);
+
+        let diagnostic = model
+            .diagnostics
+            .iter()
+            .find(|d| d.code == DiagnosticCode::CovarianceAssumption)
+            .expect("double-bar syntax should be diagnosed");
+        assert_eq!(diagnostic.severity, DiagnosticSeverity::Info);
+        assert_eq!(diagnostic.stage, DiagnosticStage::SemanticIr);
+        assert_eq!(
+            diagnostic.payload.get("group"),
+            Some(&serde_json::json!("subject"))
+        );
+        assert_eq!(
+            diagnostic.payload.get("between"),
+            Some(&serde_json::json!(["Intercept", "x"]))
+        );
+        assert_eq!(
+            diagnostic.payload.get("reason"),
+            Some(&serde_json::json!("double_bar_syntax"))
+        );
+    }
+
+    #[test]
+    fn emits_covariance_assumption_for_split_random_effect_blocks() {
+        let formula = parse_formula("y ~ x + (1 | subject) + (0 + x | subject)").unwrap();
+        let model = compile_formula_ir(&formula);
+
+        let diagnostic = model
+            .diagnostics
+            .iter()
+            .find(|d| {
+                d.code == DiagnosticCode::CovarianceAssumption
+                    && d.payload.get("reason")
+                        == Some(&serde_json::json!("separate_random_effect_blocks"))
+            })
+            .expect("split random-effect blocks should be diagnosed");
+        assert_eq!(
+            diagnostic.affected_terms,
+            vec!["(1 | subject)".to_string(), "(0 + x | subject)".to_string()]
+        );
+        assert_eq!(
+            diagnostic.payload.get("between"),
+            Some(&serde_json::json!(["Intercept", "x"]))
+        );
     }
 
     #[test]

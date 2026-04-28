@@ -670,12 +670,13 @@ impl CompiledModelArtifact {
         semantic_order: &[usize],
         optimizer_basis: &[Vec<String>],
     ) {
-        if semantic_order.len() != self.active_semantic_model().random_terms.len() {
+        let source_groups = optimizer_source_groups(self.active_semantic_model());
+        if semantic_order.len() != source_groups.len() {
             self.diagnostics.push(Diagnostic::new(
                 super::diagnostics::DiagnosticCode::Unsupported,
                 super::diagnostics::DiagnosticSeverity::Error,
                 super::diagnostics::DiagnosticStage::Parameterization,
-                "theta-map optimizer order does not cover all semantic random terms",
+                "theta-map optimizer order does not cover all optimizer source random terms",
             ));
             return;
         }
@@ -690,29 +691,66 @@ impl CompiledModelArtifact {
         }
 
         let mut global_start = 0;
-        let mut theta_maps = Vec::with_capacity(semantic_order.len());
-        for (optimizer_index, &semantic_index) in semantic_order.iter().enumerate() {
-            let Some(term) = self
-                .active_semantic_model()
-                .random_terms
-                .get(semantic_index)
-            else {
+        let mut theta_maps = Vec::new();
+        for (optimizer_index, &source_group_index) in semantic_order.iter().enumerate() {
+            let Some(source_group) = source_groups.get(source_group_index) else {
                 self.diagnostics.push(Diagnostic::new(
                     super::diagnostics::DiagnosticCode::Unsupported,
                     super::diagnostics::DiagnosticSeverity::Error,
                     super::diagnostics::DiagnosticStage::Parameterization,
-                    format!("semantic random-term index {semantic_index} is out of range"),
+                    format!(
+                        "optimizer source random-term index {source_group_index} is out of range"
+                    ),
                 ));
                 return;
             };
-            let map = ThetaMap::from_random_term_with_optimizer_basis(
-                optimizer_index,
-                term,
-                global_start,
-                optimizer_basis[optimizer_index].clone(),
-            );
-            global_start += map.n_free();
-            theta_maps.push(map);
+            for &semantic_index in source_group {
+                let Some(term) = self
+                    .active_semantic_model()
+                    .random_terms
+                    .get(semantic_index)
+                else {
+                    self.diagnostics.push(Diagnostic::new(
+                        super::diagnostics::DiagnosticCode::Unsupported,
+                        super::diagnostics::DiagnosticSeverity::Error,
+                        super::diagnostics::DiagnosticStage::Parameterization,
+                        format!("semantic random-term index {semantic_index} is out of range"),
+                    ));
+                    return;
+                };
+                let map = if source_group.len() > 1 {
+                    let lambda_index =
+                        split_term_optimizer_basis_index(term, &optimizer_basis[optimizer_index]);
+                    let Some(lambda_index) = lambda_index else {
+                        self.diagnostics.push(Diagnostic::new(
+                            super::diagnostics::DiagnosticCode::Unsupported,
+                            super::diagnostics::DiagnosticSeverity::Error,
+                            super::diagnostics::DiagnosticStage::Parameterization,
+                            format!(
+                                "split random-term '{}' is missing from optimizer basis",
+                                term.id
+                            ),
+                        ));
+                        return;
+                    };
+                    ThetaMap::from_split_scalar_random_term_with_optimizer_basis(
+                        optimizer_index,
+                        term,
+                        global_start,
+                        optimizer_basis[optimizer_index].clone(),
+                        lambda_index,
+                    )
+                } else {
+                    ThetaMap::from_random_term_with_optimizer_basis(
+                        optimizer_index,
+                        term,
+                        global_start,
+                        optimizer_basis[optimizer_index].clone(),
+                    )
+                };
+                global_start += map.n_free();
+                theta_maps.push(map);
+            }
         }
 
         self.theta_maps = theta_maps;
@@ -743,8 +781,9 @@ fn covariance_parameter_traces(
     let active_model = artifact.active_semantic_model();
     let mut traces = Vec::new();
 
-    for (optimizer_term_index, theta_map) in artifact.theta_maps.iter().enumerate() {
+    for theta_map in &artifact.theta_maps {
         let block = theta_map.block();
+        let optimizer_term_index = block.term_index;
         let semantic_term_index = active_model
             .random_terms
             .iter()
@@ -773,6 +812,36 @@ fn covariance_parameter_traces(
     }
 
     traces
+}
+
+fn optimizer_source_groups(semantic_model: &SemanticModel) -> Vec<Vec<usize>> {
+    let mut groups = Vec::new();
+    let mut index = 0;
+    while index < semantic_model.random_terms.len() {
+        let term = &semantic_model.random_terms[index];
+        if let Some(block_group) = &term.block_group {
+            let mut group = Vec::new();
+            while index < semantic_model.random_terms.len()
+                && semantic_model.random_terms[index].block_group.as_ref() == Some(block_group)
+            {
+                group.push(index);
+                index += 1;
+            }
+            groups.push(group);
+        } else {
+            groups.push(vec![index]);
+            index += 1;
+        }
+    }
+    groups
+}
+
+fn split_term_optimizer_basis_index(
+    term: &super::ir::RandomTermIr,
+    optimizer_basis: &[String],
+) -> Option<usize> {
+    let basis = term.basis.first()?;
+    optimizer_basis.iter().position(|name| name == &basis.name)
 }
 
 #[allow(clippy::too_many_arguments)]

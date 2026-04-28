@@ -320,6 +320,23 @@
               "n_levels": 3,
               "requested_covariance_parameters": 3
             }
+          },
+          {
+            "code": "scope_note",
+            "severity": "info",
+            "stage": "design_audit",
+            "message": "`x2` varies within `subject`, so a `subject`-level slope is structurally possible",
+            "affected_terms": [
+              "r0"
+            ],
+            "suggested_actions": [
+              "`x2` varies within `subject`, so a `subject`-level slope is structurally possible."
+            ],
+            "payload": {
+              "fixed_effect": "x2",
+              "group": "subject",
+              "varies_within_group": true
+            }
           }
         ]
       }
@@ -389,6 +406,23 @@
           "min_levels_variance": 5,
           "n_levels": 3,
           "requested_covariance_parameters": 3
+        }
+      },
+      {
+        "code": "scope_note",
+        "severity": "info",
+        "stage": "design_audit",
+        "message": "`x2` varies within `subject`, so a `subject`-level slope is structurally possible",
+        "affected_terms": [
+          "r0"
+        ],
+        "suggested_actions": [
+          "`x2` varies within `subject`, so a `subject`-level slope is structurally possible."
+        ],
+        "payload": {
+          "fixed_effect": "x2",
+          "group": "subject",
+          "varies_within_group": true
         }
       }
     ]
@@ -670,6 +704,23 @@
         "min_levels_variance": 5,
         "n_levels": 3,
         "requested_covariance_parameters": 3
+      }
+    },
+    {
+      "code": "scope_note",
+      "severity": "info",
+      "stage": "design_audit",
+      "message": "`x2` varies within `subject`, so a `subject`-level slope is structurally possible",
+      "affected_terms": [
+        "r0"
+      ],
+      "suggested_actions": [
+        "`x2` varies within `subject`, so a `subject`-level slope is structurally possible."
+      ],
+      "payload": {
+        "fixed_effect": "x2",
+        "group": "subject",
+        "varies_within_group": true
       }
     }
   ]

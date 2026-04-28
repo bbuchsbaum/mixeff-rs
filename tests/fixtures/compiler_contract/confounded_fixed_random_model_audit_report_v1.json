@@ -200,6 +200,11 @@
           "label": "fixed_random_redundant",
           "status": "warning",
           "detail": "random intercept for 'subject' is redundant with fixed-effect term 'subject'; affected=(1 | subject), subject; suggested=drop the random intercept term '(1 | subject)' | or remove fixed-effect term 'subject' if 'subject' should be modeled as a sampled random unit"
+        },
+        {
+          "label": "scope_note",
+          "status": "info",
+          "detail": "`x` varies within `subject`, so a `subject`-level slope is structurally possible; affected=r0; suggested=`x` varies within `subject`, so a `subject`-level slope is structurally possible."
         }
       ]
     }
@@ -223,6 +228,23 @@
         "group": "subject",
         "n_levels": 6,
         "random_term": "(1 | subject)"
+      }
+    },
+    {
+      "code": "scope_note",
+      "severity": "info",
+      "stage": "design_audit",
+      "message": "`x` varies within `subject`, so a `subject`-level slope is structurally possible",
+      "affected_terms": [
+        "r0"
+      ],
+      "suggested_actions": [
+        "`x` varies within `subject`, so a `subject`-level slope is structurally possible."
+      ],
+      "payload": {
+        "fixed_effect": "x",
+        "group": "subject",
+        "varies_within_group": true
       }
     }
   ]
