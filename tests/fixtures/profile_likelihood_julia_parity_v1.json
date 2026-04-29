@@ -1,0 +1,106 @@
+{
+  "schema_version": "1.0.0",
+  "source": "MixedModels.jl 5.3.0 profile/confint",
+  "cases": [
+    {
+      "id": "dyestuff_scalar_re_ml",
+      "dataset": "dyestuff",
+      "julia_formula": "yield ~ 1 + :(1 | batch)",
+      "rust_formula": "Yield ~ 1 + (1 | Batch)",
+      "reml": false,
+      "level": 0.95,
+      "threshold": 4.0,
+      "julia_row_order": ["σ", "β1", "θ1", "σ1"],
+      "rust_row_order": ["σ", "β1", "θ1"],
+      "parameters": {
+        "β1": {
+          "estimate": 1527.5000000000011,
+          "lower": 1486.4517280783487,
+          "upper": 1568.5482719216516
+        },
+        "σ": {
+          "estimate": 49.510100352238155,
+          "lower": 38.22990402269809,
+          "upper": 67.65762699428838
+        },
+        "θ1": {
+          "estimate": 0.7525806540074477,
+          "lower": 0.20479324116104736,
+          "upper": 1.7784917264145985
+        }
+      }
+    },
+    {
+      "id": "dyestuff2_boundary_scalar_re_ml",
+      "dataset": "dyestuff2",
+      "julia_formula": "yield ~ 1 + :(1 | batch)",
+      "rust_formula": "Yield ~ 1 + (1 | Batch)",
+      "reml": false,
+      "level": 0.95,
+      "threshold": 4.0,
+      "julia_row_order": ["σ", "β1", "θ1", "σ1"],
+      "rust_row_order": ["σ", "β1", "θ1"],
+      "parameters": {
+        "β1": {
+          "estimate": 5.665600000000001,
+          "lower": 4.3126409728765385,
+          "upper": 7.018559027123458
+        },
+        "σ": {
+          "estimate": 3.65323135137465,
+          "lower": 2.892806958062084,
+          "upper": 4.815827019720469
+        },
+        "θ1": {
+          "estimate": 0.0,
+          "lower": 0.0,
+          "upper": 0.5749035793404245
+        }
+      }
+    },
+    {
+      "id": "sleepstudy_random_intercept_ml",
+      "dataset": "sleepstudy",
+      "julia_formula": "reaction ~ 1 + days + :(1 | subj)",
+      "rust_formula": "Reaction ~ 1 + Days + (1 | Subject)",
+      "reml": false,
+      "level": 0.95,
+      "threshold": 4.0,
+      "slow_reason": "default CI skips this case because the current Rust beta-profile path uses dense constrained GLS for each profile point; run with MIXEDMODELS_RUN_SLOW_PROFILE_PARITY=1 to include it",
+      "julia_row_order": ["σ", "β1", "β2", "θ1", "σ1"],
+      "rust_row_order": ["σ", "β1", "β2", "θ1"],
+      "parameters": {
+        "β1": {
+          "estimate": 10.467285959595912,
+          "lower": 8.886552019052596,
+          "upper": 12.04801990014096
+        },
+        "β2": {
+          "estimate": 251.4051048484858,
+          "lower": 231.9923630005577,
+          "upper": 270.81784669641013
+        },
+        "σ": {
+          "estimate": 30.895433868903996,
+          "lower": 27.813861592710932,
+          "upper": 34.59105434632997
+        },
+        "θ1": {
+          "estimate": 1.1656117904215684,
+          "lower": 0.8212934864070055,
+          "upper": 1.7383019634713008
+        }
+      }
+    },
+    {
+      "id": "kb07_scalar_crossed_reml",
+      "dataset": "kb07",
+      "julia_formula": "rt_trunc ~ 1 + spkr + prec + load + (1 | subj) + (1 | item)",
+      "rust_formula": "rt_trunc ~ 1 + spkr + prec + load + (1 | subj) + (1 | item)",
+      "reml": true,
+      "level": 0.95,
+      "threshold": 4.0,
+      "unsupported_reason": "profile parity fixture is recorded but not run in Rust CI because kb07 profile evaluation is too expensive for the dense beta-profile fallback"
+    }
+  ]
+}

@@ -10,8 +10,11 @@ use std::io::{Read, Write};
 use crate::error::{MixedModelError, Result};
 use crate::model::linear::LinearMixedModel;
 pub use crate::model::linear::{
-    parametricbootstrap, BootstrapInterval, BootstrapIntervalMethod, BootstrapQuantile,
-    BootstrapReplicate, MixedModelBootstrap,
+    parametricbootstrap, BootstrapFailedRefitPolicy, BootstrapInterval, BootstrapIntervalMethod,
+    BootstrapQuantile, BootstrapRefitOptions, BootstrapReplicate, BootstrapRunMetadata,
+    BootstrapRunPayload, BootstrapSeedRecord, BootstrapTarget, BootstrapTargetKind,
+    FixedEffectNullBootstrapTarget, FixedEffectNullCovariancePolicy, MixedModelBootstrap,
+    BOOTSTRAP_RUN_SCHEMA, BOOTSTRAP_RUN_SCHEMA_VERSION,
 };
 
 /// Save bootstrap replicates as JSON.

@@ -1,9 +1,10 @@
 //! Profile-likelihood confidence intervals for linear mixed models.
 //!
 //! This is a partial port of `MixedModels.jl/src/profile/`. The current
-//! scope covers the residual-scale profile (σ) together with the shared
-//! [`MixedModelProfile`] container and [`MixedModelProfile::confint`]. The
-//! β, θ, and variance-component profiles will be added in later passes.
+//! scope covers the residual-scale profile (σ), θ profiles, and ML fixed-effect
+//! β profiles together
+//! with the shared [`MixedModelProfile`] container and
+//! [`MixedModelProfile::confint`].
 //!
 //! The basic idea: fix one model parameter at a series of values on either
 //! side of its estimate, refit the model with that parameter held constant,
@@ -20,7 +21,10 @@
 
 use std::collections::BTreeMap;
 
+use nalgebra::DMatrix;
+
 use crate::error::{MixedModelError, Result};
+use crate::model::traits::MixedModelFit;
 use crate::model::LinearMixedModel;
 use crate::stats::spline::NaturalCubicSpline;
 
@@ -104,6 +108,9 @@ impl MixedModelProfile {
             if lower > upper {
                 std::mem::swap(&mut lower, &mut upper);
             }
+            if lower < 0.0 && self.profile_touches_nonnegative_boundary(name) {
+                lower = 0.0;
+            }
             rows.push(ConfintRow {
                 parameter: name.clone(),
                 estimate,
@@ -128,6 +135,50 @@ impl MixedModelProfile {
     pub fn rows_for(&self, parameter: &str) -> Vec<&ProfileRow> {
         self.tbl.iter().filter(|r| r.p == parameter).collect()
     }
+
+    fn profile_touches_nonnegative_boundary(&self, parameter: &str) -> bool {
+        let Some(values) = self.parameter_values(parameter) else {
+            return false;
+        };
+        values.iter().all(|value| *value >= -1e-12)
+            && values.iter().any(|value| value.abs() < 1e-10)
+    }
+
+    fn parameter_values(&self, parameter: &str) -> Option<Vec<f64>> {
+        if parameter == "σ" {
+            return Some(
+                self.rows_for(parameter)
+                    .into_iter()
+                    .map(|row| row.sigma)
+                    .collect(),
+            );
+        }
+        if let Some(index) = parameter_index(parameter, 'β') {
+            return Some(
+                self.rows_for(parameter)
+                    .into_iter()
+                    .map(|row| row.beta[index])
+                    .collect(),
+            );
+        }
+        if let Some(index) = parameter_index(parameter, 'θ') {
+            return Some(
+                self.rows_for(parameter)
+                    .into_iter()
+                    .map(|row| row.theta[index])
+                    .collect(),
+            );
+        }
+        None
+    }
+}
+
+fn parameter_index(parameter: &str, prefix: char) -> Option<usize> {
+    parameter
+        .strip_prefix(prefix)?
+        .parse::<usize>()
+        .ok()?
+        .checked_sub(1)
 }
 
 // ===========================================================================
@@ -335,12 +386,620 @@ pub fn profile_sigma(m: &mut LinearMixedModel, threshold: f64) -> Result<MixedMo
     })
 }
 
+/// Profile one θ covariance parameter of a fitted linear mixed model.
+///
+/// The target θ coordinate is fixed at each profile point while the remaining
+/// θ coordinates are conditionally optimized by a bounded coordinate search.
+/// β and σ remain profiled by the model objective. This is intentionally
+/// conservative but gives a real one-coordinate profile for scalar and
+/// multi-θ models without introducing a second optimizer stack.
+pub fn profile_theta(
+    m: &mut LinearMixedModel,
+    index: usize,
+    threshold: f64,
+) -> Result<MixedModelProfile> {
+    let n_theta = m.n_theta();
+    if index >= n_theta {
+        return Err(MixedModelError::InvalidArgument(format!(
+            "profile_theta index {index} is out of bounds for {n_theta} θ parameter(s)"
+        )));
+    }
+    if m.optsum.feval <= 0 {
+        return Err(MixedModelError::InvalidArgument(
+            "profile_theta: model must be fitted first".into(),
+        ));
+    }
+
+    let parameter = format!("θ{}", index + 1);
+    let theta_hat_vector = m.theta();
+    let theta_hat = theta_hat_vector[index];
+    let obj_hat = m.optsum.fmin;
+    let saved_theta = theta_hat_vector.clone();
+    let saved_fmin = m.optsum.fmin;
+    let lower_bounds = m.lower_bounds();
+
+    let lower = lower_bounds
+        .get(index)
+        .copied()
+        .filter(|value| value.is_finite())
+        .unwrap_or(f64::NEG_INFINITY);
+    let min_step = (theta_hat.abs() * 1e-8).max(1e-10);
+
+    let mut rows = vec![ProfileRow::estimate_row(&parameter, m)];
+    let mut evaluate = |m: &mut LinearMixedModel,
+                        fixed_value: f64,
+                        start: &mut Vec<f64>,
+                        negative_side: bool|
+     -> Result<f64> {
+        let (conditional_theta, obj) =
+            optimize_theta_profile_point(m, index, fixed_value, start, &lower_bounds)?;
+        *start = conditional_theta;
+        let diff = (obj - obj_hat).max(0.0);
+        let zeta = if negative_side {
+            -diff.sqrt()
+        } else {
+            diff.sqrt()
+        };
+        rows.push(ProfileRow {
+            p: parameter.clone(),
+            zeta,
+            sigma: m.sigma(),
+            beta: m.beta().iter().cloned().collect(),
+            theta: m.theta(),
+        });
+        Ok(zeta)
+    };
+
+    let facsz = {
+        let probe = if theta_hat.abs() > min_step {
+            theta_hat * (1.0_f64 / 64.0).exp()
+        } else {
+            theta_hat + 0.05
+        };
+        let mut probe_start = theta_hat_vector.clone();
+        let (_, obj) =
+            optimize_theta_profile_point(m, index, probe, &mut probe_start, &lower_bounds)?;
+        let delta = (obj - obj_hat).max(0.0);
+        if delta <= 0.0 {
+            1.05
+        } else {
+            ((probe - theta_hat).abs() / (2.0 * delta.sqrt()))
+                .exp()
+                .max(1.01)
+                .min(1.25)
+        }
+    };
+
+    let max_points = 60;
+    let mut negative_start = theta_hat_vector.clone();
+    if theta_hat > lower + min_step {
+        let mut theta_v = next_theta_profile_value(theta_hat, facsz, lower, true, min_step);
+        let mut iter = 0;
+        loop {
+            iter += 1;
+            if iter > max_points {
+                break;
+            }
+            let zeta = evaluate(m, theta_v, &mut negative_start, true)?;
+            if zeta <= -threshold || theta_v <= lower + min_step {
+                break;
+            }
+            let next = next_theta_profile_value(theta_v, facsz, lower, true, min_step);
+            if (theta_v - next).abs() <= min_step {
+                break;
+            }
+            theta_v = next;
+        }
+    }
+
+    let mut positive_start = theta_hat_vector.clone();
+    let mut theta_v = next_theta_profile_value(theta_hat, facsz, lower, false, min_step);
+    let mut iter = 0;
+    loop {
+        iter += 1;
+        if iter > max_points {
+            break;
+        }
+        let zeta = evaluate(m, theta_v, &mut positive_start, false)?;
+        if zeta >= threshold {
+            break;
+        }
+        theta_v = next_theta_profile_value(theta_v, facsz, lower, false, min_step);
+    }
+
+    rows.sort_by(|a, b| a.theta[index].partial_cmp(&b.theta[index]).unwrap());
+    rows.dedup_by(|a, b| (a.theta[index] - b.theta[index]).abs() < 1e-14);
+
+    m.set_theta(&saved_theta)?;
+    m.update_l()?;
+    m.optsum.fmin = saved_fmin;
+
+    let mut fwd_map = BTreeMap::new();
+    let mut rev_map = BTreeMap::new();
+    add_profile_splines(&parameter, &rows, &mut fwd_map, &mut rev_map, |row| {
+        row.theta[index]
+    })?;
+
+    Ok(MixedModelProfile {
+        tbl: rows,
+        fwd: fwd_map,
+        rev: rev_map,
+    })
+}
+
+/// Profile the single θ covariance parameter of a fitted linear mixed model.
+pub fn profile_theta_scalar(m: &mut LinearMixedModel, threshold: f64) -> Result<MixedModelProfile> {
+    if m.n_theta() != 1 {
+        return Err(MixedModelError::InvalidArgument(format!(
+            "profile_theta_scalar requires exactly one θ parameter; model has {}",
+            m.n_theta()
+        )));
+    }
+    profile_theta(m, 0, threshold)
+}
+
+fn next_theta_profile_value(
+    current: f64,
+    factor: f64,
+    lower: f64,
+    negative_side: bool,
+    min_step: f64,
+) -> f64 {
+    if negative_side {
+        if current.abs() > min_step {
+            (current / factor).max(lower)
+        } else {
+            (current - min_step).max(lower)
+        }
+    } else if current.abs() > min_step {
+        current * factor
+    } else {
+        current + min_step.max(0.05)
+    }
+}
+
+fn optimize_theta_profile_point(
+    m: &mut LinearMixedModel,
+    fixed_index: usize,
+    fixed_value: f64,
+    start: &[f64],
+    lower_bounds: &[f64],
+) -> Result<(Vec<f64>, f64)> {
+    let n_theta = m.n_theta();
+    let mut best_theta = start.to_vec();
+    if best_theta.len() != n_theta {
+        return Err(MixedModelError::DimensionMismatch(format!(
+            "profile optimizer start has length {}, expected {n_theta}",
+            best_theta.len()
+        )));
+    }
+    best_theta[fixed_index] = fixed_value;
+    for (idx, value) in best_theta.iter_mut().enumerate() {
+        if idx == fixed_index {
+            continue;
+        }
+        if let Some(lower) = lower_bounds
+            .get(idx)
+            .copied()
+            .filter(|value| value.is_finite())
+        {
+            if *value < lower {
+                *value = lower;
+            }
+        }
+    }
+
+    let mut best_obj = m.objective_at(&best_theta)?;
+    let mut steps = best_theta
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            if idx == fixed_index {
+                0.0
+            } else {
+                (value.abs() * 0.1).max(0.05)
+            }
+        })
+        .collect::<Vec<_>>();
+
+    for _ in 0..80 {
+        let mut improved = false;
+        for idx in 0..n_theta {
+            if idx == fixed_index {
+                continue;
+            }
+            for direction in [1.0, -1.0] {
+                let mut candidate = best_theta.clone();
+                candidate[idx] += direction * steps[idx];
+                if let Some(lower) = lower_bounds
+                    .get(idx)
+                    .copied()
+                    .filter(|value| value.is_finite())
+                {
+                    if candidate[idx] < lower {
+                        candidate[idx] = lower;
+                    }
+                }
+                if (candidate[idx] - best_theta[idx]).abs() < 1e-12 {
+                    continue;
+                }
+                let obj = m.objective_at(&candidate)?;
+                if obj + 1e-8 < best_obj {
+                    best_obj = obj;
+                    best_theta = candidate;
+                    improved = true;
+                }
+            }
+        }
+        if !improved {
+            let mut max_step = 0.0_f64;
+            for (idx, step) in steps.iter_mut().enumerate() {
+                if idx == fixed_index {
+                    continue;
+                }
+                *step *= 0.5;
+                max_step = max_step.max(*step);
+            }
+            if max_step < 1e-5 {
+                break;
+            }
+        }
+    }
+
+    best_obj = m.objective_at(&best_theta)?;
+    Ok((best_theta, best_obj))
+}
+
+// ===========================================================================
+// β profile
+// ===========================================================================
+
+/// Profile one active fixed-effect coefficient of an ML-fitted linear mixed
+/// model.
+///
+/// The target β coordinate is fixed at each profile point while the remaining
+/// fixed effects, θ, and σ are profiled. The constrained objective is computed
+/// from the dense marginal covariance `V = I + ZΛΛ'Z'`, so this is deliberately
+/// limited to unweighted ML fits until the blocked PLS path exposes the same
+/// fixed-β constraint.
+pub fn profile_beta(
+    m: &mut LinearMixedModel,
+    index: usize,
+    threshold: f64,
+) -> Result<MixedModelProfile> {
+    let p = m.feterm.rank;
+    if index >= p {
+        return Err(MixedModelError::InvalidArgument(format!(
+            "profile_beta index {index} is out of bounds for {p} active fixed effect(s)"
+        )));
+    }
+    if m.optsum.feval <= 0 {
+        return Err(MixedModelError::InvalidArgument(
+            "profile_beta: model must be fitted first".into(),
+        ));
+    }
+    if m.optsum.reml {
+        return Err(MixedModelError::InvalidArgument(
+            "profile_beta currently requires an ML fit; refit with REML=false".into(),
+        ));
+    }
+    if !m.sqrtwts.is_empty() {
+        return Err(MixedModelError::InvalidArgument(
+            "profile_beta currently does not support observation weights".into(),
+        ));
+    }
+
+    let parameter = format!("β{}", index + 1);
+    let beta_hat_vector = m.beta().iter().cloned().collect::<Vec<_>>();
+    let beta_hat = beta_hat_vector[index];
+    let theta_hat_vector = m.theta();
+    let saved_theta = theta_hat_vector.clone();
+    let saved_fmin = m.optsum.fmin;
+    let lower_bounds = m.lower_bounds();
+    let (_, _, obj_hat) = fixed_beta_profile_components(m, &theta_hat_vector, index, beta_hat)?;
+
+    let se = m.stderror().get(index).copied().unwrap_or(f64::NAN);
+    let initial_step = if se.is_finite() && se > 0.0 {
+        0.35 * se
+    } else {
+        (beta_hat.abs() * 0.05).max(0.1)
+    };
+
+    let mut rows = vec![ProfileRow::estimate_row(&parameter, m)];
+    let mut evaluate = |m: &mut LinearMixedModel,
+                        fixed_value: f64,
+                        start: &mut Vec<f64>,
+                        negative_side: bool|
+     -> Result<f64> {
+        let (conditional_theta, beta, sigma, obj) =
+            optimize_beta_profile_point(m, index, fixed_value, start, &lower_bounds)?;
+        *start = conditional_theta.clone();
+        let diff = (obj - obj_hat).max(0.0);
+        let zeta = if negative_side {
+            -diff.sqrt()
+        } else {
+            diff.sqrt()
+        };
+        rows.push(ProfileRow {
+            p: parameter.clone(),
+            zeta,
+            sigma,
+            beta,
+            theta: conditional_theta,
+        });
+        Ok(zeta)
+    };
+
+    let max_points = 60;
+    let step_growth = 1.35;
+
+    let mut negative_start = theta_hat_vector.clone();
+    let mut distance = initial_step;
+    for _ in 0..max_points {
+        let zeta = evaluate(m, beta_hat - distance, &mut negative_start, true)?;
+        if zeta <= -threshold {
+            break;
+        }
+        distance *= step_growth;
+    }
+
+    let mut positive_start = theta_hat_vector.clone();
+    let mut distance = initial_step;
+    for _ in 0..max_points {
+        let zeta = evaluate(m, beta_hat + distance, &mut positive_start, false)?;
+        if zeta >= threshold {
+            break;
+        }
+        distance *= step_growth;
+    }
+
+    rows.sort_by(|a, b| a.beta[index].partial_cmp(&b.beta[index]).unwrap());
+    rows.dedup_by(|a, b| (a.beta[index] - b.beta[index]).abs() < 1e-12);
+
+    m.set_theta(&saved_theta)?;
+    m.update_l()?;
+    m.optsum.fmin = saved_fmin;
+
+    let mut fwd_map = BTreeMap::new();
+    let mut rev_map = BTreeMap::new();
+    add_profile_splines(&parameter, &rows, &mut fwd_map, &mut rev_map, |row| {
+        row.beta[index]
+    })?;
+
+    Ok(MixedModelProfile {
+        tbl: rows,
+        fwd: fwd_map,
+        rev: rev_map,
+    })
+}
+
+/// Profile every active fixed-effect coefficient of an ML-fitted LMM.
+pub fn profile_betas(m: &mut LinearMixedModel, threshold: f64) -> Result<MixedModelProfile> {
+    let p = m.feterm.rank;
+    let mut tbl = Vec::new();
+    let mut fwd = BTreeMap::new();
+    let mut rev = BTreeMap::new();
+    for index in 0..p {
+        let beta = profile_beta(m, index, threshold)?;
+        tbl.extend(beta.tbl);
+        fwd.extend(beta.fwd);
+        rev.extend(beta.rev);
+    }
+    Ok(MixedModelProfile { tbl, fwd, rev })
+}
+
+fn optimize_beta_profile_point(
+    m: &mut LinearMixedModel,
+    fixed_index: usize,
+    fixed_value: f64,
+    start: &[f64],
+    lower_bounds: &[f64],
+) -> Result<(Vec<f64>, Vec<f64>, f64, f64)> {
+    let n_theta = m.n_theta();
+    let mut best_theta = start.to_vec();
+    if best_theta.len() != n_theta {
+        return Err(MixedModelError::DimensionMismatch(format!(
+            "profile_beta optimizer start has length {}, expected {n_theta}",
+            best_theta.len()
+        )));
+    }
+    for (idx, value) in best_theta.iter_mut().enumerate() {
+        if let Some(lower) = lower_bounds
+            .get(idx)
+            .copied()
+            .filter(|value| value.is_finite())
+        {
+            if *value < lower {
+                *value = lower;
+            }
+        }
+    }
+
+    let (_, _, mut best_obj) =
+        fixed_beta_profile_components(m, &best_theta, fixed_index, fixed_value)?;
+    let mut steps = best_theta
+        .iter()
+        .map(|value| (value.abs() * 0.1).max(0.05))
+        .collect::<Vec<_>>();
+
+    for _ in 0..80 {
+        let mut improved = false;
+        for idx in 0..n_theta {
+            for direction in [1.0, -1.0] {
+                let mut candidate = best_theta.clone();
+                candidate[idx] += direction * steps[idx];
+                if let Some(lower) = lower_bounds
+                    .get(idx)
+                    .copied()
+                    .filter(|value| value.is_finite())
+                {
+                    if candidate[idx] < lower {
+                        candidate[idx] = lower;
+                    }
+                }
+                if (candidate[idx] - best_theta[idx]).abs() < 1e-12 {
+                    continue;
+                }
+                let (_, _, obj) =
+                    fixed_beta_profile_components(m, &candidate, fixed_index, fixed_value)?;
+                if obj + 1e-8 < best_obj {
+                    best_obj = obj;
+                    best_theta = candidate;
+                    improved = true;
+                }
+            }
+        }
+        if !improved {
+            let mut max_step = 0.0_f64;
+            for step in &mut steps {
+                *step *= 0.5;
+                max_step = max_step.max(*step);
+            }
+            if max_step < 1e-5 {
+                break;
+            }
+        }
+    }
+
+    let (best_beta, best_sigma, best_obj) =
+        fixed_beta_profile_components(m, &best_theta, fixed_index, fixed_value)?;
+    Ok((best_theta, best_beta, best_sigma, best_obj))
+}
+
+fn fixed_beta_profile_components(
+    m: &mut LinearMixedModel,
+    theta: &[f64],
+    fixed_index: usize,
+    fixed_value: f64,
+) -> Result<(Vec<f64>, f64, f64)> {
+    m.set_theta(theta)?;
+    let v = marginal_relative_covariance(m);
+    let chol = v.cholesky().ok_or_else(|| {
+        MixedModelError::Optimization(
+            "profile_beta: marginal covariance is not positive definite".into(),
+        )
+    })?;
+    let x = m.feterm.full_rank_x().into_owned();
+    let n = x.nrows();
+    let p = x.ncols();
+    if fixed_index >= p {
+        return Err(MixedModelError::InvalidArgument(format!(
+            "profile_beta index {fixed_index} is out of bounds for {p} active fixed effect(s)"
+        )));
+    }
+
+    let adjusted = &m.y - x.column(fixed_index) * fixed_value;
+    let free_p = p - 1;
+    let mut beta = vec![0.0; p];
+    beta[fixed_index] = fixed_value;
+    let residual = if free_p == 0 {
+        adjusted
+    } else {
+        let mut x_free = DMatrix::zeros(n, free_p);
+        let mut free_col = 0;
+        for col in 0..p {
+            if col == fixed_index {
+                continue;
+            }
+            x_free.set_column(free_col, &x.column(col));
+            free_col += 1;
+        }
+        let vinv_x = chol.solve(&x_free);
+        let adjusted_matrix = DMatrix::from_column_slice(n, 1, adjusted.as_slice());
+        let vinv_y = chol.solve(&adjusted_matrix);
+        let xt_vinv_x = x_free.transpose() * vinv_x;
+        let xt_vinv_y = x_free.transpose() * vinv_y;
+        let beta_free = xt_vinv_x.lu().solve(&xt_vinv_y).ok_or_else(|| {
+            MixedModelError::Optimization(
+                "profile_beta: constrained fixed-effects system is singular".into(),
+            )
+        })?;
+        let mut free_col = 0;
+        for col in 0..p {
+            if col == fixed_index {
+                continue;
+            }
+            beta[col] = beta_free[(free_col, 0)];
+            free_col += 1;
+        }
+        adjusted - x_free * beta_free.column(0)
+    };
+
+    let residual_matrix = DMatrix::from_column_slice(n, 1, residual.as_slice());
+    let vinv_residual = chol.solve(&residual_matrix);
+    let pwrss = residual.dot(&vinv_residual.column(0)).max(0.0);
+    let denom = n as f64;
+    if pwrss <= 0.0 || !pwrss.is_finite() {
+        return Err(MixedModelError::Optimization(format!(
+            "profile_beta: invalid constrained pwrss {pwrss}"
+        )));
+    }
+    let logdet_v = 2.0
+        * chol
+            .l()
+            .diagonal()
+            .iter()
+            .map(|value| value.ln())
+            .sum::<f64>();
+    let objective = logdet_v + denom * (1.0 + (2.0 * std::f64::consts::PI * pwrss / denom).ln());
+    let sigma = (pwrss / denom).sqrt();
+    Ok((beta, sigma, objective))
+}
+
+fn marginal_relative_covariance(m: &LinearMixedModel) -> DMatrix<f64> {
+    let n = m.dims.n;
+    let mut v = DMatrix::<f64>::identity(n, n);
+    for re in &m.reterms {
+        let cov = &re.lambda * re.lambda.transpose();
+        for i in 0..n {
+            let level_i = re.refs[i];
+            for j in 0..=i {
+                if re.refs[j] != level_i {
+                    continue;
+                }
+                let mut value = 0.0;
+                for row in 0..re.vsize {
+                    for col in 0..re.vsize {
+                        value += re.z[(row, i)] * cov[(row, col)] * re.z[(col, j)];
+                    }
+                }
+                v[(i, j)] += value;
+                if i != j {
+                    v[(j, i)] += value;
+                }
+            }
+        }
+    }
+    v
+}
+
 /// Public entry point matching the shape of `MixedModels.jl::profile`.
 ///
-/// Currently only profiles σ; later revisions will add β, θ, and
-/// variance-component profiles.
+/// Profiles σ and θ for fitted LMMs. For ML fits, active fixed-effect β
+/// profiles are included as well. REML β profiles are deliberately omitted
+/// until a certified REML fixed-effect profile contract exists.
 pub fn profile(m: &mut LinearMixedModel) -> Result<MixedModelProfile> {
-    profile_sigma(m, 4.0)
+    let sigma = profile_sigma(m, 4.0)?;
+    let n_theta = m.n_theta();
+    let mut tbl = Vec::new();
+    let mut fwd = BTreeMap::new();
+    let mut rev = BTreeMap::new();
+    tbl.extend(sigma.tbl);
+    fwd.extend(sigma.fwd);
+    rev.extend(sigma.rev);
+    if !m.optsum.reml {
+        let beta = profile_betas(m, 4.0)?;
+        tbl.extend(beta.tbl);
+        fwd.extend(beta.fwd);
+        rev.extend(beta.rev);
+    }
+    for index in 0..n_theta {
+        let theta = profile_theta(m, index, 4.0)?;
+        tbl.extend(theta.tbl);
+        fwd.extend(theta.fwd);
+        rev.extend(theta.rev);
+    }
+    Ok(MixedModelProfile { tbl, fwd, rev })
 }
 
 // ===========================================================================
@@ -398,9 +1057,47 @@ fn normal_inverse_cdf(p: f64) -> f64 {
     }
 }
 
+fn add_profile_splines(
+    parameter: &str,
+    rows: &[ProfileRow],
+    fwd_map: &mut BTreeMap<String, NaturalCubicSpline>,
+    rev_map: &mut BTreeMap<String, NaturalCubicSpline>,
+    value_of: impl Fn(&ProfileRow) -> f64,
+) -> Result<()> {
+    let values: Vec<f64> = rows.iter().map(value_of).collect();
+    let zetas: Vec<f64> = rows.iter().map(|r| r.zeta).collect();
+    if values.len() < 3 {
+        return Err(MixedModelError::Optimization(format!(
+            "profile_{parameter}: only {} evaluations produced — try a larger threshold",
+            values.len()
+        )));
+    }
+    for w in zetas.windows(2) {
+        if !(w[1] > w[0]) {
+            return Err(MixedModelError::Optimization(format!(
+                "profile_{parameter}: ζ table is not strictly monotone — refusing to invert"
+            )));
+        }
+    }
+    fwd_map.insert(
+        parameter.to_string(),
+        NaturalCubicSpline::fit(&values, &zetas)?,
+    );
+    rev_map.insert(
+        parameter.to_string(),
+        NaturalCubicSpline::fit(&zetas, &values)?,
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    use serde::Deserialize;
+
+    use crate::datasets;
     use crate::formula::parse_formula;
     use crate::model::data::DataFrame;
 
@@ -428,6 +1125,28 @@ mod tests {
         let mut df = DataFrame::new();
         df.add_numeric("yield", yields);
         df.add_categorical("batch", batches);
+        df
+    }
+
+    fn random_slope_fixture() -> DataFrame {
+        let mut y = Vec::new();
+        let mut x = Vec::new();
+        let mut g = Vec::new();
+        for group in 0..8 {
+            let intercept_offset = (group as f64 - 3.5) * 4.0;
+            let slope_offset = ((group % 4) as f64 - 1.5) * 1.8;
+            for day in 0..5 {
+                let x_value = day as f64 - 2.0;
+                let noise = ((group + day) % 3) as f64 - 1.0;
+                y.push(100.0 + 8.0 * x_value + intercept_offset + slope_offset * x_value + noise);
+                x.push(x_value);
+                g.push(format!("G{group}"));
+            }
+        }
+        let mut df = DataFrame::new();
+        df.add_numeric("y", y);
+        df.add_numeric("x", x);
+        df.add_categorical("g", g);
         df
     }
 
@@ -487,5 +1206,303 @@ mod tests {
         // Sanity: the CI shouldn't span more than a factor of 3 either way.
         assert!(sigma_ci.lower > sigma_hat / 3.0);
         assert!(sigma_ci.upper < sigma_hat * 3.0);
+    }
+
+    #[test]
+    fn profile_theta_scalar_dyestuff_returns_consistent_table() {
+        let data = dyestuff_fixture();
+        let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+        let theta_hat = model.theta()[0];
+        let fmin = model.optsum.fmin;
+
+        let pr = profile_theta_scalar(&mut model, 4.0).expect("θ1 profile should succeed");
+
+        assert!(pr.tbl.len() >= 5, "got {} rows", pr.tbl.len());
+        assert!(pr.tbl.iter().any(|r| r.zeta < -0.5));
+        assert!(pr.tbl.iter().any(|r| r.zeta > 0.5));
+        assert!(pr.tbl.iter().all(|row| row.p == "θ1"));
+
+        let at_estimate = pr
+            .tbl
+            .iter()
+            .min_by(|a, b| a.zeta.abs().partial_cmp(&b.zeta.abs()).unwrap())
+            .unwrap();
+        assert!(at_estimate.zeta.abs() < 1e-6);
+        assert!((at_estimate.theta[0] - theta_hat).abs() / theta_hat < 1e-3);
+
+        for w in pr.rows_for("θ1").windows(2) {
+            assert!(
+                w[1].zeta > w[0].zeta - 1e-9,
+                "zeta not monotone: {} -> {}",
+                w[0].zeta,
+                w[1].zeta
+            );
+        }
+
+        assert!((model.theta()[0] - theta_hat).abs() < 1e-8);
+        assert!((model.optsum.fmin - fmin).abs() < 1e-8);
+
+        let ci = pr.confint(0.95).unwrap();
+        assert_eq!(ci.len(), 1);
+        let theta_ci = &ci[0];
+        assert_eq!(theta_ci.parameter, "θ1");
+        assert!(theta_ci.lower < theta_hat);
+        assert!(theta_ci.upper > theta_hat);
+        assert!(theta_ci.lower >= 0.0);
+    }
+
+    #[test]
+    fn profile_theta_optimizes_remaining_theta_coordinates() {
+        let data = random_slope_fixture();
+        let formula = parse_formula("y ~ 1 + x + (1 + x || g)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+        assert_eq!(model.n_theta(), 2);
+        let theta_hat = model.theta();
+        let fmin = model.optsum.fmin;
+
+        let pr = profile_theta(&mut model, 1, 2.5).expect("θ2 profile should succeed");
+
+        assert!(pr.tbl.len() >= 5, "got {} rows", pr.tbl.len());
+        assert!(pr.tbl.iter().all(|row| row.p == "θ2"));
+        assert!(pr.tbl.iter().any(|row| row.zeta < -0.5));
+        assert!(pr.tbl.iter().any(|row| row.zeta > 0.5));
+        assert!(pr.tbl.iter().any(|row| {
+            (row.theta[1] - theta_hat[1]).abs() > 1e-4 && (row.theta[0] - theta_hat[0]).abs() > 1e-6
+        }));
+
+        for w in pr.rows_for("θ2").windows(2) {
+            assert!(
+                w[1].zeta > w[0].zeta - 1e-9,
+                "zeta not monotone: {} -> {}",
+                w[0].zeta,
+                w[1].zeta
+            );
+        }
+
+        let restored = model.theta();
+        assert_eq!(restored.len(), theta_hat.len());
+        for (actual, expected) in restored.iter().zip(theta_hat.iter()) {
+            assert!((actual - expected).abs() < 1e-8);
+        }
+        assert!((model.optsum.fmin - fmin).abs() < 1e-8);
+
+        let ci = pr.confint_for("θ2", 0.90).unwrap();
+        assert!(ci.lower <= theta_hat[1]);
+        assert!(ci.upper >= theta_hat[1]);
+    }
+
+    #[test]
+    fn profile_beta_dyestuff_returns_constrained_ml_table() {
+        let data = dyestuff_fixture();
+        let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+        let beta_hat = model.beta()[0];
+        let theta_hat = model.theta();
+        let fmin = model.optsum.fmin;
+        let (_, sigma_at_hat, obj_at_hat) =
+            fixed_beta_profile_components(&mut model, &theta_hat, 0, beta_hat).unwrap();
+        assert!((obj_at_hat - fmin).abs() < 1e-6);
+        assert!((sigma_at_hat - model.sigma()).abs() < 1e-6);
+
+        let pr = profile_beta(&mut model, 0, 3.0).expect("β1 profile should succeed");
+
+        assert!(pr.tbl.len() >= 5, "got {} rows", pr.tbl.len());
+        assert!(pr.tbl.iter().all(|row| row.p == "β1"));
+        assert!(pr.tbl.iter().any(|row| row.zeta < -0.5));
+        assert!(pr.tbl.iter().any(|row| row.zeta > 0.5));
+
+        let at_estimate = pr
+            .tbl
+            .iter()
+            .min_by(|a, b| a.zeta.abs().partial_cmp(&b.zeta.abs()).unwrap())
+            .unwrap();
+        assert!(at_estimate.zeta.abs() < 1e-6);
+        assert!((at_estimate.beta[0] - beta_hat).abs() < 1e-6);
+
+        for w in pr.rows_for("β1").windows(2) {
+            assert!(
+                w[1].zeta > w[0].zeta - 1e-8,
+                "zeta not monotone: {} -> {}",
+                w[0].zeta,
+                w[1].zeta
+            );
+        }
+
+        let restored = model.theta();
+        for (actual, expected) in restored.iter().zip(theta_hat.iter()) {
+            assert!((actual - expected).abs() < 1e-8);
+        }
+        assert!((model.optsum.fmin - fmin).abs() < 1e-8);
+
+        let ci = pr.confint_for("β1", 0.95).unwrap();
+        assert!(ci.lower < beta_hat);
+        assert!(ci.upper > beta_hat);
+    }
+
+    #[test]
+    fn profile_beta_reml_is_explicitly_unavailable() {
+        let data = dyestuff_fixture();
+        let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(true).unwrap();
+
+        let err = profile_beta(&mut model, 0, 3.0).unwrap_err();
+        assert!(
+            err.to_string().contains("requires an ML fit"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn profile_dyestuff_combines_sigma_and_scalar_theta() {
+        let data = dyestuff_fixture();
+        let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let pr = profile(&mut model).expect("combined profile should succeed");
+        assert!(!pr.rows_for("σ").is_empty());
+        assert!(!pr.rows_for("θ1").is_empty());
+        assert!(!pr.rows_for("β1").is_empty());
+        assert_eq!(profile_row_order(&pr), vec!["σ", "β1", "θ1"]);
+
+        let ci = pr.confint(0.95).unwrap();
+        let parameters = ci
+            .iter()
+            .map(|row| row.parameter.as_str())
+            .collect::<Vec<_>>();
+        assert!(parameters.contains(&"σ"));
+        assert!(parameters.contains(&"θ1"));
+        assert!(parameters.contains(&"β1"));
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ProfileParityFixture {
+        schema_version: String,
+        source: String,
+        cases: Vec<ProfileParityCase>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ProfileParityCase {
+        id: String,
+        dataset: String,
+        rust_formula: String,
+        reml: bool,
+        level: f64,
+        #[serde(default)]
+        rust_row_order: Vec<String>,
+        #[serde(default)]
+        parameters: BTreeMap<String, ProfileParityInterval>,
+        #[serde(default)]
+        unsupported_reason: Option<String>,
+        #[serde(default)]
+        slow_reason: Option<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ProfileParityInterval {
+        estimate: f64,
+        lower: f64,
+        upper: f64,
+    }
+
+    fn profile_parity_fixture() -> ProfileParityFixture {
+        serde_json::from_str(include_str!(
+            "../../tests/fixtures/profile_likelihood_julia_parity_v1.json"
+        ))
+        .expect("profile likelihood parity fixture should deserialize")
+    }
+
+    fn profile_row_order(pr: &MixedModelProfile) -> Vec<String> {
+        let mut order = Vec::new();
+        for row in &pr.tbl {
+            if !order.iter().any(|name| name == &row.p) {
+                order.push(row.p.clone());
+            }
+        }
+        order
+    }
+
+    fn profile_parity_tolerance(parameter: &str, expected: f64) -> f64 {
+        let scale = expected.abs().max(1.0);
+        if parameter.starts_with('θ') {
+            0.15 * scale
+        } else {
+            0.02 * scale
+        }
+    }
+
+    #[test]
+    fn profile_likelihood_julia_parity_fixture_is_versioned() {
+        let fixture = profile_parity_fixture();
+        assert_eq!(fixture.schema_version, "1.0.0");
+        assert!(fixture.source.contains("MixedModels.jl"));
+        assert!(
+            fixture
+                .cases
+                .iter()
+                .any(|case| case.id == "kb07_scalar_crossed_reml"
+                    && case.unsupported_reason.is_some())
+        );
+        assert!(fixture
+            .cases
+            .iter()
+            .any(|case| case.id == "sleepstudy_random_intercept_ml" && case.slow_reason.is_some()));
+    }
+
+    #[test]
+    fn profile_likelihood_confint_matches_julia_fixture_for_supported_cases() {
+        let fixture = profile_parity_fixture();
+        let run_slow = std::env::var_os("MIXEDMODELS_RUN_SLOW_PROFILE_PARITY").is_some();
+        for case in fixture
+            .cases
+            .iter()
+            .filter(|case| case.unsupported_reason.is_none())
+            .filter(|case| run_slow || case.slow_reason.is_none())
+        {
+            let (data, _) = datasets::load(&case.dataset).unwrap();
+            let formula = parse_formula(&case.rust_formula).unwrap();
+            let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+            model.fit(case.reml).unwrap();
+
+            let pr = profile(&mut model)
+                .unwrap_or_else(|error| panic!("profile failed for {}: {error}", case.id));
+            assert_eq!(
+                profile_row_order(&pr),
+                case.rust_row_order,
+                "row order mismatch for {}",
+                case.id
+            );
+
+            let actual = pr
+                .confint(case.level)
+                .unwrap_or_else(|error| panic!("confint failed for {}: {error}", case.id))
+                .into_iter()
+                .map(|row| (row.parameter.clone(), row))
+                .collect::<BTreeMap<_, _>>();
+
+            for (parameter, expected) in &case.parameters {
+                let actual = actual
+                    .get(parameter)
+                    .unwrap_or_else(|| panic!("{} missing parameter {parameter}", case.id));
+                for (label, got, want) in [
+                    ("estimate", actual.estimate, expected.estimate),
+                    ("lower", actual.lower, expected.lower),
+                    ("upper", actual.upper, expected.upper),
+                ] {
+                    let tolerance = profile_parity_tolerance(parameter, want);
+                    assert!(
+                        (got - want).abs() <= tolerance,
+                        "{} {parameter} {label}: got {got}, expected {want}, tolerance {tolerance}",
+                        case.id
+                    );
+                }
+            }
+        }
     }
 }
