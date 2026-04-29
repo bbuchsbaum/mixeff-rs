@@ -795,7 +795,7 @@
         "rank": 3
       },
       "certification_quality": {
-        "failed": {
+        "approximate": {
           "reason": "free-gradient norm 1.845664e2 exceeds tolerance 4.270411e-3"
         }
       }
@@ -808,8 +808,11 @@
     "information_rank": 3,
     "checks": [
       {
-        "failed": {
-          "code": "free_gradient_kkt_failed",
+        "derivative_mismatch": {
+          "kind": "free_gradient_kkt_mismatch",
+          "observed": 184.56642368391837,
+          "tolerance": 0.004270411335651856,
+          "regime": "interior_theta",
           "message": "free-gradient norm 1.845664e2 exceeds tolerance 4.270411e-3"
         }
       },

@@ -764,7 +764,7 @@
         "rank": 3
       },
       "certification_quality": {
-        "failed": {
+        "approximate": {
           "reason": "free-gradient norm 2.611324e1 exceeds tolerance 2.860272e-3"
         }
       }
@@ -826,10 +826,10 @@
           "label": "optimizer_consensus_pattern_search",
           "optimizer_name": "pattern_search",
           "return_code": "SUCCESS",
-          "objective_value": -818.1161846876472,
-          "objective_delta": 0.0005267118369829404,
-          "max_abs_theta_delta": 0.002124023437318101,
-          "max_abs_beta_delta": 8.072262502878402e-8,
+          "objective_value": -818.1164144013298,
+          "objective_delta": 0.0007564255196257363,
+          "max_abs_theta_delta": 0.002567138671565772,
+          "max_abs_beta_delta": 7.296076631746473e-8,
           "effective_ranks": [
             1
           ],
@@ -849,8 +849,11 @@
     "information_rank": 3,
     "checks": [
       {
-        "failed": {
-          "code": "free_gradient_kkt_failed",
+        "derivative_mismatch": {
+          "kind": "free_gradient_kkt_mismatch",
+          "observed": 26.113242847713988,
+          "tolerance": 0.002860272116383003,
+          "regime": "interior_theta",
           "message": "free-gradient norm 2.611324e1 exceeds tolerance 2.860272e-3"
         }
       },

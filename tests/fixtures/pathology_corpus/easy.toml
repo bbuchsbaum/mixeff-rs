@@ -1,3 +1,4 @@
+contract_version = "v0.3"
 name = "easy_full_rank"
 stratum = "easy"
 group_sizes = [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]

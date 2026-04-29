@@ -1,3 +1,4 @@
+contract_version = "v0.3"
 name = "reduced_rank_unit_correlation"
 stratum = "reduced-rank"
 group_sizes = [6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6]

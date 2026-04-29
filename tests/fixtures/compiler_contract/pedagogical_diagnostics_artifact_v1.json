@@ -1980,6 +1980,66 @@
         }
       },
       {
+        "code": "covariance_assumption",
+        "severity": "info",
+        "stage": "design_audit",
+        "message": "no correlation parameter is estimated between random-intercept groups 'subject' and 'batch'; separate scalar random-effect terms define independent covariance blocks",
+        "affected_terms": [
+          "(1 | subject)",
+          "(1 + x || batch)"
+        ],
+        "suggested_actions": [
+          "Report standard deviations for 'subject' and 'batch' separately; their cross-block correlation is fixed absent by this parameterization.",
+          "A nonzero cross-block correlation would require an explicit coupled covariance structure, which is not represented by separate `(1 | group)` terms."
+        ],
+        "payload": {
+          "correlation_parameter": "not_estimated",
+          "covariance_blocks": "independent",
+          "left_group": "subject",
+          "right_group": "batch"
+        }
+      },
+      {
+        "code": "covariance_assumption",
+        "severity": "info",
+        "stage": "design_audit",
+        "message": "no correlation parameter is estimated between random-intercept groups 'subject' and 'item'; separate scalar random-effect terms define independent covariance blocks",
+        "affected_terms": [
+          "(1 | subject)",
+          "(1 | item)"
+        ],
+        "suggested_actions": [
+          "Report standard deviations for 'subject' and 'item' separately; their cross-block correlation is fixed absent by this parameterization.",
+          "A nonzero cross-block correlation would require an explicit coupled covariance structure, which is not represented by separate `(1 | group)` terms."
+        ],
+        "payload": {
+          "correlation_parameter": "not_estimated",
+          "covariance_blocks": "independent",
+          "left_group": "subject",
+          "right_group": "item"
+        }
+      },
+      {
+        "code": "covariance_assumption",
+        "severity": "info",
+        "stage": "design_audit",
+        "message": "no correlation parameter is estimated between random-intercept groups 'batch' and 'item'; separate scalar random-effect terms define independent covariance blocks",
+        "affected_terms": [
+          "(1 + x || batch)",
+          "(1 | item)"
+        ],
+        "suggested_actions": [
+          "Report standard deviations for 'batch' and 'item' separately; their cross-block correlation is fixed absent by this parameterization.",
+          "A nonzero cross-block correlation would require an explicit coupled covariance structure, which is not represented by separate `(1 | group)` terms."
+        ],
+        "payload": {
+          "correlation_parameter": "not_estimated",
+          "covariance_blocks": "independent",
+          "left_group": "batch",
+          "right_group": "item"
+        }
+      },
+      {
         "code": "repeated_unit_unmodeled",
         "severity": "warning",
         "stage": "design_audit",
@@ -3106,6 +3166,66 @@
         "fixed_effect": "x",
         "group": "subject",
         "varies_within_group": true
+      }
+    },
+    {
+      "code": "covariance_assumption",
+      "severity": "info",
+      "stage": "design_audit",
+      "message": "no correlation parameter is estimated between random-intercept groups 'subject' and 'batch'; separate scalar random-effect terms define independent covariance blocks",
+      "affected_terms": [
+        "(1 | subject)",
+        "(1 + x || batch)"
+      ],
+      "suggested_actions": [
+        "Report standard deviations for 'subject' and 'batch' separately; their cross-block correlation is fixed absent by this parameterization.",
+        "A nonzero cross-block correlation would require an explicit coupled covariance structure, which is not represented by separate `(1 | group)` terms."
+      ],
+      "payload": {
+        "correlation_parameter": "not_estimated",
+        "covariance_blocks": "independent",
+        "left_group": "subject",
+        "right_group": "batch"
+      }
+    },
+    {
+      "code": "covariance_assumption",
+      "severity": "info",
+      "stage": "design_audit",
+      "message": "no correlation parameter is estimated between random-intercept groups 'subject' and 'item'; separate scalar random-effect terms define independent covariance blocks",
+      "affected_terms": [
+        "(1 | subject)",
+        "(1 | item)"
+      ],
+      "suggested_actions": [
+        "Report standard deviations for 'subject' and 'item' separately; their cross-block correlation is fixed absent by this parameterization.",
+        "A nonzero cross-block correlation would require an explicit coupled covariance structure, which is not represented by separate `(1 | group)` terms."
+      ],
+      "payload": {
+        "correlation_parameter": "not_estimated",
+        "covariance_blocks": "independent",
+        "left_group": "subject",
+        "right_group": "item"
+      }
+    },
+    {
+      "code": "covariance_assumption",
+      "severity": "info",
+      "stage": "design_audit",
+      "message": "no correlation parameter is estimated between random-intercept groups 'batch' and 'item'; separate scalar random-effect terms define independent covariance blocks",
+      "affected_terms": [
+        "(1 + x || batch)",
+        "(1 | item)"
+      ],
+      "suggested_actions": [
+        "Report standard deviations for 'batch' and 'item' separately; their cross-block correlation is fixed absent by this parameterization.",
+        "A nonzero cross-block correlation would require an explicit coupled covariance structure, which is not represented by separate `(1 | group)` terms."
+      ],
+      "payload": {
+        "correlation_parameter": "not_estimated",
+        "covariance_blocks": "independent",
+        "left_group": "batch",
+        "right_group": "item"
       }
     },
     {

@@ -1,3 +1,4 @@
+contract_version = "v0.3"
 name = "separation_extreme_prevalence_negative_15"
 stratum = "separation"
 group_sizes = [20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20]

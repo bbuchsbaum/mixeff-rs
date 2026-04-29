@@ -31,10 +31,65 @@ use mixedmodels::pathology::{
     block_diagonal_crossings, certify, collinear_fe, detect_separation, effective_status,
     effective_status_from_artifact, empty_crossings, expected_statuses, extreme_prevalence,
     generate, inferred_axes, lint_single_axis, map_error_to_status, near_singular_re, pareto_sizes,
-    scale_mismatch, set_group_sizes, singletons_with_slope, BoundaryKind, Certificate,
-    ExpectedStatusSet, FeSeparationKind, GeneratorSpec, PathologyAxis, SeparationKind,
-    StructuralIssue, WEAK_ID_THRESHOLD,
+    scale_mismatch, set_group_sizes, singletons_with_slope, Certificate, ExpectedStatusSet,
+    FeSeparationKind, GeneratorSpec, PathologyAxis, SeparationKind, StructuralIssue,
+    PATHOLOGY_CORPUS_CONTRACT_VERSION, WEAK_ID_THRESHOLD,
 };
+
+const PATHOLOGY_TOML_FIXTURES: &[(&str, &str)] = &[
+    (
+        "tests/fixtures/pathology_corpus/easy.toml",
+        include_str!("fixtures/pathology_corpus/easy.toml"),
+    ),
+    (
+        "tests/fixtures/pathology_corpus/boundary.toml",
+        include_str!("fixtures/pathology_corpus/boundary.toml"),
+    ),
+    (
+        "tests/fixtures/pathology_corpus/reduced_rank.toml",
+        include_str!("fixtures/pathology_corpus/reduced_rank.toml"),
+    ),
+    (
+        "tests/fixtures/pathology_corpus/refusal.toml",
+        include_str!("fixtures/pathology_corpus/refusal.toml"),
+    ),
+    (
+        "tests/fixtures/pathology_corpus/separation.toml",
+        include_str!("fixtures/pathology_corpus/separation.toml"),
+    ),
+    (
+        "tests/fixtures/pathology_corpus/separation_conditional.toml",
+        include_str!("fixtures/pathology_corpus/separation_conditional.toml"),
+    ),
+    (
+        "tests/fixtures/pathology_corpus/separation_fe.toml",
+        include_str!("fixtures/pathology_corpus/separation_fe.toml"),
+    ),
+];
+
+#[test]
+fn pathology_toml_fixtures_match_current_contract_version() {
+    for (path, contents) in PATHOLOGY_TOML_FIXTURES {
+        let value = contents
+            .parse::<toml::Value>()
+            .unwrap_or_else(|err| panic!("{path} is not valid TOML: {err}"));
+        let actual = value
+            .get("contract_version")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_else(|| {
+                panic!(
+                    "{path} fixture needs migration review: missing contract_version \
+                     (current {PATHOLOGY_CORPUS_CONTRACT_VERSION})"
+                )
+            });
+
+        assert_eq!(
+            actual, PATHOLOGY_CORPUS_CONTRACT_VERSION,
+            "{path} fixture needs migration review: contract_version {actual:?} does not match \
+             current {PATHOLOGY_CORPUS_CONTRACT_VERSION:?}"
+        );
+    }
+}
 
 /// Build the four foundation-stratum specs.
 mod fixtures {
@@ -364,7 +419,7 @@ mod fixtures {
 }
 
 fn try_fit(spec: &GeneratorSpec) -> Result<LinearMixedModel, MixedModelError> {
-    let out = generate(spec);
+    let out = generate(spec)?;
     let formula = parse_formula(&out.formula).map_err(MixedModelError::from)?;
     let mut model = LinearMixedModel::new(formula, &out.data, None)?;
     model.fit(true)?;
@@ -509,7 +564,7 @@ fn extreme_prevalence_transform_promotes_to_bernoulli_logit() {
     assert_eq!(spec.link, LinkFunction::Logit);
     assert_eq!(spec.binary_intercept_shift, -5.0);
 
-    let out = generate(&spec);
+    let out = generate(&spec).unwrap();
     let y_col = out.data.numeric(&spec.response_name).unwrap();
     let prevalence: f64 = y_col.iter().sum::<f64>() / y_col.len() as f64;
     assert!(
@@ -673,7 +728,7 @@ fn crossed_block_diagonal_engine_runs_with_two_grouping_factors() {
     // the model's reterm count rather than instantiating BlockedSparse
     // directly.
     let spec = fixtures::crossed_block_diagonal();
-    let out = generate(&spec);
+    let out = generate(&spec).unwrap();
     let formula = parse_formula(&out.formula).unwrap();
     let mut model = LinearMixedModel::new(formula, &out.data, None)
         .expect("crossed-RE LMM must construct on a structurally disconnected design");
@@ -1040,6 +1095,30 @@ fn every_corpus_fixture_satisfies_single_axis_policy() {
         "single-axis policy violations:\n  {}",
         violations.join("\n  ")
     );
+}
+
+#[test]
+fn test_certificate_unified_expected_statuses() {
+    for spec in all_fixture_specs() {
+        let cert = certify(&spec);
+        let expected = expected_statuses(&cert);
+        assert!(
+            !expected.allowed.is_empty(),
+            "fixture '{}' should produce at least one acceptable status",
+            spec.label
+        );
+        if spec.family == Family::Normal {
+            let (_, expected, status) = assert_status_in_set(&spec);
+            assert!(
+                expected.contains(status),
+                "fixture '{}': status {:?} not in unified pathology certificate set {:?}; certificate={:?}",
+                spec.label,
+                status,
+                expected.allowed,
+                cert
+            );
+        }
+    }
 }
 
 #[test]

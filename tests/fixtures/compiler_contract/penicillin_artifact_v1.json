@@ -399,7 +399,28 @@
       ],
       "missing_dependence_paths": []
     },
-    "diagnostics": []
+    "diagnostics": [
+      {
+        "code": "covariance_assumption",
+        "severity": "info",
+        "stage": "design_audit",
+        "message": "no correlation parameter is estimated between random-intercept groups 'plate' and 'sample'; separate scalar random-effect terms define independent covariance blocks",
+        "affected_terms": [
+          "(1 | plate)",
+          "(1 | sample)"
+        ],
+        "suggested_actions": [
+          "Report standard deviations for 'plate' and 'sample' separately; their cross-block correlation is fixed absent by this parameterization.",
+          "A nonzero cross-block correlation would require an explicit coupled covariance structure, which is not represented by separate `(1 | group)` terms."
+        ],
+        "payload": {
+          "correlation_parameter": "not_estimated",
+          "covariance_blocks": "independent",
+          "left_group": "plate",
+          "right_group": "sample"
+        }
+      }
+    ]
   },
   "compiler_policy": {
     "random_strategy": "maximal_feasible",
@@ -578,5 +599,26 @@
     ]
   },
   "optimizer_certificate": null,
-  "diagnostics": []
+  "diagnostics": [
+    {
+      "code": "covariance_assumption",
+      "severity": "info",
+      "stage": "design_audit",
+      "message": "no correlation parameter is estimated between random-intercept groups 'plate' and 'sample'; separate scalar random-effect terms define independent covariance blocks",
+      "affected_terms": [
+        "(1 | plate)",
+        "(1 | sample)"
+      ],
+      "suggested_actions": [
+        "Report standard deviations for 'plate' and 'sample' separately; their cross-block correlation is fixed absent by this parameterization.",
+        "A nonzero cross-block correlation would require an explicit coupled covariance structure, which is not represented by separate `(1 | group)` terms."
+      ],
+      "payload": {
+        "correlation_parameter": "not_estimated",
+        "covariance_blocks": "independent",
+        "left_group": "plate",
+        "right_group": "sample"
+      }
+    }
+  ]
 }

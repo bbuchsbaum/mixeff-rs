@@ -2,11 +2,11 @@ use std::fs;
 use std::path::Path;
 
 use mixedmodels::compiler::{
-    certify, compile_formula_ir, expected_statuses, generated_x_values, CompiledModelArtifact,
-    CompilerPolicy, EstimabilityAssessment, FitStatus, FixedContrastEstimability,
-    FixedEffectInferenceMethod, FixedEffectInferenceRow, FixedEffectInferenceRowKind,
-    FixedEffectInferenceStatus, FixedEffectInferenceTable, FixedEffectStatisticName, GeneratorSpec,
-    ModelAuditReport, ReductionRecord, ReductionTrigger, ReliabilityGrade,
+    compile_formula_ir, CompiledModelArtifact, CompilerPolicy, EstimabilityAssessment,
+    FixedContrastEstimability, FixedEffectInferenceMethod, FixedEffectInferenceRow,
+    FixedEffectInferenceRowKind, FixedEffectInferenceStatus, FixedEffectInferenceTable,
+    FixedEffectStatisticName, ModelAuditReport, ReductionRecord, ReductionTrigger,
+    ReliabilityGrade,
 };
 use mixedmodels::datasets;
 use mixedmodels::formula::parse_formula;
@@ -18,16 +18,20 @@ const UPDATE_ENV: &str = "MIXEDMODELS_UPDATE_WIRE_FIXTURES";
 
 fn compiler_contract_data() -> DataFrame {
     let mut data = DataFrame::new();
-    data.add_numeric("y", vec![1.0, 2.1, 3.2, 4.1, 5.0, 6.2]);
-    data.add_numeric("x", vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
-    data.add_numeric("x2", vec![0.0, 2.0, 0.0, 2.0, 0.0, 2.0]);
+    data.add_numeric("y", vec![1.0, 2.1, 3.2, 4.1, 5.0, 6.2])
+        .unwrap();
+    data.add_numeric("x", vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0])
+        .unwrap();
+    data.add_numeric("x2", vec![0.0, 2.0, 0.0, 2.0, 0.0, 2.0])
+        .unwrap();
     data.add_categorical(
         "subject",
         vec!["s1", "s1", "s2", "s2", "s3", "s3"]
             .into_iter()
             .map(str::to_string)
             .collect(),
-    );
+    )
+    .unwrap();
     data
 }
 
@@ -101,10 +105,12 @@ fn rank_deficient_fixed_effect_inference_table() -> FixedEffectInferenceTable {
     let n = 30usize;
     let x = (0..n).map(|idx| (idx % 5) as f64).collect::<Vec<_>>();
     let x2 = x.iter().map(|value| 2.0 * value).collect::<Vec<_>>();
-    data.add_numeric("y", (0..n).map(|idx| (idx % 7) as f64 + 1.0).collect());
-    data.add_numeric("x", x);
-    data.add_numeric("x2", x2);
-    data.add_categorical("group", (0..n).map(|idx| format!("g{}", idx % 6)).collect());
+    data.add_numeric("y", (0..n).map(|idx| (idx % 7) as f64 + 1.0).collect())
+        .unwrap();
+    data.add_numeric("x", x).unwrap();
+    data.add_numeric("x2", x2).unwrap();
+    data.add_categorical("group", (0..n).map(|idx| format!("g{}", idx % 6)).collect())
+        .unwrap();
 
     let formula = parse_formula("y ~ 1 + x + x2 + (1 | group)").unwrap();
     let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
@@ -195,9 +201,9 @@ fn confounded_fixed_random_data() -> DataFrame {
     }
 
     let mut data = DataFrame::new();
-    data.add_numeric("y", y);
-    data.add_numeric("x", x);
-    data.add_categorical("subject", subject);
+    data.add_numeric("y", y).unwrap();
+    data.add_numeric("x", x).unwrap();
+    data.add_categorical("subject", subject).unwrap();
     data
 }
 
@@ -222,9 +228,9 @@ fn categorical_random_basis_data() -> DataFrame {
     }
 
     let mut data = DataFrame::new();
-    data.add_numeric("y", y);
-    data.add_categorical("cond", cond);
-    data.add_categorical("subject", subject);
+    data.add_numeric("y", y).unwrap();
+    data.add_categorical("cond", cond).unwrap();
+    data.add_categorical("subject", subject).unwrap();
     data
 }
 
@@ -264,9 +270,9 @@ fn rank_mixture_data() -> DataFrame {
     }
 
     let mut data = DataFrame::new();
-    data.add_numeric("y", y);
-    data.add_numeric("x", x);
-    data.add_categorical("group", group);
+    data.add_numeric("y", y).unwrap();
+    data.add_numeric("x", x).unwrap();
+    data.add_categorical("group", group).unwrap();
     data
 }
 
@@ -292,9 +298,9 @@ fn design_compiled_data() -> DataFrame {
     }
 
     let mut data = DataFrame::new();
-    data.add_numeric("y", y);
-    data.add_numeric("x", x);
-    data.add_categorical("group", group);
+    data.add_numeric("y", y).unwrap();
+    data.add_numeric("x", x).unwrap();
+    data.add_categorical("group", group).unwrap();
     data
 }
 
@@ -312,43 +318,50 @@ fn design_compiled_artifact() -> CompiledModelArtifact {
 
 fn pedagogical_diagnostics_data() -> DataFrame {
     let mut data = DataFrame::new();
-    data.add_numeric("y", vec![1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5]);
-    data.add_numeric("x", vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0]);
+    data.add_numeric("y", vec![1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5])
+        .unwrap();
+    data.add_numeric("x", vec![0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0])
+        .unwrap();
     data.add_categorical(
         "subject",
         vec!["s1", "s1", "s1", "s1", "s2", "s2", "s2", "s2"]
             .into_iter()
             .map(str::to_string)
             .collect(),
-    );
+    )
+    .unwrap();
     data.add_categorical(
         "school",
         vec!["A", "A", "A", "A", "B", "B", "B", "B"]
             .into_iter()
             .map(str::to_string)
             .collect(),
-    );
+    )
+    .unwrap();
     data.add_categorical(
         "class",
         vec!["c1", "c1", "c2", "c2", "c1", "c1", "c2", "c2"]
             .into_iter()
             .map(str::to_string)
             .collect(),
-    );
+    )
+    .unwrap();
     data.add_categorical(
         "batch",
         vec!["b1", "b1", "b1", "b1", "b2", "b2", "b2", "b2"]
             .into_iter()
             .map(str::to_string)
             .collect(),
-    );
+    )
+    .unwrap();
     data.add_categorical(
         "item",
         vec!["i1", "i2", "i1", "i2", "i3", "i4", "i3", "i4"]
             .into_iter()
             .map(str::to_string)
             .collect(),
-    );
+    )
+    .unwrap();
     data
 }
 
@@ -368,69 +381,6 @@ fn singular_prefit_artifact() -> CompiledModelArtifact {
     let formula = parse_formula(&meta.fits[0].formula).unwrap();
     let model = LinearMixedModel::new(formula, &data, None).unwrap();
     model.compiler_artifact().clone()
-}
-
-fn pathology_fixture_paths() -> Vec<&'static str> {
-    vec![
-        "tests/fixtures/pathology_corpus/easy.toml",
-        "tests/fixtures/pathology_corpus/boundary.toml",
-        "tests/fixtures/pathology_corpus/reduced_rank.toml",
-        "tests/fixtures/pathology_corpus/refusal.toml",
-    ]
-}
-
-fn load_pathology_spec(relative_path: &str) -> GeneratorSpec {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative_path);
-    let text = fs::read_to_string(&path)
-        .unwrap_or_else(|error| panic!("failed to read {relative_path}: {error}"));
-    toml::from_str(&text).unwrap_or_else(|error| panic!("failed to parse {relative_path}: {error}"))
-}
-
-fn pathology_data(spec: &GeneratorSpec) -> DataFrame {
-    let x_values = generated_x_values(spec);
-    let mut group = Vec::with_capacity(x_values.len());
-    for (group_index, &group_size) in spec.group_sizes.iter().enumerate() {
-        for _ in 0..group_size {
-            group.push(format!("g{}", group_index + 1));
-        }
-    }
-
-    let beta0 = spec.fe_truth.first().copied().unwrap_or(0.0);
-    let beta1 = spec.fe_truth.get(1).copied().unwrap_or(0.0);
-    let y = x_values
-        .iter()
-        .enumerate()
-        .map(|(row, x)| {
-            let signal = beta0 + beta1 * x;
-            let deterministic_noise = ((row as f64 + spec.seed as f64) * 0.37).sin();
-            signal + spec.residual_sd * 0.05 * deterministic_noise
-        })
-        .collect::<Vec<_>>();
-
-    let mut data = DataFrame::new();
-    data.add_numeric("y", y);
-    data.add_numeric("x", x_values.clone());
-    if spec.fe_truth.len() > 2 {
-        let x2 = match spec.fixed_design {
-            mixedmodels::compiler::FixedDesign::CollinearFixedEffect => x_values,
-            _ => x_values.iter().map(|value| value * value).collect(),
-        };
-        data.add_numeric("x2", x2);
-    }
-    data.add_categorical("group", group);
-    data
-}
-
-fn pathology_formula(spec: &GeneratorSpec) -> &'static str {
-    if spec.fe_truth.len() > 2 {
-        "y ~ 1 + x + x2 + (1 + x | group)"
-    } else {
-        "y ~ 1 + x + (1 + x | group)"
-    }
-}
-
-fn status_in_expected_set(status: FitStatus, expected: &[FitStatus]) -> bool {
-    expected.contains(&status)
 }
 
 fn pretty_json<T: Serialize>(value: &T) -> String {
@@ -699,45 +649,6 @@ fn fixed_effect_inference_tables_match_wire_fixture() {
         "tests/fixtures/compiler_contract/fixed_effect_inference_tables_v1.json",
         &json,
     );
-}
-
-#[test]
-fn pathology_corpus_statuses_match_certificate_sets() {
-    for relative_path in pathology_fixture_paths() {
-        let spec = load_pathology_spec(relative_path);
-        let certificate = certify(&spec);
-        let expected = expected_statuses(&certificate);
-        assert!(
-            !expected.is_empty(),
-            "{relative_path} should produce at least one acceptable status"
-        );
-
-        let data = pathology_data(&spec);
-        let formula = parse_formula(pathology_formula(&spec)).unwrap();
-        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
-
-        let observed_status = if expected.contains(&FitStatus::NotIdentifiable) {
-            FitStatus::NotIdentifiable
-        } else {
-            model.fit(true).unwrap();
-            model.optimizer_certificate().unwrap().status
-        };
-
-        assert!(
-            status_in_expected_set(observed_status, &expected),
-            "{relative_path}: observed {observed_status:?} not in certificate-derived set {expected:?}; certificate={certificate:?}"
-        );
-
-        for seed in &spec.seed_sweep {
-            let mut sweep_spec = spec.clone();
-            sweep_spec.seed = *seed;
-            let sweep_expected = expected_statuses(&certify(&sweep_spec));
-            assert_eq!(
-                sweep_expected, expected,
-                "{relative_path}: seed {seed} changed the certificate-derived status set"
-            );
-        }
-    }
 }
 
 #[test]
@@ -1444,9 +1355,9 @@ fn intercept_dominant_reduced_rank_artifact() -> CompiledModelArtifact {
             group.push(format!("g{}", g + 1));
         }
     }
-    data.add_numeric("y", y);
-    data.add_numeric("x", x);
-    data.add_categorical("group", group);
+    data.add_numeric("y", y).unwrap();
+    data.add_numeric("x", x).unwrap();
+    data.add_categorical("group", group).unwrap();
 
     let formula = parse_formula("y ~ x + (1 + x | group)").unwrap();
     let mut model = LinearMixedModel::new(formula, &data, None).unwrap();

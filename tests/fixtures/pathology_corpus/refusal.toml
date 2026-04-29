@@ -1,3 +1,4 @@
+contract_version = "v0.3"
 name = "refusal_collinear_fixed_effect"
 stratum = "refusal"
 group_sizes = [6, 6, 6, 6, 6, 6]

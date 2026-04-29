@@ -9,6 +9,11 @@ data). The certificate maps to the set of `FitStatus` values that any
 conformant fit engine must produce. Tests assert the engine's actual
 status is a member of that set, never equality.
 
+The TOML fixtures carry `contract_version = "v0.3"`, matching
+`PATHOLOGY_CORPUS_CONTRACT_VERSION`. Bumping that constant requires a
+deliberate migration pass over every fixture's acceptable `FitStatus`
+set and an entry in the contract version log.
+
 ## Strata
 
 | Stratum         | Truth condition                              | Acceptable `FitStatus`                                            |
