@@ -23,7 +23,7 @@ use crate::model::data::DataFrame;
 use crate::model::linear::LinearMixedModel;
 use crate::model::traits::{Family, LinkFunction, MixedModelFit, RandomEffectTermInfo};
 use crate::stats::{BlockDescription, ModelSummary, VarCorr};
-use crate::types::OptSummary;
+use crate::types::{MatrixBlock, OptSummary};
 
 /// A generalized linear mixed-effects model.
 #[derive(Debug, Clone)]
@@ -53,8 +53,16 @@ pub struct GeneralizedLinearMixedModel {
     pub mu: DVector<f64>,
     /// Response vector.
     pub y: DVector<f64>,
+    /// Fixed linear predictor offset, one value per observation.
+    pub offset: DVector<f64>,
     /// Prior weights.
     pub wt: Vec<f64>,
+    /// Estimated residual scale for dispersion families.
+    ///
+    /// Stored as sigma, so `dispersion(false)` returns this value and
+    /// `dispersion(true)` returns sigma squared. Non-dispersion GLMM families
+    /// keep this at 1.
+    dispersion: f64,
 
     /// Distribution family.
     pub family: Family,
@@ -99,20 +107,40 @@ impl GeneralizedLinearMixedModel {
     ) -> Result<Self> {
         let mut model =
             Self::new_with_policy_internal(formula, data, family, link, CompilerPolicy::default())?;
-        if weights.len() != model.y.len() {
-            return Err(MixedModelError::InvalidArgument(format!(
-                "case weights length ({}) does not match number of observations ({})",
-                weights.len(),
-                model.y.len()
-            )));
-        }
-        for (i, &w) in weights.iter().enumerate() {
-            if !w.is_finite() || w <= 0.0 {
-                return Err(MixedModelError::InvalidArgument(format!(
-                    "case weight at index {i} must be finite and positive (got {w})"
-                )));
-            }
-        }
+        validate_case_weights(&weights, model.y.len())?;
+        model.wt = weights;
+        Ok(model)
+    }
+
+    /// Construct a GLMM with a fixed per-observation linear predictor offset.
+    ///
+    /// The offset is not estimated. It enters the linear predictor as
+    /// `eta = offset + X beta + Z b` and is subtracted from the PIRLS working
+    /// response before solving the internal LMM approximation.
+    pub fn new_with_offset(
+        formula: Formula,
+        data: &DataFrame,
+        family: Family,
+        link: Option<LinkFunction>,
+        offset: Vec<f64>,
+    ) -> Result<Self> {
+        let mut model =
+            Self::new_with_policy_internal(formula, data, family, link, CompilerPolicy::default())?;
+        model.set_offset(offset)?;
+        Ok(model)
+    }
+
+    /// Construct a GLMM with both case weights and a fixed linear predictor offset.
+    pub fn new_with_weights_and_offset(
+        formula: Formula,
+        data: &DataFrame,
+        family: Family,
+        link: Option<LinkFunction>,
+        weights: Vec<f64>,
+        offset: Vec<f64>,
+    ) -> Result<Self> {
+        let mut model = Self::new_with_offset(formula, data, family, link, offset)?;
+        validate_case_weights(&weights, model.y.len())?;
         model.wt = weights;
         Ok(model)
     }
@@ -132,13 +160,16 @@ impl GeneralizedLinearMixedModel {
                 "Use LinearMixedModel for Normal distribution with IdentityLink".to_string(),
             ));
         }
-        if glmm_dispersion_family_requires_refusal(family, link) {
-            return Err(MixedModelError::Unsupported(format!(
-                "{} GLMM with {} link requires a dispersion parameter, but GLMM dispersion \
-                 estimation is not implemented yet",
-                family_label(family),
-                link_label(link)
-            )));
+        if let Some(y) = data.numeric(&formula.response) {
+            validate_glmm_response_domain(family, link, y)?;
+            if let Some(&first) = y.first() {
+                if y.iter().all(|&value| value == first) {
+                    return Err(MixedModelError::InvalidArgument(
+                        "response is constant; GLMM construction requires variation in the response"
+                            .to_string(),
+                    ));
+                }
+            }
         }
 
         // Build the internal LMM
@@ -173,6 +204,7 @@ impl GeneralizedLinearMixedModel {
 
         let eta = DVector::zeros(n);
         let mu = DVector::zeros(n);
+        let offset = DVector::zeros(n);
 
         // AGQ vectors — only used for single RE term
         let agq_len = if u.len() == 1 {
@@ -192,7 +224,9 @@ impl GeneralizedLinearMixedModel {
             eta,
             mu,
             y,
+            offset,
             wt: Vec::new(),
+            dispersion: 1.0,
             family,
             link,
             devc: vec![0.0; agq_len],
@@ -251,13 +285,24 @@ impl GeneralizedLinearMixedModel {
         self.lmm.parameterization()
     }
 
+    /// Replace the fixed linear predictor offset before fitting.
+    pub fn set_offset(&mut self, offset: Vec<f64>) -> Result<&mut Self> {
+        if self.is_fitted() {
+            return Err(MixedModelError::AlreadyFitted);
+        }
+        validate_offset(&offset, self.y.len())?;
+        self.offset = DVector::from_vec(offset);
+        self.update_eta();
+        Ok(self)
+    }
+
     /// Update the linear predictor η and conditional mean μ.
     pub fn update_eta(&mut self) {
         let n = self.eta.len();
         let x = self.lmm.feterm.full_rank_x();
 
-        // η = X * β
-        self.eta = x * &self.beta;
+        // η = offset + X * β
+        self.eta = &self.offset + x * &self.beta;
 
         // Add random effects: η += Z_i * b_i
         for (i, rt) in self.lmm.reterms.iter().enumerate() {
@@ -387,11 +432,13 @@ impl GeneralizedLinearMixedModel {
         }
         self.update_eta();
 
-        // Save the initial accepted state for halving; the 1.0001 slack on
-        // obj0 matches Julia's tolerant first-iteration acceptance.
+        // Save the initial accepted state for halving. The 1.0001 slack is
+        // only an acceptance bound for the first step-halving loop; convergence
+        // is compared with the uninflated accepted objective.
         let mut u_prev: Vec<DMatrix<f64>> = self.u.clone();
         let mut beta_prev = self.beta.clone();
-        let mut obj0 = self.laplace_objective() * 1.0001;
+        let mut obj0 = self.laplace_objective();
+        let mut halving_bound = obj0 * 1.0001;
 
         let mut sqrtwts = vec![0.0f64; n];
         let mut working_y = vec![0.0f64; n];
@@ -408,13 +455,14 @@ impl GeneralizedLinearMixedModel {
                 } else {
                     self.wt[obs]
                 };
-                (sqrtwts[obs], working_y[obs]) = pirls_working_observation(
+                (sqrtwts[obs], working_y[obs]) = pirls_working_observation_with_offset(
                     self.family,
                     self.link,
                     y_obs,
                     eta_obs,
                     mu_obs,
                     case_w,
+                    self.offset[obs],
                 );
             }
 
@@ -437,7 +485,7 @@ impl GeneralizedLinearMixedModel {
             // --- Step-halving: average toward the previous accepted state
             //     until obj is no worse, up to `max_halvings` averagings. ---
             let mut nhalf = 0;
-            while obj > obj0 && nhalf < max_halvings {
+            while obj > halving_bound && nhalf < max_halvings {
                 nhalf += 1;
                 for i in 0..self.u.len() {
                     self.u[i] = 0.5 * (&self.u[i] + &u_prev[i]);
@@ -456,7 +504,7 @@ impl GeneralizedLinearMixedModel {
                 eprintln!("  PIRLS iter {iter}: obj = {obj:.6} (nhalf = {nhalf})");
             }
 
-            if (obj - obj0).abs() < tol {
+            if pirls_converged(obj, obj0, tol) {
                 break;
             }
 
@@ -466,7 +514,10 @@ impl GeneralizedLinearMixedModel {
             }
             beta_prev = self.beta.clone();
             obj0 = obj;
+            halving_bound = obj;
         }
+
+        self.refresh_dispersion();
 
         Ok(())
     }
@@ -633,22 +684,20 @@ impl GeneralizedLinearMixedModel {
         for j in 0..k {
             let idx = j * (j + 1) / 2 + j; // block_index(j, j)
             logdet += match &self.lmm.l_blocks[idx] {
-                crate::model::linear::MatrixBlock::Dense(m) => {
+                MatrixBlock::Dense(m) => {
                     let n = m.nrows().min(m.ncols());
                     (0..n).map(|i| m[(i, i)].abs().ln()).sum::<f64>()
                 }
-                crate::model::linear::MatrixBlock::Diagonal(v) => {
-                    v.iter().map(|x| x.abs().ln()).sum::<f64>()
-                }
-                crate::model::linear::MatrixBlock::BlockDiagonal(blocks) => blocks
+                MatrixBlock::Diagonal(v) => v.iter().map(|x| x.abs().ln()).sum::<f64>(),
+                MatrixBlock::BlockDiagonal(blocks) => blocks
                     .iter()
                     .map(|blk| {
                         let n = blk.nrows();
                         (0..n).map(|i| blk[(i, i)].abs().ln()).sum::<f64>()
                     })
                     .sum::<f64>(),
-                crate::model::linear::MatrixBlock::Sparse(m) => {
-                    let dense = crate::model::linear::MatrixBlock::Sparse(m.clone()).as_dense();
+                MatrixBlock::Sparse(m) => {
+                    let dense = MatrixBlock::Sparse(m.clone()).as_dense();
                     let n = dense.nrows().min(dense.ncols());
                     (0..n).map(|i| dense[(i, i)].abs().ln()).sum::<f64>()
                 }
@@ -659,7 +708,29 @@ impl GeneralizedLinearMixedModel {
 
     /// Fit the GLMM.
     pub fn fit(&mut self) -> Result<&mut Self> {
-        self.fit_with_options(false, 1, false)
+        self.fit_with_options(true, 1, false)
+    }
+
+    /// Refit the GLMM to a new response vector from the recorded initial θ.
+    ///
+    /// This mirrors Julia's `refit!` semantics for bootstrap and simulation
+    /// workflows: the optimizer starts from `optsum.initial`, not from the
+    /// previous optimum.
+    pub fn refit(&mut self, new_y: &[f64]) -> Result<&mut Self> {
+        let n_agq = self.lmm.optsum.n_agq.max(1);
+        self.refit_with_options(new_y, n_agq, false)
+    }
+
+    /// Refit the GLMM to a new response vector with an explicit AGQ setting.
+    pub fn refit_with_options(
+        &mut self,
+        new_y: &[f64],
+        n_agq: usize,
+        verbose: bool,
+    ) -> Result<&mut Self> {
+        self.validate_agq(n_agq)?;
+        self.reset_for_refit(Some(new_y))?;
+        self.fit_with_options(true, n_agq, verbose)
     }
 
     /// Fit after first applying a compiler policy.
@@ -673,6 +744,12 @@ impl GeneralizedLinearMixedModel {
 
     /// Fit with options.
     ///
+    /// `fast` selects the supported MixedModels.jl-style fast path, which
+    /// profiles over θ and updates β through PIRLS. `fast = false` is not
+    /// implemented yet because it requires a distinct joint `[β; θ]`
+    /// optimizer path; passing `false` returns [`MixedModelError::Unsupported`]
+    /// rather than silently using the fast path.
+    ///
     /// `n_agq` selects the deviance approximation: `1` (or `0`) means the
     /// Laplace approximation; values `>= 2` request `n_agq`-point adaptive
     /// Gauss-Hermite quadrature, which is only valid for models with a
@@ -680,21 +757,92 @@ impl GeneralizedLinearMixedModel {
     /// otherwise.
     pub fn fit_with_options(
         &mut self,
-        _fast: bool,
+        fast: bool,
         n_agq: usize,
-        _verbose: bool,
+        verbose: bool,
     ) -> Result<&mut Self> {
+        if !fast {
+            return Err(MixedModelError::Unsupported(
+                "GLMM fit_with_options(fast = false) is not implemented; \
+                 use fast = true for the current profiled-θ PIRLS path"
+                    .to_string(),
+            ));
+        }
         self.validate_agq(n_agq)?;
-        self.fit_with_options_impl(_fast, n_agq, _verbose)
+        if self.lmm.optsum.feval > 0 {
+            return Err(MixedModelError::AlreadyFitted);
+        }
+        self.fit_with_options_impl(n_agq, verbose)
+    }
+
+    fn reset_for_refit(&mut self, new_y: Option<&[f64]>) -> Result<()> {
+        if let Some(new_y) = new_y {
+            if new_y.len() != self.y.len() {
+                return Err(MixedModelError::InvalidArgument(format!(
+                    "Response length {} does not match model ({} observations)",
+                    new_y.len(),
+                    self.y.len()
+                )));
+            }
+            validate_glmm_response_domain(self.family, self.link, new_y)?;
+            let y_max = new_y.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let y_min = new_y.iter().copied().fold(f64::INFINITY, f64::min);
+            if (y_max - y_min) < f64::EPSILON {
+                return Err(MixedModelError::InvalidArgument(
+                    "response is constant; GLMM refit requires variation in the response"
+                        .to_string(),
+                ));
+            }
+
+            let p = self.lmm.feterm.rank;
+            for obs in 0..self.y.len() {
+                let sw = if self.lmm.sqrtwts.is_empty() {
+                    1.0
+                } else {
+                    self.lmm.sqrtwts[obs]
+                };
+                self.y[obs] = new_y[obs];
+                self.lmm.y[obs] = new_y[obs];
+                self.lmm.xy_mat.xy[(obs, p)] = new_y[obs];
+                self.lmm.xy_mat.wtxy[(obs, p)] = sw * new_y[obs];
+            }
+            self.lmm.recompute_a_blocks();
+        }
+
+        let initial_theta = self.lmm.optsum.initial.clone();
+        self.lmm.set_theta(&initial_theta)?;
+        self.lmm.update_l()?;
+        self.theta = initial_theta.clone();
+
+        self.beta = DVector::zeros(self.lmm.feterm.rank);
+        self.beta0 = self.beta.clone();
+        for u in &mut self.u {
+            u.fill(0.0);
+        }
+        for u0 in &mut self.u0 {
+            u0.fill(0.0);
+        }
+        for b in &mut self.b {
+            b.fill(0.0);
+        }
+        self.eta.fill(0.0);
+        self.mu.fill(0.0);
+        self.dispersion = 1.0;
+        self.update_eta();
+
+        self.lmm.optsum.finitial = f64::INFINITY;
+        self.lmm.optsum.final_params = initial_theta;
+        self.lmm.optsum.fmin = f64::INFINITY;
+        self.lmm.optsum.feval = 0;
+        self.lmm.optsum.return_value.clear();
+        self.lmm.optsum.fit_log.clear();
+        self.lmm.compiler_artifact.optimizer_certificate = None;
+        self.lmm.compiler_artifact.effective_covariance.clear();
+        Ok(())
     }
 
     #[cfg(not(feature = "nlopt"))]
-    fn fit_with_options_impl(
-        &mut self,
-        _fast: bool,
-        _n_agq: usize,
-        _verbose: bool,
-    ) -> Result<&mut Self> {
+    fn fit_with_options_impl(&mut self, _n_agq: usize, _verbose: bool) -> Result<&mut Self> {
         Err(MixedModelError::Optimization(
             "GLMM fitting currently requires the `nlopt` feature; \
              rebuild with default features (or `--features nlopt`) to fit \
@@ -705,17 +853,12 @@ impl GeneralizedLinearMixedModel {
     }
 
     #[cfg(feature = "nlopt")]
-    fn fit_with_options_impl(
-        &mut self,
-        _fast: bool,
-        n_agq: usize,
-        _verbose: bool,
-    ) -> Result<&mut Self> {
+    fn fit_with_options_impl(&mut self, n_agq: usize, _verbose: bool) -> Result<&mut Self> {
         use nlopt::{Algorithm as NloptAlgorithm, Nlopt, Target as NloptTarget};
 
         let n_theta = self.theta.len();
         let lb = self.lmm.lower_bounds();
-        let initial_theta = self.theta.clone();
+        let initial_theta = self.lmm.optsum.initial.clone();
 
         let mut feval_count: i64 = 0;
         let feval_ptr = &mut feval_count as *mut i64;
@@ -755,13 +898,7 @@ impl GeneralizedLinearMixedModel {
         let mut theta = initial_theta;
         let nlopt_result = optimizer.optimize(&mut theta);
 
-        // Final PIRLS at optimal θ
-        self.update_pirls_at_theta(&theta, true)?;
-        self.beta = self.lmm.beta();
-
-        self.lmm.optsum.n_agq = n_agq;
-        self.lmm.optsum.fmin = self.deviance(n_agq);
-        self.lmm.optsum.final_params = theta;
+        self.finalize_theta_after_optimizer(&mut theta, n_agq)?;
         self.lmm.optsum.return_value = match nlopt_result {
             Ok((status, _fmin)) => format!("{status:?}"),
             Err((status, _fmin)) => format!("FAILED:{status:?}"),
@@ -774,9 +911,26 @@ impl GeneralizedLinearMixedModel {
                 &self.lmm.lower_bounds(),
                 Some(self.lmm.dims.n),
             ));
+        self.refresh_binomial_separation_diagnostics();
         self.refresh_near_unit_random_effect_correlation_diagnostics();
 
         Ok(self)
+    }
+
+    #[cfg(feature = "nlopt")]
+    fn finalize_theta_after_optimizer(&mut self, theta: &mut Vec<f64>, n_agq: usize) -> Result<()> {
+        LinearMixedModel::rectify_theta_columns(theta, &self.lmm.parmap, self.lmm.reterms.len());
+
+        // Final PIRLS at optimal θ, after matching MixedModels.jl's
+        // post-optimizer sign convention for Cholesky columns.
+        self.update_pirls_at_theta(theta, true)?;
+        self.beta = self.lmm.beta();
+        self.refresh_dispersion();
+
+        self.lmm.optsum.n_agq = n_agq;
+        self.lmm.optsum.fmin = self.deviance(n_agq);
+        self.lmm.optsum.final_params = theta.clone();
+        Ok(())
     }
 
     #[cfg(feature = "nlopt")]
@@ -801,6 +955,35 @@ impl GeneralizedLinearMixedModel {
         }
         self.pirls(vary_beta, false)?;
         Ok(())
+    }
+
+    fn refresh_dispersion(&mut self) {
+        self.dispersion = self.estimated_dispersion_scale();
+    }
+
+    fn estimated_dispersion_scale(&self) -> f64 {
+        if !self.family.has_dispersion() {
+            return 1.0;
+        }
+
+        let pearson = self.pearson_dispersion_numerator();
+        let denom = self.y.len().saturating_sub(self.lmm.feterm.rank).max(1) as f64;
+        let variance = (pearson / denom).max(f64::MIN_POSITIVE);
+        variance.sqrt()
+    }
+
+    fn pearson_dispersion_numerator(&self) -> f64 {
+        let mut total = 0.0;
+        for obs in 0..self.y.len() {
+            let mu = self.mu[obs];
+            let variance = self.family.variance(mu);
+            if !variance.is_finite() || variance <= 0.0 {
+                continue;
+            }
+            let residual = self.y[obs] - mu;
+            total += self.case_weight(obs) * residual * residual / variance;
+        }
+        total
     }
 
     #[cfg(feature = "nlopt")]
@@ -880,6 +1063,85 @@ impl GeneralizedLinearMixedModel {
             certificate.diagnostics.extend(diagnostics);
         }
     }
+
+    #[cfg(feature = "nlopt")]
+    fn refresh_binomial_separation_diagnostics(&mut self) {
+        self.lmm
+            .compiler_artifact
+            .diagnostics
+            .retain(|diagnostic| diagnostic.code != DiagnosticCode::BinomialSeparation);
+        if let Some(certificate) = &mut self.lmm.compiler_artifact.optimizer_certificate {
+            certificate
+                .diagnostics
+                .retain(|diagnostic| diagnostic.code != DiagnosticCode::BinomialSeparation);
+        }
+
+        let diagnostics = self.conservative_binomial_separation_diagnostics();
+        if diagnostics.is_empty() {
+            return;
+        }
+
+        self.lmm
+            .compiler_artifact
+            .diagnostics
+            .extend(diagnostics.clone());
+        if let Some(certificate) = &mut self.lmm.compiler_artifact.optimizer_certificate {
+            certificate.diagnostics.extend(diagnostics);
+        }
+    }
+
+    #[cfg(feature = "nlopt")]
+    fn conservative_binomial_separation_diagnostics(&self) -> Vec<Diagnostic> {
+        if !matches!(self.family, Family::Bernoulli | Family::Binomial)
+            || self.link != LinkFunction::Logit
+            || !self.y.iter().all(|value| is_binary_response(*value))
+        {
+            return Vec::new();
+        }
+
+        let mut diagnostics = Vec::new();
+        for column_index in 0..self.lmm.feterm.rank {
+            let column_name = self
+                .lmm
+                .feterm
+                .cnames
+                .get(column_index)
+                .cloned()
+                .unwrap_or_else(|| format!("fixed_effect[{column_index}]"));
+            if is_intercept_column(&column_name) {
+                continue;
+            }
+
+            let column_values = self.lmm.feterm.x.column(column_index);
+            let Some(split) = binary_column_split(column_values.iter().copied()) else {
+                continue;
+            };
+
+            let low_counts = outcome_counts_for_value(
+                column_values.iter().copied(),
+                self.y.iter().copied(),
+                split.low,
+            );
+            let high_counts = outcome_counts_for_value(
+                column_values.iter().copied(),
+                self.y.iter().copied(),
+                split.high,
+            );
+
+            if let Some(diagnostic) =
+                separation_diagnostic_for_side(&column_name, split.low, low_counts, high_counts)
+            {
+                diagnostics.push(diagnostic);
+            }
+            if let Some(diagnostic) =
+                separation_diagnostic_for_side(&column_name, split.high, high_counts, low_counts)
+            {
+                diagnostics.push(diagnostic);
+            }
+        }
+
+        diagnostics
+    }
 }
 
 /// Diagonal entries of a [`MatrixBlock`].
@@ -889,8 +1151,7 @@ impl GeneralizedLinearMixedModel {
 /// so the variant logic is unit-testable without constructing a full LMM.
 ///
 /// For a `Dense` block this returns `min(nrows, ncols)` diagonal entries.
-fn matrix_block_diag(block: &crate::model::linear::MatrixBlock) -> Vec<f64> {
-    use crate::model::linear::MatrixBlock;
+fn matrix_block_diag(block: &MatrixBlock) -> Vec<f64> {
     match block {
         MatrixBlock::Dense(m) => {
             let n = m.nrows().min(m.ncols());
@@ -925,6 +1186,174 @@ fn lower_triangle_pair(offset: usize) -> (usize, usize) {
     (row, remaining)
 }
 
+#[cfg(feature = "nlopt")]
+#[derive(Debug, Clone, Copy)]
+struct BinaryColumnSplit {
+    low: f64,
+    high: f64,
+}
+
+#[cfg(feature = "nlopt")]
+#[derive(Debug, Clone, Copy)]
+struct OutcomeCounts {
+    n: usize,
+    successes: usize,
+    failures: usize,
+}
+
+#[cfg(feature = "nlopt")]
+fn is_binary_response(value: f64) -> bool {
+    (value - 0.0).abs() < 1e-12 || (value - 1.0).abs() < 1e-12
+}
+
+#[cfg(feature = "nlopt")]
+fn is_intercept_column(name: &str) -> bool {
+    matches!(name, "1" | "(Intercept)" | "Intercept" | "intercept")
+}
+
+#[cfg(feature = "nlopt")]
+fn binary_column_split(values: impl Iterator<Item = f64>) -> Option<BinaryColumnSplit> {
+    let mut unique = Vec::new();
+    for value in values {
+        if !value.is_finite() {
+            return None;
+        }
+        if unique
+            .iter()
+            .all(|seen: &f64| (value - *seen).abs() > 1e-12)
+        {
+            unique.push(value);
+            if unique.len() > 2 {
+                return None;
+            }
+        }
+    }
+    if unique.len() != 2 {
+        return None;
+    }
+    unique.sort_by(|a, b| a.total_cmp(b));
+    Some(BinaryColumnSplit {
+        low: unique[0],
+        high: unique[1],
+    })
+}
+
+#[cfg(feature = "nlopt")]
+fn outcome_counts_for_value(
+    values: impl Iterator<Item = f64>,
+    y: impl Iterator<Item = f64>,
+    target: f64,
+) -> OutcomeCounts {
+    let mut counts = OutcomeCounts {
+        n: 0,
+        successes: 0,
+        failures: 0,
+    };
+    for (value, response) in values.zip(y) {
+        if (value - target).abs() <= 1e-12 {
+            counts.n += 1;
+            if response > 0.5 {
+                counts.successes += 1;
+            } else {
+                counts.failures += 1;
+            }
+        }
+    }
+    counts
+}
+
+#[cfg(feature = "nlopt")]
+fn separation_diagnostic_for_side(
+    column_name: &str,
+    value: f64,
+    side: OutcomeCounts,
+    complement: OutcomeCounts,
+) -> Option<Diagnostic> {
+    if side.n == 0
+        || complement.n == 0
+        || !side_is_pure(side)
+        || !complement_has_opposite(side, complement)
+    {
+        return None;
+    }
+
+    let outcome = if side.successes == side.n { 1 } else { 0 };
+    let kind = if side_is_pure(complement) {
+        "complete_fixed_effect"
+    } else {
+        "quasi_complete_fixed_effect"
+    };
+    let rows = if side.n == 1 { "row" } else { "rows" };
+    let value_label = format_column_value(value);
+    let mut diagnostic = Diagnostic::new(
+        DiagnosticCode::BinomialSeparation,
+        DiagnosticSeverity::Warning,
+        DiagnosticStage::Certification,
+        format!(
+            "Possible separation in binomial model: `{column_name} = {value_label}` occurs in {} {rows}, and all such rows have y = {outcome}. The coefficient for `{column_name}` may be unbounded; standard errors, Wald tests, and p-values for this term are unreliable.",
+            side.n
+        ),
+    )
+    .with_affected_terms(vec![column_name.to_string()])
+    .with_suggested_actions(vec![
+        "inspect the corresponding rows or levels for sparse outcome support".to_string(),
+        "consider removing or combining rare predictors, or use penalized/Bayesian logistic mixed modeling".to_string(),
+        "report inference for this term as unreliable if the model is retained".to_string(),
+    ]);
+    diagnostic
+        .payload
+        .insert("term".to_string(), serde_json::json!(column_name));
+    diagnostic
+        .payload
+        .insert("value".to_string(), serde_json::json!(value));
+    diagnostic
+        .payload
+        .insert("n_at_value".to_string(), serde_json::json!(side.n));
+    diagnostic.payload.insert(
+        "successes_at_value".to_string(),
+        serde_json::json!(side.successes),
+    );
+    diagnostic.payload.insert(
+        "failures_at_value".to_string(),
+        serde_json::json!(side.failures),
+    );
+    diagnostic.payload.insert(
+        "complement_successes".to_string(),
+        serde_json::json!(complement.successes),
+    );
+    diagnostic.payload.insert(
+        "complement_failures".to_string(),
+        serde_json::json!(complement.failures),
+    );
+    diagnostic
+        .payload
+        .insert("separation_kind".to_string(), serde_json::json!(kind));
+    Some(diagnostic)
+}
+
+#[cfg(feature = "nlopt")]
+fn side_is_pure(counts: OutcomeCounts) -> bool {
+    counts.n > 0 && (counts.successes == counts.n || counts.failures == counts.n)
+}
+
+#[cfg(feature = "nlopt")]
+fn complement_has_opposite(side: OutcomeCounts, complement: OutcomeCounts) -> bool {
+    if side.successes == side.n {
+        complement.failures > 0
+    } else {
+        complement.successes > 0
+    }
+}
+
+#[cfg(feature = "nlopt")]
+fn format_column_value(value: f64) -> String {
+    if (value.round() - value).abs() < 1e-12 {
+        format!("{value:.0}")
+    } else {
+        format!("{value:.6}")
+    }
+}
+
 fn pirls_working_observation(
     family: Family,
     link: LinkFunction,
@@ -933,8 +1362,9 @@ fn pirls_working_observation(
     mu: f64,
     case_weight: f64,
 ) -> (f64, f64) {
-    let dmu_deta = link.mu_eta(eta);
-    let var_mu = family.variance(mu);
+    let (working_mu, eta_for_derivative) = bounded_pirls_mean_and_eta(family, link, mu, eta);
+    let dmu_deta = link.mu_eta(eta_for_derivative);
+    let var_mu = family.variance(working_mu);
     let weight = if dmu_deta.is_finite() && var_mu.is_finite() && var_mu > 0.0 {
         case_weight * dmu_deta * dmu_deta / var_mu
     } else {
@@ -943,14 +1373,97 @@ fn pirls_working_observation(
     let resid = if !dmu_deta.is_finite() || dmu_deta.abs() < 1e-15 {
         0.0
     } else {
-        (y - mu) / dmu_deta
+        (y - working_mu) / dmu_deta
     };
     (weight.max(0.0).sqrt(), eta + resid)
 }
 
-fn glmm_dispersion_family_requires_refusal(family: Family, link: LinkFunction) -> bool {
-    matches!(family, Family::Gamma | Family::InverseGaussian)
-        || (family == Family::Normal && link != LinkFunction::Identity)
+fn pirls_working_observation_with_offset(
+    family: Family,
+    link: LinkFunction,
+    y: f64,
+    eta: f64,
+    mu: f64,
+    case_weight: f64,
+    offset: f64,
+) -> (f64, f64) {
+    let (sqrt_weight, working_response) =
+        pirls_working_observation(family, link, y, eta, mu, case_weight);
+    (sqrt_weight, working_response - offset)
+}
+
+fn bounded_pirls_mean_and_eta(family: Family, link: LinkFunction, mu: f64, eta: f64) -> (f64, f64) {
+    const BOUNDED_MEAN_EPS: f64 = 1e-15;
+    const LOG_LINK_ETA_BOUND: f64 = 30.0;
+    if matches!(family, Family::Bernoulli | Family::Binomial) {
+        let bounded_mu = mu.clamp(BOUNDED_MEAN_EPS, 1.0 - BOUNDED_MEAN_EPS);
+        (bounded_mu, link.link(bounded_mu))
+    } else if family == Family::Poisson && link == LinkFunction::Log {
+        let bounded_eta = eta.clamp(-LOG_LINK_ETA_BOUND, LOG_LINK_ETA_BOUND);
+        (bounded_eta.exp(), bounded_eta)
+    } else {
+        (mu, eta)
+    }
+}
+
+fn pirls_converged(obj: f64, accepted_obj: f64, tol: f64) -> bool {
+    (obj - accepted_obj).abs() < tol
+}
+
+fn validate_case_weights(weights: &[f64], n_obs: usize) -> Result<()> {
+    if weights.len() != n_obs {
+        return Err(MixedModelError::InvalidArgument(format!(
+            "case weights length ({}) does not match number of observations ({n_obs})",
+            weights.len()
+        )));
+    }
+    for (i, &w) in weights.iter().enumerate() {
+        if !w.is_finite() || w <= 0.0 {
+            return Err(MixedModelError::InvalidArgument(format!(
+                "case weight at index {i} must be finite and positive (got {w})"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_offset(offset: &[f64], n_obs: usize) -> Result<()> {
+    if offset.len() != n_obs {
+        return Err(MixedModelError::InvalidArgument(format!(
+            "offset length ({}) does not match number of observations ({n_obs})",
+            offset.len()
+        )));
+    }
+    for (idx, &value) in offset.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(MixedModelError::InvalidArgument(format!(
+                "offset at index {idx} must be finite (got {value})"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_glmm_response_domain(family: Family, link: LinkFunction, y: &[f64]) -> Result<()> {
+    for (idx, &value) in y.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(MixedModelError::InvalidArgument(format!(
+                "response at index {idx} must be finite for GLMM construction (got {value})"
+            )));
+        }
+        if matches!(family, Family::Gamma | Family::InverseGaussian) && value <= 0.0 {
+            return Err(MixedModelError::InvalidArgument(format!(
+                "{} GLMM response must be strictly positive; index {idx} has {value}",
+                family_label(family)
+            )));
+        }
+        if family == Family::Normal && link == LinkFunction::Sqrt && value < 0.0 {
+            return Err(MixedModelError::InvalidArgument(format!(
+                "gaussian GLMM with sqrt link requires non-negative responses; index {idx} has {value}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn family_label(family: Family) -> &'static str {
@@ -1062,12 +1575,10 @@ impl MixedModelFit for GeneralizedLinearMixedModel {
     }
 
     fn dispersion(&self, sqr: bool) -> f64 {
-        if self.family.has_dispersion() {
-            self.lmm.dispersion(sqr)
-        } else if sqr {
-            1.0
+        if sqr {
+            self.dispersion * self.dispersion
         } else {
-            1.0
+            self.dispersion
         }
     }
 
@@ -1096,6 +1607,89 @@ mod tests {
     #[cfg(feature = "nlopt")]
     use approx::assert_relative_eq;
 
+    #[cfg(feature = "nlopt")]
+    fn assert_glmm_theta_diagonals_nonnegative(model: &GeneralizedLinearMixedModel) {
+        for (idx, &(_, row, col)) in model.lmm.parmap.iter().enumerate() {
+            if row == col {
+                assert!(
+                    model.theta[idx] >= 0.0,
+                    "GLMM theta diagonal {idx} should be rectified, got {}",
+                    model.theta[idx]
+                );
+                assert_eq!(
+                    model.lmm.optsum.final_params[idx], model.theta[idx],
+                    "GLMM OptSummary must store the rectified theta value"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "nlopt")]
+    fn resampled_contra_response(data: &DataFrame) -> Vec<f64> {
+        data.numeric("use_num")
+            .unwrap()
+            .iter()
+            .enumerate()
+            .map(
+                |(idx, &value)| {
+                    if idx % 11 == 0 {
+                        1.0 - value
+                    } else {
+                        value
+                    }
+                },
+            )
+            .collect()
+    }
+
+    #[cfg(feature = "nlopt")]
+    fn refit_cold_contra_model(new_y: &[f64]) -> GeneralizedLinearMixedModel {
+        let mut data = contra_fixture();
+        data.add_numeric("use_num", new_y.to_vec()).unwrap();
+        let formula =
+            parse_formula("use_num ~ 1 + age + age2 + urban + livch + (1 | urban_dist)").unwrap();
+        let mut model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+        model.fit_with_options(true, 1, false).unwrap();
+        model
+    }
+
+    #[cfg(feature = "nlopt")]
+    fn glmm_retained_state_slots(model: &GeneralizedLinearMixedModel) -> usize {
+        let matrix_slots = |matrix: &DMatrix<f64>| matrix.nrows() * matrix.ncols();
+        let block_slots = |block: &MatrixBlock| block.nrows() * block.ncols();
+
+        model.beta.len()
+            + model.beta0.len()
+            + model.theta.capacity()
+            + model.b.iter().map(matrix_slots).sum::<usize>()
+            + model.u.iter().map(matrix_slots).sum::<usize>()
+            + model.u0.iter().map(matrix_slots).sum::<usize>()
+            + model.eta.len()
+            + model.mu.len()
+            + model.y.len()
+            + model.offset.len()
+            + model.wt.capacity()
+            + model.devc.capacity()
+            + model.devc0.capacity()
+            + model.sd.capacity()
+            + model.mult.capacity()
+            + model.lmm.y.len()
+            + matrix_slots(&model.lmm.xy_mat.xy)
+            + matrix_slots(&model.lmm.xy_mat.wtxy)
+            + model
+                .lmm
+                .reterms
+                .iter()
+                .map(|rt| matrix_slots(&rt.z) + matrix_slots(&rt.wtz) + matrix_slots(&rt.lambda))
+                .sum::<usize>()
+            + model.lmm.a_blocks.iter().map(block_slots).sum::<usize>()
+            + model.lmm.l_blocks.iter().map(block_slots).sum::<usize>()
+            + model.lmm.optsum.initial.capacity()
+            + model.lmm.optsum.final_params.capacity()
+            + model.lmm.optsum.fit_log.capacity()
+    }
+
     #[test]
     fn test_gamma_pirls_components_are_link_specific() {
         let eta = 2.0_f64.ln();
@@ -1123,7 +1717,183 @@ mod tests {
     }
 
     #[test]
-    fn test_glmm_constructor_rejects_gamma_until_dispersion_supported() {
+    fn test_pirls_no_iter0_break_on_first_step_halving_slack() {
+        let accepted_obj = 100.0_f64;
+        let old_inflated_reference = accepted_obj * 1.0001;
+        let first_step_obj = old_inflated_reference + 0.5e-5;
+        let tol = 1e-5_f64;
+
+        assert!(
+            (first_step_obj - old_inflated_reference).abs() < tol,
+            "this is the old false-convergence case when the halving slack is reused"
+        );
+        assert!(
+            !pirls_converged(first_step_obj, accepted_obj, tol),
+            "PIRLS convergence must compare against the uninflated accepted objective"
+        );
+        assert!(pirls_converged(accepted_obj + tol * 0.5, accepted_obj, tol));
+    }
+
+    #[test]
+    fn test_pirls_handles_bernoulli_near_separation() {
+        let (sqrtw_low, z_low) = pirls_working_observation(
+            Family::Bernoulli,
+            LinkFunction::Logit,
+            0.0,
+            -1000.0,
+            0.0,
+            1.0,
+        );
+        let (sqrtw_high, z_high) =
+            pirls_working_observation(Family::Bernoulli, LinkFunction::Log, 1.0, 1000.0, 1.0, 1.0);
+
+        assert!(sqrtw_low.is_finite());
+        assert!(z_low.is_finite());
+        assert!(sqrtw_high.is_finite());
+        assert!(z_high.is_finite());
+        assert!(
+            sqrtw_high < 4.0e7,
+            "clamped Bernoulli variance should keep sqrt weight bounded, got {sqrtw_high}"
+        );
+    }
+
+    #[test]
+    fn test_pirls_no_inf_weight_under_logit() {
+        for (y, eta, mu) in [(0.0, -1000.0, 0.0), (1.0, 1000.0, 1.0)] {
+            let (sqrtw, z) =
+                pirls_working_observation(Family::Binomial, LinkFunction::Logit, y, eta, mu, 25.0);
+            assert!(sqrtw.is_finite());
+            assert!(z.is_finite());
+        }
+    }
+
+    #[test]
+    fn test_glmm_offset_enters_linear_predictor() {
+        let data = constant_response_fixture(vec![0.0, 1.0, 0.0, 1.0]);
+        let formula = parse_formula("y ~ 1 + (1 | g)").unwrap();
+        let offset = vec![0.1, -0.2, 0.3, -0.4];
+
+        let model = GeneralizedLinearMixedModel::new_with_offset(
+            formula,
+            &data,
+            Family::Bernoulli,
+            None,
+            offset.clone(),
+        )
+        .unwrap();
+
+        for (idx, want) in offset.iter().enumerate() {
+            assert!((model.offset[idx] - want).abs() < 1e-12);
+            assert!((model.eta[idx] - want).abs() < 1e-12);
+            assert!((model.mu[idx] - LinkFunction::Logit.linkinv(*want)).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn test_glmm_offset_validation() {
+        let data = constant_response_fixture(vec![0.0, 1.0, 0.0, 1.0]);
+        let formula = parse_formula("y ~ 1 + (1 | g)").unwrap();
+
+        let err = GeneralizedLinearMixedModel::new_with_offset(
+            formula,
+            &data,
+            Family::Bernoulli,
+            None,
+            vec![0.0],
+        )
+        .unwrap_err();
+
+        match err {
+            MixedModelError::InvalidArgument(message) => {
+                assert!(message.contains("offset length"));
+                assert!(message.contains("number of observations"));
+            }
+            other => panic!("expected InvalidArgument error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_pirls_working_response_subtracts_offset() {
+        let eta = 1.25_f64;
+        let mu = eta.exp();
+        let offset = -0.75_f64;
+        let (sqrtw_plain, z_plain) =
+            pirls_working_observation(Family::Poisson, LinkFunction::Log, 3.0, eta, mu, 2.0);
+        let (sqrtw_offset, z_offset) = pirls_working_observation_with_offset(
+            Family::Poisson,
+            LinkFunction::Log,
+            3.0,
+            eta,
+            mu,
+            2.0,
+            offset,
+        );
+
+        assert!((sqrtw_offset - sqrtw_plain).abs() < 1e-12);
+        assert!((z_offset - (z_plain - offset)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_pirls_handles_poisson_log_extreme_offset_scale() {
+        for (y, eta, mu) in [
+            (0.0, -1000.0, 0.0),
+            (1.0, -1000.0, 0.0),
+            (0.0, 1000.0, f64::INFINITY),
+            (1.0, 1000.0, f64::INFINITY),
+        ] {
+            let (sqrtw, z) =
+                pirls_working_observation(Family::Poisson, LinkFunction::Log, y, eta, mu, 1.0);
+
+            assert!(sqrtw.is_finite(), "sqrt weight was {sqrtw}");
+            assert!(sqrtw > 0.0, "sqrt weight should stay positive");
+            assert!(sqrtw < 4.0e6, "sqrt weight was {sqrtw}");
+            assert!(z.is_finite(), "working response was {z}");
+        }
+    }
+
+    fn gamma_dispersion_fixture() -> DataFrame {
+        let mut y = Vec::new();
+        let mut x = Vec::new();
+        let mut group = Vec::new();
+        let group_effects = [-0.25, 0.1, 0.3, -0.15];
+        for g in 0..4 {
+            for obs in 0..5 {
+                let xv = obs as f64 - 2.0;
+                let eta = 1.2 + 0.25 * xv + group_effects[g];
+                let wiggle = 1.0 + 0.06 * ((g + obs) % 3) as f64;
+                y.push(eta.exp() * wiggle);
+                x.push(xv);
+                group.push(format!("g{}", g + 1));
+            }
+        }
+
+        let mut data = DataFrame::new();
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_categorical("group", group).unwrap();
+        data
+    }
+
+    #[test]
+    fn test_glmm_constructor_accepts_gamma_with_positive_response() {
+        let data = gamma_dispersion_fixture();
+        let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
+
+        let model = GeneralizedLinearMixedModel::new(
+            formula,
+            &data,
+            Family::Gamma,
+            Some(LinkFunction::Log),
+        )
+        .unwrap();
+
+        assert_eq!(model.family, Family::Gamma);
+        assert_eq!(model.dispersion(false), 1.0);
+        assert_eq!(model.dispersion(true), 1.0);
+    }
+
+    #[test]
+    fn test_glmm_constructor_rejects_nonpositive_gamma_response() {
         let data = contra_fixture();
         let formula = parse_formula("use_num ~ 1 + (1 | urban_dist)").unwrap();
         let err = GeneralizedLinearMixedModel::new(
@@ -1132,39 +1902,158 @@ mod tests {
             Family::Gamma,
             Some(LinkFunction::Log),
         )
-        .expect_err("Gamma GLMM should be refused until dispersion support lands");
+        .expect_err("Gamma GLMM should reject zero responses");
 
         match err {
-            MixedModelError::Unsupported(msg) => {
+            MixedModelError::InvalidArgument(msg) => {
                 assert!(msg.contains("gamma"));
-                assert!(msg.contains("log"));
-                assert!(msg.contains("dispersion"));
-                assert!(msg.contains("not implemented"));
+                assert!(msg.contains("strictly positive"));
             }
-            other => panic!("expected Unsupported error, got {other:?}"),
+            other => panic!("expected InvalidArgument error, got {other:?}"),
         }
     }
 
     #[test]
-    fn test_glmm_constructor_rejects_normal_nonidentity_until_dispersion_supported() {
-        let data = contra_fixture();
-        let formula = parse_formula("use_num ~ 1 + (1 | urban_dist)").unwrap();
-        let err = GeneralizedLinearMixedModel::new(
+    fn test_gamma_glmm_refit_rejects_nonpositive_response() {
+        let data = gamma_dispersion_fixture();
+        let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
+        let mut model = GeneralizedLinearMixedModel::new(
+            formula,
+            &data,
+            Family::Gamma,
+            Some(LinkFunction::Log),
+        )
+        .unwrap();
+        let mut new_y = data.numeric("y").unwrap().to_vec();
+        new_y[0] = 0.0;
+
+        let err = model
+            .refit(&new_y)
+            .expect_err("Gamma GLMM refit/bootstrap response must stay strictly positive");
+
+        match err {
+            MixedModelError::InvalidArgument(msg) => {
+                assert!(msg.contains("gamma"));
+                assert!(msg.contains("strictly positive"));
+            }
+            other => panic!("expected InvalidArgument error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_glmm_constructor_accepts_normal_nonidentity_dispersion_family() {
+        let data = gamma_dispersion_fixture();
+        let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
+
+        let model = GeneralizedLinearMixedModel::new(
             formula,
             &data,
             Family::Normal,
             Some(LinkFunction::Sqrt),
         )
-        .expect_err("Normal GLMM with non-identity link should be refused");
+        .unwrap();
+
+        assert_eq!(model.family, Family::Normal);
+        assert_eq!(model.link, LinkFunction::Sqrt);
+        assert_eq!(model.dispersion(false), 1.0);
+    }
+
+    #[test]
+    #[cfg(feature = "nlopt")]
+    fn test_gamma_glmm_fit_estimates_pearson_dispersion() {
+        let data = gamma_dispersion_fixture();
+        let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
+        let mut model = GeneralizedLinearMixedModel::new(
+            formula,
+            &data,
+            Family::Gamma,
+            Some(LinkFunction::Log),
+        )
+        .unwrap();
+
+        model.fit_with_options(true, 1, false).unwrap();
+
+        let sigma = model.dispersion(false);
+        let phi = model.dispersion(true);
+        let expected_phi =
+            model.pearson_dispersion_numerator() / (model.nobs() - model.lmm.feterm.rank) as f64;
+
+        assert!(sigma.is_finite());
+        assert!(sigma > 0.0);
+        assert_relative_eq!(phi, sigma * sigma, epsilon = 1e-12);
+        assert_relative_eq!(phi, expected_phi, epsilon = 1e-12, max_relative = 1e-12);
+        assert_eq!(
+            model.dof(),
+            model.lmm.feterm.rank + model.lmm.parmap.len() + 1
+        );
+        assert_relative_eq!(model.varcorr().residual_sd.unwrap(), sigma, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_glmm_fast_parameter_documented_or_implemented() {
+        let data = contra_fixture();
+        let formula = parse_formula("use_num ~ 1 + (1 | urban_dist)").unwrap();
+        let mut model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+
+        let err = model.fit_with_options(false, 1, false).unwrap_err();
 
         match err {
-            MixedModelError::Unsupported(msg) => {
-                assert!(msg.contains("gaussian"));
-                assert!(msg.contains("sqrt"));
-                assert!(msg.contains("dispersion"));
+            MixedModelError::Unsupported(message) => {
+                assert!(message.contains("fast = false"));
+                assert!(message.contains("not implemented"));
             }
             other => panic!("expected Unsupported error, got {other:?}"),
         }
+    }
+
+    fn constant_response_fixture(y: Vec<f64>) -> DataFrame {
+        let mut data = DataFrame::new();
+        data.add_numeric("y", y).unwrap();
+        data.add_categorical(
+            "g",
+            vec![
+                "a".to_string(),
+                "a".to_string(),
+                "b".to_string(),
+                "b".to_string(),
+            ],
+        )
+        .unwrap();
+        data
+    }
+
+    fn assert_constant_response_rejected(family: Family, y: Vec<f64>) {
+        let data = constant_response_fixture(y);
+        let formula = parse_formula("y ~ 1 + (1 | g)").unwrap();
+
+        let err = GeneralizedLinearMixedModel::new(formula, &data, family, None).unwrap_err();
+
+        match err {
+            MixedModelError::InvalidArgument(message) => {
+                assert!(message.contains("response is constant"));
+            }
+            other => panic!("expected InvalidArgument error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_glmm_rejects_constant_response_bernoulli() {
+        assert_constant_response_rejected(Family::Bernoulli, vec![0.0, 0.0, 0.0, 0.0]);
+        assert_constant_response_rejected(Family::Bernoulli, vec![1.0, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn test_glmm_rejects_constant_response_poisson() {
+        assert_constant_response_rejected(Family::Poisson, vec![3.0, 3.0, 3.0, 3.0]);
+    }
+
+    #[test]
+    fn test_glmm_accepts_near_constant() {
+        let data = constant_response_fixture(vec![0.0, 0.0, 0.0, 1.0]);
+        let formula = parse_formula("y ~ 1 + (1 | g)").unwrap();
+
+        GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
     }
 
     /// Build a DataFrame from the embedded contra.csv.
@@ -1191,12 +2080,12 @@ mod tests {
         }
 
         let mut df = DataFrame::new();
-        df.add_numeric("use_num", use_num);
-        df.add_numeric("age", age);
-        df.add_numeric("age2", age2);
-        df.add_categorical("urban", urban);
-        df.add_categorical("livch", livch);
-        df.add_categorical("urban_dist", urban_dist);
+        df.add_numeric("use_num", use_num).unwrap();
+        df.add_numeric("age", age).unwrap();
+        df.add_numeric("age2", age2).unwrap();
+        df.add_categorical("urban", urban).unwrap();
+        df.add_categorical("livch", livch).unwrap();
+        df.add_categorical("urban_dist", urban_dist).unwrap();
         df
     }
 
@@ -1256,7 +2145,9 @@ mod tests {
         let weights: Vec<f64> = size.to_vec();
 
         let mut data_with_proportion = data.clone();
-        data_with_proportion.add_numeric("proportion", proportion);
+        data_with_proportion
+            .add_numeric("proportion", proportion)
+            .unwrap();
 
         let formula = parse_formula("proportion ~ 1 + period + (1 | herd)").unwrap();
 
@@ -1296,7 +2187,9 @@ mod tests {
         let weights: Vec<f64> = size.to_vec();
 
         let mut data_with_proportion = data.clone();
-        data_with_proportion.add_numeric("proportion", proportion);
+        data_with_proportion
+            .add_numeric("proportion", proportion)
+            .unwrap();
 
         let formula = parse_formula("proportion ~ 1 + period + (1 | herd)").unwrap();
         let mut model = GeneralizedLinearMixedModel::new_with_weights(
@@ -1399,7 +2292,7 @@ mod tests {
         // on the (1,1) Cholesky block. Contra exercises one variant in
         // practice; this guards the other two so refactors of the L block
         // layout can't silently break AGQ.
-        use crate::model::linear::MatrixBlock;
+        use crate::types::MatrixBlock;
         use nalgebra::{DMatrix, DVector};
 
         let diag = MatrixBlock::Diagonal(DVector::from_vec(vec![1.0, 2.0, 3.0]));
@@ -1539,6 +2432,118 @@ mod tests {
 
     #[cfg(feature = "nlopt")]
     #[test]
+    fn test_glmm_refit_resets_theta_to_initial() {
+        let data = contra_fixture();
+        let formula =
+            parse_formula("use_num ~ 1 + age + age2 + urban + livch + (1 | urban_dist)").unwrap();
+        let mut model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+        let initial_theta = model.lmm.optsum.initial.clone();
+
+        model.fit_with_options(true, 1, false).unwrap();
+        assert!(
+            (model.theta[0] - initial_theta[0]).abs() > 1e-6,
+            "fixture should move away from its starting theta"
+        );
+
+        let new_y = resampled_contra_response(&data);
+        model.reset_for_refit(Some(&new_y)).unwrap();
+
+        assert_eq!(model.theta, initial_theta);
+        assert_eq!(model.lmm.optsum.final_params, initial_theta);
+        assert_eq!(model.lmm.optsum.feval, 0);
+        assert!(model.lmm.optsum.return_value.is_empty());
+    }
+
+    #[cfg(feature = "nlopt")]
+    #[test]
+    fn test_glmm_bootstrap_does_not_warm_start() {
+        let data = contra_fixture();
+        let formula =
+            parse_formula("use_num ~ 1 + age + age2 + urban + livch + (1 | urban_dist)").unwrap();
+        let mut model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+        let initial_theta = model.lmm.optsum.initial.clone();
+        model.fit_with_options(true, 1, false).unwrap();
+        let fitted_theta = model.theta.clone();
+
+        let err = model
+            .fit_with_options(true, 1, false)
+            .expect_err("plain fit_with_options must not silently warm-start a fitted GLMM");
+        assert!(matches!(err, MixedModelError::AlreadyFitted));
+
+        let new_y = resampled_contra_response(&data);
+        model.reset_for_refit(Some(&new_y)).unwrap();
+        assert_eq!(
+            model.theta, initial_theta,
+            "bootstrap/refit reset must ignore the previous optimum"
+        );
+        assert_ne!(model.theta, fitted_theta);
+    }
+
+    #[cfg(feature = "nlopt")]
+    #[test]
+    fn test_glmm_refit_after_resample_matches_cold_fit() {
+        let data = contra_fixture();
+        let formula =
+            parse_formula("use_num ~ 1 + age + age2 + urban + livch + (1 | urban_dist)").unwrap();
+        let mut warm_model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+        warm_model.fit_with_options(true, 1, false).unwrap();
+
+        let new_y = resampled_contra_response(&data);
+        warm_model.refit(&new_y).unwrap();
+        let cold_model = refit_cold_contra_model(&new_y);
+
+        assert_relative_eq!(warm_model.theta[0], cold_model.theta[0], epsilon = 1e-8);
+        assert_relative_eq!(
+            warm_model.lmm.optsum.fmin,
+            cold_model.lmm.optsum.fmin,
+            epsilon = 1e-8
+        );
+        for (warm, cold) in warm_model.beta.iter().zip(cold_model.beta.iter()) {
+            assert_relative_eq!(warm, cold, epsilon = 1e-8);
+        }
+    }
+
+    #[cfg(feature = "nlopt")]
+    #[test]
+    fn test_glmm_repeated_refit_does_not_accumulate_retained_state() {
+        let data = contra_fixture();
+        let formula =
+            parse_formula("use_num ~ 1 + age + age2 + urban + livch + (1 | urban_dist)").unwrap();
+        let original_y = data.numeric("use_num").unwrap().to_vec();
+        let perturbed_y = resampled_contra_response(&data);
+        let mut model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+        model.fit_with_options(true, 1, false).unwrap();
+
+        let baseline_slots = glmm_retained_state_slots(&model);
+        let baseline_fit_log_capacity = model.lmm.optsum.fit_log.capacity();
+
+        for iteration in 0..8 {
+            let y = if iteration % 2 == 0 {
+                &perturbed_y
+            } else {
+                &original_y
+            };
+            model.refit(y).unwrap();
+
+            assert_eq!(
+                glmm_retained_state_slots(&model),
+                baseline_slots,
+                "GLMM refit should reuse bounded work buffers rather than accumulating retained state"
+            );
+            assert_eq!(
+                model.lmm.optsum.fit_log.capacity(),
+                baseline_fit_log_capacity,
+                "GLMM optimizer logging must not retain one entry per refit iteration"
+            );
+        }
+    }
+
+    #[cfg(feature = "nlopt")]
+    #[test]
     fn test_glmm_theta_probe_penalizes_invalid_theta() {
         let data = contra_fixture();
         let formula =
@@ -1566,6 +2571,25 @@ mod tests {
             .update_pirls_at_theta(&[f64::NAN], true)
             .expect_err("final theta update must propagate invalid-theta errors");
         assert!(matches!(err, MixedModelError::InvalidArgument(_)));
+    }
+
+    #[cfg(feature = "nlopt")]
+    #[test]
+    fn test_glmm_rectify_after_fit() {
+        let data = contra_fixture();
+        let formula =
+            parse_formula("use_num ~ 1 + age2 + urban + livch + (1 + age | urban_dist)").unwrap();
+        let mut model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+        let mut theta = vec![-0.5, 0.05, -0.25];
+
+        model.finalize_theta_after_optimizer(&mut theta, 1).unwrap();
+
+        assert_eq!(theta, vec![0.5, -0.05, 0.25]);
+        assert_eq!(model.theta, theta);
+        assert_eq!(model.lmm.optsum.final_params, theta);
+        assert!(model.lmm.optsum.fmin.is_finite());
+        assert_glmm_theta_diagonals_nonnegative(&model);
     }
 
     #[cfg(feature = "nlopt")]

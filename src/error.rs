@@ -35,11 +35,17 @@ pub enum MixedModelError {
     #[error("Unsupported model: {0}")]
     Unsupported(String),
 
+    #[error("Unsupported family/link combination: {family}/{link}")]
+    UnsupportedFamilyLink { family: String, link: String },
+
     #[error("Problem too large: {0}")]
     ProblemTooLarge(String),
 
     #[error("Singular model: {0}")]
     Singular(String),
+
+    #[error("Fixed-effect design is rank-saturated: rank(X) = {rank} and n = {nobs}, leaving zero residual degrees of freedom. Ordinary unpenalized LMM fitting is not identifiable; use fewer fixed effects or an explicit penalized/MAP fixed-effect prior.")]
+    RankSaturatedFixedEffects { rank: usize, nobs: usize },
 
     #[error("Positive definite exception during Cholesky")]
     PosDefException,

@@ -624,8 +624,10 @@ mod tests {
     #[test]
     fn test_from_linear_model_adds_random_effect_only_rows() {
         let mut data = DataFrame::new();
-        data.add_numeric("y", vec![2.0, 2.5, 3.0, 3.2, 4.0, 4.4, 5.0, 5.1]);
-        data.add_numeric("x", vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
+        data.add_numeric("y", vec![2.0, 2.5, 3.0, 3.2, 4.0, 4.4, 5.0, 5.1])
+            .unwrap();
+        data.add_numeric("x", vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0])
+            .unwrap();
         data.add_categorical(
             "g",
             vec![
@@ -638,7 +640,8 @@ mod tests {
                 "d".to_string(),
                 "d".to_string(),
             ],
-        );
+        )
+        .unwrap();
 
         let formula = parse_formula("y ~ 1 + (1 + x | g)").unwrap();
         let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
@@ -673,8 +676,10 @@ mod tests {
     #[test]
     fn test_from_generalized_model_omits_residual_for_bernoulli() {
         let mut data = DataFrame::new();
-        data.add_numeric("y", vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
-        data.add_numeric("x", vec![-1.0, -0.5, 0.0, 0.5, 1.0, 1.5]);
+        data.add_numeric("y", vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0])
+            .unwrap();
+        data.add_numeric("x", vec![-1.0, -0.5, 0.0, 0.5, 1.0, 1.5])
+            .unwrap();
         data.add_categorical(
             "g",
             vec![
@@ -685,7 +690,8 @@ mod tests {
                 "c".to_string(),
                 "c".to_string(),
             ],
-        );
+        )
+        .unwrap();
 
         let formula = parse_formula("y ~ 1 + x + (1 | g)").unwrap();
         let mut model = GeneralizedLinearMixedModel::new(

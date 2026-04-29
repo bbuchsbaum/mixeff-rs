@@ -102,7 +102,9 @@ impl MixedModelProfile {
 
         let mut rows = Vec::with_capacity(self.rev.len());
         for (name, spline) in &self.rev {
-            let estimate = spline.eval(0.0);
+            let estimate = self
+                .profile_estimate(name)
+                .unwrap_or_else(|| spline.eval(0.0));
             let mut lower = spline.eval(-cutoff);
             let mut upper = spline.eval(cutoff);
             if lower > upper {
@@ -110,6 +112,11 @@ impl MixedModelProfile {
             }
             if lower < 0.0 && self.profile_touches_nonnegative_boundary(name) {
                 lower = 0.0;
+            }
+            if lower > estimate || upper < estimate {
+                return Err(MixedModelError::Optimization(format!(
+                    "confint for {name}: profile interval [{lower}, {upper}] does not bracket estimate {estimate}"
+                )));
             }
             rows.push(ConfintRow {
                 parameter: name.clone(),
@@ -142,6 +149,14 @@ impl MixedModelProfile {
         };
         values.iter().all(|value| *value >= -1e-12)
             && values.iter().any(|value| value.abs() < 1e-10)
+    }
+
+    fn profile_estimate(&self, parameter: &str) -> Option<f64> {
+        self.tbl
+            .iter()
+            .filter(|row| row.p == parameter)
+            .min_by(|left, right| left.zeta.abs().partial_cmp(&right.zeta.abs()).unwrap())
+            .and_then(|row| profile_row_parameter_value(row, parameter))
     }
 
     fn parameter_values(&self, parameter: &str) -> Option<Vec<f64>> {
@@ -179,6 +194,19 @@ fn parameter_index(parameter: &str, prefix: char) -> Option<usize> {
         .parse::<usize>()
         .ok()?
         .checked_sub(1)
+}
+
+fn profile_row_parameter_value(row: &ProfileRow, parameter: &str) -> Option<f64> {
+    if parameter == "σ" {
+        return Some(row.sigma);
+    }
+    if let Some(index) = parameter_index(parameter, 'β') {
+        return row.beta.get(index).copied();
+    }
+    if let Some(index) = parameter_index(parameter, 'θ') {
+        return row.theta.get(index).copied();
+    }
+    None
 }
 
 // ===========================================================================
@@ -294,6 +322,7 @@ pub fn profile_sigma(m: &mut LinearMixedModel, threshold: f64) -> Result<MixedMo
     debug_assert!(facsz.is_finite() && facsz > 1.0);
 
     // ----- Walk the negative ζ side (σ decreasing) -----
+    let sigma_min = 1e-6 * sigma_hat;
     let mut sigma_v = sigma_hat / facsz;
     let max_points = 60;
     let mut iter = 0;
@@ -302,14 +331,18 @@ pub fn profile_sigma(m: &mut LinearMixedModel, threshold: f64) -> Result<MixedMo
         if iter > max_points {
             break;
         }
+        if sigma_v <= sigma_min {
+            break;
+        }
         let zeta = refit_at_sigma(m, &mut rows, sigma_v, true)?;
         if zeta <= -threshold {
             break;
         }
-        sigma_v /= facsz;
-        if sigma_v <= 0.0 {
+        let next_sigma = sigma_v / facsz;
+        if next_sigma <= sigma_min {
             break;
         }
+        sigma_v = next_sigma;
     }
 
     // At this point `rows` has [estimate, neg1, neg2, ...]. Sort by σ so the
@@ -459,15 +492,7 @@ pub fn profile_theta(
         let mut probe_start = theta_hat_vector.clone();
         let (_, obj) =
             optimize_theta_profile_point(m, index, probe, &mut probe_start, &lower_bounds)?;
-        let delta = (obj - obj_hat).max(0.0);
-        if delta <= 0.0 {
-            1.05
-        } else {
-            ((probe - theta_hat).abs() / (2.0 * delta.sqrt()))
-                .exp()
-                .max(1.01)
-                .min(1.25)
-        }
+        theta_profile_step_factor_from_probe(theta_hat, probe, obj_hat, obj)
     };
 
     let max_points = 60;
@@ -555,6 +580,48 @@ fn next_theta_profile_value(
         current * factor
     } else {
         current + min_step.max(0.05)
+    }
+}
+
+fn theta_profile_step_factor_from_probe(
+    theta_hat: f64,
+    probe: f64,
+    obj_hat: f64,
+    obj_probe: f64,
+) -> f64 {
+    const TARGET_ZETA_STEP: f64 = 0.5;
+    const FALLBACK_FACTOR: f64 = 1.05;
+    const MIN_FACTOR: f64 = 1.000_001;
+    const MAX_FACTOR: f64 = 1.25;
+
+    let zeta_step = (obj_probe - obj_hat).max(0.0).sqrt();
+    if !zeta_step.is_finite() || zeta_step <= 0.0 {
+        return FALLBACK_FACTOR;
+    }
+
+    // Choose a multiplicative θ step whose local linearized ζ increment is
+    // about 0.5.  The older raw-θ distance heuristic could not shrink below
+    // 1.01, which underpopulated sharply curved profiles.
+    let probe_log_step = if theta_hat.abs() > 0.0 && probe > 0.0 {
+        (probe / theta_hat).abs().ln().abs()
+    } else {
+        0.0
+    };
+    let candidate = if probe_log_step.is_finite() && probe_log_step > 0.0 {
+        (probe_log_step * TARGET_ZETA_STEP / zeta_step).exp()
+    } else {
+        let probe_step = (probe - theta_hat).abs();
+        if !probe_step.is_finite() || probe_step <= 0.0 {
+            FALLBACK_FACTOR
+        } else {
+            (probe_step * TARGET_ZETA_STEP / zeta_step).exp()
+        }
+    };
+
+    if candidate.is_finite() {
+        candidate.clamp(MIN_FACTOR, MAX_FACTOR)
+    } else {
+        FALLBACK_FACTOR
     }
 }
 
@@ -1066,9 +1133,9 @@ fn add_profile_splines(
 ) -> Result<()> {
     let values: Vec<f64> = rows.iter().map(value_of).collect();
     let zetas: Vec<f64> = rows.iter().map(|r| r.zeta).collect();
-    if values.len() < 3 {
+    if values.len() < 5 {
         return Err(MixedModelError::Optimization(format!(
-            "profile_{parameter}: only {} evaluations produced — try a larger threshold",
+            "profile_{parameter}: only {} evaluations produced — refusing sparse profile spline; try a larger threshold",
             values.len()
         )));
     }
@@ -1123,8 +1190,8 @@ mod tests {
             .flat_map(|c| std::iter::repeat_n(c.to_string(), 5))
             .collect();
         let mut df = DataFrame::new();
-        df.add_numeric("yield", yields);
-        df.add_categorical("batch", batches);
+        df.add_numeric("yield", yields).unwrap();
+        df.add_categorical("batch", batches).unwrap();
         df
     }
 
@@ -1144,9 +1211,9 @@ mod tests {
             }
         }
         let mut df = DataFrame::new();
-        df.add_numeric("y", y);
-        df.add_numeric("x", x);
-        df.add_categorical("g", g);
+        df.add_numeric("y", y).unwrap();
+        df.add_numeric("x", x).unwrap();
+        df.add_categorical("g", g).unwrap();
         df
     }
 
@@ -1206,6 +1273,176 @@ mod tests {
         // Sanity: the CI shouldn't span more than a factor of 3 either way.
         assert!(sigma_ci.lower > sigma_hat / 3.0);
         assert!(sigma_ci.upper < sigma_hat * 3.0);
+    }
+
+    #[test]
+    fn test_profile_sigma_clamp_no_walk_below_threshold() {
+        let data = dyestuff_fixture();
+        let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+        let sigma_min = 1e-6 * model.sigma();
+
+        let pr = profile_sigma(&mut model, 4.0).expect("σ profile should succeed");
+        let min_profiled_sigma = pr
+            .rows_for("σ")
+            .into_iter()
+            .map(|row| row.sigma)
+            .fold(f64::INFINITY, f64::min);
+
+        assert!(min_profiled_sigma > sigma_min);
+    }
+
+    #[test]
+    fn test_profile_confint_brackets_estimate() {
+        let mut rev = BTreeMap::new();
+        rev.insert(
+            "σ".to_string(),
+            NaturalCubicSpline::fit(&[-2.0, 0.0, 2.0], &[10.0, 5.0, 6.0]).unwrap(),
+        );
+        let profile = MixedModelProfile {
+            tbl: vec![
+                ProfileRow {
+                    p: "σ".to_string(),
+                    zeta: -2.0,
+                    sigma: 10.0,
+                    beta: Vec::new(),
+                    theta: Vec::new(),
+                },
+                ProfileRow {
+                    p: "σ".to_string(),
+                    zeta: 0.0,
+                    sigma: 5.0,
+                    beta: Vec::new(),
+                    theta: Vec::new(),
+                },
+                ProfileRow {
+                    p: "σ".to_string(),
+                    zeta: 2.0,
+                    sigma: 6.0,
+                    beta: Vec::new(),
+                    theta: Vec::new(),
+                },
+            ],
+            fwd: BTreeMap::new(),
+            rev,
+        };
+
+        let err = profile.confint(0.95).unwrap_err();
+        assert!(err.to_string().contains("does not bracket estimate"));
+    }
+
+    #[test]
+    fn test_profile_sigma_logspace_walk_consistent() {
+        let data = dyestuff_fixture();
+        let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let pr = profile_sigma(&mut model, 4.0).expect("σ profile should succeed");
+        let mut negative_side_sigmas: Vec<f64> = pr
+            .rows_for("σ")
+            .into_iter()
+            .filter(|row| row.zeta < -1e-8)
+            .map(|row| row.sigma)
+            .collect();
+        negative_side_sigmas.sort_by(|a, b| b.partial_cmp(a).unwrap());
+
+        if negative_side_sigmas.len() >= 3 {
+            let ratios: Vec<f64> = negative_side_sigmas
+                .windows(2)
+                .map(|window| window[0] / window[1])
+                .collect();
+            for window in ratios.windows(2) {
+                assert!((window[0] - window[1]).abs() <= 1e-10 * window[0].max(1.0));
+            }
+        }
+    }
+
+    #[test]
+    fn test_profile_theta_dense_grid_on_curved_profile() {
+        let theta_hat = 1.0;
+        let probe = theta_hat * (1.0_f64 / 64.0).exp();
+        let factor = theta_profile_step_factor_from_probe(theta_hat, probe, 100.0, 500.0);
+
+        assert!(
+            factor < 1.01,
+            "high-curvature θ profiles must be allowed below the old 1.01 floor; got {factor}"
+        );
+        assert!(factor > 1.0);
+
+        let zeta_probe = (500.0_f64 - 100.0).sqrt();
+        let predicted_next_zeta = zeta_probe * factor.ln() / (probe / theta_hat).ln();
+        assert!(
+            (predicted_next_zeta - 0.5).abs() < 1e-6,
+            "target ζ step should be about 0.5, got {predicted_next_zeta}"
+        );
+    }
+
+    #[test]
+    fn test_profile_theta_sparse_grid_emits_warning_or_errors() {
+        let rows = vec![
+            ProfileRow {
+                p: "θ1".to_string(),
+                zeta: -1.0,
+                sigma: 1.0,
+                beta: Vec::new(),
+                theta: vec![0.9],
+            },
+            ProfileRow {
+                p: "θ1".to_string(),
+                zeta: 0.0,
+                sigma: 1.0,
+                beta: Vec::new(),
+                theta: vec![1.0],
+            },
+            ProfileRow {
+                p: "θ1".to_string(),
+                zeta: 1.0,
+                sigma: 1.0,
+                beta: Vec::new(),
+                theta: vec![1.1],
+            },
+        ];
+        let mut fwd = BTreeMap::new();
+        let mut rev = BTreeMap::new();
+
+        let err =
+            add_profile_splines("θ1", &rows, &mut fwd, &mut rev, |row| row.theta[0]).unwrap_err();
+
+        assert!(err.to_string().contains("refusing sparse profile spline"));
+        assert!(fwd.is_empty());
+        assert!(rev.is_empty());
+    }
+
+    #[test]
+    fn test_profile_theta_julia_parity_fixture_keeps_scalar_theta_supported() {
+        let fixture = profile_parity_fixture();
+        let case = fixture
+            .cases
+            .iter()
+            .find(|case| case.id == "dyestuff_scalar_re_ml")
+            .expect("dyestuff scalar θ parity case should be present");
+        let expected = case.parameters.get("θ1").unwrap();
+        let (data, _) = datasets::load(&case.dataset).unwrap();
+        let formula = parse_formula(&case.rust_formula).unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(case.reml).unwrap();
+
+        let pr = profile_theta(&mut model, 0, 4.0).expect("θ1 profile should succeed");
+        let rows = pr.rows_for("θ1");
+        assert!(
+            rows.len() >= 8,
+            "target-ζ θ profile should populate a dense grid, got {} rows",
+            rows.len()
+        );
+
+        let actual = pr.confint_for("θ1", case.level).unwrap();
+        assert!(
+            (actual.estimate - expected.estimate).abs() <= 0.15 * expected.estimate.abs().max(1.0)
+        );
+        assert!((actual.lower - expected.lower).abs() <= 0.15 * expected.lower.abs().max(1.0));
+        assert!((actual.upper - expected.upper).abs() <= 0.15 * expected.upper.abs().max(1.0));
     }
 
     #[test]

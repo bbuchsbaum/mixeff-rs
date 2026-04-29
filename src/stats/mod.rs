@@ -9,11 +9,15 @@ pub mod profile;
 pub mod spline;
 pub mod varcorr;
 
-pub use block_description::*;
-pub use bootstrap::*;
-pub use coeftable::*;
-pub use lrt::*;
-pub use model_summary::*;
-pub use profile::*;
-pub use spline::NaturalCubicSpline;
-pub use varcorr::*;
+pub use block_description::BlockDescription;
+pub use bootstrap::{
+    restore_replicates, restorereplicates, save_replicates, savereplicates, shortest_cov_int,
+};
+pub use coeftable::{coeftable_to_markdown, CoefTable, CoefTablePValuePolicy};
+pub use lrt::{LikelihoodRatioTest, LinearModelFit};
+pub use model_summary::{ModelSummary, ModelSummaryRow};
+pub use profile::{
+    profile, profile_beta, profile_betas, profile_sigma, profile_theta, profile_theta_scalar,
+    ConfintRow, MixedModelProfile, ProfileRow,
+};
+pub use varcorr::{VarCorr, VarCorrComponent};

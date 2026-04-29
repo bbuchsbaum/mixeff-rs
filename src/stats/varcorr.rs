@@ -323,7 +323,7 @@ mod tests {
             vec!["(Intercept)".to_string()],
             DMatrix::from_row_slice(1, 3, &[1.0, 1.0, 1.0]),
         );
-        re.set_theta(&[0.75]);
+        re.set_theta(&[0.75]).unwrap();
         re
     }
 
@@ -335,7 +335,7 @@ mod tests {
             vec!["(Intercept)".to_string(), "days".to_string()],
             DMatrix::from_row_slice(2, 4, &[1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0]),
         );
-        re.set_theta(&[2.0, 0.5, 1.0]);
+        re.set_theta(&[2.0, 0.5, 1.0]).unwrap();
         re
     }
 

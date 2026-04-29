@@ -7,6 +7,8 @@
 
 use nalgebra::DMatrix;
 
+use crate::linalg::pivot::stats_rank;
+
 /// Fixed-effects model matrix with column pivoting for rank detection.
 ///
 /// Stores the (possibly reordered) model matrix along with pivot
@@ -70,70 +72,7 @@ impl FeTerm {
             };
         }
 
-        // --- Column-pivoted QR via modified Gram-Schmidt with pivoting ---
-        //
-        // At each step we pick the column with the largest remaining norm,
-        // swap it into position, and orthogonalise the remaining columns
-        // against it. The rank is determined by checking when the residual
-        // norm drops below a tolerance.
-
-        let tol = (n.max(p) as f64) * f64::EPSILON * {
-            // Estimate the largest column norm of the original matrix.
-            (0..p).map(|j| x.column(j).norm()).fold(0.0_f64, f64::max)
-        };
-
-        // Work on a mutable copy.
-        let mut qr = x.clone();
-        let mut piv: Vec<usize> = (0..p).collect();
-        let mut col_norms: Vec<f64> = (0..p).map(|j| qr.column(j).norm_squared()).collect();
-        let mut rank = 0;
-
-        for k in 0..p.min(n) {
-            // Find the column with the largest remaining norm.
-            let mut best = k;
-            let mut best_norm = col_norms[k];
-            for j in (k + 1)..p {
-                if col_norms[j] > best_norm {
-                    best = j;
-                    best_norm = col_norms[j];
-                }
-            }
-
-            // Check if the remaining norm is below tolerance.
-            if best_norm.sqrt() <= tol {
-                break;
-            }
-
-            // Swap columns k and best.
-            if best != k {
-                qr.swap_columns(k, best);
-                piv.swap(k, best);
-                col_norms.swap(k, best);
-            }
-
-            // Normalise the pivot column.
-            let pivot_norm = qr.column(k).norm();
-            if pivot_norm <= tol {
-                break;
-            }
-
-            rank += 1;
-
-            // Orthogonalise remaining columns against column k.
-            // Extract the pivot column first.
-            let pivot_col = qr.column(k).clone_owned();
-            let norm_sq = pivot_col.norm_squared();
-
-            for j in (k + 1)..p {
-                let coeff = qr.column(j).dot(&pivot_col) / norm_sq;
-                // qr.column_mut(j) -= coeff * pivot_col
-                for i in 0..n {
-                    qr[(i, j)] -= coeff * pivot_col[i];
-                }
-                // Update the running column norm.
-                col_norms[j] = qr.column(j).norm_squared();
-            }
-        }
+        let (rank, piv) = stats_rank(&x);
 
         // Build the pivoted X (take columns from the original x in pivot order).
         let mut pivoted_x = DMatrix::zeros(n, p);
@@ -209,6 +148,57 @@ mod tests {
         assert_eq!(fe.rank, 2);
         assert!(!fe.is_full_rank());
         assert_eq!(fe.full_rank_x().ncols(), 2);
+    }
+
+    #[test]
+    fn test_feterm_rank_matches_stats_rank() {
+        let x = DMatrix::from_row_slice(
+            4,
+            3,
+            &[
+                1.0, 0.0, 1.0, //
+                1.0, 1.0, 2.0, //
+                1.0, 2.0, 3.0, //
+                1.0, 3.0, 4.0, //
+            ],
+        );
+        let cnames = vec![
+            "(Intercept)".to_string(),
+            "x".to_string(),
+            "intercept_plus_x".to_string(),
+        ];
+        let (rank, piv) = stats_rank(&x);
+
+        let fe = FeTerm::new(x, cnames);
+
+        assert_eq!(fe.rank, rank);
+        assert_eq!(fe.piv, piv);
+    }
+
+    #[test]
+    fn test_feterm_rank_intercept_preserving() {
+        let x = DMatrix::from_row_slice(
+            4,
+            3,
+            &[
+                1.0, 0.0, 1.0, //
+                1.0, 1.0, 2.0, //
+                1.0, 2.0, 3.0, //
+                1.0, 3.0, 4.0, //
+            ],
+        );
+        let cnames = vec![
+            "(Intercept)".to_string(),
+            "x".to_string(),
+            "intercept_plus_x".to_string(),
+        ];
+
+        let fe = FeTerm::new(x, cnames);
+
+        assert_eq!(fe.rank, 2);
+        assert_eq!(fe.piv[0], 0);
+        assert_eq!(fe.cnames[0], "(Intercept)");
+        assert!(fe.piv[0..fe.rank].windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]

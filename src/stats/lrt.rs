@@ -87,6 +87,9 @@ impl LinearModelFit {
             (0..covariance.ncols()).map(|idx| covariance[(idx, idx)].sqrt()),
         );
 
+        let mut optsum = OptSummary::new(Vec::new());
+        optsum.reml = false;
+
         Ok(Self {
             response,
             model_matrix,
@@ -99,7 +102,7 @@ impl LinearModelFit {
             loglik,
             rank,
             formula,
-            optsum: OptSummary::new(Vec::new()),
+            optsum,
         })
     }
 }
@@ -243,6 +246,12 @@ impl LikelihoodRatioTest {
         for m in models {
             if m.nobs() != nobs {
                 return Err("All models must have the same number of observations".to_string());
+            }
+        }
+        let response = models[0].response();
+        for m in models.iter().skip(1) {
+            if !vectors_equal(response, m.response()) {
+                return Err("All models must be fit to the same response values".to_string());
             }
         }
 
@@ -642,6 +651,14 @@ fn random_effect_term_is_nested(
             .all(|column| larger.columns.iter().any(|candidate| candidate == column))
 }
 
+fn vectors_equal(lhs: &DVector<f64>, rhs: &DVector<f64>) -> bool {
+    lhs.len() == rhs.len()
+        && lhs
+            .iter()
+            .zip(rhs.iter())
+            .all(|(left, right)| left.to_bits() == right.to_bits())
+}
+
 fn column_widths(rows: &[Vec<String>]) -> Vec<usize> {
     (0..rows[0].len())
         .map(|col| rows.iter().map(|row| row[col].len()).max().unwrap_or(0))
@@ -721,6 +738,12 @@ mod tests {
 
         fn with_model_matrix(mut self, model_matrix: DMatrix<f64>) -> Self {
             self.model_matrix = model_matrix;
+            self
+        }
+
+        fn with_response(mut self, response: DVector<f64>) -> Self {
+            self.nobs = response.len();
+            self.response = response;
             self
         }
 
@@ -885,6 +908,30 @@ mod tests {
     }
 
     #[test]
+    fn test_lrt_accepts_distinct_fits_with_identical_response_values() {
+        let response = DVector::from_vec(vec![1.0, 2.0, 3.0, 4.0]);
+        let m0 = DummyFit::new(4, 2, -10.0, Some("y ~ 1")).with_response(response.clone());
+        let m1 = DummyFit::new(4, 3, -9.0, Some("y ~ 1 + x")).with_response(response);
+
+        let lrt = LikelihoodRatioTest::test(&[&m0, &m1]).unwrap();
+
+        assert_eq!(lrt.nobs, 4);
+        assert_relative_eq!(lrt.chisq[0], 2.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_lrt_rejects_same_nobs_with_different_response_values() {
+        let m0 = DummyFit::new(4, 2, -10.0, Some("y ~ 1"))
+            .with_response(DVector::from_vec(vec![1.0, 2.0, 3.0, 4.0]));
+        let m1 = DummyFit::new(4, 3, -9.0, Some("z ~ 1 + x"))
+            .with_response(DVector::from_vec(vec![1.0, 2.0, 3.0, 5.0]));
+
+        let err = LikelihoodRatioTest::test(&[&m0, &m1]).unwrap_err();
+
+        assert_eq!(err, "All models must be fit to the same response values");
+    }
+
+    #[test]
     fn test_lrt_rejects_fixed_effect_non_nested_column_space() {
         let small_x = DMatrix::from_row_slice(
             4,
@@ -969,7 +1016,8 @@ mod tests {
     fn test_linear_model_fit_compares_with_mixed_model_like_fit() {
         let y = DVector::from_vec(vec![1.0, 2.1, 2.9, 4.2, 5.1]);
         let intercept = DMatrix::from_element(5, 1, 1.0);
-        let lm0 = LinearModelFit::fit(y, intercept.clone(), Some("y ~ 1".to_string())).unwrap();
+        let lm0 =
+            LinearModelFit::fit(y.clone(), intercept.clone(), Some("y ~ 1".to_string())).unwrap();
         let mixed_like = DummyFit::new(
             5,
             lm0.dof() + 1,
@@ -977,6 +1025,8 @@ mod tests {
             Some("y ~ 1 + (1 | g)"),
         )
         .with_model_matrix(intercept)
+        .with_response(y)
+        .with_reml(false)
         .with_random_terms(vec![RandomEffectTermInfo {
             group: "g".to_string(),
             columns: vec!["(Intercept)".to_string()],
@@ -1003,7 +1053,7 @@ mod tests {
                 1.0, 4.0,
             ],
         );
-        let lm1 = LinearModelFit::fit(y, x, Some("y ~ x".to_string())).unwrap();
+        let lm1 = LinearModelFit::fit(y.clone(), x, Some("y ~ x".to_string())).unwrap();
         let mixed_intercept = DummyFit::new(
             5,
             lm1.dof() + 1,
@@ -1011,6 +1061,8 @@ mod tests {
             Some("y ~ 1 + (1 | g)"),
         )
         .with_model_matrix(DMatrix::from_element(5, 1, 1.0))
+        .with_response(y)
+        .with_reml(false)
         .with_random_terms(vec![RandomEffectTermInfo {
             group: "g".to_string(),
             columns: vec!["(Intercept)".to_string()],

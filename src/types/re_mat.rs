@@ -6,6 +6,7 @@
 //! transposed model matrix, the relative covariance factor `Λ`,
 //! and the sparse structure needed for the blocked Cholesky.
 
+use crate::error::{MixedModelError, Result};
 use nalgebra::{DMatrix, DVector};
 use nalgebra_sparse::csc::CscMatrix;
 
@@ -176,22 +177,19 @@ impl ReMat {
     }
 
     /// Install parameter values into `Λ`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `v.len() != self.n_theta()`.
-    pub fn set_theta(&mut self, v: &[f64]) {
-        assert_eq!(
-            v.len(),
-            self.n_theta(),
-            "ReMat::set_theta: expected {} values, got {}",
-            self.n_theta(),
-            v.len()
-        );
+    pub fn set_theta(&mut self, v: &[f64]) -> Result<()> {
+        let expected = self.n_theta();
+        if v.len() != expected {
+            return Err(MixedModelError::DimensionMismatch(format!(
+                "ReMat::set_theta expected {expected} values, got {}",
+                v.len()
+            )));
+        }
         for (k, &idx) in self.inds.iter().enumerate() {
             let (row, col) = linear_to_subscript(idx, self.vsize);
             self.lambda[(row, col)] = v[k];
         }
+        Ok(())
     }
 
     /// Lower bounds on the θ parameters.
@@ -457,7 +455,7 @@ mod tests {
         assert!((theta[2] - 1.0).abs() < 1e-12); // lambda[1,1]
 
         // Set new theta
-        re.set_theta(&[2.0, 0.5, 3.0]);
+        re.set_theta(&[2.0, 0.5, 3.0]).unwrap();
         let theta2 = re.get_theta();
         assert!((theta2[0] - 2.0).abs() < 1e-12);
         assert!((theta2[1] - 0.5).abs() < 1e-12);
@@ -488,7 +486,7 @@ mod tests {
     #[test]
     fn test_zerocorr() {
         let mut re = make_vector_remat();
-        re.set_theta(&[2.0, 0.5, 3.0]);
+        re.set_theta(&[2.0, 0.5, 3.0]).unwrap();
         re.zerocorr();
         // Off-diagonal should be zero
         assert!((re.lambda[(1, 0)] - 0.0).abs() < 1e-12);
@@ -497,6 +495,17 @@ mod tests {
         let theta = re.get_theta();
         assert!((theta[0] - 2.0).abs() < 1e-12);
         assert!((theta[1] - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_remat_set_theta_returns_err_on_length_mismatch() {
+        let mut re = make_vector_remat();
+        let before = re.get_theta();
+
+        let err = re.set_theta(&[2.0, 0.5]).unwrap_err();
+
+        assert!(matches!(err, MixedModelError::DimensionMismatch(_)));
+        assert_eq!(re.get_theta(), before);
     }
 
     #[test]

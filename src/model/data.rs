@@ -1,5 +1,6 @@
 //! Data frame abstraction for passing tabular data to model constructors.
 
+use crate::error::{MixedModelError, Result};
 use indexmap::IndexMap;
 use std::collections::HashMap;
 
@@ -62,20 +63,25 @@ impl CategoricalColumn {
 
     /// Construct from values together with an explicit canonical level order.
     ///
-    /// Returns `None` if any observed value is not in `levels`. Use this when
+    /// Returns an error if any observed value is not in `levels`. Use this when
     /// the level order matters (e.g. matching a reference implementation's
     /// factor encoding) rather than first-appearance order.
-    pub fn with_levels(values: Vec<String>, levels: Vec<String>) -> Option<Self> {
+    pub fn with_levels(values: Vec<String>, levels: Vec<String>) -> Result<Self> {
         let level_map: HashMap<&String, u32> = levels
             .iter()
             .enumerate()
             .map(|(i, s)| (s, i as u32))
             .collect();
         let mut refs = Vec::with_capacity(values.len());
-        for v in &values {
-            refs.push(*level_map.get(v)?);
+        for (row, v) in values.iter().enumerate() {
+            let Some(&idx) = level_map.get(v) else {
+                return Err(MixedModelError::InvalidArgument(format!(
+                    "categorical value `{v}` at row {row} is not present in canonical levels"
+                )));
+            };
+            refs.push(idx);
         }
-        Some(CategoricalColumn {
+        Ok(CategoricalColumn {
             levels,
             refs,
             values,
@@ -107,48 +113,49 @@ impl DataFrame {
         self.columns.keys().map(|s| s.as_str()).collect()
     }
 
-    /// Add a numeric column.
-    pub fn add_numeric(&mut self, name: &str, data: Vec<f64>) -> &mut Self {
+    fn validate_new_column_len(&mut self, name: &str, len: usize) -> Result<()> {
         if self.columns.is_empty() {
-            self.n_rows = data.len();
-        } else {
-            assert_eq!(data.len(), self.n_rows, "Column length mismatch");
+            self.n_rows = len;
+            return Ok(());
         }
+
+        if len != self.n_rows {
+            return Err(MixedModelError::DimensionMismatch(format!(
+                "column `{name}` has length {len}, expected {}",
+                self.n_rows
+            )));
+        }
+        Ok(())
+    }
+
+    /// Add a numeric column.
+    pub fn add_numeric(&mut self, name: &str, data: Vec<f64>) -> Result<&mut Self> {
+        self.validate_new_column_len(name, data.len())?;
         self.columns.insert(name.to_string(), Column::Numeric(data));
-        self
+        Ok(self)
     }
 
     /// Add a categorical column from string values.
-    pub fn add_categorical(&mut self, name: &str, data: Vec<String>) -> &mut Self {
-        if self.columns.is_empty() {
-            self.n_rows = data.len();
-        } else {
-            assert_eq!(data.len(), self.n_rows, "Column length mismatch");
-        }
+    pub fn add_categorical(&mut self, name: &str, data: Vec<String>) -> Result<&mut Self> {
+        self.validate_new_column_len(name, data.len())?;
         let cat = CategoricalColumn::new(data);
         self.columns
             .insert(name.to_string(), Column::Categorical(cat));
-        self
+        Ok(self)
     }
 
     /// Add a categorical column with an explicit canonical level order.
-    /// Panics if any value is not present in `levels`.
     pub fn add_categorical_with_levels(
         &mut self,
         name: &str,
         data: Vec<String>,
         levels: Vec<String>,
-    ) -> &mut Self {
-        if self.columns.is_empty() {
-            self.n_rows = data.len();
-        } else {
-            assert_eq!(data.len(), self.n_rows, "Column length mismatch");
-        }
-        let cat = CategoricalColumn::with_levels(data, levels)
-            .expect("value not found in canonical levels");
+    ) -> Result<&mut Self> {
+        let cat = CategoricalColumn::with_levels(data, levels)?;
+        self.validate_new_column_len(name, cat.values.len())?;
         self.columns
             .insert(name.to_string(), Column::Categorical(cat));
-        self
+        Ok(self)
     }
 
     /// Get a numeric column by name.
@@ -175,6 +182,47 @@ impl DataFrame {
     /// Check if a column exists.
     pub fn has_column(&self, name: &str) -> bool {
         self.columns.contains_key(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_add_categorical_with_levels_unknown_value_returns_err() {
+        let mut df = DataFrame::new();
+
+        let err = df
+            .add_categorical_with_levels(
+                "group",
+                vec!["a".to_string(), "missing".to_string()],
+                vec!["a".to_string(), "b".to_string()],
+            )
+            .unwrap_err();
+
+        match err {
+            MixedModelError::InvalidArgument(message) => {
+                assert!(message.contains("missing"));
+                assert!(message.contains("row 1"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert_eq!(df.nrow(), 0);
+        assert!(!df.has_column("group"));
+    }
+
+    #[test]
+    fn test_add_column_length_mismatch_returns_err() {
+        let mut df = DataFrame::new();
+        df.add_numeric("y", vec![1.0, 2.0, 3.0]).unwrap();
+
+        let err = df
+            .add_categorical("group", vec!["a".to_string()])
+            .unwrap_err();
+
+        assert!(matches!(err, MixedModelError::DimensionMismatch(_)));
+        assert!(!df.has_column("group"));
     }
 }
 

@@ -2,7 +2,8 @@
 
 use std::fmt;
 
-use crate::model::{GeneralizedLinearMixedModel, LinearMixedModel, MatrixBlock};
+use crate::model::{GeneralizedLinearMixedModel, LinearMixedModel};
+use crate::types::{matrix_block::block_index, MatrixBlock};
 
 /// Description of the blocked `A`/`L` structure for a mixed model.
 #[derive(Debug, Clone)]
@@ -192,10 +193,6 @@ fn short_type(a: &MatrixBlock, l: &MatrixBlock) -> &'static str {
         (MatrixBlock::BlockDiagonal(_), MatrixBlock::Diagonal(_)) => "BlkDiag/Diag",
         (MatrixBlock::BlockDiagonal(_), MatrixBlock::Sparse(_)) => "BlkDiag/Sparse",
     }
-}
-
-fn block_index(i: usize, j: usize) -> usize {
-    i * (i + 1) / 2 + j
 }
 
 fn column_widths(rows: &[Vec<String>]) -> Vec<usize> {

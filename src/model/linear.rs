@@ -20,30 +20,31 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::compiler::{
-    compile_formula_ir, BasisLoading, CompiledModelArtifact, CompilerPolicy,
-    ConvergenceVerification, ConvergenceVerificationRun, ConvergenceVerificationStatus,
-    CovarianceFamily, CovarianceFamilyTransition, DesignAudit, Diagnostic, DiagnosticCode,
-    DiagnosticSeverity, DiagnosticStage, DominantLoading, EffectiveCovarianceSummary,
-    EffectiveRankStatus, EstimabilityAssessment, EstimabilityStatus, EvidenceMethod,
-    FixedContrastEstimability, FixedEffectHypothesis, FixedEffectInferenceMethod,
-    FixedEffectInferenceRow, FixedEffectInferenceRowKind, FixedEffectInferenceStatus,
-    FixedEffectInferenceTable, FixedEffectStatisticName, FixedEffectTest, FixedEffectTestMethod,
-    InferenceMethod, InferenceStatus, InterpretableSubmodel, ModelAuditReport, ModelStateChange,
-    ModelStateSummary, OptimizerCertificate, OptimizerDerivativeEvidence, PolicyAction,
-    PolicyRecommendation, ReductionRecord, ReductionTrigger, ReliabilityGrade,
+    compile_formula_ir, BasisLoading, BootstrapInferenceDetails, CompiledModelArtifact,
+    CompilerPolicy, ContrastFamilyDetails, ConvergenceVerification, ConvergenceVerificationRun,
+    ConvergenceVerificationStatus, CovarianceFamily, CovarianceFamilyTransition, DesignAudit,
+    Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticStage, DominantLoading,
+    EffectiveCovarianceSummary, EffectiveRankStatus, EstimabilityAssessment, EstimabilityStatus,
+    EvidenceMethod, FixedContrastEstimability, FixedEffectHypothesis, FixedEffectInferenceDetails,
+    FixedEffectInferenceMethod, FixedEffectInferenceRow, FixedEffectInferenceRowKind,
+    FixedEffectInferenceStatus, FixedEffectInferenceTable, FixedEffectNullTargetSummary,
+    FixedEffectStatisticName, FixedEffectTest, FixedEffectTestMethod, InferenceMethod,
+    InferenceStatus, InterpretableSubmodel, KenwardRogerInferenceDetails, ModelAuditReport,
+    ModelStateChange, ModelStateSummary, OptimizerCertificate, OptimizerDerivativeEvidence,
+    PolicyAction, PolicyRecommendation, ReductionRecord, ReductionTrigger, ReliabilityGrade,
     SupportedCovarianceDirection, DOMINANT_LOADING_THRESHOLD, INTERPRETABLE_GAP_TOLERANCE,
-};
-use crate::compiler::artifact::{
-    BootstrapInferenceDetails, ContrastFamilyDetails, FixedEffectInferenceDetails,
-    FixedEffectNullTargetSummary, KenwardRogerInferenceDetails,
 };
 use crate::error::{MixedModelError, Result};
 use crate::formula::{FixedTerm, Formula, RandomTerm};
 use crate::model::data::{Column, DataFrame};
+use crate::model::fixed_design::DenseFixedDesign;
 use crate::model::traits::MixedModelFit;
 #[cfg(feature = "prima")]
 use crate::optimizer::prima::{minimize_bobyqa, PrimaBobyqaOptions};
 use crate::stats::{BlockDescription, CoefTable, CoefTablePValuePolicy, ModelSummary, VarCorr};
+use crate::types::matrix_block::{
+    block_index, with_block_pair_mut, with_block_triple, with_dense_block, MatrixBlock,
+};
 #[cfg(feature = "prima")]
 use crate::types::opt_summary::OptimizerBackend;
 use crate::types::{FeMat, FeTerm, FitLogEntry, OptSummary, Optimizer, ReMat};
@@ -117,6 +118,38 @@ pub struct ResponseMatrixProfile {
     pub logdet_re: f64,
     /// Shared fixed-effects log-determinant term used by REML.
     pub logdet_xx: f64,
+}
+
+#[derive(Debug)]
+struct PatternSearchOutcome {
+    best_theta: Vec<f64>,
+    best_fmin: f64,
+    feval_count: i64,
+    fit_log: Vec<FitLogEntry>,
+}
+
+fn record_pattern_eval<F>(
+    objective: &mut F,
+    theta: &[f64],
+    feval_count: &mut i64,
+    fit_log: &mut Vec<FitLogEntry>,
+    best_theta: &mut Vec<f64>,
+    best_fmin: &mut f64,
+) -> Result<f64>
+where
+    F: FnMut(&[f64]) -> Result<f64>,
+{
+    let obj = objective(theta)?;
+    *feval_count += 1;
+    fit_log.push(FitLogEntry {
+        theta: theta.to_vec(),
+        objective: obj,
+    });
+    if obj < *best_fmin {
+        *best_fmin = obj;
+        *best_theta = theta.to_vec();
+    }
+    Ok(obj)
 }
 
 /// Covariance estimate for `varpar = c(theta, sigma)` plus Hessian diagnostics.
@@ -220,99 +253,6 @@ impl Default for ConvergenceVerificationOptions {
     }
 }
 
-/// A block in the lower-triangular blocked matrix system.
-///
-/// The blocked system stores the lower triangle of [Z₁ Z₂ ... X y]'[Z₁ Z₂ ... X y].
-/// Blocks can be dense, diagonal, block-diagonal, or (in the L factor) lower triangular.
-#[derive(Debug, Clone)]
-pub enum MatrixBlock {
-    Dense(DMatrix<f64>),
-    Sparse(CscMatrix<f64>),
-    Diagonal(DVector<f64>),
-    /// Uniform block diagonal: `nlevels` blocks each of size `vsize × vsize`.
-    /// Total matrix is `(nlevels * vsize) × (nlevels * vsize)`.
-    BlockDiagonal(Vec<DMatrix<f64>>),
-}
-
-impl MatrixBlock {
-    pub fn nrows(&self) -> usize {
-        match self {
-            MatrixBlock::Dense(m) => m.nrows(),
-            MatrixBlock::Sparse(m) => m.nrows(),
-            MatrixBlock::Diagonal(v) => v.len(),
-            MatrixBlock::BlockDiagonal(blocks) => blocks.iter().map(|b| b.nrows()).sum(),
-        }
-    }
-
-    pub fn ncols(&self) -> usize {
-        match self {
-            MatrixBlock::Dense(m) => m.ncols(),
-            MatrixBlock::Sparse(m) => m.ncols(),
-            MatrixBlock::Diagonal(v) => v.len(),
-            MatrixBlock::BlockDiagonal(blocks) => blocks.iter().map(|b| b.ncols()).sum(),
-        }
-    }
-
-    pub fn as_dense(&self) -> DMatrix<f64> {
-        match self {
-            MatrixBlock::Dense(m) => m.clone(),
-            MatrixBlock::Sparse(m) => {
-                let mut result = DMatrix::zeros(m.nrows(), m.ncols());
-                for (row, col, value) in m.triplet_iter() {
-                    result[(row, col)] += *value;
-                }
-                result
-            }
-            MatrixBlock::Diagonal(v) => DMatrix::from_diagonal(v),
-            MatrixBlock::BlockDiagonal(blocks) => {
-                let total = blocks.iter().map(|b| b.nrows()).sum();
-                let mut result = DMatrix::zeros(total, total);
-                let mut offset = 0;
-                for blk in blocks {
-                    let s = blk.nrows();
-                    for i in 0..s {
-                        for j in 0..s {
-                            result[(offset + i, offset + j)] = blk[(i, j)];
-                        }
-                    }
-                    offset += s;
-                }
-                result
-            }
-        }
-    }
-
-    pub fn as_dense_ref(&self) -> Option<&DMatrix<f64>> {
-        match self {
-            MatrixBlock::Dense(m) => Some(m),
-            MatrixBlock::Sparse(_) => None,
-            _ => None,
-        }
-    }
-
-    pub fn as_dense_mut(&mut self) -> Option<&mut DMatrix<f64>> {
-        match self {
-            MatrixBlock::Dense(m) => Some(m),
-            MatrixBlock::Sparse(_) => None,
-            _ => None,
-        }
-    }
-
-    pub fn as_diag_ref(&self) -> Option<&DVector<f64>> {
-        match self {
-            MatrixBlock::Diagonal(v) => Some(v),
-            _ => None,
-        }
-    }
-
-    pub fn as_diag_mut(&mut self) -> Option<&mut DVector<f64>> {
-        match self {
-            MatrixBlock::Diagonal(v) => Some(v),
-            _ => None,
-        }
-    }
-}
-
 const DEFAULT_DENSE_BLOCK_LIMIT_BYTES: u128 = 16 * 1024 * 1024 * 1024;
 
 fn dense_block_limit_bytes() -> u128 {
@@ -400,14 +340,7 @@ fn validate_dense_block_plan(reterms: &[ReMat], fixed_response_cols: usize) -> R
     Ok(())
 }
 
-/// Convert row-major lower triangle index to linear index.
-/// For a system with k random effects terms + 1 (for [X|y]),
-/// block (i, j) where i >= j maps to index i*(i+1)/2 + j.
-#[inline]
-fn block_index(i: usize, j: usize) -> usize {
-    debug_assert!(i >= j);
-    i * (i + 1) / 2 + j
-}
+const BLOCK_TRIANGULAR_SOLVE_ZERO_TOLERANCE: f64 = 1e-30;
 
 fn copy_block(dst: &mut MatrixBlock, src: &MatrixBlock) {
     match (dst, src) {
@@ -450,64 +383,6 @@ fn copy_block(dst: &mut MatrixBlock, src: &MatrixBlock) {
         }
         (dst_block, src_block) => {
             *dst_block = src_block.clone();
-        }
-    }
-}
-
-fn with_block_pair_mut<T, F>(blocks: &mut [MatrixBlock], dst_idx: usize, src_idx: usize, f: F) -> T
-where
-    F: FnOnce(&mut MatrixBlock, &MatrixBlock) -> T,
-{
-    debug_assert_ne!(dst_idx, src_idx);
-
-    if dst_idx < src_idx {
-        let (left, right) = blocks.split_at_mut(src_idx);
-        f(&mut left[dst_idx], &right[0])
-    } else {
-        let (left, right) = blocks.split_at_mut(dst_idx);
-        f(&mut right[0], &left[src_idx])
-    }
-}
-
-fn with_block_triple<T, F>(
-    blocks: &mut [MatrixBlock],
-    target_idx: usize,
-    src_a_idx: usize,
-    src_b_idx: usize,
-    f: F,
-) -> T
-where
-    F: FnOnce(&mut MatrixBlock, &MatrixBlock, &MatrixBlock) -> T,
-{
-    debug_assert_ne!(target_idx, src_a_idx);
-    debug_assert_ne!(target_idx, src_b_idx);
-    debug_assert_ne!(src_a_idx, src_b_idx);
-
-    let (before, target_and_after) = blocks.split_at_mut(target_idx);
-    let (target, after) = target_and_after
-        .split_first_mut()
-        .expect("target index must be in bounds");
-
-    let get_src = |idx: usize| -> &MatrixBlock {
-        if idx < target_idx {
-            &before[idx]
-        } else {
-            &after[idx - target_idx - 1]
-        }
-    };
-
-    f(target, get_src(src_a_idx), get_src(src_b_idx))
-}
-
-fn with_dense_block<T, F>(block: &MatrixBlock, f: F) -> T
-where
-    F: FnOnce(&DMatrix<f64>) -> T,
-{
-    match block {
-        MatrixBlock::Dense(mat) => f(mat),
-        _ => {
-            let dense = block.as_dense();
-            f(&dense)
         }
     }
 }
@@ -556,6 +431,7 @@ fn update_l_from_parts(
     a_blocks: &[MatrixBlock],
     l_blocks: &mut [MatrixBlock],
     reterms: &[ReMat],
+    cholesky_zero_pad_tolerance: f64,
 ) -> Result<()> {
     let k = reterms.len(); // number of RE terms
     let total = k + 1; // +1 for the [X|y] block
@@ -611,7 +487,7 @@ fn update_l_from_parts(
         }
 
         // Cholesky of diagonal block
-        cholesky_block(&mut l_blocks[diag_idx])?;
+        cholesky_block_with_tolerance(&mut l_blocks[diag_idx], cholesky_zero_pad_tolerance)?;
 
         // Solve for off-diagonal blocks: L[i,j] for i > j
         for i in (j + 1)..total {
@@ -694,8 +570,11 @@ impl LinearMixedModel {
         })?;
         let y = DVector::from_column_slice(y_data);
 
-        // Build the fixed-effects model matrix
-        let (x_mat, fe_names) = build_fixed_effects_matrix(&effective_formula, data)?;
+        // Build the fixed-effects design. The current backend is dense, but
+        // the construction boundary is explicit so high-cardinality factors can
+        // later stream cross-products without materializing all dummy columns.
+        let fixed_design = build_fixed_effects_design(&effective_formula, data)?;
+        let (x_mat, fe_names) = fixed_design.into_parts();
         let feterm = FeTerm::new(x_mat, fe_names);
 
         // Build the random-effects terms
@@ -775,6 +654,10 @@ impl LinearMixedModel {
             optsum,
             compiler_artifact,
         };
+        debug_assert_eq!(
+            model.dims.p, model.feterm.rank,
+            "ModelDims::p must track the active fixed-effect rank"
+        );
         model.refresh_covariance_parameter_traces();
         Ok(model)
     }
@@ -1677,15 +1560,18 @@ impl LinearMixedModel {
 
     /// Set the θ parameter vector, distributing values to each ReMat's λ.
     pub fn set_theta(&mut self, theta: &[f64]) -> Result<()> {
+        let expected = self.n_theta();
+        if theta.len() != expected {
+            return Err(MixedModelError::DimensionMismatch(format!(
+                "theta vector length mismatch: expected {expected}, got {}",
+                theta.len()
+            )));
+        }
+
         let mut offset = 0;
         for rt in &mut self.reterms {
             let n = rt.n_theta();
-            if offset + n > theta.len() {
-                return Err(MixedModelError::DimensionMismatch(
-                    "theta vector too short".into(),
-                ));
-            }
-            rt.set_theta(&theta[offset..offset + n]);
+            rt.set_theta(&theta[offset..offset + n])?;
             offset += n;
         }
         Ok(())
@@ -1704,12 +1590,44 @@ impl LinearMixedModel {
         lb
     }
 
+    fn theta_at_lower_bound(&self) -> bool {
+        let theta = self.theta();
+        let lb = self.lower_bounds();
+        let boundary_tolerance = self.optsum.xtol_zero_abs.max(1e-12) * 10.0;
+        theta.iter().zip(lb.iter()).any(|(&value, &lower)| {
+            lower.is_finite() && (value - lower).abs() <= boundary_tolerance
+        })
+    }
+
+    fn optimizer_certificate_reports_boundary(&self) -> bool {
+        self.compiler_artifact
+            .optimizer_certificate
+            .as_ref()
+            .is_some_and(|certificate| certificate.evidence.parameter_space.n_boundary > 0)
+    }
+
+    fn has_reduced_effective_covariance(&self) -> bool {
+        self.compiler_artifact
+            .effective_covariance
+            .iter()
+            .any(|summary| summary.status == EffectiveRankStatus::ReducedRank)
+    }
+
     /// Update the blocked Cholesky factor L from A and current λ values.
     ///
     /// This is the core operation: L = cholesky(Λ'AΛ + I).
     /// The blocks of L are updated in-place.
     pub fn update_l(&mut self) -> Result<()> {
-        update_l_from_parts(&self.a_blocks, &mut self.l_blocks, &self.reterms)
+        let cholesky_zero_pad_tolerance = self
+            .compiler_policy()
+            .thresholds
+            .cholesky_zero_pad_tolerance;
+        update_l_from_parts(
+            &self.a_blocks,
+            &mut self.l_blocks,
+            &self.reterms,
+            cholesky_zero_pad_tolerance,
+        )
     }
 
     /// Update IRLS weights and working response, then rebuild A blocks.
@@ -1829,8 +1747,7 @@ impl LinearMixedModel {
         }
     }
 
-    /// Compute the profiled deviance or REML criterion for the current θ.
-    pub fn objective_value(&self) -> f64 {
+    fn profiled_objective_value(&self) -> f64 {
         let denomdf = if self.optsum.reml {
             (self.dims.n - self.dims.p) as f64
         } else {
@@ -1838,6 +1755,24 @@ impl LinearMixedModel {
         };
         let (logdet, pwrss) = self.determinant_term_and_pwrss();
         Self::objective_from_components(logdet, pwrss, denomdf, self.optsum.sigma)
+    }
+
+    fn weight_logdet_correction(&self) -> f64 {
+        if self.sqrtwts.is_empty() {
+            0.0
+        } else {
+            2.0 * self.sqrtwts.iter().map(|sqrtwt| sqrtwt.ln()).sum::<f64>()
+        }
+    }
+
+    /// Compute the user-facing deviance or REML criterion for the current θ.
+    ///
+    /// Weighted LMMs subtract the log-Jacobian term for the row scaling,
+    /// matching MixedModels.jl's `objective(::LinearMixedModel)`. The optimizer
+    /// hot path remains [`Self::profiled_objective_from_parts`], whose target
+    /// omits this θ-constant correction.
+    pub fn objective_value(&self) -> f64 {
+        self.profiled_objective_value() - self.weight_logdet_correction()
     }
 
     /// Set θ, update L, and return the objective value.
@@ -2786,13 +2721,17 @@ impl LinearMixedModel {
             .all(|(&value, &tol)| value <= tol)
     }
 
-    fn apply_theta_to_reterms(reterms: &mut [ReMat], theta: &[f64]) {
+    fn apply_theta_to_reterms(reterms: &mut [ReMat], theta: &[f64]) -> Option<()> {
         let mut offset = 0;
         for rt in reterms {
             let nt = rt.n_theta();
-            rt.set_theta(&theta[offset..offset + nt]);
+            if offset + nt > theta.len() {
+                return None;
+            }
+            rt.set_theta(&theta[offset..offset + nt]).ok()?;
             offset += nt;
         }
+        (offset == theta.len()).then_some(())
     }
 
     fn profiled_objective_from_parts(
@@ -2803,6 +2742,7 @@ impl LinearMixedModel {
         dims: ModelDims,
         is_reml: bool,
         fixed_sigma: Option<f64>,
+        cholesky_zero_pad_tolerance: f64,
     ) -> Option<f64> {
         if let Some(obj) = Self::profiled_objective_one_vsize2_fast(
             a_blocks,
@@ -2811,12 +2751,13 @@ impl LinearMixedModel {
             dims,
             is_reml,
             fixed_sigma,
+            cholesky_zero_pad_tolerance,
         ) {
             return Some(obj);
         }
 
-        Self::apply_theta_to_reterms(reterms, theta);
-        if update_l_from_parts(a_blocks, l_blocks, reterms).is_err() {
+        Self::apply_theta_to_reterms(reterms, theta)?;
+        if update_l_from_parts(a_blocks, l_blocks, reterms, cholesky_zero_pad_tolerance).is_err() {
             return None;
         }
 
@@ -2863,6 +2804,7 @@ impl LinearMixedModel {
         dims: ModelDims,
         is_reml: bool,
         fixed_sigma: Option<f64>,
+        cholesky_zero_pad_tolerance: f64,
     ) -> Option<f64> {
         if reterms.len() != 1 || reterms[0].vsize != 2 || theta.len() != 3 || a_blocks.len() != 3 {
             return None;
@@ -2913,9 +2855,13 @@ impl LinearMixedModel {
             let mut l00 = lam00 * t00 + lam10 * t10 + 1.0;
             let mut l10 = lam11 * t10;
             let mut l11 = lam11 * t11 + 1.0;
+            let pivot_tolerance = cholesky_zero_pad_abs_tolerance(
+                l00.abs().max(l11.abs()),
+                cholesky_zero_pad_tolerance,
+            );
 
             if l00 <= 0.0 {
-                if l00 < -1e-8 {
+                if l00 < -pivot_tolerance {
                     return None;
                 }
                 l00 = 0.0;
@@ -2927,7 +2873,7 @@ impl LinearMixedModel {
 
             l11 -= l10 * l10;
             if l11 <= 0.0 {
-                if l11 < -1e-8 {
+                if l11 < -pivot_tolerance {
                     return None;
                 }
                 l11 = 0.0;
@@ -2980,7 +2926,7 @@ impl LinearMixedModel {
         logdet_lzz *= 2.0;
 
         let mut l_last_block = MatrixBlock::Dense(l_last);
-        if cholesky_block(&mut l_last_block).is_err() {
+        if cholesky_block_with_tolerance(&mut l_last_block, cholesky_zero_pad_tolerance).is_err() {
             return None;
         }
         let MatrixBlock::Dense(l_last) = l_last_block else {
@@ -3041,6 +2987,28 @@ impl LinearMixedModel {
         }
     }
 
+    fn cobyla_success_status_label(status: cobyla::SuccessStatus) -> String {
+        match status {
+            cobyla::SuccessStatus::Success => "SUCCESS".to_string(),
+            cobyla::SuccessStatus::StopValReached => "STOPVAL_REACHED".to_string(),
+            cobyla::SuccessStatus::FtolReached => "FTOL_REACHED".to_string(),
+            cobyla::SuccessStatus::XtolReached => "XTOL_REACHED".to_string(),
+            cobyla::SuccessStatus::MaxEvalReached => "MAXEVAL_REACHED".to_string(),
+            cobyla::SuccessStatus::MaxTimeReached => "MAXTIME_REACHED".to_string(),
+        }
+    }
+
+    fn cobyla_fail_status_label(status: cobyla::FailStatus) -> String {
+        match status {
+            cobyla::FailStatus::Failure => "FAILURE".to_string(),
+            cobyla::FailStatus::InvalidArgs => "INVALID_ARGS".to_string(),
+            cobyla::FailStatus::OutOfMemory => "OUT_OF_MEMORY".to_string(),
+            cobyla::FailStatus::RoundoffLimited => "ROUNDOFF_LIMITED".to_string(),
+            cobyla::FailStatus::ForcedStop => "FORCED_STOP".to_string(),
+            cobyla::FailStatus::UnexpectedError => "UNEXPECTED_ERROR".to_string(),
+        }
+    }
+
     fn record_scalar_eval(
         &mut self,
         theta: f64,
@@ -3062,27 +3030,6 @@ impl LinearMixedModel {
         Ok(obj)
     }
 
-    fn record_multi_eval(
-        &mut self,
-        theta: &[f64],
-        feval_count: &mut i64,
-        fit_log: &mut Vec<FitLogEntry>,
-        best_theta: &mut Vec<f64>,
-        best_fmin: &mut f64,
-    ) -> Result<f64> {
-        let obj = self.objective_at(theta)?;
-        *feval_count += 1;
-        fit_log.push(FitLogEntry {
-            theta: theta.to_vec(),
-            objective: obj,
-        });
-        if obj < *best_fmin {
-            *best_fmin = obj;
-            *best_theta = theta.to_vec();
-        }
-        Ok(obj)
-    }
-
     fn finalize_fit_result(
         &mut self,
         mut best_theta_val: Vec<f64>,
@@ -3090,7 +3037,9 @@ impl LinearMixedModel {
         feval_count: i64,
         fit_log: Vec<FitLogEntry>,
         optimizer: Optimizer,
+        return_value: Option<String>,
     ) -> Result<&mut Self> {
+        Self::rectify_theta_columns(&mut best_theta_val, &self.parmap, self.reterms.len());
         self.set_theta(&best_theta_val)?;
         self.update_l()?;
 
@@ -3118,14 +3067,17 @@ impl LinearMixedModel {
         self.optsum.final_params = best_theta_val;
         self.optsum.fmin = best_fmin_val;
         self.optsum.feval = feval_count;
-        self.optsum.return_value = "SUCCESS".to_string();
+        self.optsum.return_value = return_value.unwrap_or_else(|| "SUCCESS".to_string());
         self.optsum.fit_log = fit_log;
 
         Ok(self)
     }
 
-    #[cfg_attr(not(any(feature = "nlopt", feature = "prima")), allow(dead_code))]
-    fn rectify_theta_columns(theta: &mut [f64], parmap: &[(usize, usize, usize)], n_terms: usize) {
+    pub(crate) fn rectify_theta_columns(
+        theta: &mut [f64],
+        parmap: &[(usize, usize, usize)],
+        n_terms: usize,
+    ) {
         for block in 0..n_terms {
             let max_col = parmap
                 .iter()
@@ -3300,39 +3252,14 @@ impl LinearMixedModel {
             }
         }
 
-        let mut best_theta_val = vec![best_theta];
-        let mut best_fmin_val = best_fmin;
-
-        self.set_theta(&best_theta_val)?;
-        self.update_l()?;
-
-        let mut xmin = best_theta_val.clone();
-        let mut modified = false;
-        for (i, (_, row, col)) in self.parmap.iter().enumerate() {
-            if row == col && xmin[i] > 0.0 && xmin[i] < self.optsum.xtol_zero_abs {
-                xmin[i] = 0.0;
-                modified = true;
-            }
-        }
-        if modified {
-            let zero_obj = self.objective_at(&xmin)?;
-            if zero_obj <= best_fmin_val + self.optsum.ftol_zero_abs {
-                best_fmin_val = zero_obj;
-                best_theta_val = xmin;
-            } else {
-                self.set_theta(&best_theta_val)?;
-                self.update_l()?;
-            }
-        }
-
-        self.optsum.final_params = best_theta_val;
-        self.optsum.fmin = best_fmin_val;
-        self.optsum.feval = feval_count;
-        self.optsum.optimizer = Optimizer::PatternSearch;
-        self.optsum.return_value = "SUCCESS".to_string();
-        self.optsum.fit_log = fit_log;
-
-        Ok(self)
+        self.finalize_fit_result(
+            vec![best_theta],
+            best_fmin,
+            feval_count,
+            fit_log,
+            Optimizer::PatternSearch,
+            (feval_count >= maxeval).then(|| "MAXEVAL_REACHED".to_string()),
+        )
     }
 
     fn fit_multivariate_pattern_search(&mut self) -> Result<&mut Self> {
@@ -3347,10 +3274,10 @@ impl LinearMixedModel {
             .optsum
             .xtol_abs
             .iter()
-            .map(|&tol| tol.max(1e-4))
+            .map(|&tol| tol.max(1e-5))
             .collect();
         if step_tol.len() != n_theta {
-            step_tol = vec![1e-4; n_theta];
+            step_tol = vec![1e-5; n_theta];
         }
 
         let mut step: Vec<f64> = self
@@ -3364,6 +3291,41 @@ impl LinearMixedModel {
             step = vec![0.5; n_theta];
         }
 
+        let outcome = Self::run_multivariate_pattern_search(
+            self.optsum.initial.clone(),
+            self.optsum.finitial,
+            &lower_bounds,
+            step,
+            &step_tol,
+            maxeval,
+            self.optsum.ftol_abs,
+            |theta| self.objective_at(theta),
+        )?;
+
+        self.finalize_fit_result(
+            outcome.best_theta,
+            outcome.best_fmin,
+            outcome.feval_count,
+            outcome.fit_log,
+            Optimizer::PatternSearch,
+            (outcome.feval_count >= maxeval).then(|| "MAXEVAL_REACHED".to_string()),
+        )
+    }
+
+    fn run_multivariate_pattern_search<F>(
+        initial: Vec<f64>,
+        finitial: f64,
+        lower_bounds: &[f64],
+        mut step: Vec<f64>,
+        step_tol: &[f64],
+        maxeval: i64,
+        ftol_abs: f64,
+        mut objective: F,
+    ) -> Result<PatternSearchOutcome>
+    where
+        F: FnMut(&[f64]) -> Result<f64>,
+    {
+        let n_theta = initial.len();
         let mut preferred_sign = vec![-1.0; n_theta];
         for (i, &lower) in lower_bounds.iter().enumerate() {
             if !lower.is_finite() {
@@ -3371,8 +3333,8 @@ impl LinearMixedModel {
             }
         }
 
-        let mut theta = self.optsum.initial.clone();
-        let mut ftheta = self.optsum.finitial;
+        let mut theta = initial;
+        let mut ftheta = finitial;
         let mut best_theta = theta.clone();
         let mut best_fmin = ftheta;
         let mut feval_count = 0i64;
@@ -3382,11 +3344,13 @@ impl LinearMixedModel {
             let base_theta = theta.clone();
             let base_f = ftheta;
             let mut moved = vec![false; n_theta];
+            let mut exploratory_direction = vec![0.0; n_theta];
 
             for i in 0..n_theta {
                 let mut chosen_theta = theta[i];
                 let mut chosen_f = ftheta;
                 let mut chosen_sign = 0.0;
+                exploratory_direction[i] = preferred_sign[i];
 
                 for dir in [preferred_sign[i], -preferred_sign[i]] {
                     let mut trial = theta.clone();
@@ -3396,14 +3360,15 @@ impl LinearMixedModel {
                         continue;
                     }
 
-                    let ftrial = self.record_multi_eval(
+                    let ftrial = record_pattern_eval(
+                        &mut objective,
                         &trial,
                         &mut feval_count,
                         &mut fit_log,
                         &mut best_theta,
                         &mut best_fmin,
                     )?;
-                    if ftrial + self.optsum.ftol_abs < ftheta {
+                    if ftrial + ftol_abs < ftheta {
                         chosen_theta = trial[i];
                         chosen_f = ftrial;
                         chosen_sign = dir;
@@ -3428,23 +3393,60 @@ impl LinearMixedModel {
                 }
             }
 
-            let any_moved = moved.iter().any(|&m| m);
-            if any_moved && feval_count < maxeval {
-                let mut pattern = theta.clone();
-                for i in 0..n_theta {
-                    pattern[i] += theta[i] - base_theta[i];
-                }
-                Self::project_theta_to_bounds(&mut pattern, &lower_bounds);
+            let mut any_moved = moved.iter().any(|&m| m);
+            if feval_count < maxeval {
+                let mut pattern_candidates = Vec::with_capacity(if any_moved { 1 } else { 2 });
+                if any_moved {
+                    let mut pattern = theta.clone();
+                    for i in 0..n_theta {
+                        pattern[i] += theta[i] - base_theta[i];
+                    }
+                    Self::project_theta_to_bounds(&mut pattern, &lower_bounds);
+                    pattern_candidates.push(pattern);
+                } else {
+                    let mut push_candidate = |pattern: Vec<f64>| {
+                        if pattern != theta && !pattern_candidates.contains(&pattern) {
+                            pattern_candidates.push(pattern);
+                        }
+                    };
 
-                if pattern != theta {
-                    let fpattern = self.record_multi_eval(
+                    for direction_sign in [1.0, -1.0] {
+                        let mut pattern = base_theta.clone();
+                        for i in 0..n_theta {
+                            pattern[i] += direction_sign * exploratory_direction[i] * step[i];
+                        }
+                        Self::project_theta_to_bounds(&mut pattern, &lower_bounds);
+                        push_candidate(pattern);
+                    }
+
+                    for i in 0..n_theta {
+                        for j in (i + 1)..n_theta {
+                            for dir_i in [exploratory_direction[i], -exploratory_direction[i]] {
+                                for dir_j in [exploratory_direction[j], -exploratory_direction[j]] {
+                                    let mut pattern = base_theta.clone();
+                                    pattern[i] += dir_i * step[i];
+                                    pattern[j] += dir_j * step[j];
+                                    Self::project_theta_to_bounds(&mut pattern, &lower_bounds);
+                                    push_candidate(pattern);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                for pattern in pattern_candidates {
+                    if feval_count >= maxeval {
+                        break;
+                    }
+                    let fpattern = record_pattern_eval(
+                        &mut objective,
                         &pattern,
                         &mut feval_count,
                         &mut fit_log,
                         &mut best_theta,
                         &mut best_fmin,
                     )?;
-                    if fpattern + self.optsum.ftol_abs < ftheta {
+                    if fpattern + ftol_abs < ftheta {
                         for i in 0..n_theta {
                             if (pattern[i] - theta[i]).abs() > 0.0 {
                                 preferred_sign[i] = (pattern[i] - theta[i]).signum();
@@ -3453,6 +3455,8 @@ impl LinearMixedModel {
                         }
                         theta = pattern;
                         ftheta = fpattern;
+                        any_moved = true;
+                        break;
                     }
                 }
             }
@@ -3472,20 +3476,17 @@ impl LinearMixedModel {
                 }
             }
 
-            if (base_f - ftheta).abs() <= self.optsum.ftol_abs
-                && Self::steps_are_small(&step, &step_tol)
-            {
+            if (base_f - ftheta).abs() <= ftol_abs && Self::steps_are_small(&step, &step_tol) {
                 break;
             }
         }
 
-        self.finalize_fit_result(
+        Ok(PatternSearchOutcome {
             best_theta,
             best_fmin,
             feval_count,
             fit_log,
-            Optimizer::PatternSearch,
-        )
+        })
     }
 
     fn fit_cobyla_with_maxeval(
@@ -3502,6 +3503,10 @@ impl LinearMixedModel {
         let dims = self.dims;
         let is_reml = reml;
         let fixed_sigma = self.optsum.sigma;
+        let cholesky_zero_pad_tolerance = self
+            .compiler_policy()
+            .thresholds
+            .cholesky_zero_pad_tolerance;
         let best_theta = std::cell::RefCell::new(self.optsum.initial.clone());
         let best_fmin = std::cell::Cell::new(f64::INFINITY);
         let feval_count = std::cell::Cell::new(0i64);
@@ -3523,6 +3528,7 @@ impl LinearMixedModel {
                     dims,
                     is_reml,
                     fixed_sigma,
+                    cholesky_zero_pad_tolerance,
                 )
                 .unwrap_or(f64::INFINITY)
             };
@@ -3576,21 +3582,24 @@ impl LinearMixedModel {
             Some(stop_tol),
         );
 
-        let (best_theta_val, best_fmin_val);
+        let (best_theta_val, best_fmin_val, return_value);
 
         match result {
-            Ok((_, x_opt, fmin)) => {
+            Ok((status, x_opt, fmin)) => {
                 best_fmin_val = fmin;
                 best_theta_val = x_opt;
+                return_value = Some(Self::cobyla_success_status_label(status));
             }
-            Err((cobyla::FailStatus::RoundoffLimited, x_opt, _)) => {
+            Err((status @ cobyla::FailStatus::RoundoffLimited, x_opt, _)) => {
                 best_theta_val = x_opt;
                 best_fmin_val = best_fmin.get();
+                return_value = Some(Self::cobyla_fail_status_label(status));
             }
-            Err((_, x_opt, fmin)) => {
+            Err((status, x_opt, fmin)) => {
                 if fmin.is_finite() {
                     best_fmin_val = fmin;
                     best_theta_val = x_opt;
+                    return_value = Some(Self::cobyla_fail_status_label(status));
                 } else {
                     return Err(MixedModelError::Optimization(
                         "COBYLA optimization failed".to_string(),
@@ -3612,6 +3621,7 @@ impl LinearMixedModel {
                 })
                 .collect(),
             Optimizer::Cobyla,
+            return_value,
         )
     }
 
@@ -3634,6 +3644,10 @@ impl LinearMixedModel {
         let dims = self.dims;
         let is_reml = reml;
         let fixed_sigma = self.optsum.sigma;
+        let cholesky_zero_pad_tolerance = self
+            .compiler_policy()
+            .thresholds
+            .cholesky_zero_pad_tolerance;
         let invalid_objective = self.optsum.finitial;
         let best_theta = std::cell::RefCell::new(self.optsum.initial.clone());
         let best_fmin = std::cell::Cell::new(self.optsum.finitial);
@@ -3656,6 +3670,7 @@ impl LinearMixedModel {
                     dims,
                     is_reml,
                     fixed_sigma,
+                    cholesky_zero_pad_tolerance,
                 )
                 .unwrap_or(invalid_objective)
             };
@@ -3704,11 +3719,7 @@ impl LinearMixedModel {
             };
 
         self.finalize_fit_result(
-            {
-                let mut rectified = final_theta;
-                Self::rectify_theta_columns(&mut rectified, &self.parmap, self.reterms.len());
-                rectified
-            },
+            final_theta,
             final_fmin,
             if result.feval > 0 {
                 result.feval
@@ -3717,6 +3728,7 @@ impl LinearMixedModel {
             },
             fit_log.into_inner(),
             Optimizer::PrimaBobyqa,
+            None,
         )?;
         self.optsum.return_value = result.return_code;
         self.optsum.backend = OptimizerBackend::Prima;
@@ -3808,6 +3820,10 @@ impl LinearMixedModel {
         let dims = self.dims;
         let is_reml = reml;
         let fixed_sigma = self.optsum.sigma;
+        let cholesky_zero_pad_tolerance = self
+            .compiler_policy()
+            .thresholds
+            .cholesky_zero_pad_tolerance;
         let invalid_objective = self.optsum.finitial;
         let best_theta = std::cell::RefCell::new(self.optsum.initial.clone());
         let best_fmin = std::cell::Cell::new(self.optsum.finitial);
@@ -3830,6 +3846,7 @@ impl LinearMixedModel {
                     dims,
                     is_reml,
                     fixed_sigma,
+                    cholesky_zero_pad_tolerance,
                 )
                 .unwrap_or(invalid_objective)
             };
@@ -3940,15 +3957,12 @@ impl LinearMixedModel {
         };
 
         self.finalize_fit_result(
-            {
-                let mut rectified = final_theta;
-                Self::rectify_theta_columns(&mut rectified, &self.parmap, self.reterms.len());
-                rectified
-            },
+            final_theta,
             final_fmin,
             feval_count.get(),
             fit_log.into_inner(),
             optimizer,
+            None,
         )?;
         self.optsum.return_value = status_label;
 
@@ -3974,6 +3988,13 @@ impl LinearMixedModel {
         let y0 = y[0];
         if y.iter().all(|&yi| (yi - y0).abs() < f64::EPSILON) {
             return Err(MixedModelError::ConstantResponse);
+        }
+
+        if self.feterm.rank >= self.dims.n {
+            return Err(MixedModelError::RankSaturatedFixedEffects {
+                rank: self.feterm.rank,
+                nobs: self.dims.n,
+            });
         }
 
         self.optsum.reml = reml;
@@ -4090,7 +4111,14 @@ impl LinearMixedModel {
 
         let x = self.feterm.full_rank_x().into_owned();
         let (a_blocks, mut l_blocks) = create_structural_al(&self.reterms, &x)?;
-        update_l_from_parts(&a_blocks, &mut l_blocks, &self.reterms)?;
+        update_l_from_parts(
+            &a_blocks,
+            &mut l_blocks,
+            &self.reterms,
+            self.compiler_policy()
+                .thresholds
+                .cholesky_zero_pad_tolerance,
+        )?;
         profile_response_matrix_with_l_blocks(
             &self.reterms,
             &x,
@@ -4177,8 +4205,6 @@ impl LinearMixedModel {
         let mut v_vecs: Vec<DVector<f64>> = Vec::with_capacity(k);
         for j in 0..k {
             let nranef_j = self.reterms[j].n_ranef();
-            let vs_j = self.reterms[j].vsize;
-            let n_levels_j = self.reterms[j].n_levels();
 
             let mut rhs = c_vecs[j].clone();
 
@@ -4196,61 +4222,9 @@ impl LinearMixedModel {
             }
 
             // Solve L[j,j] * v_j = rhs  (forward substitution)
-            let v_j = match &self.l_blocks[block_index(j, j)] {
-                MatrixBlock::Diagonal(diag) => {
-                    let mut v = DVector::zeros(nranef_j);
-                    for i in 0..nranef_j {
-                        let d = diag[i];
-                        v[i] = if d.abs() > f64::EPSILON {
-                            rhs[i] / d
-                        } else {
-                            0.0
-                        };
-                    }
-                    v
-                }
-                MatrixBlock::BlockDiagonal(blocks) => {
-                    let mut v = DVector::zeros(nranef_j);
-                    for lev in 0..n_levels_j {
-                        let blk = &blocks[lev]; // vs_j × vs_j lower triangular
-                        let offset = lev * vs_j;
-                        for i in 0..vs_j {
-                            let mut val = rhs[offset + i];
-                            for ci in 0..i {
-                                val -= blk[(i, ci)] * v[offset + ci];
-                            }
-                            let d = blk[(i, i)];
-                            v[offset + i] = if d.abs() > f64::EPSILON { val / d } else { 0.0 };
-                        }
-                    }
-                    v
-                }
-                MatrixBlock::Dense(mat) => {
-                    let mut v = DVector::zeros(nranef_j);
-                    for i in 0..nranef_j {
-                        let mut val = rhs[i];
-                        for ci in 0..i {
-                            val -= mat[(i, ci)] * v[ci];
-                        }
-                        let d = mat[(i, i)];
-                        v[i] = if d.abs() > f64::EPSILON { val / d } else { 0.0 };
-                    }
-                    v
-                }
-                MatrixBlock::Sparse(mat) => {
-                    let dense = MatrixBlock::Sparse(mat.clone()).as_dense();
-                    let mut v = DVector::zeros(nranef_j);
-                    for i in 0..nranef_j {
-                        let mut val = rhs[i];
-                        for ci in 0..i {
-                            val -= dense[(i, ci)] * v[ci];
-                        }
-                        let d = dense[(i, i)];
-                        v[i] = if d.abs() > f64::EPSILON { val / d } else { 0.0 };
-                    }
-                    v
-                }
-            };
+            let mut v_j = rhs.as_slice().to_vec();
+            solve_lower_block_against_rhs(&self.l_blocks[block_index(j, j)], &mut v_j);
+            let v_j = DVector::from_vec(v_j);
             v_vecs.push(v_j);
         }
 
@@ -4258,8 +4232,6 @@ impl LinearMixedModel {
         let mut u_vecs: Vec<DVector<f64>> = vec![DVector::zeros(0); k];
         for j in (0..k).rev() {
             let nranef_j = self.reterms[j].n_ranef();
-            let vs_j = self.reterms[j].vsize;
-            let n_levels_j = self.reterms[j].n_levels();
 
             let mut rhs = v_vecs[j].clone();
 
@@ -4278,63 +4250,12 @@ impl LinearMixedModel {
             }
 
             // Solve L[j,j]' * u_j = rhs  (backward substitution with L')
-            let u_j = match &self.l_blocks[block_index(j, j)] {
-                MatrixBlock::Diagonal(diag) => {
-                    let mut u = DVector::zeros(nranef_j);
-                    for i in 0..nranef_j {
-                        let d = diag[i];
-                        u[i] = if d.abs() > f64::EPSILON {
-                            rhs[i] / d
-                        } else {
-                            0.0
-                        };
-                    }
-                    u
-                }
-                MatrixBlock::BlockDiagonal(blocks) => {
-                    let mut u = DVector::zeros(nranef_j);
-                    for lev in 0..n_levels_j {
-                        let blk = &blocks[lev]; // vs_j × vs_j lower triangular
-                        let offset = lev * vs_j;
-                        // L'[i,ci] = L[ci,i]; backward: iterate i from vs_j-1 down to 0
-                        for i in (0..vs_j).rev() {
-                            let mut val = rhs[offset + i];
-                            for ci in (i + 1)..vs_j {
-                                val -= blk[(ci, i)] * u[offset + ci];
-                            }
-                            let d = blk[(i, i)];
-                            u[offset + i] = if d.abs() > f64::EPSILON { val / d } else { 0.0 };
-                        }
-                    }
-                    u
-                }
-                MatrixBlock::Dense(mat) => {
-                    let mut u = DVector::zeros(nranef_j);
-                    // L' is upper triangular; solve from bottom to top
-                    for i in (0..nranef_j).rev() {
-                        let mut val = rhs[i];
-                        for ci in (i + 1)..nranef_j {
-                            val -= mat[(ci, i)] * u[ci];
-                        }
-                        let d = mat[(i, i)];
-                        u[i] = if d.abs() > f64::EPSILON { val / d } else { 0.0 };
-                    }
-                    u
-                }
-                MatrixBlock::Sparse(mat) => {
-                    let dense = MatrixBlock::Sparse(mat.clone()).as_dense();
-                    let mut u = DVector::zeros(nranef_j);
-                    for i in (0..nranef_j).rev() {
-                        let mut val = rhs[i];
-                        for ci in (i + 1)..nranef_j {
-                            val -= dense[(ci, i)] * u[ci];
-                        }
-                        let d = dense[(i, i)];
-                        u[i] = if d.abs() > f64::EPSILON { val / d } else { 0.0 };
-                    }
-                    u
-                }
-            };
+            let mut u_j = rhs.as_slice().to_vec();
+            solve_upper_block_from_lower_transpose_against_rhs(
+                &self.l_blocks[block_index(j, j)],
+                &mut u_j,
+            );
+            let u_j = DVector::from_vec(u_j);
             u_vecs[j] = u_j;
         }
 
@@ -4406,8 +4327,14 @@ impl LinearMixedModel {
         self.nobs().saturating_sub(self.feterm.rank)
     }
 
-    /// Variance estimate: σ².  Mirrors `varest(fm)` in Julia.
+    /// Residual scale reported by Julia's `varest(fm)`.
+    ///
+    /// For estimated-σ fits this is σ². For fixed-σ fits, MixedModels.jl
+    /// reports the fixed σ itself, not σ².
     pub fn varest(&self) -> f64 {
+        if let Some(sigma) = self.optsum.sigma {
+            return sigma;
+        }
         let s = self.sigma();
         s * s
     }
@@ -4665,12 +4592,13 @@ impl LinearMixedModel {
         self.recompute_a_blocks();
 
         // Reset fit state so fit() doesn't reject as AlreadyFitted
+        let reml = self.optsum.reml;
         self.optsum.feval = 0;
 
         // Re-optimize from initial θ
         let initial = self.optsum.initial.clone();
         self.set_theta(&initial)?;
-        self.fit(false)?;
+        self.fit(reml)?;
         Ok(())
     }
 
@@ -4727,9 +4655,7 @@ impl LinearMixedModel {
             // RE blocks j = 0..k
             for j in 0..k {
                 let re_j = &self.reterms[j];
-                let vs_j = re_j.vsize;
                 let nranef_j = re_j.n_ranef();
-                let n_levels_j = re_j.n_levels();
 
                 let mut rhs = vec![0.0f64; nranef_j];
                 for idx in 0..nranef_j {
@@ -4747,54 +4673,9 @@ impl LinearMixedModel {
                     }
                 }
 
-                match &self.l_blocks[block_index(j, j)] {
-                    MatrixBlock::Diagonal(diag) => {
-                        for idx in 0..nranef_j {
-                            let d = diag[idx];
-                            w[offsets[j] + idx] = if d.abs() > f64::EPSILON {
-                                rhs[idx] / d
-                            } else {
-                                0.0
-                            };
-                        }
-                    }
-                    MatrixBlock::BlockDiagonal(blocks) => {
-                        for lev in 0..n_levels_j {
-                            let blk = &blocks[lev];
-                            for idx in 0..vs_j {
-                                let mut val = rhs[lev * vs_j + idx];
-                                for ci in 0..idx {
-                                    val -= blk[(idx, ci)] * w[offsets[j] + lev * vs_j + ci];
-                                }
-                                let d = blk[(idx, idx)];
-                                w[offsets[j] + lev * vs_j + idx] =
-                                    if d.abs() > f64::EPSILON { val / d } else { 0.0 };
-                            }
-                        }
-                    }
-                    MatrixBlock::Dense(mat) => {
-                        for idx in 0..nranef_j {
-                            let mut val = rhs[idx];
-                            for ci in 0..idx {
-                                val -= mat[(idx, ci)] * w[offsets[j] + ci];
-                            }
-                            let d = mat[(idx, idx)];
-                            w[offsets[j] + idx] =
-                                if d.abs() > f64::EPSILON { val / d } else { 0.0 };
-                        }
-                    }
-                    MatrixBlock::Sparse(mat) => {
-                        let dense = MatrixBlock::Sparse(mat.clone()).as_dense();
-                        for idx in 0..nranef_j {
-                            let mut val = rhs[idx];
-                            for ci in 0..idx {
-                                val -= dense[(idx, ci)] * w[offsets[j] + ci];
-                            }
-                            let d = dense[(idx, idx)];
-                            w[offsets[j] + idx] =
-                                if d.abs() > f64::EPSILON { val / d } else { 0.0 };
-                        }
-                    }
+                solve_lower_block_against_rhs(&self.l_blocks[block_index(j, j)], &mut rhs);
+                for idx in 0..nranef_j {
+                    w[offsets[j] + idx] = rhs[idx];
                 }
             }
 
@@ -4816,14 +4697,8 @@ impl LinearMixedModel {
                 }
             }
             let mut w_k = vec![0.0f64; pp1];
-            for idx in 0..pp1 {
-                let mut val = rhs_k[idx];
-                for ci in 0..idx {
-                    val -= l_kk[(idx, ci)] * w_k[ci];
-                }
-                let d = l_kk[(idx, idx)];
-                w_k[idx] = if d.abs() > f64::EPSILON { val / d } else { 0.0 };
-            }
+            w_k.copy_from_slice(&rhs_k);
+            solve_lower_block_against_rhs(&MatrixBlock::Dense(l_kk), &mut w_k);
 
             // h_obs = ||w_RE||² + ||w_FE||²  (exclude w_k[p] = y component)
             let sum_sq: f64 = w[..nranef_total].iter().map(|x| x * x).sum::<f64>()
@@ -4884,8 +4759,6 @@ impl LinearMixedModel {
                 for i in 0..(k - j) {
                     let blk_i = j + i;
                     let nranef_i = self.reterms[blk_i].n_ranef();
-                    let vs_i = self.reterms[blk_i].vsize;
-                    let n_levels_i = self.reterms[blk_i].n_levels();
                     let off_i = local_off[i];
 
                     // Subtract cross-block contributions: L[blk_i, blk_prev] * scratch[prev]
@@ -4906,61 +4779,16 @@ impl LinearMixedModel {
                     }
 
                     // Solve L[blk_i, blk_i] * scratch[i_part] = scratch[i_part]
-                    match &self.l_blocks[block_index(blk_i, blk_i)] {
-                        MatrixBlock::Diagonal(diag) => {
-                            for col in 0..vs_j {
-                                for idx in 0..nranef_i {
-                                    let d = diag[idx];
-                                    let val = scratch[(off_i + idx, col)];
-                                    scratch[(off_i + idx, col)] =
-                                        if d.abs() > f64::EPSILON { val / d } else { 0.0 };
-                                }
-                            }
-                        }
-                        MatrixBlock::BlockDiagonal(blocks) => {
-                            for lev in 0..n_levels_i {
-                                let blk = &blocks[lev].clone();
-                                for col in 0..vs_j {
-                                    for idx in 0..vs_i {
-                                        let mut val = scratch[(off_i + lev * vs_i + idx, col)];
-                                        for ci in 0..idx {
-                                            val -= blk[(idx, ci)]
-                                                * scratch[(off_i + lev * vs_i + ci, col)];
-                                        }
-                                        let d = blk[(idx, idx)];
-                                        scratch[(off_i + lev * vs_i + idx, col)] =
-                                            if d.abs() > f64::EPSILON { val / d } else { 0.0 };
-                                    }
-                                }
-                            }
-                        }
-                        MatrixBlock::Dense(mat) => {
-                            let mat = mat.clone();
-                            for col in 0..vs_j {
-                                for idx in 0..nranef_i {
-                                    let mut val = scratch[(off_i + idx, col)];
-                                    for ci in 0..idx {
-                                        val -= mat[(idx, ci)] * scratch[(off_i + ci, col)];
-                                    }
-                                    let d = mat[(idx, idx)];
-                                    scratch[(off_i + idx, col)] =
-                                        if d.abs() > f64::EPSILON { val / d } else { 0.0 };
-                                }
-                            }
-                        }
-                        MatrixBlock::Sparse(mat) => {
-                            let mat = MatrixBlock::Sparse(mat.clone()).as_dense();
-                            for col in 0..vs_j {
-                                for idx in 0..nranef_i {
-                                    let mut val = scratch[(off_i + idx, col)];
-                                    for ci in 0..idx {
-                                        val -= mat[(idx, ci)] * scratch[(off_i + ci, col)];
-                                    }
-                                    let d = mat[(idx, idx)];
-                                    scratch[(off_i + idx, col)] =
-                                        if d.abs() > f64::EPSILON { val / d } else { 0.0 };
-                                }
-                            }
+                    for col in 0..vs_j {
+                        let mut rhs: Vec<f64> = (0..nranef_i)
+                            .map(|idx| scratch[(off_i + idx, col)])
+                            .collect();
+                        solve_lower_block_against_rhs(
+                            &self.l_blocks[block_index(blk_i, blk_i)],
+                            &mut rhs,
+                        );
+                        for idx in 0..nranef_i {
+                            scratch[(off_i + idx, col)] = rhs[idx];
                         }
                     }
                 }
@@ -6257,7 +6085,7 @@ impl MixedModelFit for LinearMixedModel {
     }
 
     fn dof(&self) -> usize {
-        self.dims.p + self.n_theta() + usize::from(self.optsum.sigma.is_none())
+        self.feterm.rank + self.n_theta() + usize::from(self.optsum.sigma.is_none())
     }
 
     fn coef(&self) -> DVector<f64> {
@@ -6347,12 +6175,9 @@ impl MixedModelFit for LinearMixedModel {
     }
 
     fn is_singular(&self) -> bool {
-        let theta = self.theta();
-        let lb = self.lower_bounds();
-        theta
-            .iter()
-            .zip(lb.iter())
-            .any(|(&t, &l)| l >= 0.0 && (t - l).abs() < f64::EPSILON)
+        self.theta_at_lower_bound()
+            || self.optimizer_certificate_reports_boundary()
+            || self.has_reduced_effective_covariance()
     }
 
     fn opt_summary(&self) -> &OptSummary {
@@ -6365,7 +6190,7 @@ impl MixedModelFit for LinearMixedModel {
 
     fn dispersion(&self, sqr: bool) -> f64 {
         let s = self.sigma();
-        if sqr {
+        if sqr && self.optsum.sigma.is_none() {
             s * s
         } else {
             s
@@ -6477,12 +6302,7 @@ impl LinearMixedModel {
         use crate::formula::GroupingFactor;
 
         for re_term in &self.formula.random_terms {
-            let gf_name = match &re_term.grouping {
-                GroupingFactor::Single(name) => name.clone(),
-                GroupingFactor::Interaction(names) => names.join(" & "),
-                GroupingFactor::Cell(names) => names.join(":"),
-            };
-            if gf_name != rt.grouping_name {
+            if random_term_grouping_name(re_term) != rt.grouping_name {
                 continue;
             }
             return match &re_term.grouping {
@@ -6549,41 +6369,57 @@ impl LinearMixedModel {
 
     /// Build the z covariate vector for observation `obs` from `newdata`.
     fn get_z_for_obs(&self, rt: &ReMat, newdata: &DataFrame, obs: usize) -> Result<Vec<f64>> {
-        use crate::formula::{FixedTerm, GroupingFactor};
-
         for re_term in &self.formula.random_terms {
-            let gf_name = match &re_term.grouping {
-                GroupingFactor::Single(name) => name.clone(),
-                GroupingFactor::Interaction(names) => names.join(" & "),
-                GroupingFactor::Cell(names) => names.join(":"),
-            };
-            if gf_name != rt.grouping_name {
+            if random_term_grouping_name(re_term) != rt.grouping_name {
                 continue;
             }
-            let mut z = Vec::with_capacity(rt.vsize);
-            let has_intercept = re_term
-                .terms
-                .iter()
-                .any(|t| matches!(t, FixedTerm::Intercept))
-                || re_term.terms.is_empty();
-            if has_intercept {
-                z.push(1.0);
+            let (z, cnames) = random_term_z_for_obs(re_term, newdata, obs)?;
+            if cnames == rt.cnames {
+                return Ok(z);
             }
-            let basis_coding = random_effect_basis_coding(re_term);
-            for term in &re_term.terms {
-                for (col, _) in
-                    random_effect_basis_columns(term, newdata, newdata.nrow(), basis_coding)?
-                {
-                    z.push(col[obs]);
-                }
-            }
-            return Ok(z);
         }
         Err(MixedModelError::InvalidArgument(format!(
-            "RE term '{}' not found in formula",
-            rt.grouping_name
+            "RE term '{}' with basis [{}] not found in formula",
+            rt.grouping_name,
+            rt.cnames.join(", ")
         )))
     }
+}
+
+fn random_term_grouping_name(rt: &crate::formula::RandomTerm) -> String {
+    use crate::formula::GroupingFactor;
+
+    match &rt.grouping {
+        GroupingFactor::Single(name) => name.clone(),
+        GroupingFactor::Interaction(names) | GroupingFactor::Cell(names) => names.join(" & "),
+    }
+}
+
+fn random_term_z_for_obs(
+    rt: &crate::formula::RandomTerm,
+    data: &DataFrame,
+    obs: usize,
+) -> Result<(Vec<f64>, Vec<String>)> {
+    use crate::formula::FixedTerm;
+
+    let mut z = Vec::new();
+    let mut cnames = Vec::new();
+    let has_intercept =
+        rt.terms.iter().any(|t| matches!(t, FixedTerm::Intercept)) || rt.terms.is_empty();
+    if has_intercept {
+        z.push(1.0);
+        cnames.push("(Intercept)".to_string());
+    }
+
+    let basis_coding = random_effect_basis_coding(rt);
+    for term in &rt.terms {
+        for (col, name) in random_effect_basis_columns(term, data, data.nrow(), basis_coding)? {
+            z.push(col[obs]);
+            cnames.push(name);
+        }
+    }
+
+    Ok((z, cnames))
 }
 
 // === Helper functions for model construction ===
@@ -6593,6 +6429,10 @@ fn build_fixed_effects_matrix(
     formula: &Formula,
     data: &DataFrame,
 ) -> Result<(DMatrix<f64>, Vec<String>)> {
+    Ok(build_fixed_effects_design(formula, data)?.into_parts())
+}
+
+fn build_fixed_effects_design(formula: &Formula, data: &DataFrame) -> Result<DenseFixedDesign> {
     use crate::formula::FixedTerm;
 
     let n = data.nrow();
@@ -6659,7 +6499,7 @@ fn build_fixed_effects_matrix(
 
     if columns.is_empty() {
         // No fixed effects at all — create an empty matrix
-        return Ok((DMatrix::zeros(n, 0), vec![]));
+        return DenseFixedDesign::new(DMatrix::zeros(n, 0), vec![]);
     }
 
     let p = columns.len();
@@ -6668,7 +6508,7 @@ fn build_fixed_effects_matrix(
         x.set_column(j, col);
     }
 
-    Ok((x, names))
+    DenseFixedDesign::new(x, names)
 }
 
 /// Per-variable expansion used by interaction terms: numeric → one column,
@@ -8454,63 +8294,36 @@ fn subtract_left_block_product(dst: &mut DMatrix<f64>, lhs: &MatrixBlock, rhs: &
     }
 }
 
-fn solve_lower_block_rhs(rhs: &mut DMatrix<f64>, l: &MatrixBlock) {
+fn solve_lower_block_against_rhs(l: &MatrixBlock, rhs: &mut [f64]) {
+    debug_assert_eq!(l.nrows(), rhs.len());
+    debug_assert_eq!(l.ncols(), rhs.len());
+
     match l {
         MatrixBlock::Diagonal(diag) => {
             for row in 0..diag.len() {
                 let denom = diag[row];
-                if denom.abs() < 1e-30 {
-                    for col in 0..rhs.ncols() {
-                        rhs[(row, col)] = 0.0;
-                    }
+                if denom.abs() < BLOCK_TRIANGULAR_SOLVE_ZERO_TOLERANCE {
+                    rhs[row] = 0.0;
                     continue;
                 }
-                for col in 0..rhs.ncols() {
-                    rhs[(row, col)] /= denom;
-                }
+                rhs[row] /= denom;
             }
         }
         MatrixBlock::BlockDiagonal(blocks) => {
             let mut row_offset = 0;
             for block in blocks {
                 let s = block.nrows();
-                if s == 2 {
-                    let l00 = block[(0, 0)];
-                    let l10 = block[(1, 0)];
-                    let l11 = block[(1, 1)];
-                    for col in 0..rhs.ncols() {
-                        let row0 = row_offset;
-                        let row1 = row0 + 1;
-                        if l00.abs() < 1e-30 {
-                            rhs[(row0, col)] = 0.0;
-                        } else {
-                            rhs[(row0, col)] /= l00;
-                        }
-                        if l11.abs() < 1e-30 {
-                            rhs[(row1, col)] = 0.0;
-                        } else {
-                            rhs[(row1, col)] = (rhs[(row1, col)] - l10 * rhs[(row0, col)]) / l11;
-                        }
-                    }
-                    row_offset += s;
-                    continue;
-                }
-
                 for row in 0..s {
                     let diag = block[(row, row)];
-                    if diag.abs() < 1e-30 {
-                        for col in 0..rhs.ncols() {
-                            rhs[(row_offset + row, col)] = 0.0;
-                        }
+                    if diag.abs() < BLOCK_TRIANGULAR_SOLVE_ZERO_TOLERANCE {
+                        rhs[row_offset + row] = 0.0;
                         continue;
                     }
-                    for col in 0..rhs.ncols() {
-                        let mut sum = rhs[(row_offset + row, col)];
-                        for inner in 0..row {
-                            sum -= block[(row, inner)] * rhs[(row_offset + inner, col)];
-                        }
-                        rhs[(row_offset + row, col)] = sum / diag;
+                    let mut sum = rhs[row_offset + row];
+                    for inner in 0..row {
+                        sum -= block[(row, inner)] * rhs[row_offset + inner];
                     }
+                    rhs[row_offset + row] = sum / diag;
                 }
                 row_offset += s;
             }
@@ -8518,24 +8331,87 @@ fn solve_lower_block_rhs(rhs: &mut DMatrix<f64>, l: &MatrixBlock) {
         MatrixBlock::Dense(mat) => {
             for row in 0..mat.nrows() {
                 let diag = mat[(row, row)];
-                if diag.abs() < 1e-30 {
-                    for col in 0..rhs.ncols() {
-                        rhs[(row, col)] = 0.0;
-                    }
+                if diag.abs() < BLOCK_TRIANGULAR_SOLVE_ZERO_TOLERANCE {
+                    rhs[row] = 0.0;
                     continue;
                 }
-                for col in 0..rhs.ncols() {
-                    let mut sum = rhs[(row, col)];
-                    for inner in 0..row {
-                        sum -= mat[(row, inner)] * rhs[(inner, col)];
-                    }
-                    rhs[(row, col)] = sum / diag;
+                let mut sum = rhs[row];
+                for inner in 0..row {
+                    sum -= mat[(row, inner)] * rhs[inner];
                 }
+                rhs[row] = sum / diag;
             }
         }
         MatrixBlock::Sparse(_) => {
             let dense = l.as_dense();
-            solve_lower_block_rhs(rhs, &MatrixBlock::Dense(dense));
+            solve_lower_block_against_rhs(&MatrixBlock::Dense(dense), rhs);
+        }
+    }
+}
+
+fn solve_upper_block_from_lower_transpose_against_rhs(l: &MatrixBlock, rhs: &mut [f64]) {
+    debug_assert_eq!(l.nrows(), rhs.len());
+    debug_assert_eq!(l.ncols(), rhs.len());
+
+    match l {
+        MatrixBlock::Diagonal(diag) => {
+            for row in (0..diag.len()).rev() {
+                let denom = diag[row];
+                if denom.abs() < BLOCK_TRIANGULAR_SOLVE_ZERO_TOLERANCE {
+                    rhs[row] = 0.0;
+                    continue;
+                }
+                rhs[row] /= denom;
+            }
+        }
+        MatrixBlock::BlockDiagonal(blocks) => {
+            let mut row_offset = 0;
+            for block in blocks {
+                let s = block.nrows();
+                for row in (0..s).rev() {
+                    let diag = block[(row, row)];
+                    if diag.abs() < BLOCK_TRIANGULAR_SOLVE_ZERO_TOLERANCE {
+                        rhs[row_offset + row] = 0.0;
+                        continue;
+                    }
+                    let mut sum = rhs[row_offset + row];
+                    for inner in (row + 1)..s {
+                        sum -= block[(inner, row)] * rhs[row_offset + inner];
+                    }
+                    rhs[row_offset + row] = sum / diag;
+                }
+                row_offset += s;
+            }
+        }
+        MatrixBlock::Dense(mat) => {
+            for row in (0..mat.nrows()).rev() {
+                let diag = mat[(row, row)];
+                if diag.abs() < BLOCK_TRIANGULAR_SOLVE_ZERO_TOLERANCE {
+                    rhs[row] = 0.0;
+                    continue;
+                }
+                let mut sum = rhs[row];
+                for inner in (row + 1)..mat.nrows() {
+                    sum -= mat[(inner, row)] * rhs[inner];
+                }
+                rhs[row] = sum / diag;
+            }
+        }
+        MatrixBlock::Sparse(_) => {
+            let dense = l.as_dense();
+            solve_upper_block_from_lower_transpose_against_rhs(&MatrixBlock::Dense(dense), rhs);
+        }
+    }
+}
+
+fn solve_lower_block_rhs(rhs: &mut DMatrix<f64>, l: &MatrixBlock) {
+    debug_assert_eq!(rhs.nrows(), l.nrows());
+
+    for col in 0..rhs.ncols() {
+        let mut column_rhs: Vec<f64> = (0..rhs.nrows()).map(|row| rhs[(row, col)]).collect();
+        solve_lower_block_against_rhs(l, &mut column_rhs);
+        for row in 0..rhs.nrows() {
+            rhs[(row, col)] = column_rhs[row];
         }
     }
 }
@@ -9261,12 +9137,40 @@ fn subtract_product(c: &mut MatrixBlock, a: &DMatrix<f64>, b: &DMatrix<f64>) {
 }
 
 /// In-place Cholesky of a block (handles zero diagonal gracefully).
+#[cfg(test)]
 fn cholesky_block(block: &mut MatrixBlock) -> Result<()> {
+    cholesky_block_with_tolerance(
+        block,
+        crate::compiler::policy::DEFAULT_CHOLESKY_ZERO_PAD_TOLERANCE,
+    )
+}
+
+fn cholesky_zero_pad_abs_tolerance(diagonal_scale: f64, relative_tolerance: f64) -> f64 {
+    if !diagonal_scale.is_finite() || !relative_tolerance.is_finite() {
+        return 0.0;
+    }
+    relative_tolerance.max(0.0) * diagonal_scale.max(0.0)
+}
+
+fn diagonal_abs_max_matrix(mat: &DMatrix<f64>) -> f64 {
+    (0..mat.nrows().min(mat.ncols()))
+        .map(|idx| mat[(idx, idx)].abs())
+        .fold(0.0_f64, f64::max)
+}
+
+fn cholesky_block_with_tolerance(
+    block: &mut MatrixBlock,
+    cholesky_zero_pad_tolerance: f64,
+) -> Result<()> {
     match block {
         MatrixBlock::Diagonal(diag) => {
+            let tol = cholesky_zero_pad_abs_tolerance(
+                diag.iter().map(|value| value.abs()).fold(0.0_f64, f64::max),
+                cholesky_zero_pad_tolerance,
+            );
             for i in 0..diag.len() {
                 if diag[i] <= 0.0 {
-                    if diag[i] < -1e-8 {
+                    if diag[i] < -tol {
                         return Err(MixedModelError::PosDefException);
                     }
                     diag[i] = 0.0;
@@ -9280,9 +9184,13 @@ fn cholesky_block(block: &mut MatrixBlock) -> Result<()> {
             // Cholesky each small block independently: O(nlevels * s³)
             if blocks.first().is_some_and(|blk| blk.nrows() == 2) {
                 for blk in blocks.iter_mut() {
+                    let tol = cholesky_zero_pad_abs_tolerance(
+                        diagonal_abs_max_matrix(blk),
+                        cholesky_zero_pad_tolerance,
+                    );
                     let d00 = blk[(0, 0)];
                     if d00 <= 0.0 {
-                        if d00 < -1e-8 {
+                        if d00 < -tol {
                             return Err(MixedModelError::PosDefException);
                         }
                         blk[(0, 0)] = 0.0;
@@ -9294,7 +9202,7 @@ fn cholesky_block(block: &mut MatrixBlock) -> Result<()> {
 
                     let d11 = blk[(1, 1)] - blk[(1, 0)] * blk[(1, 0)];
                     if d11 <= 0.0 {
-                        if d11 < -1e-8 {
+                        if d11 < -tol {
                             return Err(MixedModelError::PosDefException);
                         }
                         blk[(1, 1)] = 0.0;
@@ -9308,13 +9216,17 @@ fn cholesky_block(block: &mut MatrixBlock) -> Result<()> {
 
             for blk in blocks.iter_mut() {
                 let n = blk.nrows();
+                let tol = cholesky_zero_pad_abs_tolerance(
+                    diagonal_abs_max_matrix(blk),
+                    cholesky_zero_pad_tolerance,
+                );
                 for j in 0..n {
                     let mut s = blk[(j, j)];
                     for k in 0..j {
                         s -= blk[(j, k)] * blk[(j, k)];
                     }
                     if s <= 0.0 {
-                        if s < -1e-8 {
+                        if s < -tol {
                             return Err(MixedModelError::PosDefException);
                         }
                         for i in j..n {
@@ -9339,6 +9251,10 @@ fn cholesky_block(block: &mut MatrixBlock) -> Result<()> {
         }
         MatrixBlock::Dense(mat) => {
             let n = mat.nrows();
+            let tol = cholesky_zero_pad_abs_tolerance(
+                diagonal_abs_max_matrix(mat),
+                cholesky_zero_pad_tolerance,
+            );
             for j in 0..n {
                 // Compute L[j,j]
                 let mut s = mat[(j, j)];
@@ -9346,7 +9262,7 @@ fn cholesky_block(block: &mut MatrixBlock) -> Result<()> {
                     s -= mat[(j, k)] * mat[(j, k)];
                 }
                 if s <= 0.0 {
-                    if s < -1e-8 {
+                    if s < -tol {
                         return Err(MixedModelError::PosDefException);
                     }
                     // Zero row (singular RE)
@@ -9376,7 +9292,7 @@ fn cholesky_block(block: &mut MatrixBlock) -> Result<()> {
         MatrixBlock::Sparse(_) => {
             let dense = block.as_dense();
             *block = MatrixBlock::Dense(dense);
-            cholesky_block(block)
+            cholesky_block_with_tolerance(block, cholesky_zero_pad_tolerance)
         }
     }
 }
@@ -10561,9 +10477,9 @@ mod tests {
         }
 
         let mut df = DataFrame::new();
-        df.add_numeric("reaction", reaction);
-        df.add_numeric("days", days);
-        df.add_categorical("subj", subj_labels);
+        df.add_numeric("reaction", reaction).unwrap();
+        df.add_numeric("days", days).unwrap();
+        df.add_categorical("subj", subj_labels).unwrap();
         df
     }
 
@@ -10583,10 +10499,125 @@ mod tests {
                 group.push(format!("g{}", idx + 1));
             }
         }
-        data.add_numeric("y", y);
-        data.add_numeric("x", x);
-        data.add_categorical("group", group);
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_categorical("group", group).unwrap();
         data
+    }
+
+    fn correlated_crossed_slope_data() -> DataFrame {
+        fn centered_mod(value: usize, modulus: usize, center: f64, scale: f64) -> f64 {
+            ((value % modulus) as f64 - center) * scale
+        }
+
+        let n_g = 10;
+        let n_h = 8;
+        let n_rep = 4;
+        let mut y = Vec::with_capacity(n_g * n_h * n_rep);
+        let mut x = Vec::with_capacity(n_g * n_h * n_rep);
+        let mut g = Vec::with_capacity(n_g * n_h * n_rep);
+        let mut h = Vec::with_capacity(n_g * n_h * n_rep);
+
+        for gi in 0..n_g {
+            let g0 = centered_mod(7 * gi + 3, 19, 9.0, 2.1);
+            let g1 = 0.82 * g0 + centered_mod(11 * gi + 5, 17, 8.0, 0.18);
+            for hi in 0..n_h {
+                let h0 = centered_mod(13 * hi + 2, 23, 11.0, 1.5);
+                let h1 = -0.74 * h0 + centered_mod(5 * hi + 7, 19, 9.0, 0.16);
+                for rep in 0..n_rep {
+                    let xv = rep as f64 - 1.5 + (gi % 3) as f64 * 0.08 + (hi % 2) as f64 * 0.05;
+                    let eps = centered_mod(gi * 11 + hi * 7 + rep * 5, 31, 15.0, 0.28);
+                    y.push(4.0 + 1.7 * xv + g0 + g1 * xv + h0 + h1 * xv + eps);
+                    x.push(xv);
+                    g.push(format!("g{:02}", gi + 1));
+                    h.push(format!("h{:02}", hi + 1));
+                }
+            }
+        }
+
+        let mut data = DataFrame::new();
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_categorical("g", g).unwrap();
+        data.add_categorical("h", h).unwrap();
+        data
+    }
+
+    fn vsize3_kernel_remat() -> ReMat {
+        ReMat::new(
+            "subj".to_string(),
+            vec![0, 1],
+            vec!["S1".to_string(), "S2".to_string()],
+            vec!["(Intercept)".to_string(), "x".to_string(), "z".to_string()],
+            DMatrix::from_row_slice(3, 2, &[1.0, 1.0, 0.0, 1.0, 2.0, 3.0]),
+        )
+    }
+
+    #[test]
+    fn test_apply_lambda_transpose_to_rhs_consistent_with_parmap_order() {
+        let mut re = vsize3_kernel_remat();
+        let parmap = build_parmap(&[re.clone()]);
+        assert_eq!(
+            parmap,
+            vec![
+                (0, 0, 0),
+                (0, 1, 0),
+                (0, 2, 0),
+                (0, 1, 1),
+                (0, 2, 1),
+                (0, 2, 2)
+            ]
+        );
+
+        re.set_theta(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        assert_eq!(
+            re.lambda,
+            DMatrix::from_row_slice(3, 3, &[1.0, 0.0, 0.0, 2.0, 4.0, 0.0, 3.0, 5.0, 6.0])
+        );
+
+        let mut rhs = DMatrix::from_row_slice(
+            6,
+            2,
+            &[
+                7.0, 29.0, 11.0, 31.0, 13.0, 37.0, 17.0, 41.0, 19.0, 43.0, 23.0, 47.0,
+            ],
+        );
+        let original = rhs.clone();
+
+        apply_lambda_transpose_to_rhs(&mut rhs, &re);
+
+        let lambda_t = re.lambda.transpose();
+        let mut expected = DMatrix::zeros(6, 2);
+        for level in 0..2 {
+            let offset = level * 3;
+            let expected_block = &lambda_t * original.rows(offset, 3).into_owned();
+            expected.rows_mut(offset, 3).copy_from(&expected_block);
+        }
+        assert_eq!(rhs, expected);
+    }
+
+    fn diagonal_theta_indices(model: &LinearMixedModel) -> Vec<usize> {
+        model
+            .parmap
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, &(_, row, col))| (row == col).then_some(idx))
+            .collect()
+    }
+
+    fn assert_theta_diagonals_nonnegative(model: &LinearMixedModel) {
+        let theta = model.theta();
+        for idx in diagonal_theta_indices(model) {
+            assert!(
+                theta[idx] >= 0.0,
+                "theta diagonal {idx} should be rectified, got {}",
+                theta[idx]
+            );
+            assert_eq!(
+                model.optsum.final_params[idx], theta[idx],
+                "final_params must store the rectified theta value"
+            );
+        }
     }
 
     #[cfg(feature = "nlopt")]
@@ -10647,11 +10678,11 @@ mod tests {
         }
 
         let mut df = DataFrame::new();
-        df.add_numeric("reaction", reaction);
-        df.add_numeric("days", days);
-        df.add_categorical("subj", subj_labels);
-        df.add_categorical("item", item_labels);
-        df.add_categorical("site", site_labels);
+        df.add_numeric("reaction", reaction).unwrap();
+        df.add_numeric("days", days).unwrap();
+        df.add_categorical("subj", subj_labels).unwrap();
+        df.add_categorical("item", item_labels).unwrap();
+        df.add_categorical("site", site_labels).unwrap();
         df
     }
 
@@ -10662,11 +10693,11 @@ mod tests {
             match data.column(name).unwrap() {
                 Column::Numeric(values) => {
                     let reordered = order.iter().map(|&idx| values[idx]).collect();
-                    permuted.add_numeric(name, reordered);
+                    permuted.add_numeric(name, reordered).unwrap();
                 }
                 Column::Categorical(cat) => {
                     let reordered = order.iter().map(|&idx| cat.values[idx].clone()).collect();
-                    permuted.add_categorical(name, reordered);
+                    permuted.add_categorical(name, reordered).unwrap();
                 }
             }
         }
@@ -10712,9 +10743,10 @@ mod tests {
         ];
 
         let mut df = DataFrame::new();
-        df.add_numeric("reaction", reaction);
-        df.add_numeric("days", days);
-        df.add_categorical("subj", subj.into_iter().map(str::to_string).collect());
+        df.add_numeric("reaction", reaction).unwrap();
+        df.add_numeric("days", days).unwrap();
+        df.add_categorical("subj", subj.into_iter().map(str::to_string).collect())
+            .unwrap();
         df
     }
 
@@ -10792,11 +10824,11 @@ mod tests {
         }
 
         let mut df = DataFrame::new();
-        df.add_numeric("reaction", reaction);
-        df.add_numeric("days", days);
-        df.add_categorical("subj", subj_labels);
-        df.add_categorical("item", item_labels);
-        df.add_categorical("site", site_labels);
+        df.add_numeric("reaction", reaction).unwrap();
+        df.add_numeric("days", days).unwrap();
+        df.add_categorical("subj", subj_labels).unwrap();
+        df.add_categorical("item", item_labels).unwrap();
+        df.add_categorical("site", site_labels).unwrap();
         df
     }
 
@@ -10817,8 +10849,8 @@ mod tests {
             .collect();
 
         let mut df = DataFrame::new();
-        df.add_numeric("yield", yields);
-        df.add_categorical("batch", batches);
+        df.add_numeric("yield", yields).unwrap();
+        df.add_categorical("batch", batches).unwrap();
         df
     }
 
@@ -10927,8 +10959,9 @@ mod tests {
         ];
 
         let mut df = DataFrame::new();
-        df.add_numeric("y", y);
-        df.add_categorical("z", (1..=100).map(|idx| idx.to_string()).collect());
+        df.add_numeric("y", y).unwrap();
+        df.add_categorical("z", (1..=100).map(|idx| idx.to_string()).collect())
+            .unwrap();
         df
     }
 
@@ -10987,17 +11020,22 @@ mod tests {
     #[test]
     fn test_random_effect_three_way_interaction_basis_is_materialized() {
         let mut data = DataFrame::new();
-        data.add_numeric("y", vec![1.0, 2.0, 1.5, 2.5, 3.0, 4.0]);
-        data.add_numeric("A", vec![0.0, 1.0, 0.5, 1.5, 2.0, 2.5]);
-        data.add_numeric("B", vec![1.0, 0.5, 1.5, 1.0, 2.0, 1.5]);
-        data.add_numeric("C", vec![2.0, 1.0, 0.5, 1.5, 1.0, 2.5]);
+        data.add_numeric("y", vec![1.0, 2.0, 1.5, 2.5, 3.0, 4.0])
+            .unwrap();
+        data.add_numeric("A", vec![0.0, 1.0, 0.5, 1.5, 2.0, 2.5])
+            .unwrap();
+        data.add_numeric("B", vec![1.0, 0.5, 1.5, 1.0, 2.0, 1.5])
+            .unwrap();
+        data.add_numeric("C", vec![2.0, 1.0, 0.5, 1.5, 1.0, 2.5])
+            .unwrap();
         data.add_categorical(
             "group",
             vec!["g1", "g1", "g1", "g2", "g2", "g2"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
 
         let formula = parse_formula("y ~ A * B * C + (A * B * C | group)").unwrap();
         let model = LinearMixedModel::new(formula, &data, None).unwrap();
@@ -11013,21 +11051,24 @@ mod tests {
     #[test]
     fn test_random_effect_categorical_slope_uses_treatment_coding_with_intercept() {
         let mut data = DataFrame::new();
-        data.add_numeric("y", vec![1.0, 2.0, 3.0, 1.5, 2.5, 3.5]);
+        data.add_numeric("y", vec![1.0, 2.0, 3.0, 1.5, 2.5, 3.5])
+            .unwrap();
         data.add_categorical(
             "cond",
             vec!["A", "B", "C", "A", "B", "C"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
         data.add_categorical(
             "subj",
             vec!["s1", "s1", "s1", "s2", "s2", "s2"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
 
         let formula = parse_formula("y ~ cond + (1 + cond | subj)").unwrap();
         let model = LinearMixedModel::new(formula, &data, None).unwrap();
@@ -11058,21 +11099,24 @@ mod tests {
     #[test]
     fn test_random_effect_categorical_slope_uses_cell_means_without_intercept() {
         let mut data = DataFrame::new();
-        data.add_numeric("y", vec![1.0, 2.0, 3.0, 1.5, 2.5, 3.5]);
+        data.add_numeric("y", vec![1.0, 2.0, 3.0, 1.5, 2.5, 3.5])
+            .unwrap();
         data.add_categorical(
             "cond",
             vec!["A", "B", "C", "A", "B", "C"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
         data.add_categorical(
             "subj",
             vec!["s1", "s1", "s1", "s2", "s2", "s2"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
 
         let formula = parse_formula("y ~ cond + (0 + cond | subj)").unwrap();
         let model = LinearMixedModel::new(formula, &data, None).unwrap();
@@ -11103,21 +11147,24 @@ mod tests {
     #[test]
     fn test_random_effect_categorical_cell_means_preserves_zero_correlation_map() {
         let mut data = DataFrame::new();
-        data.add_numeric("y", vec![1.0, 2.0, 3.0, 1.5, 2.5, 3.5]);
+        data.add_numeric("y", vec![1.0, 2.0, 3.0, 1.5, 2.5, 3.5])
+            .unwrap();
         data.add_categorical(
             "cond",
             vec!["A", "B", "C", "A", "B", "C"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
         data.add_categorical(
             "subj",
             vec!["s1", "s1", "s1", "s2", "s2", "s2"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
 
         let formula = parse_formula("y ~ cond + (0 + cond || subj)").unwrap();
         let model = LinearMixedModel::new(formula, &data, None).unwrap();
@@ -11137,22 +11184,24 @@ mod tests {
     #[test]
     fn test_random_effect_interaction_uses_cell_means_without_intercept() {
         let mut data = DataFrame::new();
-        data.add_numeric("y", vec![1.0, 2.0, 1.5, 2.5]);
-        data.add_numeric("x", vec![0.5, 1.0, 1.5, 2.0]);
+        data.add_numeric("y", vec![1.0, 2.0, 1.5, 2.5]).unwrap();
+        data.add_numeric("x", vec![0.5, 1.0, 1.5, 2.0]).unwrap();
         data.add_categorical(
             "cond",
             vec!["A", "B", "A", "B"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
         data.add_categorical(
             "subj",
             vec!["s1", "s1", "s2", "s2"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
 
         let formula = parse_formula("y ~ x * cond + (0 + x:cond | subj)").unwrap();
         let model = LinearMixedModel::new(formula, &data, None).unwrap();
@@ -11213,16 +11262,17 @@ mod tests {
     #[test]
     fn test_lmm_compiler_artifact_records_rank_deficient_fixed_effects() {
         let mut data = DataFrame::new();
-        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0]);
-        data.add_numeric("x", vec![0.0, 1.0, 0.0, 1.0]);
-        data.add_numeric("x2", vec![0.0, 2.0, 0.0, 2.0]);
+        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        data.add_numeric("x", vec![0.0, 1.0, 0.0, 1.0]).unwrap();
+        data.add_numeric("x2", vec![0.0, 2.0, 0.0, 2.0]).unwrap();
         data.add_categorical(
             "z",
             vec!["a", "a", "b", "b"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
 
         let formula = parse_formula("y ~ x + x2 + (1 | z)").unwrap();
         let model = LinearMixedModel::new(formula, &data, None).unwrap();
@@ -11241,22 +11291,26 @@ mod tests {
     #[test]
     fn test_lmm_compiler_theta_maps_follow_optimizer_reterm_order() {
         let mut data = DataFrame::new();
-        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        data.add_numeric("x", vec![0.0, 1.0, 0.5, 1.5, 0.25, 1.25]);
+        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+            .unwrap();
+        data.add_numeric("x", vec![0.0, 1.0, 0.5, 1.5, 0.25, 1.25])
+            .unwrap();
         data.add_categorical(
             "small",
             vec!["s1", "s1", "s2", "s2", "s1", "s2"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
         data.add_categorical(
             "large",
             vec!["l1", "l2", "l3", "l1", "l2", "l3"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
 
         let formula = parse_formula("y ~ x + (1 | small) + (1 + x | large)").unwrap();
         let model = LinearMixedModel::new(formula, &data, None).unwrap();
@@ -11682,21 +11736,24 @@ mod tests {
     #[test]
     fn test_crossed_scalar_re_cross_product_stays_sparse() {
         let mut data = DataFrame::new();
-        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+            .unwrap();
         data.add_categorical(
             "person",
             vec!["p1", "p1", "p2", "p3", "p3", "p1"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
         data.add_categorical(
             "firm",
             vec!["f1", "f2", "f2", "f1", "f3", "f1"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
 
         let formula = parse_formula("y ~ 1 + (1 | person) + (1 | firm)").unwrap();
         let model = LinearMixedModel::new(formula, &data, None).unwrap();
@@ -11748,6 +11805,51 @@ mod tests {
             assert!((m[(1, 1)] - 2.0).abs() < 1e-10);
             assert!(m[(0, 1)].abs() < 1e-10);
         }
+    }
+
+    #[test]
+    fn test_cholesky_zero_pad_scales_with_diagonal() {
+        let mut unit_scale = MatrixBlock::Dense(DMatrix::from_diagonal(&DVector::from_vec(vec![
+            -1e-12, 1.0,
+        ])));
+        assert!(matches!(
+            cholesky_block(&mut unit_scale),
+            Err(MixedModelError::PosDefException)
+        ));
+
+        let mut large_scale = MatrixBlock::Dense(DMatrix::from_diagonal(&DVector::from_vec(vec![
+            -1e-12, 1e8,
+        ])));
+        cholesky_block(&mut large_scale).unwrap();
+        let MatrixBlock::Dense(mat) = large_scale else {
+            unreachable!();
+        };
+        assert_eq!(mat[(0, 0)], 0.0);
+        assert_relative_eq!(mat[(1, 1)], 1e4, epsilon = 1e-8);
+    }
+
+    #[test]
+    fn test_cholesky_rejects_near_singular_negative_pivot_at_unit_scale() {
+        let mut block =
+            MatrixBlock::Dense(DMatrix::from_diagonal(&DVector::from_vec(vec![-1e-9, 1.0])));
+
+        assert!(matches!(
+            cholesky_block(&mut block),
+            Err(MixedModelError::PosDefException)
+        ));
+    }
+
+    #[test]
+    fn test_cholesky_strict_mode_matches_julia() {
+        let mut block = MatrixBlock::Dense(DMatrix::from_diagonal(&DVector::from_vec(vec![
+            -f64::EPSILON,
+            1e16,
+        ])));
+
+        assert!(matches!(
+            cholesky_block_with_tolerance(&mut block, 0.0),
+            Err(MixedModelError::PosDefException)
+        ));
     }
 
     #[test]
@@ -11844,9 +11946,60 @@ mod tests {
     }
 
     #[test]
+    fn test_blocked_forward_solve_zero_pivot_guard_uniform() {
+        let tiny_but_solvable = f64::EPSILON * 0.5;
+        let effectively_zero = BLOCK_TRIANGULAR_SOLVE_ZERO_TOLERANCE * 0.5;
+        let blocks = [
+            (
+                MatrixBlock::Diagonal(DVector::from_vec(vec![tiny_but_solvable, 2.0])),
+                [1.0, 2.0],
+            ),
+            (
+                MatrixBlock::BlockDiagonal(vec![DMatrix::from_row_slice(
+                    2,
+                    2,
+                    &[tiny_but_solvable, 0.0, 3.0, 2.0],
+                )]),
+                [1.0, 0.5],
+            ),
+            (
+                MatrixBlock::Dense(DMatrix::from_row_slice(
+                    2,
+                    2,
+                    &[tiny_but_solvable, 0.0, 3.0, 2.0],
+                )),
+                [1.0, 0.5],
+            ),
+        ];
+
+        for (block, expected) in &blocks {
+            let mut rhs = vec![tiny_but_solvable, 4.0];
+            solve_lower_block_against_rhs(block, &mut rhs);
+            assert_relative_eq!(rhs[0], expected[0], epsilon = 1e-12);
+            assert_relative_eq!(rhs[1], expected[1], epsilon = 1e-12);
+
+            let mut rhs_matrix = DMatrix::from_column_slice(2, 1, &[tiny_but_solvable, 4.0]);
+            solve_lower_block_rhs(&mut rhs_matrix, block);
+            assert_relative_eq!(rhs_matrix[(0, 0)], rhs[0], epsilon = 1e-12);
+            assert_relative_eq!(rhs_matrix[(1, 0)], rhs[1], epsilon = 1e-12);
+        }
+
+        let mut rhs = vec![1.0, 4.0];
+        solve_lower_block_against_rhs(
+            &MatrixBlock::Dense(DMatrix::from_row_slice(
+                2,
+                2,
+                &[effectively_zero, 0.0, 3.0, 2.0],
+            )),
+            &mut rhs,
+        );
+        assert_eq!(rhs, vec![0.0, 2.0]);
+    }
+
+    #[test]
     fn test_copy_scale_inflate_vsize2_matches_reference() {
         let mut re = make_vector_remat_for_kernel_tests(2);
-        re.set_theta(&[1.2, -0.35, 0.8]);
+        re.set_theta(&[1.2, -0.35, 0.8]).unwrap();
 
         let src_blocks = vec![
             DMatrix::from_row_slice(2, 2, &[3.0, 0.4, 0.4, 2.5]),
@@ -11880,8 +12033,8 @@ mod tests {
     fn test_copy_and_scale_offdiag_vsize2_matches_reference() {
         let mut re_i = make_vector_remat_for_kernel_tests(2);
         let mut re_j = make_vector_remat_for_kernel_tests(2);
-        re_i.set_theta(&[1.1, -0.25, 0.9]);
-        re_j.set_theta(&[0.8, 0.3, 1.4]);
+        re_i.set_theta(&[1.1, -0.25, 0.9]).unwrap();
+        re_j.set_theta(&[0.8, 0.3, 1.4]).unwrap();
 
         let a_dense = DMatrix::from_row_slice(
             4,
@@ -12014,6 +12167,10 @@ mod tests {
             model.dims,
             true,
             model.optsum.sigma,
+            model
+                .compiler_policy()
+                .thresholds
+                .cholesky_zero_pad_tolerance,
         )
         .expect("large one-term vector RE should use the fast objective path");
 
@@ -12281,6 +12438,176 @@ mod tests {
     }
 
     #[test]
+    fn test_scalar_single_theta_records_maxeval() {
+        let data = simulate_sleepstudy_like(16, 8, 99);
+        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.optsum.max_feval = 1;
+
+        model.fit(true).unwrap();
+
+        assert_eq!(model.optsum.optimizer, Optimizer::PatternSearch);
+        assert_eq!(model.optsum.return_value, "MAXEVAL_REACHED");
+        assert_ne!(model.optsum.return_value, "SUCCESS");
+    }
+
+    #[test]
+    fn test_pattern_search_records_maxeval() {
+        let data = simulate_sleepstudy_like(12, 8, 17);
+        let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.optsum.max_feval = 1;
+
+        model
+            .fit_with_forced_optimizer(true, Optimizer::PatternSearch)
+            .unwrap();
+
+        assert_eq!(model.optsum.optimizer, Optimizer::PatternSearch);
+        assert_eq!(model.optsum.return_value, "MAXEVAL_REACHED");
+        assert_ne!(model.optsum.return_value, "SUCCESS");
+    }
+
+    #[test]
+    fn test_pattern_search_descends_correlated_directions() {
+        let initial = vec![0.0, 0.0];
+        let outcome = LinearMixedModel::run_multivariate_pattern_search(
+            initial.clone(),
+            0.0,
+            &[f64::NEG_INFINITY, f64::NEG_INFINITY],
+            vec![1.0, 1.0],
+            &[1e-4, 1e-4],
+            5,
+            1e-12,
+            |theta| Ok(theta[0] * theta[0] + theta[1] * theta[1] - 3.0 * theta[0] * theta[1]),
+        )
+        .unwrap();
+
+        assert_eq!(outcome.feval_count, 5);
+        assert!(
+            outcome.best_fmin < -0.9,
+            "combined pattern probe should descend when each axis probe is uphill, got {}",
+            outcome.best_fmin
+        );
+        assert!(
+            outcome.fit_log.iter().any(|entry| {
+                entry.objective < 0.0
+                    && entry
+                        .theta
+                        .iter()
+                        .zip(initial.iter())
+                        .filter(|(candidate, base)| (*candidate - *base).abs() > 1e-12)
+                        .count()
+                        > 1
+            }),
+            "fit log should include an improving multi-coordinate pattern probe"
+        );
+    }
+
+    #[cfg(feature = "nlopt")]
+    #[test]
+    fn test_pattern_search_matches_nlopt_on_correlated_crossed_fixture() {
+        let data = correlated_crossed_slope_data();
+        let formula = parse_formula("y ~ 1 + x + (1 + x | g) + (1 + x | h)").unwrap();
+
+        let mut pattern_model = LinearMixedModel::new(formula.clone(), &data, None).unwrap();
+        pattern_model.optsum.max_feval = 20000;
+        pattern_model
+            .fit_with_forced_optimizer(true, Optimizer::PatternSearch)
+            .unwrap();
+
+        let mut nlopt_model = LinearMixedModel::new(formula, &data, None).unwrap();
+        nlopt_model.fit(true).unwrap();
+
+        assert_eq!(pattern_model.optsum.optimizer, Optimizer::PatternSearch);
+        assert_eq!(nlopt_model.optsum.optimizer, Optimizer::NloptBobyqa);
+        assert!(
+            pattern_model.objective_value() <= nlopt_model.objective_value() + 1e-4,
+            "pattern_search objective {} should match nlopt {} on correlated crossed fixture",
+            pattern_model.objective_value(),
+            nlopt_model.objective_value()
+        );
+    }
+
+    #[test]
+    fn test_cobyla_records_maxeval() {
+        let data = simulate_sleepstudy_like(12, 8, 17);
+        let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.optsum.max_feval = 5;
+
+        model
+            .fit_with_forced_optimizer(true, Optimizer::Cobyla)
+            .unwrap();
+
+        assert_eq!(model.optsum.optimizer, Optimizer::Cobyla);
+        assert_eq!(model.optsum.return_value, "MAXEVAL_REACHED");
+        assert_ne!(model.optsum.return_value, "SUCCESS");
+    }
+
+    #[test]
+    fn test_optimizer_return_values_consistent_across_backends() {
+        assert_eq!(
+            LinearMixedModel::cobyla_success_status_label(cobyla::SuccessStatus::MaxEvalReached),
+            "MAXEVAL_REACHED"
+        );
+        assert_eq!(
+            LinearMixedModel::cobyla_fail_status_label(cobyla::FailStatus::RoundoffLimited),
+            "ROUNDOFF_LIMITED"
+        );
+        #[cfg(feature = "nlopt")]
+        {
+            assert_eq!(
+                LinearMixedModel::nlopt_status_label("MaxEvalReached"),
+                "MAXEVAL_REACHED"
+            );
+            assert_eq!(
+                LinearMixedModel::nlopt_status_label("RoundoffLimited"),
+                "ROUNDOFF_LIMITED"
+            );
+        }
+    }
+
+    #[test]
+    fn test_rectify_runs_for_cobyla_and_pattern_search_backends() {
+        let data = grouped_slope_data_with_obs(8, 4);
+        let formula = parse_formula("y ~ 1 + x + (1 + x | group)").unwrap();
+
+        for optimizer in [Optimizer::Cobyla, Optimizer::PatternSearch] {
+            let mut model = LinearMixedModel::new(formula.clone(), &data, None).unwrap();
+            let negative_theta = vec![-1.0, 0.25, -0.5];
+            let fmin = model.objective_at(&negative_theta).unwrap();
+
+            model
+                .finalize_fit_result(
+                    negative_theta.clone(),
+                    fmin,
+                    1,
+                    vec![FitLogEntry {
+                        theta: negative_theta,
+                        objective: fmin,
+                    }],
+                    optimizer,
+                    None,
+                )
+                .unwrap();
+
+            assert_eq!(model.optsum.optimizer, optimizer);
+            assert_theta_diagonals_nonnegative(&model);
+            assert_eq!(model.optsum.final_params, vec![1.0, -0.25, 0.5]);
+        }
+    }
+
+    #[test]
+    fn test_rectify_theta_columns_matches_julia_sign_convention() {
+        let parmap = vec![(0, 0, 0), (0, 1, 0), (0, 1, 1), (1, 0, 0)];
+        let mut theta = vec![-2.0, 0.75, -3.0, -4.0];
+
+        LinearMixedModel::rectify_theta_columns(&mut theta, &parmap, 2);
+
+        assert_eq!(theta, vec![2.0, -0.75, 3.0, 4.0]);
+    }
+
+    #[test]
     #[allow(clippy::approx_constant)] // 3.14 is a sigma sentinel, not π
     fn test_fixed_sigma_constrains_scalar_re_fit() {
         let data = shared_julia_fixed_sigma_fixture();
@@ -12348,6 +12675,48 @@ mod tests {
             max_relative = 1e-3
         );
         assert_eq!(model_sigma314.dof(), model_sigma314.n_theta());
+    }
+
+    #[test]
+    #[allow(clippy::approx_constant)] // 3.14 is a sigma sentinel, not π
+    fn test_varest_under_fixed_sigma_matches_julia() {
+        let data = shared_julia_fixed_sigma_fixture();
+        let formula = parse_formula("y ~ 0 + (1 | z)").unwrap();
+        let mut fixed = LinearMixedModel::new(formula.clone(), &data, None).unwrap();
+        fixed.optsum.sigma = Some(3.14);
+        fixed.fit(false).unwrap();
+
+        let mut estimated = LinearMixedModel::new(formula, &data, None).unwrap();
+        estimated.fit(false).unwrap();
+
+        assert_relative_eq!(fixed.sigma(), 3.14, epsilon = 1e-12);
+        assert_relative_eq!(fixed.varest(), 3.14, epsilon = 1e-12);
+        assert_relative_eq!(
+            estimated.varest(),
+            estimated.sigma().powi(2),
+            epsilon = 1e-12
+        );
+    }
+
+    #[test]
+    #[allow(clippy::approx_constant)] // 3.14 is a sigma sentinel, not π
+    fn test_dispersion_under_fixed_sigma_matches_julia() {
+        let data = shared_julia_fixed_sigma_fixture();
+        let formula = parse_formula("y ~ 0 + (1 | z)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.optsum.sigma = Some(3.14);
+        model.fit(false).unwrap();
+
+        assert_relative_eq!(
+            MixedModelFit::dispersion(&model, false),
+            3.14,
+            epsilon = 1e-12
+        );
+        assert_relative_eq!(
+            MixedModelFit::dispersion(&model, true),
+            3.14,
+            epsilon = 1e-12
+        );
     }
 
     #[cfg(feature = "nlopt")]
@@ -12676,6 +13045,91 @@ mod tests {
     }
 
     #[test]
+    fn test_is_singular_detects_rank_deficient_lambda() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+        assert!(
+            !model.is_singular(),
+            "fitted vector model should start full rank"
+        );
+
+        // Full Cholesky with a tiny nonzero second diagonal: not at the
+        // parameter lower bound, but numerically rank-deficient in ΛΛ'.
+        let rank_deficient_theta = vec![1.0, 0.25, 1e-8];
+        model.set_theta(&rank_deficient_theta).unwrap();
+        model.update_l().unwrap();
+
+        assert!(
+            !model.theta_at_lower_bound(),
+            "tiny nonzero diagonal should not be classified as a boundary θ"
+        );
+
+        model.refresh_effective_covariance_summaries();
+
+        let summary = &model.compiler_artifact().effective_covariance[0];
+        assert_eq!(summary.status, EffectiveRankStatus::ReducedRank);
+        assert!(
+            model.is_singular(),
+            "is_singular must follow reduced effective covariance, not just θ lower bounds"
+        );
+    }
+
+    #[test]
+    fn test_is_singular_consistent_with_effective_covariance_status() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        let mut policy = CompilerPolicy::maximal_feasible();
+        policy.thresholds.effective_rank_relative_tolerance = 2.0;
+        model.set_compiler_policy(policy).unwrap();
+
+        model.fit(false).unwrap();
+
+        let has_reduced_covariance = model
+            .compiler_artifact()
+            .effective_covariance
+            .iter()
+            .any(|summary| summary.status == EffectiveRankStatus::ReducedRank);
+        assert!(has_reduced_covariance);
+        assert_eq!(
+            model.is_singular(),
+            model.theta_at_lower_bound()
+                || model.optimizer_certificate_reports_boundary()
+                || has_reduced_covariance
+        );
+        assert!(model.is_singular());
+    }
+
+    #[test]
+    fn test_lmm_set_theta_propagates_remat_err() {
+        let data = shared_julia_parity_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+
+        let err = model.set_theta(&[]).unwrap_err();
+
+        assert!(matches!(err, MixedModelError::DimensionMismatch(_)));
+    }
+
+    #[test]
+    fn test_set_theta_does_not_panic_on_bad_input() {
+        let data = shared_julia_parity_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| model.set_theta(&[])));
+
+        assert!(result.is_ok());
+        assert!(matches!(
+            result.unwrap(),
+            Err(MixedModelError::DimensionMismatch(_))
+        ));
+    }
+
+    #[test]
     fn test_lrt_nested_scalar_re_models() {
         // LRT comparing reaction ~ 1 + (1|subj) vs reaction ~ 1 + days + (1|subj).
         // The second model adds one FE parameter: chisq_dof == 1.
@@ -12741,8 +13195,8 @@ mod tests {
             .flat_map(|c| std::iter::repeat_n(c.to_string(), 5))
             .collect();
         let mut df = DataFrame::new();
-        df.add_numeric("yield", yields);
-        df.add_categorical("batch", batches);
+        df.add_numeric("yield", yields).unwrap();
+        df.add_categorical("batch", batches).unwrap();
         df
     }
 
@@ -12816,9 +13270,9 @@ mod tests {
             .flat_map(|s| std::iter::repeat_n(s.to_string(), 10))
             .collect();
         let mut df = DataFrame::new();
-        df.add_numeric("reaction", reaction);
-        df.add_numeric("days", days);
-        df.add_categorical("subj", subj);
+        df.add_numeric("reaction", reaction).unwrap();
+        df.add_numeric("days", days).unwrap();
+        df.add_categorical("subj", subj).unwrap();
         df
     }
 
@@ -12865,9 +13319,9 @@ mod tests {
             .flat_map(|_| ["A", "B", "C", "D", "E", "F"].iter().map(|s| s.to_string()))
             .collect();
         let mut df = DataFrame::new();
-        df.add_numeric("diameter", diameter);
-        df.add_categorical("plate", plate);
-        df.add_categorical("sample", sample);
+        df.add_numeric("diameter", diameter).unwrap();
+        df.add_categorical("plate", plate).unwrap();
+        df.add_categorical("sample", sample).unwrap();
         df
     }
 
@@ -12907,10 +13361,10 @@ mod tests {
             .collect();
 
         let mut df = DataFrame::new();
-        df.add_numeric("strength", strength);
-        df.add_categorical("batch", batch);
-        df.add_categorical("cask", cask);
-        df.add_categorical("batch_cask", batch_cask);
+        df.add_numeric("strength", strength).unwrap();
+        df.add_categorical("batch", batch).unwrap();
+        df.add_categorical("cask", cask).unwrap();
+        df.add_categorical("batch_cask", batch_cask).unwrap();
         df
     }
 
@@ -12932,8 +13386,8 @@ mod tests {
             .flat_map(|c| std::iter::repeat_n(c.to_string(), 5))
             .collect();
         let mut df = DataFrame::new();
-        df.add_numeric("yield", yields);
-        df.add_categorical("batch", batches);
+        df.add_numeric("yield", yields).unwrap();
+        df.add_categorical("batch", batches).unwrap();
         df
     }
 
@@ -13067,13 +13521,14 @@ mod tests {
         }
 
         let mut df = DataFrame::new();
-        df.add_numeric("reaction", out_reaction);
-        df.add_numeric("days", out_days);
+        df.add_numeric("reaction", out_reaction).unwrap();
+        df.add_numeric("days", out_days).unwrap();
         df.add_categorical_with_levels(
             "subj",
             out_subj,
             source.categorical("subj").unwrap().levels.clone(),
-        );
+        )
+        .unwrap();
         df
     }
 
@@ -13789,10 +14244,16 @@ mod tests {
         for _ in 0..8 {
             let y_sim = model.simulate_fixed_effect_null(&mut rng, &target).unwrap();
             let mut sim_data = DataFrame::new();
-            sim_data.add_numeric("reaction", y_sim.iter().copied().collect());
-            sim_data.add_numeric("days", data.numeric("days").unwrap().to_vec());
+            sim_data
+                .add_numeric("reaction", y_sim.iter().copied().collect())
+                .unwrap();
+            sim_data
+                .add_numeric("days", data.numeric("days").unwrap().to_vec())
+                .unwrap();
             let subj = data.categorical("subj").unwrap();
-            sim_data.add_categorical_with_levels("subj", subj.values.clone(), subj.levels.clone());
+            sim_data
+                .add_categorical_with_levels("subj", subj.values.clone(), subj.levels.clone())
+                .unwrap();
             let mut work = LinearMixedModel::new(formula.clone(), &sim_data, None).unwrap();
             work.fit(true).unwrap();
 
@@ -14094,13 +14555,7 @@ mod tests {
         assert_relative_eq!(theta[1], 1.3299137410046242, epsilon = 0.05);
     }
 
-    #[test]
-    fn test_weighted_model_matches_julia() {
-        // Mirrors pls.jl "wts" testset.
-        // Julia: m2 = fit(@formula(a ~ 1 + b + (1 | c)), data; wts=w1)
-        //   θ ≈ [0.2951818091809752]
-        //   stderror ≈ [0.964016663994572, 3.6309691484830533]
-        //   vcov ≈ [[0.9293, -2.5575], [-2.5575, 13.1839]]
+    fn weighted_lmm_fixture() -> (DataFrame, Vec<f64>) {
         let a = vec![
             1.55945122,
             0.004391538,
@@ -14132,9 +14587,21 @@ mod tests {
         let w1: Vec<f64> = vec![20.0, 40.0, 35.0, 12.0, 29.0, 25.0, 65.0, 105.0, 30.0, 75.0];
 
         let mut df = DataFrame::new();
-        df.add_numeric("a", a);
-        df.add_numeric("b", b);
-        df.add_categorical("c", c);
+        df.add_numeric("a", a).unwrap();
+        df.add_numeric("b", b).unwrap();
+        df.add_categorical("c", c).unwrap();
+
+        (df, w1)
+    }
+
+    #[test]
+    fn test_weighted_model_matches_julia() {
+        // Mirrors pls.jl "wts" testset.
+        // Julia: m2 = fit(@formula(a ~ 1 + b + (1 | c)), data; wts=w1)
+        //   θ ≈ [0.2951818091809752]
+        //   stderror ≈ [0.964016663994572, 3.6309691484830533]
+        //   vcov ≈ [[0.9293, -2.5575], [-2.5575, 13.1839]]
+        let (df, w1) = weighted_lmm_fixture();
 
         let formula = parse_formula("a ~ 1 + b + (1 | c)").unwrap();
         let mut model = LinearMixedModel::new(formula, &df, Some(&w1)).unwrap();
@@ -14154,6 +14621,64 @@ mod tests {
     }
 
     #[test]
+    fn test_weighted_lmm_objective_matches_julia_normalization() {
+        let (df, w1) = weighted_lmm_fixture();
+        let formula = parse_formula("a ~ 1 + b + (1 | c)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &df, Some(&w1)).unwrap();
+        model.fit(false).unwrap();
+
+        let expected_correction: f64 = w1.iter().map(|weight| weight.ln()).sum();
+
+        assert_relative_eq!(
+            model.weight_logdet_correction(),
+            expected_correction,
+            epsilon = 1e-12
+        );
+        assert_relative_eq!(
+            model.objective_value(),
+            model.profiled_objective_value() - expected_correction,
+            epsilon = 1e-10
+        );
+    }
+
+    #[test]
+    fn test_unweighted_objective_unchanged_by_weight_normalization() {
+        let data = dyestuff_fixture();
+        let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        assert_eq!(model.weight_logdet_correction(), 0.0);
+        assert_relative_eq!(
+            model.objective_value(),
+            model.profiled_objective_value(),
+            epsilon = 1e-12
+        );
+        assert_relative_eq!(model.objective_value(), 327.32705988112673, epsilon = 1e-3);
+    }
+
+    #[test]
+    fn test_weighted_lrt_matches_profiled_target_difference() {
+        use crate::stats::lrt::LikelihoodRatioTest;
+
+        let (df, w1) = weighted_lmm_fixture();
+        let f0 = parse_formula("a ~ 1 + (1 | c)").unwrap();
+        let mut m0 = LinearMixedModel::new(f0, &df, Some(&w1)).unwrap();
+        m0.fit(false).unwrap();
+
+        let f1 = parse_formula("a ~ 1 + b + (1 | c)").unwrap();
+        let mut m1 = LinearMixedModel::new(f1, &df, Some(&w1)).unwrap();
+        m1.fit(false).unwrap();
+
+        let raw_chisq = m0.profiled_objective_value() - m1.profiled_objective_value();
+        let corrected_chisq = m0.objective_value() - m1.objective_value();
+        assert_relative_eq!(corrected_chisq, raw_chisq, epsilon = 1e-10);
+
+        let lrt = LikelihoodRatioTest::test(&[&m0 as &dyn MixedModelFit, &m1]).unwrap();
+        assert_relative_eq!(lrt.chisq[0], corrected_chisq, epsilon = 1e-10);
+    }
+
+    #[test]
     fn test_rank_deficient_fixed_effects() {
         // Mirrors pls.jl "Rank deficient" testset.
         // x2 = 1.5 * x makes the FE design matrix rank-deficient (rank 2, not 3).
@@ -14168,10 +14693,10 @@ mod tests {
             .collect();
 
         let mut df = DataFrame::new();
-        df.add_numeric("y", y);
-        df.add_numeric("x", x);
-        df.add_numeric("x2", x2);
-        df.add_categorical("z", z);
+        df.add_numeric("y", y).unwrap();
+        df.add_numeric("x", x).unwrap();
+        df.add_numeric("x2", x2).unwrap();
+        df.add_categorical("z", z).unwrap();
 
         let formula = parse_formula("y ~ x + x2 + (1 | z)").unwrap();
         let mut model = LinearMixedModel::new(formula, &df, None).unwrap();
@@ -14793,6 +15318,92 @@ mod tests {
 
     // ── ranef_u / ranef_b parity with MixedModels.jl/test/pls.jl ───────────
 
+    fn manual_one_term_ranef_u_via_block_solver(model: &LinearMixedModel) -> DMatrix<f64> {
+        assert_eq!(model.reterms.len(), 1);
+        let re = &model.reterms[0];
+        let vs = re.vsize;
+        let n_levels = re.n_levels();
+        let nranef = re.n_ranef();
+        let p = model.dims.p;
+        let n = model.dims.n;
+        let beta = model.beta();
+        let wtxy = &model.xy_mat.wtxy;
+
+        let mut wr = vec![0.0f64; n];
+        for obs in 0..n {
+            let mut val = wtxy[(obs, p)];
+            for q in 0..p {
+                val -= wtxy[(obs, q)] * beta[q];
+            }
+            wr[obs] = val;
+        }
+
+        let mut c = vec![0.0f64; nranef];
+        for obs in 0..n {
+            let r = re.refs[obs] as usize;
+            for s in 0..vs {
+                c[r * vs + s] += re.wtz[(s, obs)] * wr[obs];
+            }
+        }
+
+        let mut c_scaled = vec![0.0f64; nranef];
+        for lev in 0..n_levels {
+            for i in 0..vs {
+                let mut val = 0.0;
+                for row in i..vs {
+                    val += re.lambda[(row, i)] * c[lev * vs + row];
+                }
+                c_scaled[lev * vs + i] = val;
+            }
+        }
+
+        let l = &model.l_blocks[block_index(0, 0)];
+        let mut rhs_matrix = DMatrix::from_column_slice(nranef, 1, &c_scaled);
+        solve_lower_block_rhs(&mut rhs_matrix, l);
+        let mut u: Vec<f64> = (0..nranef).map(|idx| rhs_matrix[(idx, 0)]).collect();
+        solve_upper_block_from_lower_transpose_against_rhs(l, &mut u);
+
+        DMatrix::from_column_slice(vs, n_levels, &u)
+    }
+
+    #[test]
+    fn test_ranef_u_matches_solve_lower_block_rhs() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let actual = model.ranef_u();
+        let manual = manual_one_term_ranef_u_via_block_solver(&model);
+
+        assert_eq!(actual.len(), 1);
+        assert_eq!(actual[0].shape(), manual.shape());
+        for row in 0..manual.nrows() {
+            for col in 0..manual.ncols() {
+                assert_relative_eq!(
+                    actual[0][(row, col)],
+                    manual[(row, col)],
+                    epsilon = 1e-10,
+                    max_relative = 1e-10
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_ranef_u_regression_current_outputs() {
+        let data = penicillin_fixture();
+        let formula = parse_formula("diameter ~ 1 + (1 | plate) + (1 | sample)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let rfu = model.ranef_u();
+
+        assert_eq!(rfu.len(), 2);
+        assert_relative_eq!(rfu[0][(0, 0)], 0.5231574704291094, epsilon = 1e-3);
+        assert_relative_eq!(rfu[1][(0, 5)], -0.9323155679350466, epsilon = 1e-3);
+    }
+
     #[test]
     fn test_dyestuff_ranef_u_sums_to_zero() {
         // pls.jl: @test abs(sum(only(rfu))) < 1.e-5
@@ -14963,6 +15574,34 @@ mod tests {
     }
 
     #[test]
+    fn test_refit_preserves_reml_flag() {
+        let data = dyestuff_fixture();
+        let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(true).unwrap();
+
+        let original_y: Vec<f64> = model.y().iter().copied().collect();
+        model.refit(&original_y).unwrap();
+
+        assert!(model.optsum.reml);
+    }
+
+    #[test]
+    fn test_refit_after_reml_objective_matches() {
+        let data = dyestuff_fixture();
+        let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(true).unwrap();
+        let objective_before = model.objective_value();
+        let original_y: Vec<f64> = model.y().iter().copied().collect();
+
+        model.refit(&original_y).unwrap();
+
+        assert!(model.optsum.reml);
+        assert_relative_eq!(model.objective_value(), objective_before, epsilon = 1e-6);
+    }
+
+    #[test]
     fn test_refit_rejects_constant_response() {
         // pls.jl: @test_throws ArgumentError refit!(fm, zero(slp.reaction))
         let data = sleepstudy_fixture();
@@ -15110,7 +15749,95 @@ mod tests {
     }
 
     #[test]
-    fn test_predict_new_unknown_level_error() {
+    fn test_predict_new_same_data_equals_fitted_for_same_group_random_blocks() {
+        // Regression for lme4 issue #403-shaped formulas:
+        // separate random-slope blocks share a grouping factor, so prediction
+        // must match by grouping factor *and* random-effect basis.
+        let mut y = Vec::new();
+        let mut x1 = Vec::new();
+        let mut x2 = Vec::new();
+        let mut subject = Vec::new();
+        for subj in 0..12 {
+            let b0 = subj as f64 * 0.4 - 2.0;
+            let b1 = (subj as f64 - 5.0) * 0.12;
+            let b2 = (6.0 - subj as f64) * 0.18;
+            for obs in 0..5 {
+                let a = obs as f64 - 2.0;
+                let c = (obs as f64 + 1.0).powi(2) / 4.0;
+                x1.push(a);
+                x2.push(c);
+                y.push(10.0 + 1.5 * a - 0.7 * c + b0 + b1 * a + b2 * c);
+                subject.push(format!("s{subj}"));
+            }
+        }
+
+        let mut data = DataFrame::new();
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x1", x1).unwrap();
+        data.add_numeric("x2", x2).unwrap();
+        data.add_categorical("subject", subject).unwrap();
+
+        let formula =
+            parse_formula("y ~ 1 + x1 + x2 + (1 + x1 | subject) + (1 + x2 | subject)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let fitted = model.fitted();
+        let predicted = model.predict_new(&data, NewReLevels::Error).unwrap();
+        assert_eq!(predicted.len(), fitted.len());
+        for (idx, pred) in predicted.iter().enumerate() {
+            assert_relative_eq!(
+                pred.expect("training levels are known"),
+                fitted[idx],
+                epsilon = 1e-7,
+                max_relative = 1e-7
+            );
+        }
+    }
+
+    #[test]
+    fn test_predict_new_same_data_equals_fitted_for_cell_grouping() {
+        let mut y = Vec::new();
+        let mut x = Vec::new();
+        let mut site = Vec::new();
+        let mut item = Vec::new();
+        for site_idx in 0..3 {
+            for item_idx in 0..4 {
+                let cell_effect = site_idx as f64 * 0.8 - item_idx as f64 * 0.3;
+                for rep in 0..2 {
+                    let xv = rep as f64 + item_idx as f64 * 0.25;
+                    x.push(xv);
+                    y.push(3.0 + 1.2 * xv + cell_effect);
+                    site.push(format!("site{site_idx}"));
+                    item.push(format!("item{item_idx}"));
+                }
+            }
+        }
+
+        let mut data = DataFrame::new();
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_categorical("site", site).unwrap();
+        data.add_categorical("item", item).unwrap();
+
+        let formula = parse_formula("y ~ 1 + x + (1 | site:item)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let fitted = model.fitted();
+        let predicted = model.predict_new(&data, NewReLevels::Error).unwrap();
+        for (idx, pred) in predicted.iter().enumerate() {
+            assert_relative_eq!(
+                pred.expect("training cell levels are known"),
+                fitted[idx],
+                epsilon = 1e-8,
+                max_relative = 1e-8
+            );
+        }
+    }
+
+    #[test]
+    fn test_predict_with_unseen_level_returns_typed_err() {
         // predict.jl: @test_throws ArgumentError predict(m, slp2; new_re_levels=:error)
         let data = sleepstudy_fixture();
         let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
@@ -15118,11 +15845,21 @@ mod tests {
         model.fit(false).unwrap();
 
         let mut newdata = DataFrame::new();
-        newdata.add_numeric("reaction", vec![300.0]);
-        newdata.add_numeric("days", vec![0.0]);
-        newdata.add_categorical("subj", vec!["UNSEEN".to_string()]);
+        newdata.add_numeric("reaction", vec![300.0]).unwrap();
+        newdata.add_numeric("days", vec![0.0]).unwrap();
+        newdata
+            .add_categorical("subj", vec!["UNSEEN".to_string()])
+            .unwrap();
 
-        assert!(model.predict_new(&newdata, NewReLevels::Error).is_err());
+        let err = model.predict_new(&newdata, NewReLevels::Error).unwrap_err();
+
+        match err {
+            MixedModelError::InvalidArgument(message) => {
+                assert!(message.contains("UNSEEN"));
+                assert!(message.contains("subj"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
@@ -15137,9 +15874,11 @@ mod tests {
         let cnames = model.feterm.cnames.clone();
         let days: Vec<f64> = (0..10).map(|d| d as f64).collect();
         let mut newdata = DataFrame::new();
-        newdata.add_numeric("reaction", vec![0.0; 10]);
-        newdata.add_numeric("days", days.clone());
-        newdata.add_categorical("subj", vec!["NEW".to_string(); 10]);
+        newdata.add_numeric("reaction", vec![0.0; 10]).unwrap();
+        newdata.add_numeric("days", days.clone()).unwrap();
+        newdata
+            .add_categorical("subj", vec!["NEW".to_string(); 10])
+            .unwrap();
 
         let result = model
             .predict_new(&newdata, NewReLevels::Population)
@@ -15181,9 +15920,9 @@ mod tests {
             subjects.push("S309".to_string());
         }
         let mut newdata = DataFrame::new();
-        newdata.add_numeric("reaction", vec![0.0; 20]);
-        newdata.add_numeric("days", days);
-        newdata.add_categorical("subj", subjects);
+        newdata.add_numeric("reaction", vec![0.0; 20]).unwrap();
+        newdata.add_numeric("days", days).unwrap();
+        newdata.add_categorical("subj", subjects).unwrap();
 
         let result = model.predict_new(&newdata, NewReLevels::Missing).unwrap();
         let n_missing = result.iter().filter(|v| v.is_none()).count();
@@ -15295,10 +16034,10 @@ mod tests {
         let z: Vec<String> = (0..n).map(|i| format!("G{}", i % 6)).collect();
 
         let mut df = DataFrame::new();
-        df.add_numeric("y", y);
-        df.add_numeric("x", x);
-        df.add_numeric("x2", x2);
-        df.add_categorical("z", z);
+        df.add_numeric("y", y).unwrap();
+        df.add_numeric("x", x).unwrap();
+        df.add_numeric("x2", x2).unwrap();
+        df.add_categorical("z", z).unwrap();
 
         let formula = parse_formula("y ~ 1 + x + x2 + (1 | z)").unwrap();
         let mut model = LinearMixedModel::new(formula, &df, None).unwrap();
@@ -15532,10 +16271,10 @@ mod tests {
         let z: Vec<String> = (0..n).map(|i| format!("G{}", i % 6)).collect();
 
         let mut df = DataFrame::new();
-        df.add_numeric("y", y);
-        df.add_numeric("x", x);
-        df.add_numeric("x2", x2);
-        df.add_categorical("z", z);
+        df.add_numeric("y", y).unwrap();
+        df.add_numeric("x", x).unwrap();
+        df.add_numeric("x2", x2).unwrap();
+        df.add_categorical("z", z).unwrap();
 
         let formula = parse_formula("y ~ 1 + x + x2 + (1 | z)").unwrap();
         let mut model = LinearMixedModel::new(formula, &df, None).unwrap();
@@ -15566,35 +16305,6 @@ mod tests {
             if reason.contains("aliased") || reason.contains("non-finite"))
         );
         assert_eq!(test.p_values, vec![None]);
-    }
-
-    #[test]
-    fn test_lmm_fixed_effect_term_rows_are_rust_owned() {
-        let data = sleepstudy_fixture();
-        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
-        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
-        model.fit(false).unwrap();
-
-        let hypotheses = model.fixed_effect_term_hypotheses();
-        assert!(hypotheses
-            .iter()
-            .any(|hypothesis| hypothesis.label == "days"));
-
-        let table = model.fixed_effect_term_inference_table(FixedEffectTestMethod::Auto);
-        let days = table
-            .rows
-            .iter()
-            .find(|row| row.label == "days")
-            .expect("days term row should be exposed");
-        assert_eq!(days.kind, FixedEffectInferenceRowKind::Term);
-        let family = days
-            .details
-            .as_ref()
-            .and_then(|details| details.contrast_family.as_ref())
-            .expect("term row should carry contrast-family details");
-        assert_eq!(family.family_label, "days");
-        assert_eq!(family.restriction_rows, 1);
-        assert_eq!(family.coefficient_count, model.coef_names().len());
     }
 
     #[test]
@@ -15656,10 +16366,10 @@ mod tests {
         let z: Vec<String> = (0..n).map(|i| format!("G{}", i % 6)).collect();
 
         let mut df = DataFrame::new();
-        df.add_numeric("y", y);
-        df.add_numeric("x", x);
-        df.add_numeric("x2", x2);
-        df.add_categorical("z", z);
+        df.add_numeric("y", y).unwrap();
+        df.add_numeric("x", x).unwrap();
+        df.add_numeric("x2", x2).unwrap();
+        df.add_categorical("z", z).unwrap();
 
         let formula = parse_formula("y ~ 1 + x + x2 + (1 | z)").unwrap();
         let mut model = LinearMixedModel::new(formula, &df, None).unwrap();
@@ -15782,10 +16492,10 @@ mod tests {
         let z: Vec<String> = (0..n).map(|i| format!("G{}", i % 6)).collect();
 
         let mut df = DataFrame::new();
-        df.add_numeric("y", y);
-        df.add_numeric("x", x);
-        df.add_numeric("x2", x2);
-        df.add_categorical("z", z);
+        df.add_numeric("y", y).unwrap();
+        df.add_numeric("x", x).unwrap();
+        df.add_numeric("x2", x2).unwrap();
+        df.add_categorical("z", z).unwrap();
 
         let formula = parse_formula("y ~ 1 + x + x2 + (1 | z)").unwrap();
         let mut model = LinearMixedModel::new(formula, &df, None).unwrap();
@@ -15805,6 +16515,35 @@ mod tests {
         assert!(matches!(test.status, InferenceStatus::NotEstimable { .. }));
         assert_eq!(test.estimability.status, EstimabilityStatus::NotEstimable);
         assert_eq!(test.p_values, vec![None]);
+    }
+
+    #[test]
+    fn test_lmm_fixed_effect_term_rows_are_rust_owned() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let hypotheses = model.fixed_effect_term_hypotheses();
+        assert!(hypotheses
+            .iter()
+            .any(|hypothesis| hypothesis.label == "days"));
+
+        let table = model.fixed_effect_term_inference_table(FixedEffectTestMethod::Auto);
+        let days = table
+            .rows
+            .iter()
+            .find(|row| row.label == "days")
+            .expect("days term row should be exposed");
+        assert_eq!(days.kind, FixedEffectInferenceRowKind::Term);
+        let family = days
+            .details
+            .as_ref()
+            .and_then(|details| details.contrast_family.as_ref())
+            .expect("term row should carry contrast-family details");
+        assert_eq!(family.family_label, "days");
+        assert_eq!(family.restriction_rows, 1);
+        assert_eq!(family.coefficient_count, model.coef_names().len());
     }
 
     // ── Cook's distance parity tests (pls.jl line 705) ───────────────────────

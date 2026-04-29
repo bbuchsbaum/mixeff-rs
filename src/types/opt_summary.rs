@@ -300,6 +300,52 @@ impl OptSummary {
         }
     }
 
+    fn optimizer_setting_pairs(&self) -> Vec<(&'static str, String)> {
+        self.optimizer
+            .canonical_backend()
+            .opt_params()
+            .iter()
+            .map(|name| {
+                let value = match *name {
+                    "ftol_rel" => self.ftol_rel.to_string(),
+                    "ftol_abs" => self.ftol_abs.to_string(),
+                    "xtol_rel" => self.xtol_rel.to_string(),
+                    "xtol_abs" => format!("{:?}", self.xtol_abs),
+                    "initial_step" => format!("{:?}", self.initial_step),
+                    "maxfeval" => self.max_feval.to_string(),
+                    "maxtime" => self.max_time.to_string(),
+                    "rhobeg" => self.rhobeg.to_string(),
+                    "rhoend" => self.rhoend.to_string(),
+                    other => format!("<unknown opt param {other}>"),
+                };
+                (*name, value)
+            })
+            .collect()
+    }
+
+    fn markdown_optimizer_settings(&self) -> String {
+        self.optimizer_setting_pairs()
+            .into_iter()
+            .map(|(name, value)| format!("| {name:<24} | {value} |\n"))
+            .collect()
+    }
+
+    fn html_optimizer_settings(&self) -> String {
+        self.optimizer_setting_pairs()
+            .into_iter()
+            .map(|(name, value)| {
+                format!("<tr><td align=\"left\">{name}</td><td align=\"left\">{value}</td></tr>")
+            })
+            .collect()
+    }
+
+    fn latex_optimizer_settings(&self) -> String {
+        self.optimizer_setting_pairs()
+            .into_iter()
+            .map(|(name, value)| format!("{} & {} \\\\\n", latex_escape_code(name), value))
+            .collect()
+    }
+
     /// Render a markdown summary table.
     pub fn to_markdown(&self) -> String {
         format!(
@@ -312,13 +358,7 @@ impl OptSummary {
                 "| **Optimizer settings**   |                   |\n",
                 "| Optimizer                | `{}` |\n",
                 "| Backend                  | `{}` |\n",
-                "| ftol_rel                 | {} |\n",
-                "| ftol_abs                 | {} |\n",
-                "| xtol_rel                 | {} |\n",
-                "| xtol_abs                 | {} |\n",
-                "| initial_step             | {} |\n",
-                "| maxfeval                 | {} |\n",
-                "| maxtime                  | {} |\n",
+                "{}",
                 "| xtol_zero_abs            | {} |\n",
                 "| ftol_zero_abs            | {} |\n",
                 "| **Result**               |                   |\n",
@@ -331,13 +371,7 @@ impl OptSummary {
             self.finitial,
             self.optimizer_code(),
             self.backend_name(),
-            self.ftol_rel,
-            self.ftol_abs,
-            self.xtol_rel,
-            format!("{:?}", self.xtol_abs),
-            format!("{:?}", self.initial_step),
-            self.max_feval,
-            self.max_time,
+            self.markdown_optimizer_settings(),
             self.xtol_zero_abs,
             self.ftol_zero_abs,
             self.feval,
@@ -358,13 +392,7 @@ impl OptSummary {
                 "<tr><td align=\"left\"><b>Optimizer settings</b></td><td align=\"left\"></td></tr>",
                 "<tr><td align=\"left\">Optimizer</td><td align=\"left\"><code>{}</code></td></tr>",
                 "<tr><td align=\"left\">Backend</td><td align=\"left\"><code>{}</code></td></tr>",
-                "<tr><td align=\"left\">ftol_rel</td><td align=\"left\">{}</td></tr>",
-                "<tr><td align=\"left\">ftol_abs</td><td align=\"left\">{}</td></tr>",
-                "<tr><td align=\"left\">xtol_rel</td><td align=\"left\">{}</td></tr>",
-                "<tr><td align=\"left\">xtol_abs</td><td align=\"left\">{:?}</td></tr>",
-                "<tr><td align=\"left\">initial_step</td><td align=\"left\">{:?}</td></tr>",
-                "<tr><td align=\"left\">maxfeval</td><td align=\"left\">{}</td></tr>",
-                "<tr><td align=\"left\">maxtime</td><td align=\"left\">{}</td></tr>",
+                "{}",
                 "<tr><td align=\"left\">xtol_zero_abs</td><td align=\"left\">{}</td></tr>",
                 "<tr><td align=\"left\">ftol_zero_abs</td><td align=\"left\">{}</td></tr>",
                 "<tr><td align=\"left\"><b>Result</b></td><td align=\"left\"></td></tr>",
@@ -378,13 +406,7 @@ impl OptSummary {
             self.finitial,
             self.optimizer_code(),
             self.backend_name(),
-            self.ftol_rel,
-            self.ftol_abs,
-            self.xtol_rel,
-            self.xtol_abs,
-            self.initial_step,
-            self.max_feval,
-            self.max_time,
+            self.html_optimizer_settings(),
             self.xtol_zero_abs,
             self.ftol_zero_abs,
             self.feval,
@@ -406,13 +428,7 @@ impl OptSummary {
                 "\\textbf{{Optimizer settings}} &  \\\\\n",
                 "Optimizer & \\texttt{{{}}} \\\\\n",
                 "Backend & \\texttt{{{}}} \\\\\n",
-                "ftol_rel & {} \\\\\n",
-                "ftol_abs & {} \\\\\n",
-                "xtol_rel & {} \\\\\n",
-                "xtol_abs & {:?} \\\\\n",
-                "initial_step & {:?} \\\\\n",
-                "maxfeval & {} \\\\\n",
-                "maxtime & {} \\\\\n",
+                "{}",
                 "xtol_zero_abs & {} \\\\\n",
                 "ftol_zero_abs & {} \\\\\n",
                 "\\textbf{{Result}} &  \\\\\n",
@@ -426,13 +442,7 @@ impl OptSummary {
             self.finitial,
             latex_escape_code(self.optimizer_code()),
             latex_escape_code(self.backend_name()),
-            self.ftol_rel,
-            self.ftol_abs,
-            self.xtol_rel,
-            self.xtol_abs,
-            self.initial_step,
-            self.max_feval,
-            self.max_time,
+            self.latex_optimizer_settings(),
             self.xtol_zero_abs,
             self.ftol_zero_abs,
             self.feval,
@@ -450,12 +460,9 @@ impl fmt::Display for OptSummary {
         writeln!(f)?;
         writeln!(f, "Backend:                  {}", self.backend_name())?;
         writeln!(f, "Optimizer:                {}", self.optimizer_name())?;
-        writeln!(f, "ftol_rel:                 {}", self.ftol_rel)?;
-        writeln!(f, "ftol_abs:                 {}", self.ftol_abs)?;
-        writeln!(f, "xtol_rel:                 {}", self.xtol_rel)?;
-        writeln!(f, "xtol_abs:                 {:?}", self.xtol_abs)?;
-        writeln!(f, "maxfeval:                 {}", self.max_feval)?;
-        writeln!(f, "maxtime:                  {}", self.max_time)?;
+        for (name, value) in self.optimizer_setting_pairs() {
+            writeln!(f, "{:<26} {}", format!("{name}:"), value)?;
+        }
         writeln!(f)?;
         writeln!(f, "Function evaluations:     {}", self.feval)?;
         writeln!(f, "xtol_zero_abs:            {}", self.xtol_zero_abs)?;
@@ -568,6 +575,39 @@ mod tests {
         assert!(out.contains("| ftol_zero_abs            | 0.000000000001 |"));
         assert!(out.contains("| Function evaluations     | 17 |"));
         assert!(out.contains("| Return code              | `MAXEVAL_REACHED` |"));
+    }
+
+    #[test]
+    fn test_prima_renderers_use_backend_specific_opt_params() {
+        let mut opt = OptSummary::new(vec![1.0]);
+        opt.optimizer = Optimizer::PrimaBobyqa;
+        opt.rhobeg = 1.0;
+        opt.rhoend = 1e-6;
+        opt.max_feval = 500;
+
+        let markdown = opt.to_markdown();
+        assert!(markdown.contains("| Optimizer                | `bobyqa` |"));
+        assert!(markdown.contains("| Backend                  | `prima` |"));
+        assert!(markdown.contains("| rhobeg                   | 1 |"));
+        assert!(markdown.contains("| rhoend                   | 0.000001 |"));
+        assert!(markdown.contains("| maxfeval                 | 500 |"));
+        assert!(!markdown.contains("| ftol_rel"));
+        assert!(!markdown.contains("| initial_step"));
+
+        let html = opt.to_html();
+        assert!(html.contains("<code>prima</code>"));
+        assert!(html.contains("<td align=\"left\">rhobeg</td>"));
+        assert!(!html.contains("<td align=\"left\">ftol_rel</td>"));
+
+        let latex = opt.to_latex();
+        assert!(latex.contains("Backend & \\texttt{prima}"));
+        assert!(latex.contains("rhobeg & 1"));
+        assert!(!latex.contains("ftol\\_rel"));
+
+        let display = format!("{opt}");
+        assert!(display.contains("Backend:                  prima"));
+        assert!(display.contains("rhobeg:"));
+        assert!(!display.contains("ftol_rel:"));
     }
 
     #[test]
