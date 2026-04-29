@@ -1,0 +1,60 @@
+name = "nested_constant_response"
+source = "Synthetic minimal reproduction of lme4 issue 489 / Stack Overflow convergence support case"
+license = "CC0-1.0"
+n_rows = 24
+description = """
+Small nested random-intercept fixture motivated by a public lme4 support case
+where each lower-level territory ID has multiple rows, varying `spm`, and an
+identical log-transformed response within the territory. A model such as
+`logterrisize ~ spm + (1 | studyarea/teriid)` can then report optimizer or
+positive-definiteness symptoms even though the primary issue is structural:
+the lower-level random intercept is confounded with a response measured once
+per lower-level unit and repeated across rows.
+
+The fixture is intentionally synthetic and compact. It preserves the support
+problem rather than the private original data: `spm` varies within each
+`studyarea:teriid` level, but `logterrisize` is constant within that level.
+Diagnostics should tell users to inspect the observation unit or aggregate to
+one row per lower-level unit instead of asking them to choose an optimizer.
+"""
+
+[[columns]]
+name = "studyarea"
+type = "categorical"
+levels = ["A", "B", "C"]
+
+[[columns]]
+name = "teriid"
+type = "categorical"
+levels = ["t1", "t2", "t3", "t4"]
+
+[[columns]]
+name = "spm"
+type = "numeric"
+
+[[columns]]
+name = "logterrisize"
+type = "numeric"
+
+[[fits]]
+formula = "logterrisize ~ 1 + spm + (1 | studyarea) + (1 | studyarea:teriid)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+
+[[fits]]
+formula = "logterrisize ~ 1 + spm + (1 | studyarea/teriid)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+
+[[fits]]
+formula = "logterrisize ~ 1 + spm + (1 | studyarea)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+
+[tags]
+structure = ["nested", "random_intercept", "duplicated_response", "observation_unit"]
+difficulty = "boundary"
+notes = "Lower-level random-intercept units have repeated rows with varying spm but constant response; use as a diagnostic fixture for confounded observation units."

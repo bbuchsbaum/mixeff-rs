@@ -1,0 +1,4 @@
+duration: 4d, 7d
+season: mon, post, pre
+sites: s1, s2, s3
+replicate: 1, 2, 3

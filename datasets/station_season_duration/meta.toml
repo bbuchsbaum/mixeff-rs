@@ -1,0 +1,79 @@
+name = "station_season_duration"
+source = "Cross Validated forum example; user-supplied station/season/duration data"
+license = "Stack Exchange content is CC BY-SA where quoted; numeric table supplied as a modeling example"
+n_rows = 54
+description = """
+Small balanced environmental monitoring example with two exposure durations,
+three seasons, three sites, and three randomized replicates per
+duration-season-site cell. The replicates are not repeated measurements of the
+same physical spot across seasons. This makes the common forum-suggested model
+`effect ~ duration + (1 + duration | sites) + (1 + duration | season)` a useful
+negative example: it asks for random duration slopes and intercept-slope
+covariances for grouping factors with only three levels each.
+
+The dataset is included to exercise the diagnostic path for designs where a
+mixed model may be suggested by habit, but the grouping structure provides too
+little information for the requested random-slope covariance. A fixed factorial
+model over duration, season, and site is often a clearer first diagnostic
+surface for these data; mixed-model random effects need an explicit sampling
+argument rather than a substitute for ordinary fixed-factor comparisons.
+"""
+
+[[columns]]
+name = "duration"
+type = "categorical"
+levels = ["4d", "7d"]
+
+[[columns]]
+name = "duration_days"
+type = "numeric"
+unit = "days"
+
+[[columns]]
+name = "season"
+type = "categorical"
+levels = ["mon", "post", "pre"]
+
+[[columns]]
+name = "sites"
+type = "categorical"
+levels = ["s1", "s2", "s3"]
+
+[[columns]]
+name = "replicate"
+type = "categorical"
+levels = ["1", "2", "3"]
+
+[[columns]]
+name = "effect"
+type = "numeric"
+
+[[fits]]
+# Forum-suggested model. Kept as a diagnostic example, not a recommendation:
+# each random term has only three grouping levels but requests a random
+# duration slope and intercept-slope covariance.
+formula = "effect ~ 1 + duration + (1 + duration | sites) + (1 + duration | season)"
+family = "Gaussian"
+link = "Identity"
+estimator = "ML"
+
+[[fits]]
+# Fixed factorial surface for the stated question: does effect vary with site,
+# season, duration, and their interactions?
+formula = "effect ~ 1 + duration * season * sites"
+family = "Gaussian"
+link = "Identity"
+estimator = "ML"
+
+[[fits]]
+# Simpler random-intercept diagnostic, if sites/seasons are treated as sampled
+# grouping factors rather than fixed factors of direct interest.
+formula = "effect ~ 1 + duration + (1 | sites) + (1 | season)"
+family = "Gaussian"
+link = "Identity"
+estimator = "ML"
+
+[tags]
+structure = ["balanced", "factorial", "random_intercept", "random_slope", "weakly_supported"]
+difficulty = "boundary"
+notes = "Only three site levels and three season levels; maximal random-slope covariance is intentionally included as an over-specified diagnostic example."
