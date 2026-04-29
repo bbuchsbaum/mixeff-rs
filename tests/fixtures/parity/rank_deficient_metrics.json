@@ -1,0 +1,20 @@
+{
+  "schema_version": "1.0.0",
+  "source": "MixedModels.jl 5.3.0",
+  "id": "rank_deficient_metrics",
+  "formula": "y ~ 1 + x + x2 + (1 | g)",
+  "nobs": 24,
+  "fixed_effect_rank": 2,
+  "dof": 4,
+  "ml": {
+    "objective": -7.018499579536289,
+    "aic": 0.9815004204637106,
+    "bic": 5.693715741855494,
+    "sigma": 0.10650160453217575
+  },
+  "reml": {
+    "objective": 0.7174701092551103,
+    "sigma": 0.10958922775256412,
+    "varest": 0.01200979883940337
+  }
+}

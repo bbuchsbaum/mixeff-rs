@@ -1,0 +1,78 @@
+{
+  "schema_version": "1.0.0",
+  "source": "Deterministic Gamma-log GLMM fixture cross-checked against MixedModels.jl 5.3.0 and lme4 2.0-1 on 2026-04-29",
+  "formula": "y ~ 1 + x + (1 | group)",
+  "family": "gamma",
+  "link": "log",
+  "n_agq": 1,
+  "nobs": 20,
+  "dof": 4,
+  "data_recipe": {
+    "groups": 4,
+    "observations_per_group": 5,
+    "intercept": 1.2,
+    "slope": 0.25,
+    "group_effects": [-0.25, 0.1, 0.3, -0.15],
+    "wiggle_base": 1.0,
+    "wiggle_step": 0.06,
+    "wiggle_modulus": 3
+  },
+  "rust_reference": {
+    "beta": [1.2801500995982815, 0.2500623869349765],
+    "theta": [0.000000007500000000000006],
+    "dispersion_sigma": 0.24113736806697922,
+    "dispersion_phi": 0.05814723027826981,
+    "objective": 1.0302950465115652,
+    "loglik": -0.5151475232557826,
+    "fitted_mu_head": [
+      2.181527513571749,
+      2.801311534418864,
+      3.5971796202652278,
+      4.6191582269466664,
+      5.931486602827991,
+      2.181527513571749
+    ]
+  },
+  "engines": [
+    {
+      "engine": "MixedModels.jl",
+      "status": "fit",
+      "version": "MixedModels 5.3.0; Julia 1.12.4; DataFrames 1.8.1; GLM 1.9.3",
+      "beta": [1.2801536880402493, 0.2500474303236841],
+      "theta": [0.0],
+      "dispersion": 0.255763439152833,
+      "objective": 1.0302950556972217,
+      "loglik": -23.893604960025016,
+      "verdict": "parity_reference",
+      "note": "Matches the Rust profiled objective and fixed effects at fixture tolerance; MixedModels.jl warns that dispersion-family GLMM results are not yet reliable."
+    },
+    {
+      "engine": "lme4::glmer",
+      "status": "fit",
+      "version": "lme4 2.0-1; Matrix 1.7-3; R 4.5.1",
+      "beta": [1.2525348960238136, 0.2514329570450088],
+      "theta": [1.673899552748074],
+      "dispersion": 0.005280706050124609,
+      "objective": null,
+      "loglik": 1.231780136165594,
+      "verdict": "documented_divergence",
+      "note": "glmer profiles Gamma dispersion differently and is recorded as a comparison point, not as the sole oracle for this fixture."
+    },
+    {
+      "engine": "glmmTMB",
+      "status": "unavailable",
+      "version": null,
+      "beta": null,
+      "theta": null,
+      "dispersion": null,
+      "objective": null,
+      "loglik": null,
+      "verdict": "not_run",
+      "note": "R package glmmTMB was not installed in the local validation environment."
+    }
+  ],
+  "notes": [
+    "This compact fixture intentionally uses deterministic positive responses so Rust, R, and Julia can rebuild the same data without relying on language-specific Gamma RNG streams.",
+    "glmer is preserved as a drift sentinel because its Gamma dispersion profiling can disagree with the MixedModels.jl-style PIRLS objective; it must not be promoted to the only oracle for this path."
+  ]
+}
