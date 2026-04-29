@@ -36,8 +36,11 @@ use crate::compiler::{
 };
 use crate::error::{MixedModelError, Result};
 use crate::formula::{FixedTerm, Formula, RandomTerm};
-use crate::model::data::{Column, DataFrame};
-use crate::model::fixed_design::DenseFixedDesign;
+use crate::model::data::{CategoricalCoding, Column, DataFrame};
+use crate::model::fixed_design::{
+    DenseFixedDesign, FixedDesign, FixedDesignBackend, FixedDesignBuildPolicy, FixedDesignStorage,
+    FixedDesignSummary,
+};
 use crate::model::traits::MixedModelFit;
 #[cfg(feature = "prima")]
 use crate::optimizer::prima::{minimize_bobyqa, PrimaBobyqaOptions};
@@ -72,6 +75,7 @@ pub struct LinearMixedModel {
     pub xy_mat: FeMat,
     pub y: DVector<f64>,
     pub feterm: FeTerm,
+    pub fixed_design: FixedDesign,
     pub sqrtwts: Vec<f64>,
     pub parmap: Vec<(usize, usize, usize)>, // (block, row, col)
     pub dims: ModelDims,
@@ -526,6 +530,38 @@ impl LinearMixedModel {
         weights: Option<&[f64]>,
         compiler_policy: CompilerPolicy,
     ) -> Result<Self> {
+        Self::new_with_policies_internal(
+            formula,
+            data,
+            weights,
+            compiler_policy,
+            FixedDesignBuildPolicy::default(),
+        )
+    }
+
+    #[cfg(test)]
+    fn new_with_fixed_design_policy(
+        formula: Formula,
+        data: &DataFrame,
+        weights: Option<&[f64]>,
+        fixed_design_policy: FixedDesignBuildPolicy,
+    ) -> Result<Self> {
+        Self::new_with_policies_internal(
+            formula,
+            data,
+            weights,
+            CompilerPolicy::default(),
+            fixed_design_policy,
+        )
+    }
+
+    fn new_with_policies_internal(
+        formula: Formula,
+        data: &DataFrame,
+        weights: Option<&[f64]>,
+        compiler_policy: CompilerPolicy,
+        fixed_design_policy: FixedDesignBuildPolicy,
+    ) -> Result<Self> {
         if formula.random_terms.is_empty() {
             return Err(MixedModelError::NoRandomEffects);
         }
@@ -570,12 +606,24 @@ impl LinearMixedModel {
         })?;
         let y = DVector::from_column_slice(y_data);
 
-        // Build the fixed-effects design. The current backend is dense, but
-        // the construction boundary is explicit so high-cardinality factors can
-        // later stream cross-products without materializing all dummy columns.
-        let fixed_design = build_fixed_effects_design(&effective_formula, data)?;
-        let (x_mat, fe_names) = fixed_design.into_parts();
-        let feterm = FeTerm::new(x_mat, fe_names);
+        // Build the fixed-effects design through the backend-selection policy.
+        // FeTerm still owns rank/pivot metadata; the selected full-rank backend
+        // is used below for solver cross-products.
+        let raw_fixed_design = crate::model::fixed_design::build_fixed_effects_design_with_policy(
+            &effective_formula,
+            data,
+            fixed_design_policy,
+        )?;
+        let feterm = FeTerm::new(
+            raw_fixed_design.materialize_dense(),
+            raw_fixed_design.column_names().to_vec(),
+        );
+        let fixed_design = raw_fixed_design.select_columns(&feterm.piv[..feterm.rank])?;
+        if fixed_design.storage() == FixedDesignStorage::Streamed {
+            compiler_artifact
+                .diagnostics
+                .push(fixed_design_backend_diagnostic(&fixed_design));
+        }
 
         // Build the random-effects terms
         let mut ordered_reterms = Vec::new();
@@ -611,6 +659,7 @@ impl LinearMixedModel {
         let mut xy_mat = FeMat::new(&feterm, &y);
 
         // Apply weights: scale each row of X, Z, and y by sqrt(w_i).
+        let mut sqrtwts_dvec = None;
         let sqrtwts = if let Some(wts) = weights {
             let sw: Vec<f64> = wts.iter().map(|w| w.sqrt()).collect();
             let sw_dvec = DVector::from_vec(sw.clone());
@@ -618,13 +667,15 @@ impl LinearMixedModel {
             for rt in &mut reterms {
                 rt.reweight(&sw_dvec);
             }
+            sqrtwts_dvec = Some(sw_dvec);
             sw
         } else {
             vec![]
         };
 
         // Create cross-product blocks A and Cholesky blocks L
-        let (a_blocks, l_blocks) = create_al(&reterms, &xy_mat)?;
+        let (a_blocks, l_blocks) =
+            create_al_from_fixed_design(&reterms, &fixed_design, &y, sqrtwts_dvec.as_ref())?;
 
         // Build theta vector from all reterms
         let theta: Vec<f64> = reterms.iter().flat_map(|rt| rt.get_theta()).collect();
@@ -646,6 +697,7 @@ impl LinearMixedModel {
             xy_mat,
             y,
             feterm,
+            fixed_design,
             sqrtwts,
             parmap,
             dims,
@@ -711,6 +763,24 @@ impl LinearMixedModel {
     /// Compiler policy attached to this model.
     pub fn compiler_policy(&self) -> &CompilerPolicy {
         &self.compiler_artifact.compiler_policy
+    }
+
+    /// Runtime summary for the selected fixed-effect design backend.
+    pub fn fixed_design_backend_summary(&self) -> FixedDesignSummary {
+        self.fixed_design.summary()
+    }
+
+    /// Number of active fixed-effect entries stored by the selected backend.
+    ///
+    /// Dense designs report `n * p`; streamed designs report the actual
+    /// non-zero row entries stored after rank/pivot column selection.
+    pub fn fixed_design_active_entries(&self) -> usize {
+        fixed_design_active_entries(&self.fixed_design)
+    }
+
+    /// Active-entry density of the selected fixed-effect backend.
+    pub fn fixed_design_density(&self) -> f64 {
+        fixed_design_density(&self.fixed_design)
     }
 
     /// Prefit design audit attached to the compiler artifact, if available.
@@ -1673,6 +1743,16 @@ impl LinearMixedModel {
     pub fn recompute_a_blocks(&mut self) {
         let k = self.reterms.len();
         let mut idx = 0;
+        let sqrtwts = if self.sqrtwts.is_empty() {
+            None
+        } else {
+            Some(DVector::from_column_slice(&self.sqrtwts))
+        };
+        let weighted_fixed_design =
+            weighted_fixed_design_for_solver(&self.fixed_design, sqrtwts.as_ref()).expect(
+                "stored fixed-effect design and sqrt weights must have compatible dimensions",
+            );
+        let weighted_response = self.xy_mat.wtxy.column(self.feterm.rank).into_owned();
 
         // RE × RE blocks
         for i in 0..k {
@@ -1689,14 +1769,21 @@ impl LinearMixedModel {
 
         // FE × RE blocks: [X|y]' Z_j
         for j in 0..k {
-            let block = compute_fe_re_cross_product(&self.xy_mat, &self.reterms[j]);
+            let block = compute_fixed_response_re_cross_product(
+                &weighted_fixed_design,
+                &weighted_response,
+                &self.reterms[j],
+            )
+            .expect("stored fixed-effect design and random terms must have compatible dimensions");
             self.a_blocks[idx] = block;
             idx += 1;
         }
 
         // FE × FE block: [X|y]' [X|y]
-        let wtxy = &self.xy_mat.wtxy;
-        self.a_blocks[idx] = MatrixBlock::Dense(wtxy.transpose() * wtxy);
+        self.a_blocks[idx] = MatrixBlock::Dense(
+            compute_fixed_response_cross_product(&weighted_fixed_design, &weighted_response)
+                .expect("stored fixed-effect design and response must have compatible dimensions"),
+        );
     }
 
     fn determinant_term_and_pwrss_for_reml(&self, reml: bool) -> (f64, f64) {
@@ -5119,24 +5206,6 @@ impl LinearMixedModel {
         row
     }
 
-    pub fn fixed_effect_null_bootstrap_inference_table(
-        &self,
-        hypotheses: Vec<FixedEffectHypothesis>,
-        options: FixedEffectBootstrapOptions,
-    ) -> FixedEffectInferenceTable {
-        let rows = hypotheses
-            .into_iter()
-            .map(|hypothesis| {
-                self.fixed_effect_null_bootstrap_inference_row(
-                    FixedEffectInferenceRowKind::Contrast,
-                    hypothesis,
-                    &options,
-                )
-            })
-            .collect();
-        FixedEffectInferenceTable::new(rows)
-    }
-
     pub fn fixed_effect_contrast_inference_table(
         &self,
         hypotheses: Vec<FixedEffectHypothesis>,
@@ -5161,10 +5230,25 @@ impl LinearMixedModel {
         hypothesis: FixedEffectHypothesis,
         method: FixedEffectTestMethod,
     ) -> FixedEffectInferenceRow {
-        fixed_effect_test_to_inference_row(
-            kind,
-            self.test_contrast_with_method(hypothesis, method),
-        )
+        fixed_effect_test_to_inference_row(kind, self.test_contrast_with_method(hypothesis, method))
+    }
+
+    pub fn fixed_effect_null_bootstrap_inference_table(
+        &self,
+        hypotheses: Vec<FixedEffectHypothesis>,
+        options: FixedEffectBootstrapOptions,
+    ) -> FixedEffectInferenceTable {
+        let rows = hypotheses
+            .into_iter()
+            .map(|hypothesis| {
+                self.fixed_effect_null_bootstrap_inference_row(
+                    FixedEffectInferenceRowKind::Contrast,
+                    hypothesis,
+                    &options,
+                )
+            })
+            .collect();
+        FixedEffectInferenceTable::new(rows)
     }
 
     pub fn fixed_effect_null_bootstrap_inference_row(
@@ -6482,33 +6566,24 @@ fn build_fixed_effects_design(formula: &Formula, data: &DataFrame) -> Result<Den
             FixedTerm::Intercept | FixedTerm::NoIntercept => {
                 // Already handled
             }
-            FixedTerm::Column(name) => {
-                match data.column(name) {
-                    Some(Column::Numeric(v)) => {
-                        columns.push(DVector::from_column_slice(v));
-                        names.push(name.clone());
-                    }
-                    Some(Column::Categorical(cat)) => {
-                        // Dummy coding (treatment/reference coding)
-                        // Skip the first level (reference)
-                        for (lvl_idx, lvl) in cat.levels.iter().enumerate().skip(1) {
-                            let col: Vec<f64> = cat
-                                .refs
-                                .iter()
-                                .map(|&r| if r as usize == lvl_idx { 1.0 } else { 0.0 })
-                                .collect();
-                            columns.push(DVector::from_column_slice(&col));
-                            names.push(format!("{}: {}", name, lvl));
-                        }
-                    }
-                    None => {
-                        return Err(MixedModelError::InvalidArgument(format!(
-                            "Column '{}' not found in data",
-                            name
-                        )));
+            FixedTerm::Column(name) => match data.column(name) {
+                Some(Column::Numeric(v)) => {
+                    columns.push(DVector::from_column_slice(v));
+                    names.push(name.clone());
+                }
+                Some(Column::Categorical(cat)) => {
+                    for encoded in cat.encoded_columns(name, CategoricalCoding::Treatment) {
+                        columns.push(DVector::from_column_slice(&encoded.values));
+                        names.push(encoded.name);
                     }
                 }
-            }
+                None => {
+                    return Err(MixedModelError::InvalidArgument(format!(
+                        "Column '{}' not found in data",
+                        name
+                    )));
+                }
+            },
             FixedTerm::Interaction(vars) => {
                 // N-way interaction. Each variable contributes a list of
                 // (column, label) pairs: numeric → 1 pair (the column itself),
@@ -6577,6 +6652,13 @@ enum BasisCoding {
     CellMeans,
 }
 
+fn categorical_coding(coding: BasisCoding) -> CategoricalCoding {
+    match coding {
+        BasisCoding::Treatment => CategoricalCoding::Treatment,
+        BasisCoding::CellMeans => CategoricalCoding::CellMeans,
+    }
+}
+
 fn expand_factor_columns_with_coding(
     name: &str,
     data: &DataFrame,
@@ -6585,19 +6667,11 @@ fn expand_factor_columns_with_coding(
 ) -> Result<Vec<(DVector<f64>, String)>> {
     match data.column(name) {
         Some(Column::Numeric(arr)) => Ok(vec![(DVector::from_column_slice(arr), name.to_string())]),
-        Some(Column::Categorical(cat)) => {
-            let skip_reference = usize::from(coding == BasisCoding::Treatment);
-            let mut cols = Vec::with_capacity(cat.levels.len().saturating_sub(skip_reference));
-            for (lvl_idx, lvl) in cat.levels.iter().enumerate().skip(skip_reference) {
-                let c: Vec<f64> = cat
-                    .refs
-                    .iter()
-                    .map(|&r| if r as usize == lvl_idx { 1.0 } else { 0.0 })
-                    .collect();
-                cols.push((DVector::from_column_slice(&c), format!("{}: {}", name, lvl)));
-            }
-            Ok(cols)
-        }
+        Some(Column::Categorical(cat)) => Ok(cat
+            .encoded_columns(name, categorical_coding(coding))
+            .into_iter()
+            .map(|column| (DVector::from_column_slice(&column.values), column.name))
+            .collect()),
         None => Err(MixedModelError::InvalidArgument(format!(
             "Column '{name}' not found in data ({context})"
         ))),
@@ -7939,6 +8013,7 @@ fn promote_crossed_fill_in_blocks(l: &mut [MatrixBlock], reterms: &[ReMat]) {
 }
 
 /// Create the A (cross-product) and L (Cholesky) block arrays.
+#[cfg(test)]
 fn create_al(reterms: &[ReMat], xy: &FeMat) -> Result<(Vec<MatrixBlock>, Vec<MatrixBlock>)> {
     validate_dense_block_plan(reterms, xy.wtxy.ncols())?;
 
@@ -7985,6 +8060,162 @@ fn create_al(reterms: &[ReMat], xy: &FeMat) -> Result<(Vec<MatrixBlock>, Vec<Mat
     Ok((a, l))
 }
 
+/// Create A/L blocks using fixed-design backend cross-products for the fixed
+/// side of the system.
+fn create_al_from_fixed_design(
+    reterms: &[ReMat],
+    fixed_design: &FixedDesign,
+    y: &DVector<f64>,
+    sqrtwts: Option<&DVector<f64>>,
+) -> Result<(Vec<MatrixBlock>, Vec<MatrixBlock>)> {
+    validate_dense_block_plan(reterms, fixed_design.n_cols() + 1)?;
+    let weighted_fixed_design = weighted_fixed_design_for_solver(fixed_design, sqrtwts)?;
+    let weighted_y = weighted_response_for_solver(y, sqrtwts)?;
+
+    let k = reterms.len();
+    let total = k + 1;
+    let n_blocks = total * (total + 1) / 2;
+    let mut a = Vec::with_capacity(n_blocks);
+    let mut l = Vec::with_capacity(n_blocks);
+
+    for i in 0..k {
+        for j in 0..=i {
+            let block = if i == j {
+                compute_re_cross_product(&reterms[i], &reterms[i])
+            } else {
+                compute_re_cross_product(&reterms[i], &reterms[j])
+            };
+            a.push(block.clone());
+            l.push(block);
+        }
+    }
+
+    for re in reterms {
+        let block =
+            compute_fixed_response_re_cross_product(&weighted_fixed_design, &weighted_y, re)?;
+        a.push(block.clone());
+        l.push(block);
+    }
+
+    let block = MatrixBlock::Dense(compute_fixed_response_cross_product(
+        &weighted_fixed_design,
+        &weighted_y,
+    )?);
+    a.push(block.clone());
+    l.push(block);
+
+    promote_crossed_fill_in_blocks(&mut l, reterms);
+
+    Ok((a, l))
+}
+
+fn weighted_fixed_design_for_solver(
+    fixed_design: &FixedDesign,
+    sqrtwts: Option<&DVector<f64>>,
+) -> Result<FixedDesign> {
+    match sqrtwts {
+        Some(weights) => fixed_design.with_sqrt_weights(weights),
+        None => Ok(fixed_design.clone()),
+    }
+}
+
+fn weighted_response_for_solver(
+    y: &DVector<f64>,
+    sqrtwts: Option<&DVector<f64>>,
+) -> Result<DVector<f64>> {
+    if let Some(weights) = sqrtwts {
+        if weights.len() != y.len() {
+            return Err(MixedModelError::DimensionMismatch(format!(
+                "response has {} rows but sqrt weights have {}",
+                y.len(),
+                weights.len()
+            )));
+        }
+        Ok(y.component_mul(weights))
+    } else {
+        Ok(y.clone())
+    }
+}
+
+fn fixed_design_backend_diagnostic(fixed_design: &FixedDesign) -> Diagnostic {
+    let summary = fixed_design.summary();
+    let active_entries = fixed_design_active_entries(fixed_design);
+    let density = fixed_design_density(fixed_design);
+    let mut diagnostic = Diagnostic::new(
+        DiagnosticCode::SupportNote,
+        DiagnosticSeverity::Info,
+        DiagnosticStage::DesignAudit,
+        format!(
+            "fixed-effect design backend selected: {}; n={}, p={}, dense_if_materialized={} bytes, active_entries={}, density={:.6}",
+            fixed_design_storage_label(summary.storage),
+            summary.n_obs,
+            summary.n_cols,
+            summary.dense_bytes,
+            active_entries,
+            density
+        ),
+    )
+    .with_suggested_actions(vec![
+        "no action required; streamed fixed effects avoid materializing dense X for solver cross-products".to_string(),
+        "rank and pivot detection still materialize dense X in this release".to_string(),
+    ]);
+    diagnostic.payload.insert(
+        "diagnostic_kind".to_string(),
+        serde_json::json!("fixed_design_backend"),
+    );
+    diagnostic.payload.insert(
+        "storage".to_string(),
+        serde_json::json!(fixed_design_storage_label(summary.storage)),
+    );
+    diagnostic
+        .payload
+        .insert("n_obs".to_string(), serde_json::json!(summary.n_obs));
+    diagnostic
+        .payload
+        .insert("n_cols".to_string(), serde_json::json!(summary.n_cols));
+    diagnostic.payload.insert(
+        "dense_bytes".to_string(),
+        serde_json::json!(summary.dense_bytes.to_string()),
+    );
+    diagnostic.payload.insert(
+        "active_entries".to_string(),
+        serde_json::json!(active_entries),
+    );
+    diagnostic
+        .payload
+        .insert("density".to_string(), serde_json::json!(density));
+    diagnostic
+}
+
+fn fixed_design_active_entries(fixed_design: &FixedDesign) -> usize {
+    match fixed_design {
+        FixedDesign::Dense(design) => design.n_obs() * design.n_cols(),
+        FixedDesign::Streamed(design) => design.active_entries(),
+    }
+}
+
+fn fixed_design_density(fixed_design: &FixedDesign) -> f64 {
+    match fixed_design {
+        FixedDesign::Dense(design) => {
+            if design.n_obs() == 0 || design.n_cols() == 0 {
+                0.0
+            } else {
+                1.0
+            }
+        }
+        FixedDesign::Streamed(design) => design.density(),
+    }
+}
+
+fn fixed_design_storage_label(storage: FixedDesignStorage) -> &'static str {
+    match storage {
+        FixedDesignStorage::Dense => "dense",
+        FixedDesignStorage::Streamed => "streamed",
+        FixedDesignStorage::Sparse => "sparse",
+    }
+}
+
+#[cfg(test)]
 fn create_al_single_vsize2(re: &ReMat, xy: &FeMat) -> (Vec<MatrixBlock>, Vec<MatrixBlock>) {
     let nlevels = re.n_levels();
     let pp1 = xy.wtxy.ncols();
@@ -8152,6 +8383,7 @@ fn compute_re_cross_product(a: &ReMat, b: &ReMat) -> MatrixBlock {
 }
 
 /// Compute [X|y]' Z_j.
+#[cfg(test)]
 fn compute_fe_re_cross_product(xy: &FeMat, re: &ReMat) -> MatrixBlock {
     let pp1 = xy.wtxy.ncols(); // p + 1
     let nranef = re.n_ranef();
@@ -8170,6 +8402,71 @@ fn compute_fe_re_cross_product(xy: &FeMat, re: &ReMat) -> MatrixBlock {
     }
 
     MatrixBlock::Dense(result)
+}
+
+/// Compute `[X|y]' Z_j` using fixed-design backend cross-products.
+fn compute_fixed_response_re_cross_product(
+    fixed_design: &FixedDesign,
+    y: &DVector<f64>,
+    re: &ReMat,
+) -> Result<MatrixBlock> {
+    if y.len() != fixed_design.n_obs() {
+        return Err(MixedModelError::DimensionMismatch(format!(
+            "fixed-effect design has {} rows but response has {}",
+            fixed_design.n_obs(),
+            y.len()
+        )));
+    }
+    if re.n_obs() != fixed_design.n_obs() {
+        return Err(MixedModelError::DimensionMismatch(format!(
+            "fixed-effect design has {} rows but random term '{}' has {} rows",
+            fixed_design.n_obs(),
+            re.grouping_name,
+            re.n_obs()
+        )));
+    }
+
+    let fixed_re = fixed_design.xt_reterm(re)?.as_dense();
+    let mut result = DMatrix::zeros(fixed_design.n_cols() + 1, re.n_ranef());
+    for row in 0..fixed_re.nrows() {
+        for col in 0..fixed_re.ncols() {
+            result[(row, col)] = fixed_re[(row, col)];
+        }
+    }
+
+    let response_re = compute_response_re_cross_product(&DMatrix::from_columns(&[y.clone()]), re);
+    for col in 0..response_re.nrows() {
+        result[(fixed_design.n_cols(), col)] = response_re[(col, 0)];
+    }
+    Ok(MatrixBlock::Dense(result))
+}
+
+/// Compute `[X|y]' [X|y]` using fixed-design backend cross-products.
+fn compute_fixed_response_cross_product(
+    fixed_design: &FixedDesign,
+    y: &DVector<f64>,
+) -> Result<DMatrix<f64>> {
+    if y.len() != fixed_design.n_obs() {
+        return Err(MixedModelError::DimensionMismatch(format!(
+            "fixed-effect design has {} rows but response has {}",
+            fixed_design.n_obs(),
+            y.len()
+        )));
+    }
+
+    let p = fixed_design.n_cols();
+    let xtx = fixed_design.xtx();
+    let xty = fixed_design.xty(y)?;
+    let mut result = DMatrix::zeros(p + 1, p + 1);
+    for row in 0..p {
+        for col in 0..p {
+            result[(row, col)] = xtx[(row, col)];
+        }
+        result[(row, p)] = xty[row];
+        result[(p, row)] = xty[row];
+    }
+    result[(p, p)] = y.dot(y);
+    Ok(result)
 }
 
 /// Compute X' Z_j.
@@ -11127,6 +11424,83 @@ mod tests {
     }
 
     #[test]
+    fn test_explicit_categorical_contrast_basis_drives_fixed_random_and_interaction_columns() {
+        let mut data = DataFrame::new();
+        data.add_numeric("y", vec![1.0, 2.0, 1.5, 2.5, 1.2, 2.2])
+            .unwrap();
+        data.add_numeric("x", vec![1.0, 1.0, 2.0, 2.0, 3.0, 3.0])
+            .unwrap();
+        data.add_categorical_with_contrast(
+            "anchor",
+            vec!["low", "high", "low", "high", "low", "high"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            vec!["low".to_string(), "high".to_string()],
+            crate::model::data::CategoricalContrast::new(
+                vec!["low".to_string(), "high".to_string()],
+                DMatrix::from_row_slice(2, 1, &[0.5, -0.5]),
+                vec!["hi_minus_lo".to_string()],
+                false,
+                crate::model::data::ContrastSource::Custom,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        data.add_categorical(
+            "subj",
+            vec!["s1", "s1", "s2", "s2", "s3", "s3"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        )
+        .unwrap();
+
+        let formula = parse_formula("y ~ anchor + x:anchor + (1 + anchor | subj)").unwrap();
+        let model = LinearMixedModel::new(formula, &data, None).unwrap();
+
+        assert!(model
+            .feterm
+            .cnames
+            .iter()
+            .any(|name| name == "anchor: hi_minus_lo"));
+        assert!(model
+            .feterm
+            .cnames
+            .iter()
+            .any(|name| name == "x:anchor: hi_minus_lo"));
+        assert_eq!(
+            model.reterms[0].cnames,
+            vec!["(Intercept)", "anchor: hi_minus_lo"]
+        );
+        assert_eq!(
+            model.reterms[0]
+                .z
+                .row(1)
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![0.5, -0.5, 0.5, -0.5, 0.5, -0.5]
+        );
+
+        let audit = model.design_audit().expect("design audit should attach");
+        let anchor_basis = audit
+            .fixed_effects
+            .contrast_bases
+            .iter()
+            .find(|basis| basis.variable == "anchor")
+            .expect("explicit contrast basis should be recorded");
+        assert!(anchor_basis.explicit);
+        assert_eq!(anchor_basis.source, "custom");
+        assert_eq!(anchor_basis.column_names, vec!["hi_minus_lo"]);
+        assert_eq!(anchor_basis.contrast_matrix, vec![vec![0.5], vec![-0.5]]);
+        assert!(audit.fixed_effects.columns.iter().any(|column| {
+            column.name == "anchor: hi_minus_lo"
+                && column.kind == crate::compiler::FixedEffectColumnKind::CategoricalContrast
+        }));
+    }
+
+    #[test]
     fn test_random_effect_categorical_slope_uses_cell_means_without_intercept() {
         let mut data = DataFrame::new();
         data.add_numeric("y", vec![1.0, 2.0, 3.0, 1.5, 2.5, 3.5])
@@ -11950,6 +12324,316 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_fixed_design_solver_blocks_match_femat_blocks_unweighted() {
+        let data = simulate_sleepstudy_like(24, 4, 23);
+        let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+        let y = DVector::from_column_slice(data.numeric(&formula.response).unwrap());
+        let raw_fixed_design = crate::model::fixed_design::build_fixed_effects_design_with_policy(
+            &formula,
+            &data,
+            FixedDesignBuildPolicy::streamed(),
+        )
+        .unwrap();
+        let feterm = FeTerm::new(
+            raw_fixed_design.materialize_dense(),
+            raw_fixed_design.column_names().to_vec(),
+        );
+        let fixed_design = raw_fixed_design
+            .select_columns(&feterm.piv[..feterm.rank])
+            .unwrap();
+        let xy = FeMat::new(&feterm, &y);
+        let re = build_re_mat(&formula.random_terms[0], &data, data.nrow()).unwrap();
+
+        let (backend_blocks, _) =
+            create_al_from_fixed_design(&[re.clone()], &fixed_design, &y, None).unwrap();
+        let (dense_blocks, _) = create_al(&[re], &xy).unwrap();
+
+        for (backend, dense) in backend_blocks.iter().zip(dense_blocks.iter()) {
+            let backend_dense = backend.as_dense();
+            let expected_dense = dense.as_dense();
+            assert_eq!(backend_dense.shape(), expected_dense.shape());
+            for row in 0..backend_dense.nrows() {
+                for col in 0..backend_dense.ncols() {
+                    assert_relative_eq!(
+                        backend_dense[(row, col)],
+                        expected_dense[(row, col)],
+                        epsilon = 1e-10,
+                        max_relative = 1e-12
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_fixed_design_solver_blocks_match_femat_blocks_weighted() {
+        let data = simulate_sleepstudy_like(24, 4, 47);
+        let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+        let y = DVector::from_column_slice(data.numeric(&formula.response).unwrap());
+        let raw_fixed_design = crate::model::fixed_design::build_fixed_effects_design_with_policy(
+            &formula,
+            &data,
+            FixedDesignBuildPolicy::streamed(),
+        )
+        .unwrap();
+        let feterm = FeTerm::new(
+            raw_fixed_design.materialize_dense(),
+            raw_fixed_design.column_names().to_vec(),
+        );
+        let fixed_design = raw_fixed_design
+            .select_columns(&feterm.piv[..feterm.rank])
+            .unwrap();
+        let sqrtwts = DVector::from_iterator(
+            data.nrow(),
+            (0..data.nrow()).map(|idx| if idx % 2 == 0 { 1.0 } else { 2.0 }),
+        );
+        let mut xy = FeMat::new(&feterm, &y);
+        xy.reweight(&sqrtwts);
+        let mut re = build_re_mat(&formula.random_terms[0], &data, data.nrow()).unwrap();
+        re.reweight(&sqrtwts);
+
+        let (backend_blocks, _) =
+            create_al_from_fixed_design(&[re.clone()], &fixed_design, &y, Some(&sqrtwts)).unwrap();
+        let (dense_blocks, _) = create_al(&[re], &xy).unwrap();
+
+        for (backend, dense) in backend_blocks.iter().zip(dense_blocks.iter()) {
+            let backend_dense = backend.as_dense();
+            let expected_dense = dense.as_dense();
+            assert_eq!(backend_dense.shape(), expected_dense.shape());
+            for row in 0..backend_dense.nrows() {
+                for col in 0..backend_dense.ncols() {
+                    assert_relative_eq!(
+                        backend_dense[(row, col)],
+                        expected_dense[(row, col)],
+                        epsilon = 1e-10,
+                        max_relative = 1e-12
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_lmm_constructor_keeps_high_cardinality_fixed_design_streamed() {
+        let n_levels = 256usize;
+        let n_obs = 512usize;
+        let formula = parse_formula("y ~ 1 + sku + (1 | group)").unwrap();
+        let mut data = DataFrame::new();
+        data.add_numeric("y", (0..n_obs).map(|idx| idx as f64).collect())
+            .unwrap();
+        data.add_categorical(
+            "sku",
+            (0..n_obs)
+                .map(|idx| format!("sku{}", idx % n_levels))
+                .collect(),
+        )
+        .unwrap();
+        data.add_categorical(
+            "group",
+            (0..n_obs).map(|idx| format!("g{}", idx % 16)).collect(),
+        )
+        .unwrap();
+
+        let model = LinearMixedModel::new(formula, &data, None).unwrap();
+
+        assert_eq!(
+            model.fixed_design.storage(),
+            crate::model::fixed_design::FixedDesignStorage::Streamed
+        );
+        assert_eq!(model.fixed_design.n_cols(), model.feterm.rank);
+        assert!(model.fixed_design.as_streamed().is_some());
+
+        let summary = model.fixed_design_backend_summary();
+        assert_eq!(summary.storage, FixedDesignStorage::Streamed);
+        assert_eq!(summary.n_obs, n_obs);
+        assert_eq!(summary.n_cols, model.feterm.rank);
+        assert!(model.fixed_design_density() < 0.02);
+        assert!(model.fixed_design_active_entries() < n_obs * 3);
+
+        let diagnostic = model
+            .compiler_artifact()
+            .diagnostics
+            .iter()
+            .find(|diagnostic| {
+                diagnostic.code == DiagnosticCode::SupportNote
+                    && diagnostic
+                        .payload
+                        .get("diagnostic_kind")
+                        .and_then(|value| value.as_str())
+                        == Some("fixed_design_backend")
+            })
+            .expect("streamed backend should be exposed as a structured diagnostic");
+        assert_eq!(
+            diagnostic
+                .payload
+                .get("storage")
+                .and_then(|value| value.as_str()),
+            Some("streamed")
+        );
+        assert!(diagnostic
+            .message
+            .contains("fixed-effect design backend selected: streamed"));
+
+        let report = model.audit_report().to_text();
+        assert!(report.contains("fixed-effect design backend selected: streamed"));
+        assert!(report.contains("rank and pivot detection still materialize dense X"));
+    }
+
+    fn streamed_fixed_effect_parity_fixture(n_levels: usize, obs_per_level: usize) -> DataFrame {
+        let n_obs = n_levels * obs_per_level;
+        let mut y = Vec::with_capacity(n_obs);
+        let mut x = Vec::with_capacity(n_obs);
+        let mut sku = Vec::with_capacity(n_obs);
+        let mut group = Vec::with_capacity(n_obs);
+
+        for level in 0..n_levels {
+            for rep in 0..obs_per_level {
+                let obs = level * obs_per_level + rep;
+                let x_value = rep as f64 - 0.5 + ((level % 5) as f64) * 0.1;
+                let sku_effect = ((level % 11) as f64 - 5.0) * 0.07;
+                let group_effect = ((obs % 17) as f64 - 8.0) * 0.03;
+                let noise = ((obs % 7) as f64 - 3.0) * 0.01;
+                x.push(x_value);
+                y.push(2.0 + 0.8 * x_value + sku_effect + group_effect + noise);
+                sku.push(format!("sku{:03}", level));
+                group.push(format!("g{:02}", obs % 17));
+            }
+        }
+
+        let mut data = DataFrame::new();
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_categorical("sku", sku).unwrap();
+        data.add_categorical("group", group).unwrap();
+        data
+    }
+
+    fn assert_lmm_fit_close(left: &LinearMixedModel, right: &LinearMixedModel) {
+        assert_eq!(left.coef_names(), right.coef_names());
+        let left_theta = left.theta();
+        let right_theta = right.theta();
+        assert_eq!(left_theta.len(), right_theta.len());
+        for (left_theta, right_theta) in left_theta.iter().zip(right_theta.iter()) {
+            assert_relative_eq!(
+                *left_theta,
+                *right_theta,
+                epsilon = 1e-8,
+                max_relative = 1e-8
+            );
+        }
+
+        let left_beta = left.beta();
+        let right_beta = right.beta();
+        assert_eq!(left_beta.len(), right_beta.len());
+        for idx in 0..left_beta.len() {
+            assert_relative_eq!(
+                left_beta[idx],
+                right_beta[idx],
+                epsilon = 1e-8,
+                max_relative = 1e-8
+            );
+        }
+
+        assert_relative_eq!(
+            left.sigma(),
+            right.sigma(),
+            epsilon = 1e-8,
+            max_relative = 1e-8
+        );
+        assert_relative_eq!(
+            left.objective_value(),
+            right.objective_value(),
+            epsilon = 1e-8,
+            max_relative = 1e-8
+        );
+
+        let left_fitted = left.fitted();
+        let right_fitted = right.fitted();
+        assert_eq!(left_fitted.len(), right_fitted.len());
+        for idx in 0..left_fitted.len() {
+            assert_relative_eq!(
+                left_fitted[idx],
+                right_fitted[idx],
+                epsilon = 1e-8,
+                max_relative = 1e-8
+            );
+        }
+    }
+
+    #[test]
+    fn test_streamed_fixed_effect_lmm_fit_matches_dense_backend() {
+        let data = streamed_fixed_effect_parity_fixture(64, 4);
+        let formula = parse_formula("y ~ 1 + x + sku + (1 | group)").unwrap();
+
+        let mut dense = LinearMixedModel::new_with_fixed_design_policy(
+            formula.clone(),
+            &data,
+            None,
+            FixedDesignBuildPolicy::dense(),
+        )
+        .unwrap();
+        let mut streamed = LinearMixedModel::new_with_fixed_design_policy(
+            formula,
+            &data,
+            None,
+            FixedDesignBuildPolicy::streamed(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            dense.fixed_design.storage(),
+            crate::model::fixed_design::FixedDesignStorage::Dense
+        );
+        assert_eq!(
+            streamed.fixed_design.storage(),
+            crate::model::fixed_design::FixedDesignStorage::Streamed
+        );
+
+        dense.fit(false).unwrap();
+        streamed.fit(false).unwrap();
+
+        assert_lmm_fit_close(&dense, &streamed);
+    }
+
+    #[test]
+    fn test_weighted_streamed_fixed_effect_lmm_fit_matches_dense_backend() {
+        let data = streamed_fixed_effect_parity_fixture(48, 5);
+        let formula = parse_formula("y ~ 1 + x + sku + (1 | group)").unwrap();
+        let weights = (0..data.nrow())
+            .map(|idx| 0.5 + ((idx % 5) as f64) * 0.25)
+            .collect::<Vec<_>>();
+
+        let mut dense = LinearMixedModel::new_with_fixed_design_policy(
+            formula.clone(),
+            &data,
+            Some(&weights),
+            FixedDesignBuildPolicy::dense(),
+        )
+        .unwrap();
+        let mut streamed = LinearMixedModel::new_with_fixed_design_policy(
+            formula,
+            &data,
+            Some(&weights),
+            FixedDesignBuildPolicy::streamed(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            dense.fixed_design.storage(),
+            crate::model::fixed_design::FixedDesignStorage::Dense
+        );
+        assert_eq!(
+            streamed.fixed_design.storage(),
+            crate::model::fixed_design::FixedDesignStorage::Streamed
+        );
+
+        dense.fit(false).unwrap();
+        streamed.fit(false).unwrap();
+
+        assert_lmm_fit_close(&dense, &streamed);
     }
 
     #[test]

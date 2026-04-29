@@ -3363,14 +3363,15 @@ mod tests {
         let mut data = DataFrame::new();
         data.add_numeric(
             "Percentage",
-            vec![28.96, 37.61, 67.71, 49.68, 48.51, 70.52, 56.02, 44.89, 57.38],
+            vec![
+                28.96, 37.61, 67.71, 49.68, 48.51, 70.52, 56.02, 44.89, 57.38,
+            ],
         )
         .unwrap();
         data.add_categorical_with_levels(
             "Time",
             vec![
-                "Week6", "Week6", "Week6", "Week8", "Week8", "Week8", "Week10", "Week10",
-                "Week10",
+                "Week6", "Week6", "Week6", "Week8", "Week8", "Week8", "Week10", "Week10", "Week10",
             ]
             .into_iter()
             .map(str::to_string)

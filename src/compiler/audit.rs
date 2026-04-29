@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use nalgebra::{DMatrix, DVector, SymmetricEigen};
 
 use crate::linalg::pivot::pivoted_qr_with_tol;
-use crate::model::data::{Column, DataFrame};
+use crate::model::data::{CategoricalCoding, Column, ContrastSource, DataFrame};
 use crate::types::OptSummary;
 
 use super::diagnostics::{
@@ -44,6 +44,8 @@ pub struct FixedEffectAudit {
     pub rank: RankAssessment,
     pub columns: Vec<FixedEffectColumnAudit>,
     pub terms: Vec<FixedEffectTermAudit>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contrast_bases: Vec<CategoricalContrastAudit>,
     pub aliased_columns: Vec<String>,
     pub empty_cells: Vec<EmptyCellAudit>,
     pub diagnostics: Vec<Diagnostic>,
@@ -62,6 +64,7 @@ impl FixedEffectAudit {
             },
             columns: Vec::new(),
             terms: Vec::new(),
+            contrast_bases: Vec::new(),
             aliased_columns: Vec::new(),
             empty_cells: Vec::new(),
             diagnostics: Vec::new(),
@@ -82,7 +85,19 @@ pub enum FixedEffectColumnKind {
     Intercept,
     Numeric,
     CategoricalDummy,
+    CategoricalContrast,
     Interaction,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CategoricalContrastAudit {
+    pub variable: String,
+    pub levels: Vec<String>,
+    pub column_names: Vec<String>,
+    pub source: String,
+    pub ordered: bool,
+    pub explicit: bool,
+    pub contrast_matrix: Vec<Vec<f64>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -998,6 +1013,7 @@ fn audit_fixed_effects(semantic_model: &SemanticModel, data: &DataFrame) -> Fixe
         rank,
         columns,
         terms,
+        contrast_bases: categorical_contrast_audits(data),
         aliased_columns,
         empty_cells,
         diagnostics,
@@ -1080,25 +1096,18 @@ impl<'a> FixedDesignBuilder<'a> {
                 values: DVector::from_column_slice(values),
             }),
             Some(Column::Categorical(cat)) => {
-                for (level_index, level) in cat.levels.iter().enumerate().skip(1) {
-                    let values = cat
-                        .refs
-                        .iter()
-                        .map(|&reference| {
-                            if reference as usize == level_index {
-                                1.0
-                            } else {
-                                0.0
-                            }
-                        })
-                        .collect::<Vec<_>>();
+                for encoded in cat.encoded_columns(name, CategoricalCoding::Treatment) {
                     self.columns.push(DesignColumn {
                         audit: FixedEffectColumnAudit {
-                            name: format!("{name}: {level}"),
+                            name: encoded.name,
                             source_term: name.to_string(),
-                            kind: FixedEffectColumnKind::CategoricalDummy,
+                            kind: if encoded.explicit_contrast {
+                                FixedEffectColumnKind::CategoricalContrast
+                            } else {
+                                FixedEffectColumnKind::CategoricalDummy
+                            },
                         },
-                        values: DVector::from_column_slice(&values),
+                        values: DVector::from_column_slice(&encoded.values),
                     });
                 }
             }
@@ -1171,30 +1180,19 @@ fn design_columns_for_factor(
         }]),
         Column::Categorical(cat) => {
             let columns = cat
-                .levels
-                .iter()
-                .enumerate()
-                .skip(1)
-                .map(|(level_index, level)| {
-                    let values = cat
-                        .refs
-                        .iter()
-                        .map(|&reference| {
-                            if reference as usize == level_index {
-                                1.0
-                            } else {
-                                0.0
-                            }
-                        })
-                        .collect::<Vec<_>>();
-                    DesignColumn {
-                        audit: FixedEffectColumnAudit {
-                            name: format!("{factor}: {level}"),
-                            source_term: source_term.to_string(),
-                            kind: FixedEffectColumnKind::CategoricalDummy,
+                .encoded_columns(factor, CategoricalCoding::Treatment)
+                .into_iter()
+                .map(|encoded| DesignColumn {
+                    audit: FixedEffectColumnAudit {
+                        name: encoded.name,
+                        source_term: source_term.to_string(),
+                        kind: if encoded.explicit_contrast {
+                            FixedEffectColumnKind::CategoricalContrast
+                        } else {
+                            FixedEffectColumnKind::CategoricalDummy
                         },
-                        values: DVector::from_column_slice(&values),
-                    }
+                    },
+                    values: DVector::from_column_slice(&encoded.values),
                 })
                 .collect();
             Some(columns)
@@ -1550,26 +1548,89 @@ fn categorical_basis_audits(
     refs: &Option<Vec<usize>>,
     coding: RandomBasisCoding,
 ) -> Vec<BasisAudit> {
-    let skip_reference = usize::from(coding == RandomBasisCoding::Treatment);
-    cat.levels
-        .iter()
-        .enumerate()
-        .skip(skip_reference)
-        .map(|(level_index, level)| {
-            let values = cat
-                .refs
-                .iter()
-                .map(|&reference| f64::from(reference as usize == level_index));
+    cat.encoded_columns(name, categorical_coding(coding))
+        .into_iter()
+        .map(|encoded| {
             audit_values(
-                &format!("{name}: {level}"),
-                if coding == RandomBasisCoding::Treatment {
+                &encoded.name,
+                if encoded.explicit_contrast {
+                    "categorical_contrast"
+                } else if coding == RandomBasisCoding::Treatment {
                     "categorical_dummy"
                 } else {
                     "categorical_cell"
                 },
                 refs,
-                values,
+                encoded.values.into_iter(),
             )
+        })
+        .collect()
+}
+
+fn categorical_coding(coding: RandomBasisCoding) -> CategoricalCoding {
+    match coding {
+        RandomBasisCoding::Treatment => CategoricalCoding::Treatment,
+        RandomBasisCoding::CellMeans => CategoricalCoding::CellMeans,
+    }
+}
+
+fn categorical_contrast_audits(data: &DataFrame) -> Vec<CategoricalContrastAudit> {
+    data.column_names()
+        .into_iter()
+        .filter_map(|variable| {
+            let cat = data.categorical(variable)?;
+            let explicit = cat.contrast.is_some();
+            let (column_names, source, ordered, contrast_matrix) = match &cat.contrast {
+                Some(contrast) => (
+                    contrast.column_names.clone(),
+                    contrast.source.as_str().to_string(),
+                    contrast.ordered,
+                    matrix_rows(&contrast.matrix),
+                ),
+                None => {
+                    let column_names = cat
+                        .levels
+                        .iter()
+                        .skip(1)
+                        .map(|level| format!("{variable}: {level}"))
+                        .collect::<Vec<_>>();
+                    (
+                        column_names,
+                        ContrastSource::Treatment.as_str().to_string(),
+                        false,
+                        default_treatment_matrix(cat.levels.len()),
+                    )
+                }
+            };
+            Some(CategoricalContrastAudit {
+                variable: variable.to_string(),
+                levels: cat.levels.clone(),
+                column_names,
+                source,
+                ordered,
+                explicit,
+                contrast_matrix,
+            })
+        })
+        .collect()
+}
+
+fn matrix_rows(matrix: &DMatrix<f64>) -> Vec<Vec<f64>> {
+    (0..matrix.nrows())
+        .map(|row| {
+            (0..matrix.ncols())
+                .map(|col| matrix[(row, col)])
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn default_treatment_matrix(n_levels: usize) -> Vec<Vec<f64>> {
+    (0..n_levels)
+        .map(|row| {
+            (1..n_levels)
+                .map(|col_level| f64::from(row == col_level))
+                .collect::<Vec<_>>()
         })
         .collect()
 }
@@ -1582,23 +1643,11 @@ fn expanded_interaction_columns(
     vars.iter()
         .map(|name| match data.column(name) {
             Some(Column::Numeric(values)) => Ok(vec![(name.clone(), values.clone())]),
-            Some(Column::Categorical(cat)) => {
-                let skip_reference = usize::from(coding == RandomBasisCoding::Treatment);
-                Ok(cat
-                    .levels
-                    .iter()
-                    .enumerate()
-                    .skip(skip_reference)
-                    .map(|(level_index, level)| {
-                        let values = cat
-                            .refs
-                            .iter()
-                            .map(|&reference| f64::from(reference as usize == level_index))
-                            .collect::<Vec<_>>();
-                        (format!("{name}: {level}"), values)
-                    })
-                    .collect())
-            }
+            Some(Column::Categorical(cat)) => Ok(cat
+                .encoded_columns(name, categorical_coding(coding))
+                .into_iter()
+                .map(|column| (column.name, column.values))
+                .collect()),
             None => Err(()),
         })
         .collect()

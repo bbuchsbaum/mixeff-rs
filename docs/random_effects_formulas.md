@@ -66,10 +66,11 @@ Rejected at parse time (v0):
 
 Accepted and supported at materialization/audit:
 
-- Categorical basis columns — treatment-coded expansion and the cell-means
-  `0 + factor` parameterization materialize on the random side; design audit
-  inspects the expanded optimizer columns and emits `FormulaCanonicalized`
-  diagnostics when the semantic basis expands.
+- Categorical basis columns — treatment-coded expansion, explicit
+  frontend-supplied contrast bases, and the cell-means `0 + factor`
+  parameterization materialize on the random side; design audit inspects the
+  expanded optimizer columns and emits `FormulaCanonicalized` diagnostics when
+  the semantic basis expands.
 - Interaction basis columns — numeric/categorical treatment-coded and
   cell-means interaction expansions materialize on the random side; design
   audit and ThetaMap use the expanded optimizer columns.
@@ -201,8 +202,16 @@ A numeric basis variable contributes one Z column equal to the variable's vector
 
 A categorical basis variable contributes a column block. Two parameterizations, picked by intercept policy:
 
-- **Treatment coding (default when `InterceptPolicy::Included` is in effect for this term)**: one Z column per non-reference level (`L − 1` columns). Reference level = first observed level (matching the fixed side at `src/model/linear.rs:2783–2794`). Each column is the indicator for that level.
+- **Treatment coding (default when `InterceptPolicy::Included` is in effect for this term)**: one Z column per non-reference level (`L − 1` columns). Reference level = first observed level unless the frontend supplied an explicit categorical contrast basis. Each default column is the indicator for that level.
+- **Explicit contrast coding (when `CategoricalColumn.contrast` is present and treatment coding is in effect)**: one Z column per supplied contrast column. The row values are looked up from the supplied `levels x k` numeric matrix, column names come from `contrast_column_names`, and the same basis is used by fixed effects, random slopes, and interactions.
 - **Cell-means coding (when the basis is `0 + factor` and `InterceptPolicy::Omitted`)**: one Z column per level (`L` columns). This is the "one variance per condition" parameterization commonly written `(0 + cond | g)` in lme4.
+
+The design audit records categorical bases under `fixed_effects.contrast_bases`.
+Each entry includes `variable`, `levels`, `contrast_matrix`, `column_names`,
+`source`, `ordered`, and `explicit`. `source` uses the stable labels
+`treatment`, `sum`, `helmert`, `polynomial`, `custom`, and `unknown`. When no
+explicit contrast basis is supplied, Rust records the default treatment basis
+with `explicit = false`.
 
 The covariance interpretation:
 
@@ -212,19 +221,23 @@ The covariance interpretation:
 These are not interchangeable. The basis-manager doc (under inference contract) is responsible for warning that `corr(condA, condB)` from the cell-means parameterization is contrast-stable while `corr(intercept, condA)` from treatment coding is not.
 
 Status: conforms for v0 basis construction. Treatment-coded categorical
-expansion and cell-means `0 + factor` expansion materialize in the
-random-effect basis. Design audit reports the expanded basis columns, emits a
-`FormulaCanonicalized` diagnostic with semantic and expanded basis payloads,
-and ThetaMap records both `user_basis` and optimizer-facing `optimizer_basis`
-for round-tripping.
+expansion, explicit frontend-supplied contrast bases, and cell-means
+`0 + factor` expansion materialize in the random-effect basis. Design audit
+reports the expanded basis columns, records categorical contrast/defaulting
+metadata, emits a `FormulaCanonicalized` diagnostic with semantic and expanded
+basis payloads, and ThetaMap records both `user_basis` and optimizer-facing
+`optimizer_basis` for round-tripping.
 
 ### 4.3 Interaction basis
 
 For a basis `Interaction(vars)`:
 
 - numeric × numeric → element-wise product, one Z column.
-- numeric × factor (`L` levels) → `L − 1` columns (treatment) or `L` columns (cell-means under `InterceptPolicy::Omitted`), each equal to the numeric times the corresponding indicator.
-- factor × factor (`L1 × L2` levels) → `(L1 − 1)(L2 − 1)` columns under treatment coding; `L1 · L2` columns under cell-means.
+- numeric × factor (`L` levels) → the factor basis columns selected above
+  (default treatment, explicit contrast, or cell-means under
+  `InterceptPolicy::Omitted`), each multiplied by the numeric column.
+- factor × factor (`L1 × L2` levels) → Cartesian products of the selected
+  basis columns for each factor.
 - arity > 2 → recursive: build the interaction of the first two and then interact with the next, dropping cells with no observations.
 
 Status: partial. Numeric and categorical interaction basis columns now

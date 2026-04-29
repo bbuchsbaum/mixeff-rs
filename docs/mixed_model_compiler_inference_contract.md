@@ -24,6 +24,16 @@ remaining work is tracked locally in mote; the umbrella issue is
 `bd-01KQ7WW46RJ6B71TAPZ0CK6KVJ`, and the detailed issue index is in
 `docs/compiler_contract_v0_prd.md`.
 
+## Contract Version Log
+
+Pathology-corpus TOML fixtures carry a `contract_version` field. The current
+pathology corpus contract is `v0.3`, single-sourced as
+`PATHOLOGY_CORPUS_CONTRACT_VERSION` in `src/pathology/certificate.rs`.
+
+| Version | Date | Scope | Migration rule |
+| ------- | ---- | ----- | -------------- |
+| `v0.3` | 2026-04-29 | Pathology corpus expected `FitStatus` sets after separation and penalised-convergence support. | Baseline stamp for every existing `tests/fixtures/pathology_corpus/*.toml` fixture; future bumps must re-evaluate each expected-status set by hand and update this log with the review rationale. |
+
 The long-term goal is a Rust mixed-model engine that can stand alone as a
 self-contained crate while also serving as the computational and diagnostic
 core for an R layer. The R interface should be a client of the Rust engine, not

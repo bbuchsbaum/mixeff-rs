@@ -6,7 +6,10 @@ pub mod generalized;
 pub mod linear;
 pub mod traits;
 
-pub use data::{CategoricalColumn, Column, DataFrame};
+pub use data::{
+    CategoricalCoding, CategoricalColumn, CategoricalContrast, Column, ContrastSource, DataFrame,
+    EncodedCategoricalColumn,
+};
 pub use fixed_design::{
     CompiledMixedModelDesign, DenseFixedDesign, FixedDesign, FixedDesignBackend,
     FixedDesignBackendPreference, FixedDesignBuildPolicy, FixedDesignStorage, FixedDesignSummary,

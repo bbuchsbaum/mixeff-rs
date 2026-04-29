@@ -10,7 +10,7 @@ use nalgebra::{DMatrix, DVector};
 
 use crate::error::{MixedModelError, Result};
 use crate::formula::{FixedTerm, Formula};
-use crate::model::data::{Column, DataFrame};
+use crate::model::data::{CategoricalCoding, Column, DataFrame};
 use crate::types::{MatrixBlock, ReMat};
 
 /// Storage strategy used by a fixed-effect design backend.
@@ -273,6 +273,23 @@ impl FixedDesign {
         match self {
             Self::Dense(_) => None,
             Self::Streamed(design) => Some(design),
+        }
+    }
+
+    /// Return a design with columns selected in the requested order.
+    pub fn select_columns(&self, columns: &[usize]) -> Result<Self> {
+        match self {
+            Self::Dense(design) => Ok(Self::Dense(design.select_columns(columns)?)),
+            Self::Streamed(design) => Ok(Self::Streamed(design.select_columns(columns)?)),
+        }
+    }
+
+    /// Return a row-weighted design where row `i` is scaled by
+    /// `sqrt_weights[i]`.
+    pub fn with_sqrt_weights(&self, sqrt_weights: &DVector<f64>) -> Result<Self> {
+        match self {
+            Self::Dense(design) => Ok(Self::Dense(design.with_sqrt_weights(sqrt_weights)?)),
+            Self::Streamed(design) => Ok(Self::Streamed(design.with_sqrt_weights(sqrt_weights)?)),
         }
     }
 }
@@ -557,6 +574,17 @@ impl DenseFixedDesign {
         }
         Self::new(weighted, self.column_names.clone())
     }
+
+    pub fn select_columns(&self, columns: &[usize]) -> Result<Self> {
+        validate_column_selection(columns, self.n_cols())?;
+        let mut selected = DMatrix::zeros(self.n_obs(), columns.len());
+        let mut selected_names = Vec::with_capacity(columns.len());
+        for (new_col, &old_col) in columns.iter().enumerate() {
+            selected.set_column(new_col, &self.x.column(old_col));
+            selected_names.push(self.column_names[old_col].clone());
+        }
+        Self::new(selected, selected_names)
+    }
 }
 
 impl FixedDesignBackend for DenseFixedDesign {
@@ -733,6 +761,30 @@ impl StreamedFixedDesign {
         Self::new(self.n_obs, self.column_names.clone(), rows)
     }
 
+    pub fn select_columns(&self, columns: &[usize]) -> Result<Self> {
+        validate_column_selection(columns, self.n_cols())?;
+        let mut old_to_new = vec![None; self.n_cols()];
+        for (new_col, &old_col) in columns.iter().enumerate() {
+            old_to_new[old_col] = Some(new_col);
+        }
+        let selected_names = columns
+            .iter()
+            .map(|&column| self.column_names[column].clone())
+            .collect::<Vec<_>>();
+        let selected_rows = self
+            .rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .filter_map(|&(old_col, value)| {
+                        old_to_new[old_col].map(|new_col| (new_col, value))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        Self::new(self.n_obs, selected_names, selected_rows)
+    }
+
     fn validate_response_len(&self, len: usize, context: &str) -> Result<()> {
         if len != self.n_obs {
             return Err(MixedModelError::DimensionMismatch(format!(
@@ -830,20 +882,17 @@ fn append_streamed_main_effect(
             Ok(())
         }
         Some(Column::Categorical(cat)) => {
-            let level_columns = cat
-                .levels
+            let encoded = cat.encoded_columns(name, CategoricalCoding::Treatment);
+            let level_columns = encoded
                 .iter()
-                .enumerate()
-                .skip(1)
-                .map(|(_level_index, level)| {
-                    push_column_name(column_names, format!("{}: {}", name, level))
-                })
+                .map(|column| push_column_name(column_names, column.name.clone()))
                 .collect::<Vec<_>>();
 
-            for (row, &reference) in cat.refs.iter().enumerate() {
-                if reference > 0 {
-                    let encoded_level = reference as usize - 1;
-                    rows[row].push((level_columns[encoded_level], 1.0));
+            for (column_index, encoded_column) in encoded.iter().enumerate() {
+                for (row, &value) in encoded_column.values.iter().enumerate() {
+                    if value != 0.0 {
+                        rows[row].push((level_columns[column_index], value));
+                    }
                 }
             }
             Ok(())
@@ -888,23 +937,11 @@ fn streamed_factor_columns(
             values: values.clone(),
         }]),
         Some(Column::Categorical(cat)) => Ok(cat
-            .levels
-            .iter()
-            .enumerate()
-            .skip(1)
-            .map(|(level_index, level)| StreamedFactorColumn {
-                label: format!("{}: {}", name, level),
-                values: cat
-                    .refs
-                    .iter()
-                    .map(|&reference| {
-                        if reference as usize == level_index {
-                            1.0
-                        } else {
-                            0.0
-                        }
-                    })
-                    .collect(),
+            .encoded_columns(name, CategoricalCoding::Treatment)
+            .into_iter()
+            .map(|column| StreamedFactorColumn {
+                label: column.name,
+                values: column.values,
             })
             .collect()),
         None => Err(MixedModelError::InvalidArgument(format!(
@@ -1061,6 +1098,24 @@ fn validate_sqrt_weights(sqrt_weights: &DVector<f64>, n_obs: usize) -> Result<()
     validate_design_vector("sqrt weights", sqrt_weights, n_obs, false)
 }
 
+fn validate_column_selection(columns: &[usize], n_cols: usize) -> Result<()> {
+    let mut seen = vec![false; n_cols];
+    for &column in columns {
+        if column >= n_cols {
+            return Err(MixedModelError::DimensionMismatch(format!(
+                "fixed-effect column selection references column {column}, but design has {n_cols} column(s)"
+            )));
+        }
+        if seen[column] {
+            return Err(MixedModelError::InvalidArgument(format!(
+                "fixed-effect column selection contains duplicate column {column}"
+            )));
+        }
+        seen[column] = true;
+    }
+    Ok(())
+}
+
 fn validate_design_vector(
     label: &str,
     values: &DVector<f64>,
@@ -1128,6 +1183,23 @@ mod tests {
             .xty(&DVector::from_column_slice(&[1.0, 2.0, 3.0]))
             .unwrap_err();
         assert!(matches!(err, MixedModelError::DimensionMismatch(_)));
+    }
+
+    #[test]
+    fn dense_backend_selects_columns_in_requested_order() {
+        let design = DenseFixedDesign::new(
+            DMatrix::from_row_slice(2, 3, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            vec!["a".into(), "b".into(), "c".into()],
+        )
+        .unwrap();
+
+        let selected = design.select_columns(&[2, 0]).unwrap();
+
+        assert_eq!(selected.column_names(), &["c".to_string(), "a".to_string()]);
+        assert_eq!(
+            selected.matrix(),
+            &DMatrix::from_row_slice(2, 2, &[3.0, 1.0, 6.0, 4.0])
+        );
     }
 
     fn toy_random_intercept(n_obs: usize) -> ReMat {
@@ -1239,6 +1311,54 @@ mod tests {
         )
         .unwrap();
         assert!(design.rows()[0].is_empty());
+    }
+
+    #[test]
+    fn streamed_backend_selects_columns_without_materializing_dense_x() {
+        let design = StreamedFixedDesign::new(
+            3,
+            vec!["intercept".into(), "a".into(), "b".into(), "x".into()],
+            vec![
+                vec![(0, 1.0), (3, 2.0)],
+                vec![(0, 1.0), (1, 1.0), (3, 3.0)],
+                vec![(0, 1.0), (2, 1.0), (3, 4.0)],
+            ],
+        )
+        .unwrap();
+
+        let selected = design.select_columns(&[3, 0]).unwrap();
+
+        assert_eq!(
+            selected.column_names(),
+            &["x".to_string(), "intercept".to_string()]
+        );
+        assert_eq!(
+            selected.rows(),
+            &[
+                vec![(0, 2.0), (1, 1.0)],
+                vec![(0, 3.0), (1, 1.0)],
+                vec![(0, 4.0), (1, 1.0)],
+            ]
+        );
+    }
+
+    #[test]
+    fn fixed_design_rejects_invalid_column_selection() {
+        let design = FixedDesign::streamed(
+            1,
+            vec!["a".into(), "b".into()],
+            vec![vec![(0, 1.0), (1, 2.0)]],
+        )
+        .unwrap();
+
+        let out_of_bounds = design.select_columns(&[2]).unwrap_err();
+        assert!(matches!(
+            out_of_bounds,
+            MixedModelError::DimensionMismatch(_)
+        ));
+
+        let duplicate = design.select_columns(&[1, 1]).unwrap_err();
+        assert!(matches!(duplicate, MixedModelError::InvalidArgument(_)));
     }
 
     #[test]
