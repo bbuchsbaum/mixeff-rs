@@ -106,6 +106,35 @@ p-values. The payload may also carry `replicate_statistics`; this is required
 for non-coefficient scalar contrasts because the basic replicate collection
 stores coefficient standard errors but not replicate covariance matrices.
 
+### Stable Wire Labels
+
+Bootstrap option and detail labels are part of the bridge contract for schema
+version `1.0.0`.
+
+`failed_refit_policy` accepts and reports exactly:
+
+| Rust variant | Wire label |
+|---|---|
+| `BootstrapFailedRefitPolicy::Exclude` | `exclude` |
+| `BootstrapFailedRefitPolicy::CountExtreme` | `count_extreme` |
+| `BootstrapFailedRefitPolicy::Abort` | `abort` |
+
+Seed handling is represented by `FixedEffectBootstrapOptions.seed` on input
+and by `details.bootstrap.seed_rng` plus `details.bootstrap.seed` on output.
+When a caller supplies a seed, Rust uses `StdRng` and reports
+`seed_rng = "StdRng"` with the same integer seed. When no seed is supplied,
+Rust draws entropy internally and reports `seed_rng = "unknown"` with
+`seed = null`; that run is intentionally not exactly reproducible from the
+wire payload alone.
+
+The fixed-effect-null target labels emitted in `details.bootstrap` are also
+stable snake-case strings:
+
+| Target field | Wire label |
+|---|---|
+| `target_kind` | `fixed_effect_null` or `full_model_distribution` |
+| `null_target.covariance_policy` | `reuse_fitted_covariance` |
+
 Implementation note: `bd-01KQBDWN5Q6Z8RRQVXNEJVY1M9` adds
 `LinearMixedModel::fixed_effect_null_bootstrap_target()` and
 `simulate_fixed_effect_null()`. The initial target policy is

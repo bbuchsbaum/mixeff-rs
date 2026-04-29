@@ -5137,6 +5137,36 @@ impl LinearMixedModel {
         FixedEffectInferenceTable::new(rows)
     }
 
+    pub fn fixed_effect_contrast_inference_table(
+        &self,
+        hypotheses: Vec<FixedEffectHypothesis>,
+        method: FixedEffectTestMethod,
+    ) -> FixedEffectInferenceTable {
+        let rows = hypotheses
+            .into_iter()
+            .map(|hypothesis| {
+                self.fixed_effect_contrast_inference_row(
+                    FixedEffectInferenceRowKind::Contrast,
+                    hypothesis,
+                    method,
+                )
+            })
+            .collect();
+        FixedEffectInferenceTable::new(rows)
+    }
+
+    pub fn fixed_effect_contrast_inference_row(
+        &self,
+        kind: FixedEffectInferenceRowKind,
+        hypothesis: FixedEffectHypothesis,
+        method: FixedEffectTestMethod,
+    ) -> FixedEffectInferenceRow {
+        fixed_effect_test_to_inference_row(
+            kind,
+            self.test_contrast_with_method(hypothesis, method),
+        )
+    }
+
     pub fn fixed_effect_null_bootstrap_inference_row(
         &self,
         kind: FixedEffectInferenceRowKind,
@@ -16544,6 +16574,48 @@ mod tests {
         assert_eq!(family.family_label, "days");
         assert_eq!(family.restriction_rows, 1);
         assert_eq!(family.coefficient_count, model.coef_names().len());
+    }
+
+    #[test]
+    fn test_lmm_fixed_effect_contrast_table_is_rust_owned() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let days_index = model
+            .coef_names()
+            .iter()
+            .position(|name| name == "days")
+            .unwrap();
+        let hypothesis = FixedEffectHypothesis::single_coefficient(
+            "days = 0",
+            days_index,
+            model.coef_names().len(),
+        )
+        .unwrap();
+        let table = model
+            .fixed_effect_contrast_inference_table(vec![hypothesis], FixedEffectTestMethod::Auto);
+
+        assert_eq!(
+            table.schema_name,
+            crate::compiler::FIXED_EFFECT_INFERENCE_TABLE_SCHEMA
+        );
+        assert_eq!(table.rows.len(), 1);
+        let row = &table.rows[0];
+        assert_eq!(row.kind, FixedEffectInferenceRowKind::Contrast);
+        assert_eq!(row.label, "days = 0");
+        assert_eq!(row.status, FixedEffectInferenceStatus::Available);
+        let family = row
+            .details
+            .as_ref()
+            .and_then(|details| details.contrast_family.as_ref())
+            .expect("contrast row should carry contrast-family details");
+        assert_eq!(family.family_label, "days = 0");
+        assert_eq!(
+            family.numerator_df_semantics,
+            "scalar_contrast_no_numerator_df"
+        );
     }
 
     // ── Cook's distance parity tests (pls.jl line 705) ───────────────────────

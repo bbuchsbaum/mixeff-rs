@@ -50,6 +50,9 @@ Implemented Rust pieces:
   `mixedmodels.fixed_effect_inference_table` and schema version `1.0.0`.
 - `LinearMixedModel::fixed_effect_inference_table()` builds ordered
   coefficient rows from the Rust contrast-testing path.
+- `LinearMixedModel::fixed_effect_contrast_inference_table(hypotheses, method)`
+  builds non-bootstrap contrast rows from the Rust contrast-testing path,
+  including row `details`, method labels, status, reliability, and reasons.
 - `LinearMixedModel::fixed_effect_term_hypotheses()` and
   `fixed_effect_term_inference_table(method)` expose Rust-owned term tests for
   R `test_effect()` / single-model `anova()` callers.
@@ -160,6 +163,14 @@ Minimum row fields:
 | `details` | Optional structured method/family metadata |
 | `notes` | Optional row-level notes |
 
+`details` is optional in `mixedmodels.fixed_effect_inference_table` schema
+version `1.0.0`. Readers must accept rows where `details` is absent or `null`;
+writers may add `details.bootstrap`, `details.contrast_family`, or
+`details.kenward_roger` without changing the table schema version. Adding
+optional detail subfields is treated as a backward-compatible minor extension;
+changing required row fields, method labels, row meaning, or existing detail
+field semantics requires a schema-version decision.
+
 Rows are scalar by default. Coefficient rows and scalar contrast rows carry one
 estimate, one standard error, one statistic, and one p-value. Multi-df term
 tests are represented as `kind = "term"` rows with a scalar test statistic
@@ -178,6 +189,13 @@ Row order is deterministic:
 3. term or joint-hypothesis rows in request order
 
 Labels must be stable under repeated serialization of the same fitted artifact.
+Term rows built by `LinearMixedModel::fixed_effect_term_hypotheses()` use the
+compiler design-audit fixed-term label (`DesignAudit.fixed_effects.terms[*].term`)
+as both the hypothesis label and table row label. That label is the user-facing
+fixed term after formula canonicalization, so equivalent formula encodings may
+canonicalize to the same label, while distinct user-facing terms should remain
+distinct. R should display this row label directly and treat it as stable for a
+given serialized artifact.
 
 ## Method Policy
 
@@ -433,6 +451,10 @@ notes = ["asymptotic Wald z is a labeled fallback, not a finite-sample correctio
 14. [x] Add optional `details.contrast_family` and
     `details.kenward_roger` row metadata for stable restriction-family rank and
     numerator-df semantics, including current KR multi-df F scaling status.
+15. [x] Add a non-bootstrap
+    `fixed_effect_contrast_inference_table(hypotheses, method)` helper so
+    bridge callers do not reconstruct `FixedEffectInferenceRow` from
+    `FixedEffectTest`.
 
 ## Mote Work Breakdown
 
