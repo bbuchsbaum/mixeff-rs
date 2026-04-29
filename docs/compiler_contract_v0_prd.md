@@ -7,6 +7,7 @@ Owner: mixedmodels Rust crate
 Last updated: 2026-04-27  
 Related design note: `docs/mixed_model_compiler_inference_contract.md`  
 Formula-layer slice: `docs/random_effects_formulas.md`  
+Focused p-value support plan: `docs/fixed_effect_p_values_plan.md`
 Implementation state: Started; initial additive compiler-contract skeleton is
 in `src/compiler/`; grouping canonicalization for `a:b`, `a/b`, and `a*b`
 is started in the formula parser; fixed-effect design audits now report rank,
@@ -661,6 +662,12 @@ No Satterthwaite or Kenward-Roger p-values may be printed unless a derivative
 certificate exists for the relevant objective, ThetaMap variant, and fitted
 active manifold.
 
+This finite-sample restriction does not prohibit the row-level fallback
+contract in `docs/fixed_effect_p_values_plan.md`: coefficient and scalar
+contrast rows may expose labeled `asymptotic_wald_z` p-values with low
+reliability, null finite-sample degrees of freedom, and explicit notes that the
+result is not a Satterthwaite or Kenward-Roger correction.
+
 ### 15. Print-Layer Default
 
 The internal artifact may contain requested, semantic, supported, fitted, and
@@ -750,10 +757,11 @@ Legend:
 - [x] A compiled model artifact can be produced and inspected before fitting.
 - [x] Fitting extends the compiled model artifact rather than reconstructing
       mappings from formula strings.
-- [~] Fit intent distinguishes `confirmatory/as_specified`,
+- [x] Fit intent distinguishes `confirmatory/as_specified`,
       `confirmatory/design_compiled`, `exploratory`, and `predictive`.
-      `as_specified` and `design_compiled` are now operational for the LMM
-      constructor path; exploratory and predictive behavior is not enforced.
+      `as_specified` and `design_compiled` are operational for the LMM
+      constructor path, and row-level fixed-effect p-value gating suppresses
+      ordinary confirmatory p-values for exploratory and predictive fits.
 - [~] Model changes are classified as design-time, certificate-time boundary,
       or selection-time. Certificate-time boundary records exist; design-time
       covariance reductions exist; selection-time records are open.
@@ -845,9 +853,15 @@ Legend:
       reductions before optimizer construction.
 - [x] No ordinary p-value table is added without method, status, and
       reliability placeholders.
-- [~] Regularized/exploratory output refuses ordinary confirmatory p-values.
-      Ordinary finite-sample p-values are not implemented; explicit mode
-      enforcement remains open (`bd-01KQ7X0F5808VDKGCAM88Z3P95`).
+- [x] Coefficient-level p-values have a concrete row-level support plan:
+      labeled asymptotic Wald fallback first, Satterthwaite/KR only with
+      derivative and finite-sample certificates
+      (`docs/fixed_effect_p_values_plan.md`).
+- [x] Regularized, exploratory, predictive, and selection-time-reduced LMM
+      output refuses ordinary confirmatory fixed-effect p-values through the
+      row-level inference table. Ordinary finite-sample p-values remain
+      deferred until the Satterthwaite/KR/bootstrap prerequisites are
+      certified.
 - [x] Certificate-time boundary fits are not automatically labeled as
       post-selection.
 

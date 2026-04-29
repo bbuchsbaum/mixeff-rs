@@ -11,6 +11,7 @@ Related docs:
 - `docs/random_effects_formulas.md`
 - `docs/mixed_model_compiler_inference_contract.md`
 - `docs/multivariate_shared_theta.md`
+- `docs/fixed_effect_p_values_plan.md`
 
 ## Purpose
 
@@ -365,10 +366,10 @@ Use audit(), changes(), or optimizer_certificate() for details.
 
 `summary(fit, tests = "coefficients", method = "auto")` should test
 coefficient-level contrasts. Every inferential row should carry `estimate`,
-`std.error`, `df`, `statistic`, `p.value`, `method`, `status`,
-`reliability`, and `estimability`. If the Rust artifact says inference is
-unavailable, R prints `NA` with a reason instead of manufacturing a plausible
-p-value.
+`std.error`, `numerator.df`, `denominator.df`, `statistic`, `p.value`,
+`method`, `status`, `reliability`, and `estimability`. If the Rust artifact
+says inference is unavailable, R prints `NA` with a reason instead of
+manufacturing a plausible p-value.
 
 Rendering should use `cli` for severity styling, actionable hints, and
 terminal-safe links to drilldowns such as `audit(fit)` and
@@ -575,9 +576,17 @@ Policy:
 
 - `summary()` may show coefficient-level contrast tests only when Rust marks
   them available.
+- Coefficient-level Wald fallback p-values are allowed when Rust supplies the
+  row-level method/status/reliability contract described in
+  `fixed_effect_p_values_plan.md`; model-level finite-sample inference may
+  still be marked not assessed.
+- The durable payload lives at
+  `artifact.fixed_effect_inference_table`; live Rust handles may expose the
+  same JSON through the `fixed_effect_inference` bridge table. R must prefer
+  that table over `beta`/`std_errors` reconstruction.
 - `contrast()` returns one row per contrast with `estimate`, `std.error`,
-  `df`, `statistic`, `p.value`, `method`, `status`, `reliability`, and
-  `estimability`.
+  `numerator.df`, `denominator.df`, `statistic`, `p.value`, `method`,
+  `status`, `reliability`, and `estimability`.
 - `test_effect()` and single-model `anova()` test scientific terms, not just
   printed coefficient rows.
 - Single-model `anova()` should use Roman-numeral test types in the public API
@@ -902,7 +911,10 @@ Add:
 - `simulate()` and `refit()` for cached-spec workflows
 - lme4 parity tests for common datasets
 
-No advanced finite-sample p-values are required in this phase.
+No advanced finite-sample p-values are required in this phase. The Phase 2
+summary may still show labeled asymptotic Wald coefficient rows when they come
+from Rust's versioned fixed-effect inference table; R must not reconstruct
+those rows from estimates and standard errors.
 
 ### Phase 3: Diagnostics and Parameterization UX
 

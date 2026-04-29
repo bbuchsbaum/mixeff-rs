@@ -6,9 +6,10 @@ Implementation note: the binding near-term implementation contract lives in
 `docs/compiler_contract_v0_prd.md`. The formula-layer slice of that contract
 is single-sourced in `docs/random_effects_formulas.md` (random-effects
 parsing, canonicalization, basis construction, grouping factor materialization,
-diagnostics inventory). This document is the broader architecture and product
-vision; later-phase details here should be treated as non-binding until they
-are promoted into a PRD or implemented contract. Sections below covering
+diagnostics inventory). The focused row-level p-value support plan lives in
+`docs/fixed_effect_p_values_plan.md`. This document is the broader architecture
+and product vision; later-phase details here should be treated as non-binding
+until they are promoted into a PRD or implemented contract. Sections below covering
 canonical nesting/crossing semantics, intercept omission mechanics, and basis
 centering specifics are now superseded by the formulas doc; the discussion is
 preserved for design rationale only.
@@ -578,6 +579,12 @@ Design implication:
   cached symbolic structure where possible
 - the fit object should retain enough information to compute derivatives for
   requested contrasts after fitting
+
+The row-level fallback contract in `docs/fixed_effect_p_values_plan.md` is the
+near-term exception to finite-sample deferral: coefficient and scalar contrast
+rows may expose labeled `asymptotic_wald_z` p-values with low reliability,
+null finite-sample degrees of freedom, and notes that they are not
+Satterthwaite or Kenward-Roger corrections.
 
 ## Adaptive Parametric Bootstrap
 
@@ -2761,6 +2768,12 @@ The original first development slice has mostly landed. Status:
    tracked in `bd-01KQ7WZVTTHMF5VWK355NMPR6G`.
 7. Fixed-effect rank and empty-cell diagnostics: done.
 8. Information-budget reporting for random-effect covariance parameters: done.
+9. Row-level fixed-effect inference table: Rust-side schema, fitted artifact
+   field, bridge accessor, Wald fallback rows, p-value suppression reasons,
+   and fixtures are done under `bd-01KQASCG9KZH36RNTPAHHH2NA9`. External R
+   consumption remains a client task. Satterthwaite, Kenward-Roger, and
+   bootstrap rows remain deferred until the prerequisites in
+   `docs/fixed_effect_p_values_plan.md` are certified.
 
 This backlog should produce the first visible user-facing improvement:
 
@@ -2773,12 +2786,14 @@ running an optimizer.
 
 Delay these until the compiler/audit contract exists:
 
-- Kenward-Roger
+- Kenward-Roger beyond the row-level table contract, until second-derivative
+  and adjusted-covariance certificates exist
 - broad residual covariance structures
-- R bindings
+- broad R bindings beyond consuming Rust-owned artifact/table payloads
 - automatic regularized covariance selection
 - dense influence diagnostics requiring many refits
-- polished p-value tables that do not yet have reliability grades
+- finite-sample p-value rows that do not yet have method prerequisites and
+  reliability grades
 
 Starting with these would create impressive outputs before the system can defend
 their assumptions.
