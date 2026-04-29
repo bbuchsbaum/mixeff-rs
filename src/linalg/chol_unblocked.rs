@@ -56,13 +56,20 @@ pub fn chol_unblocked(a: &mut DMatrix<f64>) -> Result<(), LinAlgError> {
             d -= a[(j, k)] * a[(j, k)];
         }
 
+        if !d.is_finite() {
+            return Err(LinAlgError::NotPositiveDefinite);
+        }
+
         if d <= tol {
             if d < -tol {
                 return Err(LinAlgError::NotPositiveDefinite);
             }
-            // Singular: set the entire row j of L to zero.
+            // Singular: set row j and the not-yet-computed column tail to zero.
             for k in 0..=j {
                 a[(j, k)] = 0.0;
+            }
+            for i in (j + 1)..n {
+                a[(i, j)] = 0.0;
             }
         } else {
             let ljj = d.sqrt();
@@ -95,7 +102,7 @@ pub fn chol_unblocked(a: &mut DMatrix<f64>) -> Result<(), LinAlgError> {
 pub fn chol_unblocked_diag(d: &mut DVector<f64>) -> Result<(), LinAlgError> {
     for i in 0..d.len() {
         let val = d[i];
-        if val < 0.0 {
+        if !(val.is_finite() && val >= 0.0) {
             return Err(LinAlgError::NotPositiveDefinite);
         }
         d[i] = val.sqrt();
@@ -199,6 +206,48 @@ mod tests {
     }
 
     #[test]
+    fn test_chol_singular_middle_column_clears_column_tail() {
+        // The second pivot collapses to zero, but the third column remains
+        // informative. The singular column tail must be cleared so later
+        // updates do not read stale pre-factorization values.
+        let mut a = DMatrix::from_row_slice(
+            3,
+            3,
+            &[
+                1.0, 1.0, 1.0, //
+                1.0, 1.0, 1.0, //
+                1.0, 1.0, 2.0,
+            ],
+        );
+        chol_unblocked(&mut a).unwrap();
+
+        assert_relative_eq!(a[(0, 0)], 1.0, epsilon = 1e-12);
+        assert_relative_eq!(a[(1, 0)], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(a[(1, 1)], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(a[(2, 0)], 1.0, epsilon = 1e-12);
+        assert_relative_eq!(a[(2, 1)], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(a[(2, 2)], 1.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_chol_rejects_nan_diagonal() {
+        let mut a = DMatrix::from_row_slice(2, 2, &[f64::NAN, 0.0, 0.0, 1.0]);
+        assert!(matches!(
+            chol_unblocked(&mut a),
+            Err(LinAlgError::NotPositiveDefinite)
+        ));
+    }
+
+    #[test]
+    fn test_chol_rejects_inf_diagonal() {
+        let mut a = DMatrix::from_row_slice(2, 2, &[f64::INFINITY, 0.0, 0.0, 1.0]);
+        assert!(matches!(
+            chol_unblocked(&mut a),
+            Err(LinAlgError::NotPositiveDefinite)
+        ));
+    }
+
+    #[test]
     fn test_chol_zero_matrix() {
         // A zero matrix is PSD. All elements of L should be zero.
         let mut a = DMatrix::zeros(3, 3);
@@ -233,6 +282,15 @@ mod tests {
         let mut d = DVector::from_vec(vec![4.0, -1.0, 9.0]);
         let result = chol_unblocked_diag(&mut d);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_chol_diag_rejects_nan_entry() {
+        let mut d = DVector::from_vec(vec![4.0, f64::NAN, 9.0]);
+        assert!(matches!(
+            chol_unblocked_diag(&mut d),
+            Err(LinAlgError::NotPositiveDefinite)
+        ));
     }
 
     #[test]

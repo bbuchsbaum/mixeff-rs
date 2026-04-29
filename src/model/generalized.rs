@@ -477,10 +477,7 @@ impl GeneralizedLinearMixedModel {
         // and `wt[i]` is the trial count; weighting the per-observation
         // deviance contribution by `wt[i]` recovers the binomial deviance.
         let dev: f64 = (0..self.y.len())
-            .map(|i| {
-                let case_w = if self.wt.is_empty() { 1.0 } else { self.wt[i] };
-                case_w * self.dev_resid_component(self.y[i], self.mu[i])
-            })
+            .map(|i| self.case_weight(i) * self.dev_resid_component(self.y[i], self.mu[i]))
             .sum();
         let u_penalty: f64 = self
             .u
@@ -537,7 +534,8 @@ impl GeneralizedLinearMixedModel {
             devc0[g] = uv * uv;
         }
         for i in 0..n_obs {
-            devc0[refs[i] as usize] += self.dev_resid_component(self.y[i], self.mu[i]);
+            devc0[refs[i] as usize] +=
+                self.case_weight(i) * self.dev_resid_component(self.y[i], self.mu[i]);
         }
 
         // Sweep over GH nodes.
@@ -567,7 +565,8 @@ impl GeneralizedLinearMixedModel {
                 devc[g] = uv * uv;
             }
             for i in 0..n_obs {
-                devc[refs[i] as usize] += self.dev_resid_component(self.y[i], self.mu[i]);
+                devc[refs[i] as usize] +=
+                    self.case_weight(i) * self.dev_resid_component(self.y[i], self.mu[i]);
             }
             // mult[g] += exp((z² + devc0[g] - devc[g]) / 2) * w
             let z2 = z * z;
@@ -586,6 +585,14 @@ impl GeneralizedLinearMixedModel {
         let log_mult: f64 = mult.iter().map(|m| m.ln()).sum();
         let log_sd: f64 = sd.iter().map(|s| s.ln()).sum();
         sum_devc0 - 2.0 * (log_mult + log_sd)
+    }
+
+    fn case_weight(&self, obs: usize) -> f64 {
+        if self.wt.is_empty() {
+            1.0
+        } else {
+            self.wt[obs]
+        }
     }
 
     /// True iff the model has exactly one random-effects term and that
@@ -717,15 +724,8 @@ impl GeneralizedLinearMixedModel {
             let model_ptr = self as *mut GeneralizedLinearMixedModel;
             move |theta: &[f64], _grad: Option<&mut [f64]>, _data: &mut ()| -> f64 {
                 let model = unsafe { &mut *model_ptr };
-                let _ = model.lmm.set_theta(theta);
-                model.lmm.update_l().ok();
-                model.theta = theta.to_vec();
-                for u in model.u.iter_mut() {
-                    u.fill(0.0);
-                }
-                model.pirls(true, false).ok();
                 unsafe { *feval_ptr += 1 };
-                model.deviance(n_agq)
+                model.penalized_pirls_deviance_at_theta(theta, n_agq)
             }
         };
 
@@ -756,13 +756,7 @@ impl GeneralizedLinearMixedModel {
         let nlopt_result = optimizer.optimize(&mut theta);
 
         // Final PIRLS at optimal θ
-        let _ = self.lmm.set_theta(&theta);
-        self.lmm.update_l().ok();
-        self.theta = theta.clone();
-        for u in self.u.iter_mut() {
-            u.fill(0.0);
-        }
-        self.pirls(true, false).ok();
+        self.update_pirls_at_theta(&theta, true)?;
         self.beta = self.lmm.beta();
 
         self.lmm.optsum.n_agq = n_agq;
@@ -783,6 +777,45 @@ impl GeneralizedLinearMixedModel {
         self.refresh_near_unit_random_effect_correlation_diagnostics();
 
         Ok(self)
+    }
+
+    #[cfg(feature = "nlopt")]
+    fn update_pirls_at_theta(&mut self, theta: &[f64], vary_beta: bool) -> Result<()> {
+        if theta.len() != self.theta.len() {
+            return Err(MixedModelError::DimensionMismatch(format!(
+                "theta vector length {} does not match fitted GLMM theta length {}",
+                theta.len(),
+                self.theta.len()
+            )));
+        }
+        if !theta.iter().all(|value| value.is_finite()) {
+            return Err(MixedModelError::InvalidArgument(
+                "theta values must be finite".to_string(),
+            ));
+        }
+        self.lmm.set_theta(theta)?;
+        self.lmm.update_l()?;
+        self.theta = theta.to_vec();
+        for u in self.u.iter_mut() {
+            u.fill(0.0);
+        }
+        self.pirls(vary_beta, false)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "nlopt")]
+    fn penalized_pirls_deviance_at_theta(&mut self, theta: &[f64], n_agq: usize) -> f64 {
+        match self.update_pirls_at_theta(theta, true) {
+            Ok(()) => {
+                let deviance = self.deviance(n_agq);
+                if deviance.is_finite() {
+                    deviance
+                } else {
+                    f64::INFINITY
+                }
+            }
+            Err(_) => f64::INFINITY,
+        }
     }
 
     #[cfg(feature = "nlopt")]
@@ -1250,6 +1283,43 @@ mod tests {
 
     #[cfg(feature = "nlopt")]
     #[test]
+    fn test_cbpp_agq_deviance_uses_case_weights() {
+        let (data, _) = crate::datasets::load("cbpp").unwrap();
+        let incidence = data.numeric("incidence").unwrap();
+        let size = data.numeric("size").unwrap();
+
+        let proportion: Vec<f64> = incidence
+            .iter()
+            .zip(size.iter())
+            .map(|(&y, &n)| y / n)
+            .collect();
+        let weights: Vec<f64> = size.to_vec();
+
+        let mut data_with_proportion = data.clone();
+        data_with_proportion.add_numeric("proportion", proportion);
+
+        let formula = parse_formula("proportion ~ 1 + period + (1 | herd)").unwrap();
+        let mut model = GeneralizedLinearMixedModel::new_with_weights(
+            formula,
+            &data_with_proportion,
+            Family::Binomial,
+            None,
+            weights,
+        )
+        .unwrap();
+        model.fit_with_options(true, 1, false).unwrap();
+
+        let weighted_agq = model.deviance(5);
+        model.wt = vec![1.0; model.y.len()];
+        let unit_weight_agq = model.deviance(5);
+        assert!(
+            (weighted_agq - unit_weight_agq).abs() > 1.0,
+            "AGQ deviance must include binomial case weights; weighted={weighted_agq}, unit={unit_weight_agq}"
+        );
+    }
+
+    #[cfg(feature = "nlopt")]
+    #[test]
     fn test_grouseticks_poisson_glmm_deviance() {
         // pirls.jl:194-227, MixedModels.jl/test/pirls.jl
         //   gm4 = fit(MixedModel, only(gfms[:grouseticks]), grouseticks,
@@ -1465,6 +1535,37 @@ mod tests {
             model2.lmm.optsum.feval, feval_before,
             "no objective evaluations should have happened on the rejected fit",
         );
+    }
+
+    #[cfg(feature = "nlopt")]
+    #[test]
+    fn test_glmm_theta_probe_penalizes_invalid_theta() {
+        let data = contra_fixture();
+        let formula =
+            parse_formula("use_num ~ 1 + age + age2 + urban + livch + (1 | urban_dist)").unwrap();
+        let mut model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+
+        let value = model.penalized_pirls_deviance_at_theta(&[f64::NAN], 1);
+        assert!(
+            value.is_infinite() && value.is_sign_positive(),
+            "invalid optimizer probes should be penalized, not evaluated from stale state"
+        );
+    }
+
+    #[cfg(feature = "nlopt")]
+    #[test]
+    fn test_glmm_final_theta_update_propagates_invalid_theta_error() {
+        let data = contra_fixture();
+        let formula =
+            parse_formula("use_num ~ 1 + age + age2 + urban + livch + (1 | urban_dist)").unwrap();
+        let mut model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+
+        let err = model
+            .update_pirls_at_theta(&[f64::NAN], true)
+            .expect_err("final theta update must propagate invalid-theta errors");
+        assert!(matches!(err, MixedModelError::InvalidArgument(_)));
     }
 
     #[cfg(feature = "nlopt")]
