@@ -55,6 +55,17 @@ impl Family {
             Family::Normal | Family::Gamma | Family::InverseGaussian
         )
     }
+
+    /// GLM variance function V(μ) for this conditional family.
+    pub fn variance(&self, mu: f64) -> f64 {
+        match self {
+            Family::Normal => 1.0,
+            Family::Bernoulli | Family::Binomial => mu * (1.0 - mu),
+            Family::Poisson => mu,
+            Family::Gamma => mu * mu,
+            Family::InverseGaussian => mu * mu * mu,
+        }
+    }
 }
 
 impl LinkFunction {
@@ -214,5 +225,26 @@ pub trait MixedModelFit {
     /// construction); `Some(_)` for GLMMs.
     fn link_kind(&self) -> Option<LinkFunction> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Family, LinkFunction};
+
+    #[test]
+    fn test_family_variance_functions() {
+        assert_eq!(Family::Normal.variance(2.0), 1.0);
+        assert_eq!(Family::Poisson.variance(2.0), 2.0);
+        assert_eq!(Family::Gamma.variance(2.0), 4.0);
+        assert_eq!(Family::InverseGaussian.variance(2.0), 8.0);
+        assert_eq!(Family::Bernoulli.variance(0.25), 0.1875);
+        assert_eq!(Family::Binomial.variance(0.25), 0.1875);
+    }
+
+    #[test]
+    fn test_inverse_link_mu_eta_preserves_sign() {
+        assert_eq!(LinkFunction::Inverse.mu_eta(0.5), -4.0);
+        assert_eq!(LinkFunction::Log.mu_eta(0.5), 0.5_f64.exp());
     }
 }

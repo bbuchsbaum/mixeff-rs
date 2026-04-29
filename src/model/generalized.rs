@@ -132,6 +132,14 @@ impl GeneralizedLinearMixedModel {
                 "Use LinearMixedModel for Normal distribution with IdentityLink".to_string(),
             ));
         }
+        if glmm_dispersion_family_requires_refusal(family, link) {
+            return Err(MixedModelError::Unsupported(format!(
+                "{} GLMM with {} link requires a dispersion parameter, but GLMM dispersion \
+                 estimation is not implemented yet",
+                family_label(family),
+                link_label(link)
+            )));
+        }
 
         // Build the internal LMM
         let mut lmm =
@@ -395,30 +403,19 @@ impl GeneralizedLinearMixedModel {
                 let eta_obs = self.eta[obs];
                 let y_obs = self.y[obs];
 
-                let (dmu_deta, var_mu) = match self.family {
-                    crate::model::traits::Family::Bernoulli
-                    | crate::model::traits::Family::Binomial => {
-                        let d = mu_obs * (1.0 - mu_obs);
-                        (d, d)
-                    }
-                    crate::model::traits::Family::Poisson => (mu_obs, mu_obs),
-                    crate::model::traits::Family::Gamma => (mu_obs * mu_obs, mu_obs * mu_obs),
-                    _ => (1.0, 1.0),
-                };
-
                 let case_w = if self.wt.is_empty() {
                     1.0
                 } else {
                     self.wt[obs]
                 };
-                let w = case_w * dmu_deta * dmu_deta / var_mu;
-                sqrtwts[obs] = w.max(0.0).sqrt();
-                let resid = if dmu_deta.abs() < 1e-15 {
-                    0.0
-                } else {
-                    (y_obs - mu_obs) / dmu_deta
-                };
-                working_y[obs] = eta_obs + resid;
+                (sqrtwts[obs], working_y[obs]) = pirls_working_observation(
+                    self.family,
+                    self.link,
+                    y_obs,
+                    eta_obs,
+                    mu_obs,
+                    case_w,
+                );
             }
 
             // --- Update the LMM with new IRLS weights ---
@@ -895,6 +892,34 @@ fn lower_triangle_pair(offset: usize) -> (usize, usize) {
     (row, remaining)
 }
 
+fn pirls_working_observation(
+    family: Family,
+    link: LinkFunction,
+    y: f64,
+    eta: f64,
+    mu: f64,
+    case_weight: f64,
+) -> (f64, f64) {
+    let dmu_deta = link.mu_eta(eta);
+    let var_mu = family.variance(mu);
+    let weight = if dmu_deta.is_finite() && var_mu.is_finite() && var_mu > 0.0 {
+        case_weight * dmu_deta * dmu_deta / var_mu
+    } else {
+        0.0
+    };
+    let resid = if !dmu_deta.is_finite() || dmu_deta.abs() < 1e-15 {
+        0.0
+    } else {
+        (y - mu) / dmu_deta
+    };
+    (weight.max(0.0).sqrt(), eta + resid)
+}
+
+fn glmm_dispersion_family_requires_refusal(family: Family, link: LinkFunction) -> bool {
+    matches!(family, Family::Gamma | Family::InverseGaussian)
+        || (family == Family::Normal && link != LinkFunction::Identity)
+}
+
 fn family_label(family: Family) -> &'static str {
     match family {
         Family::Normal => "gaussian",
@@ -1037,6 +1062,77 @@ mod tests {
     use crate::model::data::DataFrame;
     #[cfg(feature = "nlopt")]
     use approx::assert_relative_eq;
+
+    #[test]
+    fn test_gamma_pirls_components_are_link_specific() {
+        let eta = 2.0_f64.ln();
+        let (sqrtw_log, z_log) =
+            pirls_working_observation(Family::Gamma, LinkFunction::Log, 3.0, eta, 2.0, 1.0);
+        assert!(
+            (sqrtw_log - 1.0).abs() < 1e-12,
+            "Gamma-log should use dmu/deta=mu, giving unit IRLS weight"
+        );
+        assert!(
+            (z_log - (eta + 0.5)).abs() < 1e-12,
+            "Gamma-log working response should divide by dmu/deta=2"
+        );
+
+        let (sqrtw_inverse, z_inverse) =
+            pirls_working_observation(Family::Gamma, LinkFunction::Inverse, 3.0, 0.5, 2.0, 1.0);
+        assert!(
+            (sqrtw_inverse - 2.0).abs() < 1e-12,
+            "Gamma-inverse should retain |dmu/deta|=mu^2 in the weight"
+        );
+        assert!(
+            (z_inverse - 0.25).abs() < 1e-12,
+            "Gamma-inverse working response must preserve the negative derivative"
+        );
+    }
+
+    #[test]
+    fn test_glmm_constructor_rejects_gamma_until_dispersion_supported() {
+        let data = contra_fixture();
+        let formula = parse_formula("use_num ~ 1 + (1 | urban_dist)").unwrap();
+        let err = GeneralizedLinearMixedModel::new(
+            formula,
+            &data,
+            Family::Gamma,
+            Some(LinkFunction::Log),
+        )
+        .expect_err("Gamma GLMM should be refused until dispersion support lands");
+
+        match err {
+            MixedModelError::Unsupported(msg) => {
+                assert!(msg.contains("gamma"));
+                assert!(msg.contains("log"));
+                assert!(msg.contains("dispersion"));
+                assert!(msg.contains("not implemented"));
+            }
+            other => panic!("expected Unsupported error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_glmm_constructor_rejects_normal_nonidentity_until_dispersion_supported() {
+        let data = contra_fixture();
+        let formula = parse_formula("use_num ~ 1 + (1 | urban_dist)").unwrap();
+        let err = GeneralizedLinearMixedModel::new(
+            formula,
+            &data,
+            Family::Normal,
+            Some(LinkFunction::Sqrt),
+        )
+        .expect_err("Normal GLMM with non-identity link should be refused");
+
+        match err {
+            MixedModelError::Unsupported(msg) => {
+                assert!(msg.contains("gaussian"));
+                assert!(msg.contains("sqrt"));
+                assert!(msg.contains("dispersion"));
+            }
+            other => panic!("expected Unsupported error, got {other:?}"),
+        }
+    }
 
     /// Build a DataFrame from the embedded contra.csv.
     ///
