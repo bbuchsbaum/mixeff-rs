@@ -906,8 +906,12 @@ mod tests {
                 1.0, 1.0,
             ],
         );
-        let m0 = DummyFit::new(4, 2, -10.0, Some("y ~ x")).with_model_matrix(small_x);
-        let m1 = DummyFit::new(4, 3, -9.0, Some("y ~ z")).with_model_matrix(large_x);
+        let m0 = DummyFit::new(4, 2, -10.0, Some("y ~ x"))
+            .with_reml(false)
+            .with_model_matrix(small_x);
+        let m1 = DummyFit::new(4, 3, -9.0, Some("y ~ z"))
+            .with_reml(false)
+            .with_model_matrix(large_x);
 
         let err = LikelihoodRatioTest::test(&[&m0, &m1]).unwrap_err();
 
