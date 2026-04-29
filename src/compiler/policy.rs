@@ -5,6 +5,15 @@ use super::diagnostics::{Diagnostic, DiagnosticCode, DiagnosticSeverity, Diagnos
 use super::ir::{CovarianceForm, InterceptPolicy, RandomTermIr, SemanticModel};
 
 pub const DEFAULT_CONVERGENCE_DERIVATIVE_NPARMAX: usize = 10;
+pub const DEFAULT_CHOLESKY_ZERO_PAD_TOLERANCE: f64 = f64::EPSILON;
+
+fn default_cholesky_zero_pad_tolerance() -> f64 {
+    DEFAULT_CHOLESKY_ZERO_PAD_TOLERANCE
+}
+
+fn is_default_cholesky_zero_pad_tolerance(value: &f64) -> bool {
+    value.to_bits() == DEFAULT_CHOLESKY_ZERO_PAD_TOLERANCE.to_bits()
+}
 
 /// Deterministic compiler policy used for v0 recommendations.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -80,6 +89,11 @@ pub struct CompilerThresholds {
     pub effective_rank_relative_tolerance: f64,
     pub effective_rank_absolute_tolerance: f64,
     pub convergence_derivative_nparmax: usize,
+    #[serde(
+        default = "default_cholesky_zero_pad_tolerance",
+        skip_serializing_if = "is_default_cholesky_zero_pad_tolerance"
+    )]
+    pub cholesky_zero_pad_tolerance: f64,
 }
 
 impl Default for CompilerThresholds {
@@ -94,6 +108,7 @@ impl Default for CompilerThresholds {
             effective_rank_relative_tolerance: 1e-6,
             effective_rank_absolute_tolerance: 1e-10,
             convergence_derivative_nparmax: DEFAULT_CONVERGENCE_DERIVATIVE_NPARMAX,
+            cholesky_zero_pad_tolerance: DEFAULT_CHOLESKY_ZERO_PAD_TOLERANCE,
         }
     }
 }
@@ -113,7 +128,7 @@ impl CompilerThresholds {
     }
 
     pub fn reproducibility_entries(&self) -> Vec<(String, String)> {
-        vec![
+        let mut entries = vec![
             (
                 "min_levels_random_intercept_fit".to_string(),
                 self.min_levels_random_intercept_fit.to_string(),
@@ -158,7 +173,14 @@ impl CompilerThresholds {
                 "convergence_derivative_nparmax".to_string(),
                 self.convergence_derivative_nparmax.to_string(),
             ),
-        ]
+        ];
+        if !is_default_cholesky_zero_pad_tolerance(&self.cholesky_zero_pad_tolerance) {
+            entries.push((
+                "cholesky_zero_pad_tolerance".to_string(),
+                self.cholesky_zero_pad_tolerance.to_string(),
+            ));
+        }
+        entries
     }
 }
 
@@ -485,9 +507,9 @@ mod tests {
                 group.push(format!("g{}", idx + 1));
             }
         }
-        data.add_numeric("y", y);
-        data.add_numeric("x", x);
-        data.add_categorical("group", group);
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_categorical("group", group).unwrap();
         data
     }
 
@@ -567,15 +589,18 @@ mod tests {
     #[test]
     fn maximal_feasible_drops_unsupported_slope_basis() {
         let mut data = DataFrame::new();
-        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        data.add_numeric("x", vec![0.0, 0.0, 1.0, 1.0, 2.0, 2.0]);
+        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+            .unwrap();
+        data.add_numeric("x", vec![0.0, 0.0, 1.0, 1.0, 2.0, 2.0])
+            .unwrap();
         data.add_categorical(
             "group",
             vec!["a", "a", "b", "b", "c", "c"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
         let formula = parse_formula("y ~ x + (1 + x | group)").unwrap();
         let semantic = compile_formula_ir(&formula);
         let audit = audit_design(&semantic, &data);
@@ -598,5 +623,27 @@ mod tests {
         let json = serde_json::to_string(&recommendations).unwrap();
         let decoded: Vec<PolicyRecommendation> = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, recommendations);
+    }
+
+    #[test]
+    fn cholesky_zero_pad_tolerance_defaults_and_serializes_when_custom() {
+        let default_thresholds = CompilerThresholds::default();
+        let json = serde_json::to_string(&default_thresholds).unwrap();
+        assert!(!json.contains("cholesky_zero_pad_tolerance"));
+
+        let decoded: CompilerThresholds = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            decoded.cholesky_zero_pad_tolerance,
+            DEFAULT_CHOLESKY_ZERO_PAD_TOLERANCE
+        );
+
+        let mut custom = CompilerThresholds::default();
+        custom.cholesky_zero_pad_tolerance = 0.0;
+        let custom_json = serde_json::to_string(&custom).unwrap();
+        assert!(custom_json.contains("cholesky_zero_pad_tolerance"));
+        assert!(custom
+            .reproducibility_entries()
+            .iter()
+            .any(|(name, value)| name == "cholesky_zero_pad_tolerance" && value == "0"));
     }
 }

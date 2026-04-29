@@ -1375,18 +1375,30 @@ fn optimizer_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
         .iter()
         .filter(|check| matches!(check, super::audit::CertificateCheck::Failed { .. }))
         .count();
+    let mismatched = certificate
+        .checks
+        .iter()
+        .filter(|check| {
+            matches!(
+                check,
+                super::audit::CertificateCheck::DerivativeMismatch { .. }
+            )
+        })
+        .count();
     lines.push(AuditReportLine {
         label: "derivative checks".to_string(),
         status: if failed > 0 && certificate.evidence.optimizer_stop.acceptable_stop {
             AuditReportStatus::Info
         } else if failed > 0 {
             AuditReportStatus::Warning
+        } else if mismatched > 0 {
+            AuditReportStatus::Info
         } else if not_assessed == 0 {
             AuditReportStatus::Ok
         } else {
             AuditReportStatus::NotAssessed
         },
-        detail: format!("{failed} failed; {not_assessed} not assessed"),
+        detail: format!("{failed} failed; {mismatched} mismatch; {not_assessed} not assessed"),
     });
     lines.push(convergence_verification_line(certificate));
 
@@ -1864,6 +1876,13 @@ fn optimizer_summary(
             actions.push(NextActionKind::GateInferenceOnDerivative);
         }
     }
+    if has_derivative_mismatch(certificate) {
+        if matches!(level, ConvergenceLevel::Certified) {
+            level = ConvergenceLevel::Ok;
+        }
+        clauses.push("inspection note: derivative evidence disagrees with tolerance".to_string());
+        actions.push(NextActionKind::PredictorScalingOrSimplifyRe);
+    }
 
     if let super::audit::EvidenceQuality::Failed { .. } =
         &certificate.evidence.certification_quality
@@ -2026,6 +2045,25 @@ fn optimizer_verdict_evidence(
                     status: ConvergenceTestStatus::Skipped,
                     detail: reason.clone(),
                     doc_anchor: skipped_doc_anchor(reason).to_string(),
+                });
+            }
+            super::audit::CertificateCheck::DerivativeMismatch {
+                kind,
+                observed,
+                tolerance,
+                regime,
+                message,
+            } => {
+                evidence.push(ConvergenceVerdictEvidence {
+                    test_name: kind.clone(),
+                    observed: *observed,
+                    threshold: *tolerance,
+                    regime: derivative_mismatch_regime(certificate, derivative_nparmax, regime),
+                    status: ConvergenceTestStatus::Informational,
+                    detail: format!(
+                        "post-hoc inspection mismatch; optimizer convergence is unchanged: {message}"
+                    ),
+                    doc_anchor: "docs/compiler_verdicts.md#derivative-inspection".to_string(),
                 });
             }
             super::audit::CertificateCheck::Failed { code, message } => {
@@ -2201,6 +2239,28 @@ fn failed_check_observed(
             certificate.evidence.hessian.rank.map(|rank| rank as f64)
         }
         _ => None,
+    }
+}
+
+fn has_derivative_mismatch(certificate: &super::audit::OptimizerCertificate) -> bool {
+    certificate.checks.iter().any(|check| {
+        matches!(
+            check,
+            super::audit::CertificateCheck::DerivativeMismatch { .. }
+        )
+    })
+}
+
+fn derivative_mismatch_regime(
+    certificate: &super::audit::OptimizerCertificate,
+    derivative_nparmax: usize,
+    regime: &str,
+) -> ConvergenceRegime {
+    match regime {
+        "boundary_theta" => ConvergenceRegime::BoundaryTheta,
+        "interior_theta" => ConvergenceRegime::InteriorTheta,
+        "large_theta" => ConvergenceRegime::LargeTheta,
+        _ => convergence_regime(certificate, derivative_nparmax),
     }
 }
 
@@ -2636,7 +2696,8 @@ fn convergence_next_steps_line(
     ) || matches!(
         certificate.evidence.certification_quality,
         super::audit::EvidenceQuality::Failed { .. }
-    ) {
+    ) || has_derivative_mismatch(certificate)
+    {
         kinds.push(NextActionKind::PredictorScalingOrSimplifyRe);
     }
     if matches!(
@@ -2727,7 +2788,8 @@ fn action_status(certificate: &super::audit::OptimizerCertificate) -> AuditRepor
     ) || matches!(
         certificate.evidence.certification_quality,
         super::audit::EvidenceQuality::Failed { .. }
-    ) {
+    ) || has_derivative_mismatch(certificate)
+    {
         AuditReportStatus::Info
     } else if certificate.verification.is_none()
         || matches!(
@@ -3239,6 +3301,7 @@ fn diagnostic_code_label(code: &DiagnosticCode) -> &'static str {
         DiagnosticCode::CovarianceReduced => "covariance_reduced",
         DiagnosticCode::BoundaryParameter => "boundary_parameter",
         DiagnosticCode::NearUnitRandomEffectCorrelation => "near_unit_random_effect_correlation",
+        DiagnosticCode::BinomialSeparation => "binomial_separation",
         DiagnosticCode::NotIdentifiable => "not_identifiable",
         DiagnosticCode::OptimizerNotAssessed => "optimizer_not_assessed",
         DiagnosticCode::InferenceUnavailable => "inference_unavailable",
@@ -3261,35 +3324,85 @@ mod tests {
 
     fn small_grouped_data() -> DataFrame {
         let mut data = DataFrame::new();
-        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0]);
-        data.add_numeric("x", vec![0.0, 1.0, 0.0, 1.0]);
+        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        data.add_numeric("x", vec![0.0, 1.0, 0.0, 1.0]).unwrap();
         data.add_categorical(
             "subject",
             vec!["s1", "s1", "s2", "s2"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
         data
     }
 
     fn repeated_unmodeled_data() -> DataFrame {
         let mut data = DataFrame::new();
-        data.add_numeric("y", vec![1.0, 2.0, 2.5, 3.5]);
+        data.add_numeric("y", vec![1.0, 2.0, 2.5, 3.5]).unwrap();
         data.add_categorical(
             "condition",
             vec!["A", "B", "A", "B"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
         data.add_categorical(
             "subject",
             vec!["s1", "s1", "s2", "s2"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
+        data
+    }
+
+    fn ha_quantification_data() -> DataFrame {
+        let mut data = DataFrame::new();
+        data.add_numeric(
+            "Percentage",
+            vec![28.96, 37.61, 67.71, 49.68, 48.51, 70.52, 56.02, 44.89, 57.38],
+        )
+        .unwrap();
+        data.add_categorical_with_levels(
+            "Time",
+            vec![
+                "Week6", "Week6", "Week6", "Week8", "Week8", "Week8", "Week10", "Week10",
+                "Week10",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+            vec!["Week6", "Week8", "Week10"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        )
+        .unwrap();
+        data.add_categorical_with_levels(
+            "Cell_Type",
+            vec![
+                "Tim4_in_HA",
+                "Tim4_in_HA",
+                "Tim4_in_HA",
+                "CD163_in_HA",
+                "CD163_in_HA",
+                "CD163_in_HA",
+                "CD163_Tim4_in_HA",
+                "CD163_Tim4_in_HA",
+                "CD163_Tim4_in_HA",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+            vec!["Tim4_in_HA", "CD163_in_HA", "CD163_Tim4_in_HA"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        )
+        .unwrap();
         data
     }
 
@@ -3329,6 +3442,50 @@ mod tests {
         assert!(text.contains("missing paths [WARNING]"));
         assert!(text.contains("subject -> (1 | subject)"));
         assert!(text.contains("repeated_unit_unmodeled"));
+    }
+
+    #[test]
+    fn report_makes_confounded_ha_quantification_design_readable() {
+        let formula =
+            parse_formula("Percentage ~ Time * Cell_Type + (1 | Time:Cell_Type)").unwrap();
+        let semantic = compile_formula_ir(&formula);
+        let mut artifact = CompiledModelArtifact::new(formula.to_string(), semantic);
+        artifact.attach_design_audit(&ha_quantification_data());
+
+        let audit = artifact.design_audit.as_ref().unwrap();
+        assert_eq!(audit.fixed_effect_rank.status, RankStatus::RankDeficient);
+        assert_eq!(audit.fixed_effect_rank.rank, Some(3));
+        assert_eq!(audit.fixed_effect_rank.expected, Some(9));
+        assert_eq!(audit.fixed_effects.empty_cells.len(), 6);
+        assert!(audit.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == DiagnosticCode::FixedEffectEmptyCell
+                && diagnostic
+                    .suggested_actions
+                    .iter()
+                    .any(|action| action.contains("estimable contrasts over observed cells"))
+        }));
+
+        let report = ModelAuditReport::from_artifact(&artifact);
+        let text = report.to_text();
+
+        assert!(text.contains("Audit Summary"));
+        assert!(text.contains("Fixed Effects"));
+        assert!(text.contains("rank [WARNING]: 3 of 9"));
+        assert!(text.contains("empty cells [WARNING]: 6"));
+        assert!(text.contains("fixed_effect_rank_deficient"));
+        assert!(text.contains("fixed_effect_empty_cell"));
+        assert!(text.contains("test estimable contrasts over observed cells"));
+
+        for scary_optimizer_phrase in [
+            "unable to evaluate scaled gradient",
+            "Hessian is numerically singular",
+            "parameters are not uniquely determined",
+        ] {
+            assert!(
+                !text.contains(scary_optimizer_phrase),
+                "prefit readability report should not lead with optimizer internals: {text}"
+            );
+        }
     }
 
     #[test]
@@ -3488,8 +3645,8 @@ mod tests {
     // ---------------------------------------------------------------
 
     use super::super::audit::{
-        ConvergenceVerification, ConvergenceVerificationStatus, EvidenceMethod, EvidenceQuality,
-        OptimizerCertificate,
+        CertificateCheck, ConvergenceVerification, ConvergenceVerificationStatus, EvidenceMethod,
+        EvidenceQuality, OptimizerCertificate, OptimizerDerivativeEvidence,
     };
     use super::super::diagnostics::{DiagnosticCode, DiagnosticSeverity, DiagnosticStage};
 
@@ -3524,6 +3681,15 @@ mod tests {
             runs: Vec::new(),
             message: format!("{status:?}"),
         });
+        cert
+    }
+
+    fn certificate_ready_for_derivatives() -> OptimizerCertificate {
+        let mut cert = clean_certificate();
+        cert.evidence.parameter_space.n_theta = 1;
+        cert.evidence.parameter_space.n_free = 1;
+        cert.evidence.sample_size.n_theta = 1;
+        cert.objective_value = Some(10.0);
         cert
     }
 
@@ -3632,6 +3798,48 @@ mod tests {
     }
 
     #[test]
+    fn test_acceptable_stop_with_derivative_mismatch_stays_converged() {
+        let mut cert = certificate_ready_for_derivatives();
+        cert.apply_derivative_evidence(
+            OptimizerDerivativeEvidence {
+                method: EvidenceMethod::FiniteDifference,
+                gradient: vec![10.0],
+                hessian: Some(nalgebra::DMatrix::from_element(1, 1, -1.0)),
+            },
+            1e-3,
+            1e-6,
+        );
+
+        assert!(cert.evidence.optimizer_stop.acceptable_stop);
+        assert!(!cert
+            .checks
+            .iter()
+            .any(|check| matches!(check, CertificateCheck::Failed { .. })));
+        assert!(cert
+            .checks
+            .iter()
+            .any(|check| matches!(check, CertificateCheck::DerivativeMismatch { .. })));
+        assert!(matches!(
+            cert.evidence.certification_quality,
+            EvidenceQuality::Approximate { .. }
+        ));
+        assert!(matches!(
+            cert.evidence.hessian.quality,
+            EvidenceQuality::Approximate { .. }
+        ));
+
+        let v = ConvergenceVerdict::compose(&cert, &[]);
+        assert_eq!(v.level, ConvergenceLevel::Ok);
+        assert_eq!(v.source, ConvergenceSource::Clean);
+        assert!(v.evidence.iter().any(|evidence| evidence.status
+            == ConvergenceTestStatus::Informational
+            && evidence.test_name.contains("mismatch")));
+
+        let line = convergence_next_steps_line(&cert, &[]);
+        assert!(line.detail.contains("scale predictors"));
+    }
+
+    #[test]
     fn verdict_unacceptable_stop_is_failed() {
         let mut cert = clean_certificate();
         cert.evidence.optimizer_stop.acceptable_stop = false;
@@ -3641,6 +3849,23 @@ mod tests {
         assert_eq!(v.source, ConvergenceSource::Optimizer);
         let next = v.next_step.expect("unacceptable stop demands an action");
         assert!(next.contains("budget") || next.contains("alternate optimizer"));
+    }
+
+    #[test]
+    fn test_unacceptable_stop_promotes_to_non_converged() {
+        let mut cert = clean_certificate();
+        cert.evidence.optimizer_stop.acceptable_stop = false;
+        cert.evidence.optimizer_stop.return_code = Some("MAXEVAL_REACHED".to_string());
+
+        let v = ConvergenceVerdict::compose(&cert, &[]);
+
+        assert_eq!(v.level, ConvergenceLevel::Failed);
+        assert_eq!(v.source, ConvergenceSource::Optimizer);
+        assert!(v
+            .evidence
+            .iter()
+            .any(|evidence| evidence.test_name == "optimizer_stop"
+                && evidence.status == ConvergenceTestStatus::Failed));
     }
 
     #[test]

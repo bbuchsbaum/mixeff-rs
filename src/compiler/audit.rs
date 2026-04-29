@@ -299,7 +299,7 @@ pub fn audit_design(semantic_model: &SemanticModel, data: &DataFrame) -> DesignA
     let mut random_terms = semantic_model
         .random_terms
         .iter()
-        .map(|term| audit_random_term(term, data, &mut diagnostics))
+        .map(|term| audit_random_term(term, data, &semantic_model.response, &mut diagnostics))
         .collect::<Vec<_>>();
 
     for (term_id, diagnostic) in
@@ -323,6 +323,10 @@ pub fn audit_design(semantic_model: &SemanticModel, data: &DataFrame) -> DesignA
         }
         diagnostics.push(diagnostic);
     }
+
+    diagnostics.extend(crossed_scalar_correlation_absence_diagnostics(
+        semantic_model,
+    ));
 
     let covariance_kernels = audit_covariance_kernels(semantic_model, data);
     diagnostics.extend(
@@ -1361,6 +1365,7 @@ fn append_level_products(
 fn audit_random_term(
     term: &RandomTermIr,
     data: &DataFrame,
+    response: &str,
     global_diagnostics: &mut Vec<Diagnostic>,
 ) -> RandomTermAudit {
     let (group, refs) = grouping_audit(&term.group, data, global_diagnostics);
@@ -1401,6 +1406,11 @@ fn audit_random_term(
             global_diagnostics.push(structural.clone());
             diagnostics.push(structural);
         }
+    }
+    if let Some(diagnostic) = response_constant_within_group_diagnostic(term, data, response, &refs)
+    {
+        global_diagnostics.push(diagnostic.clone());
+        diagnostics.push(diagnostic);
     }
     if information_budget.status == InformationBudgetStatus::WeaklySupported
         || information_budget.status == InformationBudgetStatus::TooRich
@@ -1862,6 +1872,218 @@ fn sample_sd(values: &[f64]) -> f64 {
         .sum::<f64>()
         / (values.len() - 1) as f64;
     var.sqrt()
+}
+
+fn response_constant_within_group_diagnostic(
+    term: &RandomTermIr,
+    data: &DataFrame,
+    response: &str,
+    refs: &Option<Vec<usize>>,
+) -> Option<Diagnostic> {
+    if !term
+        .basis
+        .iter()
+        .any(|basis| basis.kind == RandomCoefficientKind::Intercept)
+    {
+        return None;
+    }
+    let refs = refs.as_ref()?;
+    let y = data.numeric(response)?;
+    if refs.len() != y.len() {
+        return None;
+    }
+
+    let n_levels = refs.iter().copied().max().map(|max| max + 1).unwrap_or(0);
+    if n_levels == 0 {
+        return None;
+    }
+    let mut y_by_level = vec![Vec::new(); n_levels];
+    for (&group, &value) in refs.iter().zip(y.iter()) {
+        y_by_level[group].push(value);
+    }
+
+    let repeated_levels = y_by_level.iter().filter(|values| values.len() >= 2).count();
+    if repeated_levels == 0 {
+        return None;
+    }
+    let constant_response_levels = y_by_level
+        .iter()
+        .filter(|values| values.len() >= 2 && sample_sd(values) <= 1e-8)
+        .count();
+    if constant_response_levels == 0 {
+        return None;
+    }
+
+    let constant_fraction = constant_response_levels as f64 / repeated_levels as f64;
+    if constant_fraction < 0.8 {
+        return None;
+    }
+
+    let varying_numeric_columns = data
+        .column_names()
+        .into_iter()
+        .filter(|name| *name != response)
+        .filter_map(|name| {
+            let values = data.numeric(name)?;
+            numeric_varies_within_constant_response_group(refs, &y_by_level, values)
+                .then(|| name.to_string())
+        })
+        .collect::<Vec<_>>();
+    if varying_numeric_columns.is_empty() {
+        return None;
+    }
+
+    let group_name = grouping_factor_label(&term.group);
+    let mut diagnostic = Diagnostic::new(
+        DiagnosticCode::NotIdentifiable,
+        DiagnosticSeverity::Error,
+        DiagnosticStage::DesignAudit,
+        format!(
+            "response '{response}' is constant within {constant_response_levels} of \
+             {repeated_levels} repeated levels of random-intercept group '{group_name}', \
+             while numeric predictor(s) vary within those levels"
+        ),
+    )
+    .with_affected_terms(vec![term.source_syntax.text.clone()])
+    .with_suggested_actions(vec![
+        format!(
+            "Check whether '{response}' is measured once per '{group_name}' level and then repeated across rows; if so, aggregate to one row per lower-level unit or move predictors to the correct observation level."
+        ),
+        "Revise the random-effect/observation-unit structure before changing optimizers; optimizer changes cannot identify within-unit effects when the response is duplicated.".to_string(),
+    ]);
+    diagnostic
+        .payload
+        .insert("response".to_string(), serde_json::json!(response));
+    diagnostic
+        .payload
+        .insert("group".to_string(), serde_json::json!(group_name));
+    diagnostic.payload.insert(
+        "repeated_levels".to_string(),
+        serde_json::json!(repeated_levels),
+    );
+    diagnostic.payload.insert(
+        "constant_response_levels".to_string(),
+        serde_json::json!(constant_response_levels),
+    );
+    diagnostic.payload.insert(
+        "varying_numeric_columns".to_string(),
+        serde_json::json!(varying_numeric_columns),
+    );
+    Some(diagnostic)
+}
+
+fn numeric_varies_within_constant_response_group(
+    refs: &[usize],
+    y_by_level: &[Vec<f64>],
+    values: &[f64],
+) -> bool {
+    if refs.len() != values.len() {
+        return false;
+    }
+
+    let mut x_by_level = vec![Vec::new(); y_by_level.len()];
+    for (&group, &value) in refs.iter().zip(values.iter()) {
+        x_by_level[group].push(value);
+    }
+
+    y_by_level
+        .iter()
+        .zip(x_by_level.iter())
+        .any(|(y_values, x_values)| {
+            y_values.len() >= 2 && sample_sd(y_values) <= 1e-8 && sample_sd(x_values) > 1e-8
+        })
+}
+
+fn grouping_factor_label(group: &GroupingFactorIr) -> String {
+    match group {
+        GroupingFactorIr::Single { name } => name.clone(),
+        GroupingFactorIr::Interaction { names } | GroupingFactorIr::Cell { names } => {
+            names.join(":")
+        }
+    }
+}
+
+fn crossed_scalar_correlation_absence_diagnostics(
+    semantic_model: &SemanticModel,
+) -> Vec<Diagnostic> {
+    let scalar_intercepts = semantic_model
+        .random_terms
+        .iter()
+        .filter(|term| is_scalar_random_intercept(term))
+        .collect::<Vec<_>>();
+    let mut diagnostics = Vec::new();
+
+    for i in 0..scalar_intercepts.len() {
+        for j in (i + 1)..scalar_intercepts.len() {
+            let left = scalar_intercepts[i];
+            let right = scalar_intercepts[j];
+            let left_factors = grouping_factor_names(&left.group);
+            let right_factors = grouping_factor_names(&right.group);
+            if !disjoint_factor_sets(&left_factors, &right_factors) {
+                continue;
+            }
+
+            let left_group = grouping_factor_label(&left.group);
+            let right_group = grouping_factor_label(&right.group);
+            let mut diagnostic = Diagnostic::new(
+                DiagnosticCode::CovarianceAssumption,
+                DiagnosticSeverity::Info,
+                DiagnosticStage::DesignAudit,
+                format!(
+                    "no correlation parameter is estimated between random-intercept groups \
+                     '{left_group}' and '{right_group}'; separate scalar random-effect terms \
+                     define independent covariance blocks"
+                ),
+            )
+            .with_affected_terms(vec![
+                left.source_syntax.user_text().to_string(),
+                right.source_syntax.user_text().to_string(),
+            ])
+            .with_suggested_actions(vec![
+                format!(
+                    "Report standard deviations for '{left_group}' and '{right_group}' separately; their cross-block correlation is fixed absent by this parameterization."
+                ),
+                "A nonzero cross-block correlation would require an explicit coupled covariance structure, which is not represented by separate `(1 | group)` terms.".to_string(),
+            ]);
+            diagnostic
+                .payload
+                .insert("left_group".to_string(), serde_json::json!(left_group));
+            diagnostic
+                .payload
+                .insert("right_group".to_string(), serde_json::json!(right_group));
+            diagnostic.payload.insert(
+                "correlation_parameter".to_string(),
+                serde_json::json!("not_estimated"),
+            );
+            diagnostic.payload.insert(
+                "covariance_blocks".to_string(),
+                serde_json::json!("independent"),
+            );
+            diagnostics.push(diagnostic);
+        }
+    }
+
+    diagnostics
+}
+
+fn is_scalar_random_intercept(term: &RandomTermIr) -> bool {
+    matches!(term.covariance, CovarianceForm::Scalar)
+        && term.basis.len() == 1
+        && term.basis[0].kind == RandomCoefficientKind::Intercept
+}
+
+fn grouping_factor_names(group: &GroupingFactorIr) -> Vec<&str> {
+    match group {
+        GroupingFactorIr::Single { name } => vec![name.as_str()],
+        GroupingFactorIr::Interaction { names } | GroupingFactorIr::Cell { names } => {
+            names.iter().map(String::as_str).collect()
+        }
+    }
+}
+
+fn disjoint_factor_sets(left: &[&str], right: &[&str]) -> bool {
+    left.iter()
+        .all(|left_name| right.iter().all(|right_name| left_name != right_name))
 }
 
 fn requested_covariance_parameters(covariance: &CovarianceForm, basis_size: usize) -> usize {
@@ -2339,22 +2561,24 @@ mod tests {
 
     fn repeated_subject_data() -> DataFrame {
         let mut data = DataFrame::new();
-        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0]);
-        data.add_numeric("x", vec![0.0, 1.0, 0.0, 1.0]);
+        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        data.add_numeric("x", vec![0.0, 1.0, 0.0, 1.0]).unwrap();
         data.add_categorical(
             "subject",
             vec!["s1", "s1", "s2", "s2"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
         data.add_categorical(
             "item",
             vec!["i1", "i2", "i1", "i2"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
         data
     }
 
@@ -2375,9 +2599,9 @@ mod tests {
         }
 
         let mut data = DataFrame::new();
-        data.add_numeric("y", y);
-        data.add_numeric("x", x);
-        data.add_categorical("subject", subject);
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_categorical("subject", subject).unwrap();
         data
     }
 
@@ -2397,51 +2621,57 @@ mod tests {
         }
 
         let mut data = DataFrame::new();
-        data.add_numeric("y", y);
-        data.add_numeric("x", x);
-        data.add_categorical("cond", cond);
-        data.add_categorical("subject", subject);
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_categorical("cond", cond).unwrap();
+        data.add_categorical("subject", subject).unwrap();
         data
     }
 
     fn repeated_condition_data() -> DataFrame {
         let mut data = DataFrame::new();
-        data.add_numeric("y", vec![1.0, 2.0, 2.5, 3.5]);
+        data.add_numeric("y", vec![1.0, 2.0, 2.5, 3.5]).unwrap();
         data.add_categorical(
             "condition",
             vec!["A", "B", "A", "B"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
         data.add_categorical(
             "subject",
             vec!["s1", "s1", "s2", "s2"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
         data
     }
 
     fn repeated_crossed_data() -> DataFrame {
         let mut data = DataFrame::new();
-        data.add_numeric("y", vec![1.0, 1.2, 2.0, 2.2, 1.5, 1.7, 2.5, 2.7]);
-        data.add_numeric("x", vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
+        data.add_numeric("y", vec![1.0, 1.2, 2.0, 2.2, 1.5, 1.7, 2.5, 2.7])
+            .unwrap();
+        data.add_numeric("x", vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0])
+            .unwrap();
         data.add_categorical(
             "subject",
             vec!["s1", "s1", "s1", "s1", "s2", "s2", "s2", "s2"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
         data.add_categorical(
             "item",
             vec!["i1", "i1", "i2", "i2", "i1", "i1", "i2", "i2"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
         data
     }
 
@@ -2472,7 +2702,7 @@ mod tests {
     #[test]
     fn design_audit_flags_rank_deficient_fixed_effects() {
         let mut data = repeated_subject_data();
-        data.add_numeric("x2", vec![0.0, 2.0, 0.0, 2.0]);
+        data.add_numeric("x2", vec![0.0, 2.0, 0.0, 2.0]).unwrap();
         let formula = parse_formula("y ~ x + x2 + (1 | subject)").unwrap();
         let semantic = compile_formula_ir(&formula);
         let audit = audit_design(&semantic, &data);
@@ -2490,21 +2720,23 @@ mod tests {
     #[test]
     fn design_audit_reports_empty_factor_cells() {
         let mut data = DataFrame::new();
-        data.add_numeric("y", vec![1.0, 2.0, 3.0]);
+        data.add_numeric("y", vec![1.0, 2.0, 3.0]).unwrap();
         data.add_categorical(
             "site",
             vec!["s1", "s1", "s2"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
         data.add_categorical(
             "season",
             vec!["pre", "post", "pre"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
         let formula = parse_formula("y ~ site * season").unwrap();
         let semantic = compile_formula_ir(&formula);
         let audit = audit_design(&semantic, &data);
@@ -2600,15 +2832,18 @@ mod tests {
     #[test]
     fn design_audit_reports_median_grouping_count_for_unbalanced_groups() {
         let mut data = DataFrame::new();
-        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
-        data.add_numeric("x", vec![0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0]);
+        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0])
+            .unwrap();
+        data.add_numeric("x", vec![0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0])
+            .unwrap();
         data.add_categorical(
             "subject",
             vec!["s1", "s2", "s2", "s3", "s3", "s3", "s3"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
 
         let formula = parse_formula("y ~ x + (1 | subject)").unwrap();
         let semantic = compile_formula_ir(&formula);
@@ -2978,15 +3213,16 @@ mod tests {
     #[test]
     fn design_audit_flags_slope_without_within_group_variation() {
         let mut data = DataFrame::new();
-        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0]);
-        data.add_numeric("x", vec![0.0, 0.0, 1.0, 1.0]);
+        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        data.add_numeric("x", vec![0.0, 0.0, 1.0, 1.0]).unwrap();
         data.add_categorical(
             "subject",
             vec!["s1", "s1", "s2", "s2"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
         let formula = parse_formula("y ~ x + (1 + x | subject)").unwrap();
         let semantic = compile_formula_ir(&formula);
         let audit = audit_design(&semantic, &data);
@@ -3191,12 +3427,35 @@ pub struct ConvergenceVerificationRun {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CertificateCheck {
-    FreeGradientOk { tolerance: f64, value: f64 },
-    BoundaryGradientOk { tolerance: f64, value: f64 },
-    HessianPsdOnActiveSubspace { min_eigenvalue: f64 },
-    RankOk { rank: usize, expected: usize },
-    NotAssessed { reason: String },
-    Failed { code: String, message: String },
+    FreeGradientOk {
+        tolerance: f64,
+        value: f64,
+    },
+    BoundaryGradientOk {
+        tolerance: f64,
+        value: f64,
+    },
+    HessianPsdOnActiveSubspace {
+        min_eigenvalue: f64,
+    },
+    RankOk {
+        rank: usize,
+        expected: usize,
+    },
+    NotAssessed {
+        reason: String,
+    },
+    DerivativeMismatch {
+        kind: String,
+        observed: Option<f64>,
+        tolerance: Option<f64>,
+        regime: String,
+        message: String,
+    },
+    Failed {
+        code: String,
+        message: String,
+    },
 }
 
 impl OptimizerCertificate {
@@ -3376,14 +3635,17 @@ impl OptimizerCertificate {
 
         let n_theta = self.evidence.parameter_space.n_theta;
         if derivatives.gradient.len() != n_theta {
-            self.checks.push(CertificateCheck::Failed {
-                code: "derivative_dimension_mismatch".to_string(),
+            self.checks.push(CertificateCheck::DerivativeMismatch {
+                kind: "derivative_dimension_mismatch".to_string(),
+                observed: Some(derivatives.gradient.len() as f64),
+                tolerance: Some(n_theta as f64),
+                regime: derivative_mismatch_regime(self),
                 message: format!(
                     "gradient length {} does not match theta dimension {n_theta}",
                     derivatives.gradient.len()
                 ),
             });
-            self.evidence.certification_quality = EvidenceQuality::Failed {
+            self.evidence.certification_quality = EvidenceQuality::Approximate {
                 reason: "derivative certificate dimensions did not match theta".to_string(),
             };
             return;
@@ -3442,8 +3704,11 @@ impl OptimizerCertificate {
                 "free-gradient norm {free_gradient_norm:.6e} exceeds tolerance {gradient_tolerance:.6e}"
             );
             failures.push(message.clone());
-            self.checks.push(CertificateCheck::Failed {
-                code: "free_gradient_kkt_failed".to_string(),
+            self.checks.push(CertificateCheck::DerivativeMismatch {
+                kind: "free_gradient_kkt_mismatch".to_string(),
+                observed: Some(free_gradient_norm),
+                tolerance: Some(gradient_tolerance),
+                regime: derivative_mismatch_regime(self),
                 message,
             });
         }
@@ -3458,8 +3723,11 @@ impl OptimizerCertificate {
                 "boundary KKT gradient violation {boundary_violation_max:.6e} exceeds tolerance {gradient_tolerance:.6e}"
             );
             failures.push(message.clone());
-            self.checks.push(CertificateCheck::Failed {
-                code: "boundary_gradient_kkt_failed".to_string(),
+            self.checks.push(CertificateCheck::DerivativeMismatch {
+                kind: "boundary_gradient_kkt_mismatch".to_string(),
+                observed: Some(boundary_violation_max),
+                tolerance: Some(gradient_tolerance),
+                regime: derivative_mismatch_regime(self),
                 message,
             });
         }
@@ -3478,11 +3746,11 @@ impl OptimizerCertificate {
                             "finite-difference active-subspace Hessian is positive semidefinite",
                         )
                     } else if !active.psd_ok {
-                        EvidenceQuality::Failed {
+                        EvidenceQuality::Approximate {
                             reason: "active-subspace Hessian has negative curvature".to_string(),
                         }
                     } else {
-                        EvidenceQuality::Failed {
+                        EvidenceQuality::Approximate {
                             reason: "active-subspace Hessian is rank deficient".to_string(),
                         }
                     },
@@ -3502,8 +3770,11 @@ impl OptimizerCertificate {
                         "active-subspace Hessian minimum eigenvalue {min_eigen:.6e} is below tolerance -{hessian_tolerance:.6e}"
                     );
                     failures.push(message.clone());
-                    self.checks.push(CertificateCheck::Failed {
-                        code: "hessian_active_subspace_not_psd".to_string(),
+                    self.checks.push(CertificateCheck::DerivativeMismatch {
+                        kind: "hessian_active_subspace_not_psd".to_string(),
+                        observed: Some(min_eigen),
+                        tolerance: Some(-hessian_tolerance),
+                        regime: derivative_mismatch_regime(self),
                         message,
                     });
                 }
@@ -3520,8 +3791,11 @@ impl OptimizerCertificate {
                         active.expected_rank
                     );
                     failures.push(message.clone());
-                    self.checks.push(CertificateCheck::Failed {
-                        code: "hessian_active_subspace_rank_deficient".to_string(),
+                    self.checks.push(CertificateCheck::DerivativeMismatch {
+                        kind: "hessian_active_subspace_rank_deficient".to_string(),
+                        observed: Some(rank as f64),
+                        tolerance: Some(active.expected_rank as f64),
+                        regime: derivative_mismatch_regime(self),
                         message,
                     });
                 }
@@ -3535,15 +3809,18 @@ impl OptimizerCertificate {
                 failures.push(message.clone());
                 self.evidence.hessian = HessianEvidence {
                     method: derivatives.method.clone(),
-                    quality: EvidenceQuality::Failed {
+                    quality: EvidenceQuality::Approximate {
                         reason: message.clone(),
                     },
                     min_eigenvalue: None,
                     condition_number: None,
                     rank: None,
                 };
-                self.checks.push(CertificateCheck::Failed {
-                    code: "hessian_dimension_mismatch".to_string(),
+                self.checks.push(CertificateCheck::DerivativeMismatch {
+                    kind: "hessian_dimension_mismatch".to_string(),
+                    observed: Some((hessian.nrows() * hessian.ncols()) as f64),
+                    tolerance: Some((n_theta * n_theta) as f64),
+                    regime: derivative_mismatch_regime(self),
                     message,
                 });
             }
@@ -3572,7 +3849,7 @@ impl OptimizerCertificate {
                 "finite-difference KKT and Hessian checks passed",
             )
         } else {
-            EvidenceQuality::Failed {
+            EvidenceQuality::Approximate {
                 reason: failures.join("; "),
             }
         };
@@ -3837,6 +4114,18 @@ fn boundary_mask(n_theta: usize, boundary_indices: &[usize]) -> Vec<bool> {
         }
     }
     mask
+}
+
+fn derivative_mismatch_regime(certificate: &OptimizerCertificate) -> String {
+    let space = &certificate.evidence.parameter_space;
+    if space.n_boundary > 0 {
+        "boundary_theta"
+    } else if space.n_theta > 0 {
+        "interior_theta"
+    } else {
+        "unknown"
+    }
+    .to_string()
 }
 
 fn max_abs_norm(values: &[f64]) -> f64 {

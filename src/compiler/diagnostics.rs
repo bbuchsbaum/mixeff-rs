@@ -75,6 +75,7 @@ pub enum DiagnosticCode {
     CovarianceReduced,
     BoundaryParameter,
     NearUnitRandomEffectCorrelation,
+    BinomialSeparation,
     NotIdentifiable,
     OptimizerNotAssessed,
     InferenceUnavailable,

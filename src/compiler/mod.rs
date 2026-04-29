@@ -6,7 +6,6 @@
 
 pub mod artifact;
 pub mod audit;
-pub mod certificate;
 pub mod diagnostics;
 pub mod estimability;
 pub mod explain;
@@ -43,10 +42,6 @@ pub use audit::{
     MissingDependencePathAudit, OptimizerCertificate, OptimizerDerivativeEvidence,
     OptimizerStopEvidence, ParameterSpaceEvidence, RandomEffectEffectiveNReport,
     RandomEffectInformationBudget, RandomTermAudit, RankAssessment, RankStatus, SampleSizeContext,
-};
-pub use certificate::{
-    certify, expected_statuses, generated_x_values, near_singular_re, Certificate, FixedDesign,
-    GeneratorSpec,
 };
 pub use diagnostics::{Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticStage, FitStatus};
 pub use estimability::{

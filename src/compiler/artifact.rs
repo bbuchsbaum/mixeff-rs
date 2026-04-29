@@ -1712,15 +1712,16 @@ mod tests {
     #[test]
     fn compiled_artifact_can_attach_design_audit() {
         let mut data = DataFrame::new();
-        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0]);
-        data.add_numeric("x", vec![0.0, 1.0, 0.0, 1.0]);
+        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        data.add_numeric("x", vec![0.0, 1.0, 0.0, 1.0]).unwrap();
         data.add_categorical(
             "subject",
             vec!["s1", "s1", "s2", "s2"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
 
         let formula = parse_formula("y ~ x + (1 + x | subject)").unwrap();
         let semantic = compile_formula_ir(&formula);
@@ -1736,15 +1737,16 @@ mod tests {
     #[test]
     fn compiled_artifact_exposes_requested_supported_fitted_model_state() {
         let mut data = DataFrame::new();
-        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0]);
-        data.add_numeric("x", vec![0.0, 1.0, 0.0, 1.0]);
+        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        data.add_numeric("x", vec![0.0, 1.0, 0.0, 1.0]).unwrap();
         data.add_categorical(
             "subject",
             vec!["s1", "s1", "s2", "s2"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
 
         let formula = parse_formula("y ~ x + (1 + x | subject)").unwrap();
         let semantic = compile_formula_ir(&formula);
@@ -1775,15 +1777,16 @@ mod tests {
     #[test]
     fn compiled_artifact_can_disable_policy_recommendations() {
         let mut data = DataFrame::new();
-        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0]);
-        data.add_numeric("x", vec![0.0, 1.0, 0.0, 1.0]);
+        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        data.add_numeric("x", vec![0.0, 1.0, 0.0, 1.0]).unwrap();
         data.add_categorical(
             "subject",
             vec!["s1", "s1", "s2", "s2"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
 
         let formula = parse_formula("y ~ x + (1 + x | subject)").unwrap();
         let semantic = compile_formula_ir(&formula);
@@ -1862,15 +1865,16 @@ mod tests {
     #[test]
     fn compiled_artifact_builds_audit_report() {
         let mut data = DataFrame::new();
-        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0]);
-        data.add_numeric("x", vec![0.0, 1.0, 0.0, 1.0]);
+        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        data.add_numeric("x", vec![0.0, 1.0, 0.0, 1.0]).unwrap();
         data.add_categorical(
             "subject",
             vec!["s1", "s1", "s2", "s2"]
                 .into_iter()
                 .map(str::to_string)
                 .collect(),
-        );
+        )
+        .unwrap();
 
         let formula = parse_formula("y ~ x + (1 + x | subject)").unwrap();
         let semantic = compile_formula_ir(&formula);
