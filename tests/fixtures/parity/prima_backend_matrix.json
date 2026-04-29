@@ -1,0 +1,62 @@
+{
+  "schema_version": "1.0.0",
+  "source": "MixedModels.jl/test/prima.jl backend=:prima optimizer matrix; Rust parity manifest recorded 2026-04-29",
+  "notes": [
+    "This fixture is a backend-availability manifest, not a numeric fit oracle.",
+    "Rust keeps PRIMA out of the default build path; runtime numeric parity requires the non-default prima feature plus a system libprimac."
+  ],
+  "backends": [
+    {
+      "julia_backend": "prima",
+      "julia_optimizer": "bobyqa",
+      "rust_optimizer": "PrimaBobyqa",
+      "rust_backend": "prima",
+      "rust_optimizer_name": "bobyqa",
+      "rust_optimizer_code": "bobyqa",
+      "rust_status": "feature_gated_system_lib",
+      "rust_feature": "prima",
+      "required_library": "libprimac",
+      "opt_params": ["rhobeg", "rhoend", "maxfeval"],
+      "numeric_parity": "deferred_until_libprimac_available"
+    },
+    {
+      "julia_backend": "prima",
+      "julia_optimizer": "cobyla",
+      "rust_optimizer": "PrimaCobyla",
+      "rust_backend": "prima",
+      "rust_optimizer_name": "cobyla",
+      "rust_optimizer_code": "cobyla",
+      "rust_status": "reserved_unavailable",
+      "rust_feature": "prima",
+      "required_library": "libprimac",
+      "opt_params": ["rhobeg", "rhoend", "maxfeval"],
+      "numeric_parity": "deferred_unwired_optimizer"
+    },
+    {
+      "julia_backend": "prima",
+      "julia_optimizer": "lincoa",
+      "rust_optimizer": "PrimaLincoa",
+      "rust_backend": "prima",
+      "rust_optimizer_name": "lincoa",
+      "rust_optimizer_code": "lincoa",
+      "rust_status": "reserved_unavailable",
+      "rust_feature": "prima",
+      "required_library": "libprimac",
+      "opt_params": ["rhobeg", "rhoend", "maxfeval"],
+      "numeric_parity": "deferred_unwired_optimizer"
+    },
+    {
+      "julia_backend": "prima",
+      "julia_optimizer": "newuoa",
+      "rust_optimizer": "PrimaNewuoa",
+      "rust_backend": "prima",
+      "rust_optimizer_name": "newuoa",
+      "rust_optimizer_code": "newuoa",
+      "rust_status": "reserved_unavailable",
+      "rust_feature": "prima",
+      "required_library": "libprimac",
+      "opt_params": ["rhobeg", "rhoend", "maxfeval"],
+      "numeric_parity": "deferred_unwired_optimizer"
+    }
+  ]
+}
