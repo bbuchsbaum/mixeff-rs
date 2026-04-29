@@ -15,6 +15,7 @@ use nalgebra_sparse::{coo::CooMatrix, csc::CscMatrix};
 use nlopt::{
     Algorithm as NloptAlgorithm, FailState as NloptFailState, Nlopt, Target as NloptTarget,
 };
+use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -31,6 +32,10 @@ use crate::compiler::{
     ModelStateSummary, OptimizerCertificate, OptimizerDerivativeEvidence, PolicyAction,
     PolicyRecommendation, ReductionRecord, ReductionTrigger, ReliabilityGrade,
     SupportedCovarianceDirection, DOMINANT_LOADING_THRESHOLD, INTERPRETABLE_GAP_TOLERANCE,
+};
+use crate::compiler::artifact::{
+    BootstrapInferenceDetails, ContrastFamilyDetails, FixedEffectInferenceDetails,
+    FixedEffectNullTargetSummary, KenwardRogerInferenceDetails,
 };
 use crate::error::{MixedModelError, Result};
 use crate::formula::{FixedTerm, Formula, RandomTerm};
@@ -5278,10 +5283,194 @@ impl LinearMixedModel {
         hypothesis: FixedEffectHypothesis,
         payload: &BootstrapRunPayload,
     ) -> FixedEffectInferenceRow {
-        fixed_effect_test_to_inference_row(
+        let mut row = fixed_effect_test_to_inference_row(
             kind,
             self.test_contrast_with_bootstrap_payload(hypothesis, payload),
-        )
+        );
+        attach_bootstrap_details(&mut row, payload, None);
+        row
+    }
+
+    pub fn fixed_effect_null_bootstrap_inference_table(
+        &self,
+        hypotheses: Vec<FixedEffectHypothesis>,
+        options: FixedEffectBootstrapOptions,
+    ) -> FixedEffectInferenceTable {
+        let rows = hypotheses
+            .into_iter()
+            .map(|hypothesis| {
+                self.fixed_effect_null_bootstrap_inference_row(
+                    FixedEffectInferenceRowKind::Contrast,
+                    hypothesis,
+                    &options,
+                )
+            })
+            .collect();
+        FixedEffectInferenceTable::new(rows)
+    }
+
+    pub fn fixed_effect_null_bootstrap_inference_row(
+        &self,
+        kind: FixedEffectInferenceRowKind,
+        hypothesis: FixedEffectHypothesis,
+        options: &FixedEffectBootstrapOptions,
+    ) -> FixedEffectInferenceRow {
+        let target = match self.fixed_effect_null_bootstrap_target(&hypothesis) {
+            Ok(target) => target,
+            Err(error) => {
+                let mut test = self.test_contrast_with_method(
+                    hypothesis,
+                    FixedEffectTestMethod::ParametricBootstrap,
+                );
+                test.status = InferenceStatus::NotAssessed {
+                    reason: format!("bootstrap_null_target_unavailable: {error}"),
+                };
+                return fixed_effect_test_to_inference_row(kind, test);
+            }
+        };
+
+        match self.fixed_effect_null_bootstrap_payload(&hypothesis, &target, options) {
+            Ok(payload) => {
+                let mut row = self.fixed_effect_bootstrap_inference_row(kind, hypothesis, &payload);
+                attach_bootstrap_details(&mut row, &payload, Some(&target));
+                row
+            }
+            Err(error) => {
+                let mut test = self.test_contrast_with_method(
+                    hypothesis,
+                    FixedEffectTestMethod::ParametricBootstrap,
+                );
+                test.status = InferenceStatus::NotAssessed {
+                    reason: format!("bootstrap_replicate_accounting_unavailable: {error}"),
+                };
+                fixed_effect_test_to_inference_row(kind, test)
+            }
+        }
+    }
+
+    fn fixed_effect_null_bootstrap_payload(
+        &self,
+        hypothesis: &FixedEffectHypothesis,
+        target: &FixedEffectNullBootstrapTarget,
+        options: &FixedEffectBootstrapOptions,
+    ) -> Result<BootstrapRunPayload> {
+        let mut rng = match options.seed {
+            Some(seed) => rand::rngs::StdRng::seed_from_u64(seed),
+            None => rand::rngs::StdRng::from_entropy(),
+        };
+        let mut fits = Vec::with_capacity(options.requested_replicates);
+        let mut statistics = Vec::with_capacity(options.requested_replicates);
+
+        for _ in 0..options.requested_replicates {
+            let y_sim = self.simulate_fixed_effect_null(&mut rng, target)?;
+            let mut work = self.clone();
+            match work.refit(y_sim.as_slice()) {
+                Ok(()) => {
+                    statistics.push(
+                        scalar_contrast_abs_studentized(&work, hypothesis).unwrap_or(f64::NAN),
+                    );
+                    fits.push(BootstrapReplicate {
+                        objective: work.objective(),
+                        sigma: work.sigma(),
+                        beta: work.beta(),
+                        se: work.stderror(),
+                        theta: work.theta(),
+                    });
+                }
+                Err(_) => {
+                    let beta = work.beta();
+                    statistics.push(f64::NAN);
+                    fits.push(BootstrapReplicate {
+                        objective: f64::NAN,
+                        sigma: f64::NAN,
+                        se: DVector::from_element(beta.len(), f64::NAN),
+                        beta,
+                        theta: work.theta(),
+                    });
+                    if options.failed_refit_policy == BootstrapFailedRefitPolicy::Abort {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let bootstrap = MixedModelBootstrap { fits };
+        let p_value = scalar_contrast_abs_studentized(self, hypothesis).and_then(|observed| {
+            let finite = statistics
+                .iter()
+                .copied()
+                .filter(|value| value.is_finite())
+                .collect::<Vec<_>>();
+            (!finite.is_empty()).then(|| {
+                let extreme = finite.iter().filter(|&&value| value >= observed).count();
+                (extreme as f64 + 1.0) / (finite.len() as f64 + 1.0)
+            })
+        });
+        let seed_record = options
+            .seed
+            .map(BootstrapSeedRecord::std_rng)
+            .unwrap_or_else(BootstrapSeedRecord::unspecified);
+        let metadata = bootstrap.run_metadata_for_model(
+            self,
+            target.target.clone(),
+            options.requested_replicates,
+            options.failed_refit_policy,
+            seed_record,
+            BootstrapRefitOptions::from_model(self),
+            Some(hypothesis.label.clone()),
+            Some(&statistics),
+            p_value,
+        );
+        Ok(bootstrap.into_run_payload_with_statistics(metadata, statistics))
+    }
+
+    pub fn fixed_effect_term_hypotheses(&self) -> Vec<FixedEffectHypothesis> {
+        let names = self.coef_names();
+        let Some(audit) = self.compiler_artifact.design_audit.as_ref() else {
+            return Vec::new();
+        };
+        audit
+            .fixed_effects
+            .terms
+            .iter()
+            .filter_map(|term| {
+                let indices = audit
+                    .fixed_effects
+                    .columns
+                    .iter()
+                    .filter(|column| column.source_term == term.term)
+                    .filter_map(|column| names.iter().position(|name| name == &column.name))
+                    .collect::<Vec<_>>();
+                if indices.is_empty() {
+                    return None;
+                }
+                let mut l = DMatrix::zeros(indices.len(), names.len());
+                for (row, index) in indices.into_iter().enumerate() {
+                    l[(row, index)] = 1.0;
+                }
+                Some(FixedEffectHypothesis::zero_rhs(
+                    term.term.clone(),
+                    crate::compiler::ContrastMatrix::new(l).ok()?,
+                ))
+            })
+            .collect()
+    }
+
+    pub fn fixed_effect_term_inference_table(
+        &self,
+        method: FixedEffectTestMethod,
+    ) -> FixedEffectInferenceTable {
+        let rows = self
+            .fixed_effect_term_hypotheses()
+            .into_iter()
+            .map(|hypothesis| {
+                fixed_effect_test_to_inference_row(
+                    FixedEffectInferenceRowKind::Term,
+                    self.test_contrast_with_method(hypothesis, method),
+                )
+            })
+            .collect();
+        FixedEffectInferenceTable::new(rows)
     }
 
     fn satterthwaite_fixed_effect_test(
@@ -7095,12 +7284,30 @@ fn scalar_single_coefficient_contrast(l: &DMatrix<f64>) -> Option<(usize, f64)> 
     found
 }
 
+fn scalar_contrast_abs_studentized(
+    model: &LinearMixedModel,
+    hypothesis: &FixedEffectHypothesis,
+) -> Option<f64> {
+    if hypothesis.n_contrasts() != 1 || hypothesis.n_coefficients() != model.coef_names().len() {
+        return None;
+    }
+    let beta = model.coef();
+    let vcov = model.vcov();
+    let estimate = (&hypothesis.l.values * beta - &hypothesis.rhs.values)[0];
+    let se = contrast_standard_errors(&hypothesis.l.values, &vcov)
+        .into_iter()
+        .next()
+        .flatten()?;
+    (estimate.is_finite() && se.is_finite() && se > 0.0).then_some((estimate / se).abs())
+}
+
 fn fixed_effect_test_to_inference_row(
     kind: FixedEffectInferenceRowKind,
     test: FixedEffectTest,
 ) -> FixedEffectInferenceRow {
     let statistic_name = fixed_effect_statistic_name(&test);
     let reason = fixed_effect_inference_reason(&test);
+    let details = fixed_effect_details_for_test(kind, &test, statistic_name);
     FixedEffectInferenceRow {
         label: test.hypothesis.label.clone(),
         kind,
@@ -7116,7 +7323,129 @@ fn fixed_effect_test_to_inference_row(
         reliability: test.reliability,
         estimability: EstimabilityAssessment::FixedContrast(test.estimability),
         reason,
+        details,
         notes: test.notes,
+    }
+}
+
+fn fixed_effect_details_for_test(
+    kind: FixedEffectInferenceRowKind,
+    test: &FixedEffectTest,
+    statistic_name: Option<FixedEffectStatisticName>,
+) -> Option<FixedEffectInferenceDetails> {
+    let contrast_family = (kind != FixedEffectInferenceRowKind::Coefficient
+        || test.hypothesis.n_contrasts() > 1)
+        .then(|| contrast_family_details(kind, test, statistic_name));
+    let kenward_roger =
+        (test.method == InferenceMethod::KenwardRoger).then(|| KenwardRogerInferenceDetails {
+            restriction_rank: test.estimability.rank,
+            f_scaling: (statistic_name == Some(FixedEffectStatisticName::F)).then_some(1.0),
+            statistic_scale: (statistic_name == Some(FixedEffectStatisticName::F))
+                .then(|| "unscaled".to_string()),
+        });
+    let details = FixedEffectInferenceDetails {
+        bootstrap: None,
+        contrast_family,
+        kenward_roger,
+    };
+    (!details.is_empty()).then_some(details)
+}
+
+fn contrast_family_details(
+    kind: FixedEffectInferenceRowKind,
+    test: &FixedEffectTest,
+    statistic_name: Option<FixedEffectStatisticName>,
+) -> ContrastFamilyDetails {
+    let requested_rank = test.estimability.requested_rank;
+    let effective_rank = test.estimability.rank;
+    let rank_deficient = match (effective_rank, requested_rank) {
+        (Some(rank), Some(requested)) => Some(rank < requested),
+        _ => None,
+    };
+    let numerator_df_semantics = match (kind, statistic_name) {
+        (_, Some(FixedEffectStatisticName::F)) => "effective_restriction_rank",
+        (FixedEffectInferenceRowKind::Term, _) => "term_scalar_or_unavailable",
+        _ => "scalar_contrast_no_numerator_df",
+    }
+    .to_string();
+    ContrastFamilyDetails {
+        family_id: test.hypothesis.label.clone(),
+        family_label: test.hypothesis.label.clone(),
+        restriction_rows: test.hypothesis.n_contrasts(),
+        coefficient_count: test.hypothesis.n_coefficients(),
+        requested_rank,
+        effective_rank,
+        rank_deficient,
+        rhs_nonzero: test
+            .hypothesis
+            .rhs
+            .values
+            .iter()
+            .any(|value| value.abs() > 0.0),
+        numerator_df: fixed_effect_row_numerator_df(test, statistic_name),
+        numerator_df_semantics,
+    }
+}
+
+fn attach_bootstrap_details(
+    row: &mut FixedEffectInferenceRow,
+    payload: &BootstrapRunPayload,
+    null_target: Option<&FixedEffectNullBootstrapTarget>,
+) {
+    let details = row.details.get_or_insert(FixedEffectInferenceDetails {
+        bootstrap: None,
+        contrast_family: None,
+        kenward_roger: None,
+    });
+    details.bootstrap = Some(BootstrapInferenceDetails {
+        target_kind: bootstrap_target_kind_label(payload.metadata.target.kind).to_string(),
+        target_label: payload.metadata.target.label.clone(),
+        contrast_label: payload.metadata.target.contrast_label.clone(),
+        requested_replicates: payload.metadata.requested_replicates,
+        completed_replicates: payload.metadata.completed_replicates,
+        successful_replicates: payload.metadata.successful_replicates,
+        failed_refits: payload.metadata.failed_refits,
+        failed_refit_policy: bootstrap_failed_refit_policy_label(
+            payload.metadata.failed_refit_policy,
+        )
+        .to_string(),
+        boundary_count: payload.metadata.boundary_count,
+        boundary_rate: payload.metadata.boundary_rate,
+        seed_rng: payload.metadata.seed_record.rng.clone(),
+        seed: payload.metadata.seed_record.seed,
+        finite_statistic_count: payload.metadata.finite_statistic_count,
+        mcse: payload.metadata.mcse,
+        null_target: null_target.map(|target| FixedEffectNullTargetSummary {
+            covariance_policy: fixed_effect_null_covariance_policy_label(target.covariance_policy)
+                .to_string(),
+            coefficient_count: target.coefficient_names.len(),
+            theta_count: target.theta.len(),
+            sigma: target.sigma.is_finite().then_some(target.sigma),
+            reml: target.reml,
+        }),
+    });
+}
+
+fn bootstrap_target_kind_label(kind: BootstrapTargetKind) -> &'static str {
+    match kind {
+        BootstrapTargetKind::FullModelDistribution => "full_model_distribution",
+        BootstrapTargetKind::FixedEffectNull => "fixed_effect_null",
+    }
+}
+
+fn bootstrap_failed_refit_policy_label(policy: BootstrapFailedRefitPolicy) -> &'static str {
+    match policy {
+        BootstrapFailedRefitPolicy::Exclude => "exclude",
+        BootstrapFailedRefitPolicy::CountExtreme => "count_extreme",
+        BootstrapFailedRefitPolicy::Abort => "abort",
+    }
+}
+
+fn fixed_effect_null_covariance_policy_label(
+    policy: FixedEffectNullCovariancePolicy,
+) -> &'static str {
+    match policy {
+        FixedEffectNullCovariancePolicy::ReuseFittedCovariance => "reuse_fitted_covariance",
     }
 }
 
@@ -9468,6 +9797,23 @@ pub enum BootstrapFailedRefitPolicy {
     Exclude,
     CountExtreme,
     Abort,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FixedEffectBootstrapOptions {
+    pub requested_replicates: usize,
+    pub failed_refit_policy: BootstrapFailedRefitPolicy,
+    pub seed: Option<u64>,
+}
+
+impl Default for FixedEffectBootstrapOptions {
+    fn default() -> Self {
+        Self {
+            requested_replicates: 999,
+            failed_refit_policy: BootstrapFailedRefitPolicy::Exclude,
+            seed: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -13250,6 +13596,20 @@ mod tests {
             .notes
             .iter()
             .any(|note| note.contains("F scaling = 1.0")));
+
+        let row = fixed_effect_test_to_inference_row(FixedEffectInferenceRowKind::Term, test);
+        let details = row.details.expect("multi-df row should carry details");
+        let family = details
+            .contrast_family
+            .expect("multi-df row should carry contrast-family details");
+        assert_eq!(family.restriction_rows, 2);
+        assert_eq!(family.effective_rank, Some(2));
+        assert_eq!(family.numerator_df_semantics, "effective_restriction_rank");
+        let kr = details
+            .kenward_roger
+            .expect("KR row should carry KR details");
+        assert_eq!(kr.f_scaling, Some(1.0));
+        assert_eq!(kr.statistic_scale.as_deref(), Some("unscaled"));
     }
 
     #[test]
@@ -15209,6 +15569,35 @@ mod tests {
     }
 
     #[test]
+    fn test_lmm_fixed_effect_term_rows_are_rust_owned() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let hypotheses = model.fixed_effect_term_hypotheses();
+        assert!(hypotheses
+            .iter()
+            .any(|hypothesis| hypothesis.label == "days"));
+
+        let table = model.fixed_effect_term_inference_table(FixedEffectTestMethod::Auto);
+        let days = table
+            .rows
+            .iter()
+            .find(|row| row.label == "days")
+            .expect("days term row should be exposed");
+        assert_eq!(days.kind, FixedEffectInferenceRowKind::Term);
+        let family = days
+            .details
+            .as_ref()
+            .and_then(|details| details.contrast_family.as_ref())
+            .expect("term row should carry contrast-family details");
+        assert_eq!(family.family_label, "days");
+        assert_eq!(family.restriction_rows, 1);
+        assert_eq!(family.coefficient_count, model.coef_names().len());
+    }
+
+    #[test]
     fn test_lmm_fixed_effect_inference_table_returns_ordered_satterthwaite_rows() {
         let data = sleepstudy_fixture();
         let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
@@ -15875,6 +16264,15 @@ mod tests {
         assert_eq!(row.status, FixedEffectInferenceStatus::Available);
         assert_eq!(row.statistic_name, Some(FixedEffectStatisticName::T));
         assert_relative_eq!(row.p_value.unwrap(), 1.0 / 41.0, epsilon = 1e-12);
+        let bootstrap = row
+            .details
+            .as_ref()
+            .and_then(|details| details.bootstrap.as_ref())
+            .expect("bootstrap row should carry structured metadata");
+        assert_eq!(bootstrap.target_kind, "fixed_effect_null");
+        assert_eq!(bootstrap.requested_replicates, 40);
+        assert_eq!(bootstrap.successful_replicates, 40);
+        assert_eq!(bootstrap.failed_refit_policy, "exclude");
     }
 
     #[test]
@@ -15926,6 +16324,16 @@ mod tests {
         assert_eq!(row.status, FixedEffectInferenceStatus::Available);
         assert_eq!(row.statistic_name, Some(FixedEffectStatisticName::T));
         assert_relative_eq!(row.p_value.unwrap(), 1.0 / 41.0, epsilon = 1e-12);
+        let details = row.details.expect("contrast row should carry details");
+        assert!(details.bootstrap.is_some());
+        let family = details
+            .contrast_family
+            .expect("contrast row should carry contrast-family details");
+        assert_eq!(family.restriction_rows, 1);
+        assert_eq!(
+            family.numerator_df_semantics,
+            "scalar_contrast_no_numerator_df"
+        );
     }
 
     #[test]
@@ -16053,6 +16461,55 @@ mod tests {
             .iter()
             .any(|note| note.contains("successful_replicates=30")));
         assert!(row.notes.iter().any(|note| note.contains("mcse=")));
+    }
+
+    #[test]
+    fn test_fixed_effect_null_bootstrap_table_callable_returns_inference_table() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let days_index = model
+            .coef_names()
+            .iter()
+            .position(|name| name == "days")
+            .unwrap();
+        let hypothesis = FixedEffectHypothesis::single_coefficient(
+            "days = 0",
+            days_index,
+            model.coef_names().len(),
+        )
+        .unwrap();
+        let table = model.fixed_effect_null_bootstrap_inference_table(
+            vec![hypothesis],
+            FixedEffectBootstrapOptions {
+                requested_replicates: 2,
+                failed_refit_policy: BootstrapFailedRefitPolicy::Exclude,
+                seed: Some(20260503),
+            },
+        );
+
+        assert_eq!(
+            table.schema_name,
+            crate::compiler::FIXED_EFFECT_INFERENCE_TABLE_SCHEMA
+        );
+        assert_eq!(table.rows.len(), 1);
+        let row = &table.rows[0];
+        assert_eq!(row.method, FixedEffectInferenceMethod::Bootstrap);
+        assert_eq!(row.kind, FixedEffectInferenceRowKind::Contrast);
+        assert!(matches!(
+            row.status,
+            FixedEffectInferenceStatus::Available | FixedEffectInferenceStatus::NotAssessed
+        ));
+        let bootstrap = row
+            .details
+            .as_ref()
+            .and_then(|details| details.bootstrap.as_ref())
+            .expect("bridge row should carry bootstrap details");
+        assert_eq!(bootstrap.requested_replicates, 2);
+        assert_eq!(bootstrap.seed, Some(20260503));
+        assert!(bootstrap.null_target.is_some());
     }
 
     #[test]

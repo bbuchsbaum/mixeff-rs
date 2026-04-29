@@ -174,6 +174,7 @@ fn unavailable_se_fixed_effect_inference_table() -> FixedEffectInferenceTable {
         reason: Some(
             "standard error is unavailable, so the Wald z p-value is unavailable".to_string(),
         ),
+        details: None,
         notes: vec![
             "asymptotic Wald z is a labeled fallback, not a finite-sample correction".to_string(),
         ],

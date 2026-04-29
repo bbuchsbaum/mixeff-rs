@@ -18,13 +18,15 @@ pub mod report;
 pub mod theta_map;
 
 pub use artifact::{
-    ArtifactTable, BasisLoading, CompiledModelArtifact, CovarianceParameterTrace,
-    DerivativeAvailability, DominantLoading, EffectiveCovarianceSummary, EffectiveRankStatus,
-    FitIntent, FitMode, FixedEffectInferenceMethod, FixedEffectInferenceRow,
+    ArtifactTable, BasisLoading, BootstrapInferenceDetails, CompiledModelArtifact,
+    ContrastFamilyDetails, CovarianceParameterTrace, DerivativeAvailability, DominantLoading,
+    EffectiveCovarianceSummary, EffectiveRankStatus, FitIntent, FitMode,
+    FixedEffectInferenceDetails, FixedEffectInferenceMethod, FixedEffectInferenceRow,
     FixedEffectInferenceRowKind, FixedEffectInferenceStatus, FixedEffectInferenceTable,
-    FixedEffectStatisticName, InferenceAvailability, InterpretableSubmodel, LambdaSlotTrace,
-    ModelBoundary, ModelChangeStatus, ModelKind, ModelRandomTermState, ModelStageState,
-    ModelStateChange, ModelStateStage, ModelStateStatus, ModelStateSummary, ObjectiveApproximation,
+    FixedEffectNullTargetSummary, FixedEffectStatisticName, InferenceAvailability,
+    InterpretableSubmodel, KenwardRogerInferenceDetails, LambdaSlotTrace, ModelBoundary,
+    ModelChangeStatus, ModelKind, ModelRandomTermState, ModelStageState, ModelStateChange,
+    ModelStateStage, ModelStateStatus, ModelStateSummary, ObjectiveApproximation,
     OptimizerCertificateScope, ParmapTrace, ReductionRecord, ReductionTrigger,
     ReproducibilityRecord, SchemaMetadata, SupportedCovarianceDirection, ThetaSlotTrace,
     VarCorrEntryKind, VarCorrEntryTrace, DOMINANT_LOADING_THRESHOLD,

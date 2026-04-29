@@ -50,6 +50,12 @@ Implemented Rust pieces:
   `mixedmodels.fixed_effect_inference_table` and schema version `1.0.0`.
 - `LinearMixedModel::fixed_effect_inference_table()` builds ordered
   coefficient rows from the Rust contrast-testing path.
+- `LinearMixedModel::fixed_effect_term_hypotheses()` and
+  `fixed_effect_term_inference_table(method)` expose Rust-owned term tests for
+  R `test_effect()` / single-model `anova()` callers.
+- `LinearMixedModel::fixed_effect_null_bootstrap_inference_table()` exposes a
+  certified fixed-effect null bootstrap path that returns
+  `mixedmodels.fixed_effect_inference_table` rows.
 - The bridge table accessor exposes the same payload as
   `fixed_effect_inference`.
 - Contract fixtures cover confirmatory Wald rows, reduced-rank and boundary
@@ -151,6 +157,7 @@ Minimum row fields:
 | `reliability` | `low`, `moderate`, `high`, or `not_available` |
 | `estimability` | Structured estimability status from Rust |
 | `reason` | Optional reason for unavailable or low-reliability output |
+| `details` | Optional structured method/family metadata |
 | `notes` | Optional row-level notes |
 
 Rows are scalar by default. Coefficient rows and scalar contrast rows carry one
@@ -417,6 +424,15 @@ notes = ["asymptotic Wald z is a labeled fallback, not a finite-sample correctio
     certified `fixed_effect_null` payloads. `auto` does not select bootstrap in
     schema `1.0.0`; general scalar contrasts require payload-supplied
     replicate statistics unless the row is a single coefficient.
+12. [x] Add bridgeable Rust-owned fixed-effect null bootstrap table APIs for R
+    callers. The table rows include structured `details.bootstrap` metadata so
+    R does not parse prose notes for MCSE, replicate accounting, failed-refit
+    policy, seed state, or null-target summaries.
+13. [x] Add Rust-owned term hypothesis and term-row APIs for R
+    `test_effect()` / single-model `anova()` callers.
+14. [x] Add optional `details.contrast_family` and
+    `details.kenward_roger` row metadata for stable restriction-family rank and
+    numerator-df semantics, including current KR multi-df F scaling status.
 
 ## Mote Work Breakdown
 

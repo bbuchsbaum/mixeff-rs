@@ -1,6 +1,6 @@
 # Bootstrap Fixed-Effect Inference Contract
 
-Status: specified; implementation split into prerequisites
+Status: implemented for explicit scalar LMM contrast rows; bridge callable added
 Owner: Rust fixed-effect inference
 Parent issue: `bd-01KQATBW8DNAD98P76T667BQCE`
 
@@ -123,6 +123,15 @@ corrected bootstrap p-value, attach MCSE/accounting notes, and return
 bootstrap-labeled unavailable rows for schema, target, policy, statistic, and
 replicate-count failures. `auto` does not select bootstrap in schema `1.0.0`.
 
+Implementation note: `bd-01KQDBF2MKD9WYE3YMH11SCVC3` adds
+`LinearMixedModel::fixed_effect_null_bootstrap_inference_table()` and
+`fixed_effect_null_bootstrap_inference_row()` as the bridgeable Rust-owned
+entry points for R. They construct a certified `fixed_effect_null` target,
+simulate/refit through the Rust LMM engine, build a durable
+`BootstrapRunPayload`, and return `mixedmodels.fixed_effect_inference_table`
+rows. R should call this surface rather than deriving fixed-effect bootstrap
+p-values from replicate files.
+
 ## P-Value Rule
 
 For a scalar fixed-effect contrast `L beta = rhs`, the initial bootstrap
@@ -183,9 +192,11 @@ The row notes must include:
 - boundary rate
 - null target label
 
-Schema `1.0.0` may store method-specific details in row notes only. A future
-minor version may add structured row detail fields if R needs direct access to
-MCSE and replicate accounting without parsing notes.
+Rows now carry optional structured `details.bootstrap` metadata in addition to
+notes. The structured fields include MCSE, requested/completed/successful
+replicate counts, failed-refit policy/count, boundary count/rate, seed record,
+and a null-target summary. Notes remain user-facing method caveats; R should
+prefer structured fields for programmatic decisions.
 
 ## Reliability
 

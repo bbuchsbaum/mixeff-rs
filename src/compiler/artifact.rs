@@ -237,7 +237,74 @@ pub struct FixedEffectInferenceRow {
     pub reliability: ReliabilityGrade,
     pub estimability: EstimabilityAssessment,
     pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<FixedEffectInferenceDetails>,
     pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FixedEffectInferenceDetails {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap: Option<BootstrapInferenceDetails>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contrast_family: Option<ContrastFamilyDetails>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kenward_roger: Option<KenwardRogerInferenceDetails>,
+}
+
+impl FixedEffectInferenceDetails {
+    pub fn is_empty(&self) -> bool {
+        self.bootstrap.is_none() && self.contrast_family.is_none() && self.kenward_roger.is_none()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BootstrapInferenceDetails {
+    pub target_kind: String,
+    pub target_label: String,
+    pub contrast_label: Option<String>,
+    pub requested_replicates: usize,
+    pub completed_replicates: usize,
+    pub successful_replicates: usize,
+    pub failed_refits: usize,
+    pub failed_refit_policy: String,
+    pub boundary_count: usize,
+    pub boundary_rate: Option<f64>,
+    pub seed_rng: String,
+    pub seed: Option<u64>,
+    pub finite_statistic_count: Option<usize>,
+    pub mcse: Option<f64>,
+    pub null_target: Option<FixedEffectNullTargetSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FixedEffectNullTargetSummary {
+    pub covariance_policy: String,
+    pub coefficient_count: usize,
+    pub theta_count: usize,
+    pub sigma: Option<f64>,
+    pub reml: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContrastFamilyDetails {
+    pub family_id: String,
+    pub family_label: String,
+    pub restriction_rows: usize,
+    pub coefficient_count: usize,
+    pub requested_rank: Option<usize>,
+    pub effective_rank: Option<usize>,
+    pub rank_deficient: Option<bool>,
+    pub rhs_nonzero: bool,
+    pub numerator_df: Option<f64>,
+    pub numerator_df_semantics: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KenwardRogerInferenceDetails {
+    pub restriction_rank: Option<usize>,
+    pub f_scaling: Option<f64>,
+    pub statistic_scale: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1589,6 +1656,7 @@ mod tests {
                     super::super::estimability::FixedContrastEstimability::estimable("x", 1, 1),
                 ),
                 reason: None,
+                details: None,
                 notes: vec![
                     "asymptotic Wald z is a labeled fallback, not a finite-sample correction"
                         .to_string(),

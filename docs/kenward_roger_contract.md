@@ -163,6 +163,16 @@ The payload must also retain method detail for:
 The default coefficient table remains scalar. Multi-df rows appear only for
 explicit term or joint-hypothesis requests.
 
+Implementation note: `bd-01KQDBF2NKE1WQ4DVATG9F808W` adds optional
+`FixedEffectInferenceRow.details.contrast_family` and
+`details.kenward_roger` metadata. Multi-df KR rows record restriction-row
+count, coefficient count, requested/effective rank, rank-deficiency status,
+RHS-zero/nonzero status, numerator-df semantics, and the current F scaling
+state. The current row statistic remains the unscaled F statistic with
+`f_scaling = 1.0`; rows whose pbkrtest reference has non-unit scaling remain
+documented as unscaled until scaled-F support is promoted into the row
+calculation.
+
 ## Reliability and Failure Reasons
 
 KR-specific reasons should distinguish at least:
