@@ -199,7 +199,7 @@
         {
           "label": "convergence interpretation",
           "status": "error",
-          "detail": "optimizer reported an acceptable stop; effective covariance is reduced rank; unsupported directions are weakly identified, not proof of zero population variance; stationarity checked by finite_difference; stationarity is not certified: free-gradient norm 2.611324e1 exceeds tolerance 2.860272e-3; Hessian evidence is approximate (finite-difference active-subspace Hessian is positive semidefinite); bounded verification did not reproduce the fitted optimum"
+          "detail": "optimizer reported an acceptable stop; effective covariance is reduced rank; unsupported directions are weakly identified, not proof of zero population variance; stationarity checked by finite_difference; post-hoc stationarity inspection did not pass but does not override optimizer convergence: free-gradient norm 2.611324e1 exceeds tolerance 2.860272e-3; Hessian evidence is approximate (finite-difference active-subspace Hessian is positive semidefinite); bounded verification did not reproduce the fitted optimum"
         },
         {
           "label": "optimizer",
@@ -238,7 +238,7 @@
         },
         {
           "label": "certification quality",
-          "status": "warning",
+          "status": "info",
           "detail": "failed (free-gradient norm 2.611324e1 exceeds tolerance 2.860272e-3)"
         },
         {
@@ -248,7 +248,7 @@
         },
         {
           "label": "derivative checks",
-          "status": "warning",
+          "status": "info",
           "detail": "1 failed; 0 not assessed"
         },
         {

@@ -461,6 +461,7 @@ max_basis_pairwise_abs_corr = 0.999
 min_observations_per_supported_level = 2
 effective_rank_relative_tolerance = 1e-6
 effective_rank_absolute_tolerance = 1e-10
+convergence_derivative_nparmax = 10
 ```
 
 These numbers are engineering defaults, not universal statistical truths. They
@@ -548,6 +549,20 @@ The interface must distinguish:
 
 The certificate must be part of the fit object, even if many fields are `None`
 or `NotAssessed` in v0.
+
+The optimizer's convergence stop is authoritative. Post-hoc finite-difference
+gradient/KKT/Hessian checks are inspection metadata: they may add caveats,
+numeric evidence, or next actions, but they must not reclassify an optimizer
+accepted fit as non-converged. If a stricter derivative criterion is intended
+to define convergence, `fit()` must honor it directly instead of letting the
+print or report layer overrule the optimizer after the fact.
+
+Derivative inspection is gated by regime. Interior-theta fits may carry
+free-gradient and active-subspace Hessian evidence. Boundary or singular fits
+skip interior KKT checks and surface boundary/reduced-rank status instead.
+Large-theta fits skip finite-difference derivative inspection above
+`convergence_derivative_nparmax` and rely on optimizer-stop evidence plus
+optional `verify_convergence()` agreement.
 
 ### 10. Serialization Boundary
 
@@ -676,6 +691,7 @@ changed model views. The default print output must not dump all of them.
 Default output should show one canonical summary:
 
 - fit status
+- convergence verdict and stable documentation anchor
 - requested formula only when useful
 - effective formula/structure when it differs
 - top diagnostics
@@ -692,6 +708,11 @@ Detailed views should be opt-in:
   and consequences
 
 The audit must reduce noise, not become another wall of warnings.
+Convergence verdicts use the shared taxonomy in
+`docs/compiler_verdicts.md`: optimizer, boundary/singular, structural
+identifiability, verification, and not-assessed. These states are orthogonal;
+compact print must not collapse singular, rank-deficient, and optimizer-failed
+models into one generic convergence warning.
 
 ### 16. Compiled Model Artifact
 

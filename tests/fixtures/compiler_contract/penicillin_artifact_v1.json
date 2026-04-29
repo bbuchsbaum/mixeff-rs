@@ -411,7 +411,8 @@
       "max_basis_pairwise_abs_corr": 0.999,
       "min_observations_per_supported_level": 2,
       "effective_rank_relative_tolerance": 1e-6,
-      "effective_rank_absolute_tolerance": 1e-10
+      "effective_rank_absolute_tolerance": 1e-10,
+      "convergence_derivative_nparmax": 10
     },
     "apply_design_time_reductions": false
   },
@@ -565,6 +566,10 @@
       [
         "effective_rank_absolute_tolerance",
         "0.0000000001"
+      ],
+      [
+        "convergence_derivative_nparmax",
+        "10"
       ],
       [
         "apply_design_time_reductions",

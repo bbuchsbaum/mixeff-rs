@@ -32,11 +32,11 @@
         "estimate": 10.000000083827498,
         "std_error": 0.0434068870119898,
         "numerator_df": null,
-        "denominator_df": null,
+        "denominator_df": 130.83561018561446,
         "statistic": 230.3781904716021,
-        "statistic_name": "z",
+        "statistic_name": "t",
         "p_value": 0.0,
-        "method": "asymptotic_wald_z",
+        "method": "satterthwaite",
         "status": "available",
         "reliability": "low",
         "estimability": {
@@ -51,7 +51,9 @@
         },
         "reason": null,
         "notes": [
-          "asymptotic Wald z is a labeled fallback, not a finite-sample correction"
+          "Satterthwaite denominator df computed from finite-difference vcov_beta Jacobian and deviance Hessian over varpar",
+          "deviance Hessian has 2 near-zero eigenvalue(s)",
+          "vcov_varpar used the positive-eigenvalue subspace of the Hessian"
         ]
       },
       {
@@ -60,11 +62,11 @@
         "estimate": 2.0000000359260164,
         "std_error": 0.018602927508815113,
         "numerator_df": null,
-        "denominator_df": null,
+        "denominator_df": 130.8356101871162,
         "statistic": 107.5099623421262,
-        "statistic_name": "z",
+        "statistic_name": "t",
         "p_value": 0.0,
-        "method": "asymptotic_wald_z",
+        "method": "satterthwaite",
         "status": "available",
         "reliability": "low",
         "estimability": {
@@ -79,7 +81,9 @@
         },
         "reason": null,
         "notes": [
-          "asymptotic Wald z is a labeled fallback, not a finite-sample correction"
+          "Satterthwaite denominator df computed from finite-difference vcov_beta Jacobian and deviance Hessian over varpar",
+          "deviance Hessian has 2 near-zero eigenvalue(s)",
+          "vcov_varpar used the positive-eigenvalue subspace of the Hessian"
         ]
       }
     ]
@@ -384,7 +388,8 @@
       "max_basis_pairwise_abs_corr": 0.999,
       "min_observations_per_supported_level": 2,
       "effective_rank_relative_tolerance": 1e-6,
-      "effective_rank_absolute_tolerance": 1e-10
+      "effective_rank_absolute_tolerance": 1e-10,
+      "convergence_derivative_nparmax": 10
     },
     "apply_design_time_reductions": false
   },
@@ -700,6 +705,10 @@
       [
         "effective_rank_absolute_tolerance",
         "0.0000000001"
+      ],
+      [
+        "convergence_derivative_nparmax",
+        "10"
       ],
       [
         "apply_design_time_reductions",

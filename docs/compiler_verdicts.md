@@ -29,6 +29,11 @@ predictor scales can make absolute gradient checks look worse than the fitted
 model warrants. The first next action for this case is to rescale predictors or
 the response, then refit or verify optimizer agreement.
 
+The crate exposes the underlying evidence rather than a plug-in convergence
+predicate. Downstream layers may choose how to display the evidence, but they
+should not replace the verdict by injecting an arbitrary `(gradient, Hessian,
+nobs) -> bool` rule.
+
 ## Boundary And Singular Fits
 
 Boundary and singular fits are not convergence failures. A theta value on a

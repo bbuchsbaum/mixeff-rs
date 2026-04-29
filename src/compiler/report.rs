@@ -10,6 +10,7 @@ use super::artifact::{
 use super::audit::{BasisAudit, InformationBudgetStatus, RandomTermAudit, RankStatus};
 use super::diagnostics::{Diagnostic, DiagnosticCode, DiagnosticSeverity, FitStatus};
 use super::ir::{CovarianceForm, RandomCoefficient, RandomCoefficientKind, RandomTermIr};
+#[cfg(test)]
 use super::policy::DEFAULT_CONVERGENCE_DERIVATIVE_NPARMAX;
 use super::random_term_card::{
     CrossCardConstraint, DesignSupport, ImpliedConstraintKind, RandomTermBlock, RandomTermCard,
@@ -1566,9 +1567,12 @@ impl ConvergenceVerdict {
     }
 
     pub fn primary_doc_anchor(&self) -> Option<&str> {
-        self.evidence.first().map(|evidence| evidence.doc_anchor.as_str())
+        self.evidence
+            .first()
+            .map(|evidence| evidence.doc_anchor.as_str())
     }
 
+    #[cfg(test)]
     fn compose(
         certificate: &super::audit::OptimizerCertificate,
         diagnostics: &[Diagnostic],
@@ -1738,10 +1742,10 @@ impl NextActionKind {
     fn priority(self) -> u8 {
         match self {
             NextActionKind::BudgetOrAlternate => 0,
-            NextActionKind::SuggestVerify => 1,
-            NextActionKind::GateInferenceOnDerivative => 2,
+            NextActionKind::InspectEffectiveCovariance => 1,
+            NextActionKind::SuggestVerify => 2,
+            NextActionKind::GateInferenceOnDerivative => 3,
             NextActionKind::PredictorScalingOrSimplifyRe => 3,
-            NextActionKind::InspectEffectiveCovariance => 4,
             NextActionKind::CompareVerificationRuns => 5,
             NextActionKind::GateWeakIdentification => 6,
             NextActionKind::TreatAgreementAsReassuring => 7,
