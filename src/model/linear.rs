@@ -36,7 +36,11 @@ use crate::error::{MixedModelError, Result};
 use crate::formula::{FixedTerm, Formula, RandomTerm};
 use crate::model::data::{Column, DataFrame};
 use crate::model::traits::MixedModelFit;
+#[cfg(feature = "prima")]
+use crate::optimizer::prima::{minimize_bobyqa, PrimaBobyqaOptions};
 use crate::stats::{BlockDescription, CoefTable, CoefTablePValuePolicy, ModelSummary, VarCorr};
+#[cfg(feature = "prima")]
+use crate::types::opt_summary::OptimizerBackend;
 use crate::types::{FeMat, FeTerm, FitLogEntry, OptSummary, Optimizer, ReMat};
 
 /// A fitted (or constructed but unfitted) linear mixed-effects model.
@@ -1096,6 +1100,9 @@ impl LinearMixedModel {
         optsum.max_feval = max_function_evaluations as i64;
         optsum.max_time = previous.max_time;
         optsum.optimizer = previous.optimizer;
+        optsum.backend = previous.backend;
+        optsum.rhobeg = previous.rhobeg;
+        optsum.rhoend = previous.rhoend;
         optsum.reml = previous.reml;
         optsum.n_agq = previous.n_agq;
         optsum.sigma = previous.sigma;
@@ -1145,12 +1152,24 @@ impl LinearMixedModel {
                         .to_string(),
                 ));
             }
-            Optimizer::PrimaBobyqa
-            | Optimizer::PrimaCobyla
-            | Optimizer::PrimaLincoa
-            | Optimizer::PrimaNewuoa => {
+            Optimizer::PrimaBobyqa => {
+                #[cfg(feature = "prima")]
+                self.fit_prima_bobyqa_with_maxeval(
+                    reml,
+                    Some(self.optsum.max_feval.max(1) as usize),
+                )?;
+                #[cfg(not(feature = "prima"))]
                 return Err(MixedModelError::Optimization(
-                    "PRIMA optimizer backend is declared but not wired to the LMM optimizer path"
+                    "Optimizer::PrimaBobyqa requires the `prima` feature and a system \
+                     PRIMA C library (`libprimac`); rebuild with `--features prima` \
+                     or pick a non-PRIMA optimizer"
+                        .to_string(),
+                ));
+            }
+            Optimizer::PrimaCobyla | Optimizer::PrimaLincoa | Optimizer::PrimaNewuoa => {
+                return Err(MixedModelError::Optimization(
+                    "Only Optimizer::PrimaBobyqa is wired to the LMM optimizer path; \
+                     PRIMA COBYLA, LINCOA, and NEWUOA are reserved for later backend parity work"
                         .to_string(),
                 ));
             }
@@ -3090,6 +3109,7 @@ impl LinearMixedModel {
         }
 
         self.optsum.optimizer = optimizer;
+        self.optsum.backend = optimizer.canonical_backend();
         self.optsum.final_params = best_theta_val;
         self.optsum.fmin = best_fmin_val;
         self.optsum.feval = feval_count;
@@ -3099,7 +3119,7 @@ impl LinearMixedModel {
         Ok(self)
     }
 
-    #[cfg(feature = "nlopt")]
+    #[cfg_attr(not(any(feature = "nlopt", feature = "prima")), allow(dead_code))]
     fn rectify_theta_columns(theta: &mut [f64], parmap: &[(usize, usize, usize)], n_terms: usize) {
         for block in 0..n_terms {
             let max_col = parmap
@@ -3592,6 +3612,111 @@ impl LinearMixedModel {
 
     fn fit_cobyla(&mut self, reml: bool) -> Result<&mut Self> {
         self.fit_cobyla_with_maxeval(reml, None)
+    }
+
+    #[cfg(feature = "prima")]
+    fn fit_prima_bobyqa_with_maxeval(
+        &mut self,
+        reml: bool,
+        maxeval_override: Option<usize>,
+    ) -> Result<&mut Self> {
+        self.optsum.optimizer = Optimizer::PrimaBobyqa;
+        self.optsum.backend = OptimizerBackend::Prima;
+
+        let a_blocks = self.a_blocks.clone();
+        let l_blocks_template = self.l_blocks.clone();
+        let reterms_template = self.reterms.clone();
+        let dims = self.dims;
+        let is_reml = reml;
+        let fixed_sigma = self.optsum.sigma;
+        let invalid_objective = self.optsum.finitial;
+        let best_theta = std::cell::RefCell::new(self.optsum.initial.clone());
+        let best_fmin = std::cell::Cell::new(self.optsum.finitial);
+        let feval_count = std::cell::Cell::new(0i64);
+        let fit_log: std::cell::RefCell<Vec<FitLogEntry>> = std::cell::RefCell::new(Vec::new());
+
+        let reterms_work = std::cell::RefCell::new(reterms_template.clone());
+        let l_blocks_work = std::cell::RefCell::new(l_blocks_template);
+
+        let mut objective_fn = |theta: &[f64]| -> f64 {
+            feval_count.set(feval_count.get() + 1);
+            let obj = {
+                let mut rw = reterms_work.borrow_mut();
+                let mut lw = l_blocks_work.borrow_mut();
+                Self::profiled_objective_from_parts(
+                    &a_blocks,
+                    &mut lw,
+                    &mut rw,
+                    theta,
+                    dims,
+                    is_reml,
+                    fixed_sigma,
+                )
+                .unwrap_or(invalid_objective)
+            };
+
+            fit_log.borrow_mut().push(FitLogEntry {
+                theta: theta.to_vec(),
+                objective: obj,
+            });
+            if obj + 1e-12 < best_fmin.get() {
+                best_fmin.set(obj);
+                *best_theta.borrow_mut() = theta.to_vec();
+            }
+
+            obj
+        };
+
+        let maxfun = maxeval_override.unwrap_or_else(|| {
+            if self.optsum.max_feval > 0 {
+                self.optsum.max_feval as usize
+            } else {
+                10000
+            }
+        });
+
+        let lower_bounds = self.lower_bounds();
+        let upper_bounds = vec![f64::INFINITY; self.n_theta()];
+        let result = minimize_bobyqa(
+            &self.optsum.initial,
+            &lower_bounds,
+            &upper_bounds,
+            PrimaBobyqaOptions {
+                rhobeg: self.optsum.rhobeg,
+                rhoend: self.optsum.rhoend,
+                maxfun,
+            },
+            &mut objective_fn,
+        )?;
+
+        let logged_best_theta = best_theta.into_inner();
+        let logged_best_fmin = best_fmin.get();
+        let (final_theta, final_fmin) =
+            if logged_best_fmin.is_finite() && logged_best_fmin <= result.fmin {
+                (logged_best_theta, logged_best_fmin)
+            } else {
+                (result.x, result.fmin)
+            };
+
+        self.finalize_fit_result(
+            {
+                let mut rectified = final_theta;
+                Self::rectify_theta_columns(&mut rectified, &self.parmap, self.reterms.len());
+                rectified
+            },
+            final_fmin,
+            if result.feval > 0 {
+                result.feval
+            } else {
+                feval_count.get()
+            },
+            fit_log.into_inner(),
+            Optimizer::PrimaBobyqa,
+        )?;
+        self.optsum.return_value = result.return_code;
+        self.optsum.backend = OptimizerBackend::Prima;
+
+        Ok(self)
     }
 
     #[cfg(feature = "nlopt")]
@@ -10245,6 +10370,26 @@ mod tests {
         df.add_numeric("days", days);
         df.add_categorical("subj", subj.into_iter().map(str::to_string).collect());
         df
+    }
+
+    #[test]
+    #[cfg(not(feature = "prima"))]
+    fn test_forced_prima_bobyqa_requires_prima_feature() {
+        let data = shared_julia_parity_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+
+        let err = model
+            .fit_with_forced_optimizer(true, Optimizer::PrimaBobyqa)
+            .unwrap_err();
+
+        match err {
+            MixedModelError::Optimization(message) => {
+                assert!(message.contains("`prima` feature"));
+                assert!(message.contains("libprimac"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     fn shared_julia_crossed_parity_fixture() -> DataFrame {

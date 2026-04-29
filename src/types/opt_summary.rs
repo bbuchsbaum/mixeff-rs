@@ -36,9 +36,8 @@ pub enum Optimizer {
 /// `Native` (the COBYLA crate and the in-tree pattern-search optimizer).
 /// `Nlopt` is the upstream default in the Julia reference and is the active
 /// backend for any `Optimizer::Nlopt*` variant. `Prima` is reserved for the
-/// PRIMA derivative-free family; the FFI binding required to actually run
-/// these optimizers is not yet wired (see issue
-/// `bd-01KQ9TECWH14T6P6S5K5D3DMW7`).
+/// PRIMA derivative-free family; `Optimizer::PrimaBobyqa` is wired for LMMs
+/// when the non-default `prima` Cargo feature is enabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OptimizerBackend {
     /// In-tree Rust optimizers (COBYLA crate, pattern search).
@@ -164,9 +163,8 @@ pub struct OptSummary {
     pub optimizer: Optimizer,
 
     /// Optimization backend providing the optimizer. Defaults to
-    /// `OptimizerBackend::Native`; set to `Prima` to dispatch to the PRIMA
-    /// family (requires the PRIMA FFI to be wired — see
-    /// `bd-01KQ9TECWH14T6P6S5K5D3DMW7`).
+    /// `OptimizerBackend::Native`; PRIMA dispatch requires the non-default
+    /// `prima` Cargo feature and a system `libprimac`.
     pub backend: OptimizerBackend,
 
     // ---- PRIMA-specific tolerances ----
@@ -527,6 +525,8 @@ mod tests {
         assert_eq!(opt.backend_name(), "native");
         opt.optimizer = Optimizer::NloptNewuoa;
         assert_eq!(opt.backend_name(), "nlopt");
+        opt.optimizer = Optimizer::PrimaBobyqa;
+        assert_eq!(opt.backend_name(), "prima");
     }
 
     #[test]

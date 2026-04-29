@@ -32,6 +32,10 @@ default = ["nlopt"]
 # COBYLA-based fits (LMM keeps full functionality; GLMM fitting
 # returns a structured error directing callers to enable the feature).
 nlopt = ["dep:nlopt"]
+# Enables the PRIMA C backend for explicitly requested Powell optimizers.
+# This first slice wires bounded LMM theta optimization through PRIMA BOBYQA
+# only. The feature expects a system PRIMA C library visible to the linker.
+prima = []
 
 [dev-dependencies]
 approx = "0.5"

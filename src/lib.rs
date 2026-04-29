@@ -20,6 +20,7 @@ pub mod error;
 pub mod formula;
 pub mod linalg;
 pub mod model;
+mod optimizer;
 pub mod pathology;
 pub mod stats;
 pub mod types;
