@@ -27,7 +27,8 @@ pub mod transforms;
 pub use certificate::{
     certify, effective_status, effective_status_from_artifact, expected_statuses,
     fisher_correlation_eigvals, map_error_to_status, BoundaryKind, Certificate, CrossedSummary,
-    ExpectedStatusSet, SeparationKind, StructuralIssue, WEAK_ID_THRESHOLD,
+    ExpectedStatusSet, SeparationKind, StructuralIssue, PATHOLOGY_CORPUS_CONTRACT_VERSION,
+    WEAK_ID_THRESHOLD,
 };
 pub use separation::{
     detect_conditional_separation, detect_fe_separation, detect_separation, FeSeparationKind,

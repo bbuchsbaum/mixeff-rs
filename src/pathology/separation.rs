@@ -127,7 +127,9 @@ pub fn detect_separation(spec: &GeneratorSpec) -> SeparationReport {
         return SeparationReport::empty();
     }
 
-    let out = generate(spec);
+    let Ok(out) = generate(spec) else {
+        return SeparationReport::empty();
+    };
     let n_pred = spec.n_fe_predictors();
     let y = match out.data.numeric(&spec.response_name) {
         Some(v) => v.to_vec(),

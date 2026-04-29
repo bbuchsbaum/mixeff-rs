@@ -22,6 +22,7 @@ use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, Normal};
 
 use super::certificate::{Certificate, StructuralIssue};
+use crate::error::{MixedModelError, Result as ModelResult};
 use crate::model::{DataFrame, Family, LinkFunction};
 
 /// Cluster-size threshold below which a Bernoulli/Logit (or Poisson)
@@ -359,7 +360,7 @@ pub struct GeneratorOutput {
 /// separation tier. The realised draw is therefore deterministic
 /// given the spec and used only by the separation tier; all other
 /// strata stay seed-independent.
-pub fn generate(spec: &GeneratorSpec) -> GeneratorOutput {
+pub fn generate(spec: &GeneratorSpec) -> ModelResult<GeneratorOutput> {
     let q = spec.re_dim();
     assert_eq!(
         spec.re_cov_truth.nrows(),
@@ -419,7 +420,7 @@ pub fn generate(spec: &GeneratorSpec) -> GeneratorOutput {
         .map(|_| Vec::with_capacity(n_total))
         .collect();
 
-    let mut emit = |g_idx: usize, h_idx: Option<usize>, rng: &mut StdRng| {
+    let mut emit = |g_idx: usize, h_idx: Option<usize>, rng: &mut StdRng| -> ModelResult<()> {
         let x: Vec<f64> = if n_predictors == 0 {
             Vec::new()
         } else {
@@ -449,7 +450,7 @@ pub fn generate(spec: &GeneratorSpec) -> GeneratorOutput {
             eta += secondary_re[h];
         }
 
-        let y = sample_response(spec, eta, rng);
+        let y = sample_response(spec, eta, rng)?;
         response.push(y);
         groups.push(format!("g{:03}", g_idx + 1));
         if let Some(h) = h_idx {
@@ -458,6 +459,7 @@ pub fn generate(spec: &GeneratorSpec) -> GeneratorOutput {
         for (j, val) in x.iter().enumerate() {
             predictors[j].push(*val);
         }
+        Ok(())
     };
 
     if let Some(crossed) = &spec.crossed {
@@ -477,51 +479,52 @@ pub fn generate(spec: &GeneratorSpec) -> GeneratorOutput {
                 h_idx,
                 crossed.n_levels
             );
-            emit(g_idx, Some(h_idx), &mut rng);
+            emit(g_idx, Some(h_idx), &mut rng)?;
         }
     } else {
         for (g_idx, &group_n) in spec.group_sizes.iter().enumerate() {
             for _ in 0..group_n {
-                emit(g_idx, None, &mut rng);
+                emit(g_idx, None, &mut rng)?;
             }
         }
     }
 
     let mut data = DataFrame::new();
-    data.add_numeric(&spec.response_name, response);
+    data.add_numeric(&spec.response_name, response).unwrap();
     for (j, col) in predictors.into_iter().enumerate() {
-        data.add_numeric(&format!("x{}", j + 1), col);
+        data.add_numeric(&format!("x{}", j + 1), col).unwrap();
     }
-    data.add_categorical(&spec.group_name, groups);
+    data.add_categorical(&spec.group_name, groups).unwrap();
     if let Some(crossed) = &spec.crossed {
-        data.add_categorical(&crossed.name, secondary_groups);
+        data.add_categorical(&crossed.name, secondary_groups)
+            .unwrap();
     }
 
-    GeneratorOutput {
+    Ok(GeneratorOutput {
         data,
         formula: build_formula(spec),
-    }
+    })
 }
 
-fn sample_response(spec: &GeneratorSpec, eta: f64, rng: &mut StdRng) -> f64 {
+fn sample_response(spec: &GeneratorSpec, eta: f64, rng: &mut StdRng) -> ModelResult<f64> {
     match (spec.family, spec.link) {
         (Family::Normal, LinkFunction::Identity) => {
             let noise: f64 = Normal::new(0.0, spec.residual_sd).unwrap().sample(rng);
-            eta + noise
+            Ok(eta + noise)
         }
         (Family::Bernoulli, LinkFunction::Logit) => {
             let z = eta + spec.binary_intercept_shift;
             let p = 1.0 / (1.0 + (-z).exp());
             if rng.gen::<f64>() < p {
-                1.0
+                Ok(1.0)
             } else {
-                0.0
+                Ok(0.0)
             }
         }
-        _ => panic!(
-            "pathology generator does not yet support {:?}/{:?}; see foundation issue follow-ups",
-            spec.family, spec.link
-        ),
+        _ => Err(MixedModelError::UnsupportedFamilyLink {
+            family: format!("{:?}", spec.family),
+            link: format!("{:?}", spec.link),
+        }),
     }
 }
 
@@ -596,4 +599,58 @@ fn sqrt_psd(sigma: &DMatrix<f64>) -> DMatrix<f64> {
     let eig = SymmetricEigen::new(sigma.clone());
     let sqrt_evs = eig.eigenvalues.map(|v| v.max(0.0).sqrt());
     &eig.eigenvectors * DMatrix::from_diagonal(&sqrt_evs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_spec() -> GeneratorSpec {
+        GeneratorSpec::lmm(
+            "generator-test",
+            123,
+            vec![2, 2],
+            vec![0.0, 0.25],
+            true,
+            0,
+            DMatrix::from_element(1, 1, 0.5),
+        )
+    }
+
+    #[test]
+    fn test_pathology_generate_unsupported_family_returns_err() {
+        for (family, link) in [
+            (Family::Bernoulli, LinkFunction::Probit),
+            (Family::Poisson, LinkFunction::Log),
+            (Family::Gamma, LinkFunction::Inverse),
+        ] {
+            let mut spec = base_spec();
+            spec.family = family;
+            spec.link = link;
+
+            let err = generate(&spec).unwrap_err();
+
+            match err {
+                MixedModelError::UnsupportedFamilyLink {
+                    family: got_family,
+                    link: got_link,
+                } => {
+                    assert_eq!(got_family, format!("{family:?}"));
+                    assert_eq!(got_link, format!("{link:?}"));
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_pathology_generate_supported_pairs_succeed() {
+        generate(&base_spec()).unwrap();
+
+        let mut bernoulli = base_spec();
+        bernoulli.family = Family::Bernoulli;
+        bernoulli.link = LinkFunction::Logit;
+
+        generate(&bernoulli).unwrap();
+    }
 }

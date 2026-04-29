@@ -14,6 +14,7 @@ use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::error::MixedModelError;
 use crate::model::DataFrame;
 
 /// Errors raised by the dataset loader. Distinct from [`crate::error::MixedModelError`]
@@ -32,6 +33,8 @@ pub enum DatasetError {
     Schema(String, String),
     #[error("expected numeric value in column `{column}` but got `{value}`")]
     BadNumeric { column: String, value: String },
+    #[error("dataframe construction error: {0}")]
+    DataFrame(#[from] MixedModelError),
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -205,14 +208,14 @@ fn read_csv_with_schema(path: &Path, meta: &Meta) -> Result<DataFrame, DatasetEr
         match col.kind {
             ColumnType::Numeric => {
                 let v = numeric[i].take().unwrap();
-                df.add_numeric(&col.name, v);
+                df.add_numeric(&col.name, v)?;
             }
             ColumnType::Categorical => {
                 let v = strings[i].take().unwrap();
                 if let Some(levels) = &col.levels {
-                    df.add_categorical_with_levels(&col.name, v, levels.clone());
+                    df.add_categorical_with_levels(&col.name, v, levels.clone())?;
                 } else {
-                    df.add_categorical(&col.name, v);
+                    df.add_categorical(&col.name, v)?;
                 }
             }
         }
@@ -306,6 +309,77 @@ mod tests {
         assert_eq!(maximal.expected.as_ref().unwrap().is_singular, Some(true));
     }
 
+    #[test]
+    fn loads_station_season_duration_diagnostic_case() {
+        let (df, meta) = load("station_season_duration").unwrap();
+        assert_eq!(meta.name, "station_season_duration");
+        assert_eq!(df.nrow(), 54);
+        assert_eq!(df.ncol(), 6);
+
+        assert_eq!(
+            df.categorical("duration").unwrap().levels,
+            vec!["4d".to_string(), "7d".to_string()]
+        );
+        assert_eq!(
+            df.categorical("season").unwrap().levels,
+            vec!["mon".to_string(), "post".to_string(), "pre".to_string()]
+        );
+        assert_eq!(
+            df.categorical("sites").unwrap().levels,
+            vec!["s1".to_string(), "s2".to_string(), "s3".to_string()]
+        );
+
+        let effect = df.numeric("effect").unwrap();
+        assert!((effect[0] - 7305.91).abs() < 1e-9);
+        assert!((effect[53] - 6987.5).abs() < 1e-9);
+
+        assert!(meta.fits.iter().any(|fit| fit.formula
+            == "effect ~ 1 + duration + (1 + duration | sites) + (1 + duration | season)"));
+        assert!(meta
+            .tags
+            .structure
+            .iter()
+            .any(|tag| tag == "weakly_supported"));
+        assert_eq!(meta.tags.difficulty.as_deref(), Some("boundary"));
+    }
+
+    #[test]
+    fn loads_nested_constant_response_diagnostic_case() {
+        let (df, meta) = load("nested_constant_response").unwrap();
+        assert_eq!(meta.name, "nested_constant_response");
+        assert_eq!(df.nrow(), 24);
+        assert_eq!(df.ncol(), 4);
+
+        assert_eq!(
+            df.categorical("studyarea").unwrap().levels,
+            vec!["A".to_string(), "B".to_string(), "C".to_string()]
+        );
+        assert_eq!(
+            df.categorical("teriid").unwrap().levels,
+            vec![
+                "t1".to_string(),
+                "t2".to_string(),
+                "t3".to_string(),
+                "t4".to_string()
+            ]
+        );
+
+        let spm = df.numeric("spm").unwrap();
+        let y = df.numeric("logterrisize").unwrap();
+        assert_eq!(spm[0], 4.0);
+        assert_eq!(spm[1], 9.0);
+        assert_eq!(y[0], y[1]);
+        assert!(meta
+            .fits
+            .iter()
+            .any(|fit| fit.formula == "logterrisize ~ 1 + spm + (1 | studyarea/teriid)"));
+        assert!(meta
+            .tags
+            .structure
+            .iter()
+            .any(|tag| tag == "duplicated_response"));
+    }
+
     /// Sanity-check every Tier-1 + Tier-2 dataset that lives in the repo.
     /// Anything we ship must at least parse cleanly and match its declared row count.
     #[test]
@@ -329,6 +403,8 @@ mod tests {
             "kb07",
             "singular",
             "tungara_single_caller",
+            "station_season_duration",
+            "nested_constant_response",
         ];
         for name in names {
             let dir = datasets_root().join(name);

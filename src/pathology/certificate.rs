@@ -37,6 +37,13 @@ const RANK_REL_TOL: f64 = 1e-12;
 /// to admit `ConvergedReducedRank` alongside the usual converged set.
 pub const WEAK_ID_THRESHOLD: f64 = 10.0;
 
+/// Current contract version for pathology-corpus fixture expectations.
+///
+/// Bump this only with a deliberate fixture migration pass that re-evaluates
+/// each fixture's expected [`FitStatus`] set and records the rationale in the
+/// contract version log.
+pub const PATHOLOGY_CORPUS_CONTRACT_VERSION: &str = "v0.3";
+
 /// Analytically-derived classification of a [`GeneratorSpec`]'s
 /// identifiability.
 ///
@@ -720,7 +727,9 @@ pub fn effective_status_from_artifact(artifact: &CompiledModelArtifact) -> FitSt
 pub fn map_error_to_status(err: &MixedModelError) -> FitStatus {
     use FitStatus::*;
     match err {
-        MixedModelError::Singular(_) | MixedModelError::PosDefException => NotIdentifiable,
+        MixedModelError::Singular(_)
+        | MixedModelError::RankSaturatedFixedEffects { .. }
+        | MixedModelError::PosDefException => NotIdentifiable,
         MixedModelError::LinAlg(LinAlgError::RankDeficient { .. })
         | MixedModelError::LinAlg(LinAlgError::Singular)
         | MixedModelError::LinAlg(LinAlgError::NotPositiveDefinite) => NotIdentifiable,
