@@ -1565,6 +1565,10 @@ impl ConvergenceVerdict {
         format!("{} — {}", self.level.as_str(), self.headline)
     }
 
+    pub fn primary_doc_anchor(&self) -> Option<&str> {
+        self.evidence.first().map(|evidence| evidence.doc_anchor.as_str())
+    }
+
     fn compose(
         certificate: &super::audit::OptimizerCertificate,
         diagnostics: &[Diagnostic],
@@ -1755,9 +1759,7 @@ impl From<NextActionKind> for ConvergenceNextAction {
             NextActionKind::GateInferenceOnDerivative => {
                 ConvergenceNextAction::GateInferenceOnDerivativeEvidence
             }
-            NextActionKind::GateWeakIdentification => {
-                ConvergenceNextAction::GateWeakIdentification
-            }
+            NextActionKind::GateWeakIdentification => ConvergenceNextAction::GateWeakIdentification,
             NextActionKind::PredictorScalingOrSimplifyRe => {
                 ConvergenceNextAction::RescaleOrSimplifyRandomEffects
             }
@@ -1844,22 +1846,41 @@ fn optimizer_summary(
             | super::audit::EvidenceMethod::NotAssessed { .. }
     ) {
         bump(&mut level, ConvergenceLevel::Caution);
-        clauses.push("weak gradient evidence".to_string());
-        actions.push(NextActionKind::GateInferenceOnDerivative);
+        let regime = convergence_regime(certificate, derivative_nparmax);
+        if matches!(
+            certificate.evidence.gradient.method,
+            super::audit::EvidenceMethod::NotAssessed { .. }
+        ) && matches!(
+            regime,
+            ConvergenceRegime::BoundaryTheta | ConvergenceRegime::LargeTheta
+        ) {
+            clauses.push("derivative inspection skipped by regime".to_string());
+        } else {
+            clauses.push("derivative inspection not assessed".to_string());
+            actions.push(NextActionKind::GateInferenceOnDerivative);
+        }
     }
 
     if let super::audit::EvidenceQuality::Failed { .. } =
         &certificate.evidence.certification_quality
     {
         bump(&mut level, ConvergenceLevel::Caution);
-        clauses.push("certification failed".to_string());
+        if certificate.evidence.optimizer_stop.acceptable_stop {
+            clauses.push("inspection note: derivative check did not pass".to_string());
+        } else {
+            clauses.push("certification failed".to_string());
+        }
         actions.push(NextActionKind::PredictorScalingOrSimplifyRe);
     }
 
     match &certificate.evidence.hessian.quality {
         super::audit::EvidenceQuality::Failed { .. } => {
             bump(&mut level, ConvergenceLevel::Caution);
-            clauses.push("weak Hessian".to_string());
+            if certificate.evidence.optimizer_stop.acceptable_stop {
+                clauses.push("inspection note: weak Hessian".to_string());
+            } else {
+                clauses.push("weak Hessian".to_string());
+            }
             actions.push(NextActionKind::PredictorScalingOrSimplifyRe);
         }
         super::audit::EvidenceQuality::Unavailable { .. }
@@ -1965,8 +1986,7 @@ fn optimizer_verdict_evidence(
                     detail: format!(
                         "max boundary-gradient violation {value:.6e} <= tolerance {tolerance:.6e}"
                     ),
-                    doc_anchor: "docs/compiler_verdicts.md#boundary-and-singular-fits"
-                        .to_string(),
+                    doc_anchor: "docs/compiler_verdicts.md#boundary-and-singular-fits".to_string(),
                 });
             }
             super::audit::CertificateCheck::HessianPsdOnActiveSubspace { min_eigenvalue } => {
@@ -2109,9 +2129,7 @@ fn theta_regime_doc_anchor(
     derivative_nparmax: usize,
 ) -> &'static str {
     match convergence_regime(certificate, derivative_nparmax) {
-        ConvergenceRegime::BoundaryTheta => {
-            "docs/compiler_verdicts.md#boundary-and-singular-fits"
-        }
+        ConvergenceRegime::BoundaryTheta => "docs/compiler_verdicts.md#boundary-and-singular-fits",
         ConvergenceRegime::LargeTheta => "docs/compiler_verdicts.md#large-theta-fits",
         _ => "docs/compiler_verdicts.md#derivative-inspection",
     }
@@ -2129,10 +2147,7 @@ fn not_assessed_test_name(reason: &str) -> &'static str {
     }
 }
 
-fn skipped_observed(
-    certificate: &super::audit::OptimizerCertificate,
-    reason: &str,
-) -> Option<f64> {
+fn skipped_observed(certificate: &super::audit::OptimizerCertificate, reason: &str) -> Option<f64> {
     if reason.contains("theta dimension") {
         Some(certificate.evidence.parameter_space.n_theta as f64)
     } else {
@@ -2600,7 +2615,8 @@ fn convergence_next_steps_line(
         certificate.evidence.gradient.method,
         super::audit::EvidenceMethod::NotAvailable { .. }
             | super::audit::EvidenceMethod::NotAssessed { .. }
-    ) {
+    ) && !derivative_inspection_skipped_by_regime(certificate)
+    {
         kinds.push(NextActionKind::GateInferenceOnDerivative);
     }
     if matches!(
@@ -2668,6 +2684,17 @@ fn convergence_next_steps_line(
         } else {
             actions.join(" | ")
         },
+    }
+}
+
+fn derivative_inspection_skipped_by_regime(
+    certificate: &super::audit::OptimizerCertificate,
+) -> bool {
+    match &certificate.evidence.gradient.method {
+        super::audit::EvidenceMethod::NotAssessed { reason } => {
+            reason.contains("boundary") || reason.contains("convergence_derivative_nparmax")
+        }
+        _ => false,
     }
 }
 

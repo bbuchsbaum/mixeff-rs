@@ -10947,14 +10947,11 @@ mod tests {
             EvidenceQuality::NotAssessed { reason } if reason.contains("variance-component boundary")
         ));
         assert_eq!(certificate.evidence.hessian.rank, None);
-        assert!(certificate
-            .checks
-            .iter()
-            .any(|check| matches!(
-                check,
-                CertificateCheck::NotAssessed { reason }
-                    if reason.contains("boundary-gradient KKT check skipped")
-            )));
+        assert!(certificate.checks.iter().any(|check| matches!(
+            check,
+            CertificateCheck::NotAssessed { reason }
+                if reason.contains("boundary-gradient KKT check skipped")
+        )));
         assert!(certificate
             .diagnostics
             .iter()
@@ -14955,8 +14952,7 @@ mod tests {
             assert_eq!(test.status, InferenceStatus::Available, "{}", case.name);
             assert_eq!(test.reliability, ReliabilityGrade::Low, "{}", case.name);
             assert!(
-                (test.estimates[0] - case.estimate).abs()
-                    <= 1e-5 + 1e-6 * case.estimate.abs(),
+                (test.estimates[0] - case.estimate).abs() <= 1e-5 + 1e-6 * case.estimate.abs(),
                 "{}: β drift",
                 case.name
             );
