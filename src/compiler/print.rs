@@ -128,12 +128,22 @@ impl fmt::Display for ModelPrint {
             "{:?} [{}]: {:?}",
             self.model_kind, status_label, self.fit_mode
         )?;
-        writeln!(
-            f,
-            "  convergence: {} — {}",
-            self.verdict.level.as_str(),
-            self.verdict.headline
-        )?;
+        if let Some(anchor) = self.verdict.primary_doc_anchor() {
+            writeln!(
+                f,
+                "  convergence: {} — {} ({})",
+                self.verdict.level.as_str(),
+                self.verdict.headline,
+                anchor
+            )?;
+        } else {
+            writeln!(
+                f,
+                "  convergence: {} — {}",
+                self.verdict.level.as_str(),
+                self.verdict.headline
+            )?;
+        }
         if let Some(next_step) = &self.verdict.next_step {
             if !matches!(self.verdict.level, ConvergenceLevel::Certified) {
                 writeln!(f, "    next: {}", next_step)?;
