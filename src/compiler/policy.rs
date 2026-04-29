@@ -4,6 +4,8 @@ use super::audit::{DesignAudit, InformationBudgetStatus, RandomTermAudit};
 use super::diagnostics::{Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticStage};
 use super::ir::{CovarianceForm, InterceptPolicy, RandomTermIr, SemanticModel};
 
+pub const DEFAULT_CONVERGENCE_DERIVATIVE_NPARMAX: usize = 10;
+
 /// Deterministic compiler policy used for v0 recommendations.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CompilerPolicy {
@@ -46,6 +48,14 @@ impl CompilerPolicy {
     pub fn design_compiled() -> Self {
         Self::maximal_feasible()
     }
+
+    pub fn predictive() -> Self {
+        Self {
+            random_strategy: RandomStrategy::Predictive,
+            thresholds: CompilerThresholds::default(),
+            apply_design_time_reductions: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +64,7 @@ pub enum RandomStrategy {
     AsSpecified,
     MaximalFeasible,
     Regularized,
+    Predictive,
 }
 
 /// Named v0 thresholds. These defaults mirror the PRD and must remain
@@ -68,6 +79,7 @@ pub struct CompilerThresholds {
     pub min_observations_per_supported_level: usize,
     pub effective_rank_relative_tolerance: f64,
     pub effective_rank_absolute_tolerance: f64,
+    pub convergence_derivative_nparmax: usize,
 }
 
 impl Default for CompilerThresholds {
@@ -81,6 +93,7 @@ impl Default for CompilerThresholds {
             min_observations_per_supported_level: 2,
             effective_rank_relative_tolerance: 1e-6,
             effective_rank_absolute_tolerance: 1e-10,
+            convergence_derivative_nparmax: DEFAULT_CONVERGENCE_DERIVATIVE_NPARMAX,
         }
     }
 }
@@ -141,6 +154,10 @@ impl CompilerThresholds {
                 "effective_rank_absolute_tolerance".to_string(),
                 self.effective_rank_absolute_tolerance.to_string(),
             ),
+            (
+                "convergence_derivative_nparmax".to_string(),
+                self.convergence_derivative_nparmax.to_string(),
+            ),
         ]
     }
 }
@@ -175,7 +192,9 @@ pub fn recommend_policy(
 ) -> Vec<PolicyRecommendation> {
     match policy.random_strategy {
         RandomStrategy::AsSpecified => Vec::new(),
-        RandomStrategy::MaximalFeasible | RandomStrategy::Regularized => semantic_model
+        RandomStrategy::MaximalFeasible
+        | RandomStrategy::Regularized
+        | RandomStrategy::Predictive => semantic_model
             .random_terms
             .iter()
             .zip(design_audit.random_terms.iter())

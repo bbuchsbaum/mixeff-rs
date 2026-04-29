@@ -10,6 +10,7 @@ use super::artifact::{
 use super::audit::{BasisAudit, InformationBudgetStatus, RandomTermAudit, RankStatus};
 use super::diagnostics::{Diagnostic, DiagnosticCode, DiagnosticSeverity, FitStatus};
 use super::ir::{CovarianceForm, RandomCoefficient, RandomCoefficientKind, RandomTermIr};
+use super::policy::DEFAULT_CONVERGENCE_DERIVATIVE_NPARMAX;
 use super::random_term_card::{
     CrossCardConstraint, DesignSupport, ImpliedConstraintKind, RandomTermBlock, RandomTermCard,
     RoleOrigin, WithinGroupVariation, RANDOM_TERM_CARD_SCHEMA, RANDOM_TERM_CARD_SCHEMA_VERSION,
@@ -1343,7 +1344,7 @@ fn optimizer_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
     });
     lines.push(AuditReportLine {
         label: "hessian evidence".to_string(),
-        status: evidence_quality_status(&certificate.evidence.hessian.quality),
+        status: hessian_evidence_status(certificate),
         detail: format!(
             "method={}; quality={}; min_eigen={}; condition={}; rank={}",
             evidence_method_label(&certificate.evidence.hessian.method),
@@ -1355,10 +1356,13 @@ fn optimizer_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
     });
     lines.push(AuditReportLine {
         label: "certification quality".to_string(),
-        status: evidence_quality_status(&certificate.evidence.certification_quality),
+        status: certification_quality_status(certificate),
         detail: evidence_quality_detail(&certificate.evidence.certification_quality),
     });
-    lines.push(convergence_next_steps_line(certificate, &artifact.diagnostics));
+    lines.push(convergence_next_steps_line(
+        certificate,
+        &artifact.diagnostics,
+    ));
 
     let not_assessed = certificate
         .checks
@@ -1372,7 +1376,9 @@ fn optimizer_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
         .count();
     lines.push(AuditReportLine {
         label: "derivative checks".to_string(),
-        status: if failed > 0 {
+        status: if failed > 0 && certificate.evidence.optimizer_stop.acceptable_stop {
+            AuditReportStatus::Info
+        } else if failed > 0 {
             AuditReportStatus::Warning
         } else if not_assessed == 0 {
             AuditReportStatus::Ok
@@ -1405,15 +1411,30 @@ fn optimizer_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
 /// `CompiledModelArtifact::diagnostics` via
 /// [`ConvergenceVerdict::for_artifact`]. It is **not** persisted on the
 /// artifact so the audit JSON schema is unchanged.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConvergenceVerdict {
     pub level: ConvergenceLevel,
     pub source: ConvergenceSource,
     /// One short clause summarising the verdict for compact print.
     pub headline: String,
+    /// Structured convergence/inspection evidence that backs the headline.
+    pub evidence: Vec<ConvergenceVerdictEvidence>,
+    /// Stable action code for downstream renderers.
+    pub next_action: Option<ConvergenceNextAction>,
     /// One actionable clause; `None` for clean fits where no follow-up
     /// is recommended.
     pub next_step: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConvergenceVerdictEvidence {
+    pub test_name: String,
+    pub observed: Option<f64>,
+    pub threshold: Option<f64>,
+    pub regime: ConvergenceRegime,
+    pub status: ConvergenceTestStatus,
+    pub detail: String,
+    pub doc_anchor: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1434,6 +1455,44 @@ pub enum ConvergenceSource {
     Structural,
     Mixed,
     NotAssessed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConvergenceRegime {
+    Unfitted,
+    OptimizerStop,
+    InteriorTheta,
+    BoundaryTheta,
+    LargeTheta,
+    Verification,
+    Structural,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConvergenceTestStatus {
+    Passed,
+    Failed,
+    Skipped,
+    NotAssessed,
+    Informational,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConvergenceNextAction {
+    FitModel,
+    IncreaseBudgetOrAlternateOptimizer,
+    VerifyConvergence,
+    GateInferenceOnDerivativeEvidence,
+    GateWeakIdentification,
+    RescaleOrSimplifyRandomEffects,
+    InspectEffectiveCovariance,
+    TreatAgreementAsReassuring,
+    CompareVerificationRuns,
+    ReviseStructuralModel,
 }
 
 impl ConvergenceLevel {
@@ -1468,7 +1527,14 @@ impl ConvergenceVerdict {
     pub fn for_artifact(artifact: &CompiledModelArtifact) -> Self {
         match artifact.optimizer_certificate.as_ref() {
             None => Self::for_unfitted(),
-            Some(certificate) => Self::compose(certificate, &artifact.diagnostics),
+            Some(certificate) => Self::compose_with_nparmax(
+                certificate,
+                &artifact.diagnostics,
+                artifact
+                    .compiler_policy
+                    .thresholds
+                    .convergence_derivative_nparmax,
+            ),
         }
     }
 
@@ -1478,9 +1544,17 @@ impl ConvergenceVerdict {
             level: ConvergenceLevel::NotAssessed,
             source: ConvergenceSource::NotAssessed,
             headline: "model is not fitted".to_string(),
-            next_step: Some(
-                "call .fit() to populate the convergence certificate".to_string(),
-            ),
+            evidence: vec![ConvergenceVerdictEvidence {
+                test_name: "fit_state".to_string(),
+                observed: None,
+                threshold: None,
+                regime: ConvergenceRegime::Unfitted,
+                status: ConvergenceTestStatus::NotAssessed,
+                detail: "model has not been fitted".to_string(),
+                doc_anchor: "docs/compiler_verdicts.md#not-assessed".to_string(),
+            }],
+            next_action: Some(ConvergenceNextAction::FitModel),
+            next_step: Some("call .fit() to populate the convergence certificate".to_string()),
         }
     }
 
@@ -1495,7 +1569,19 @@ impl ConvergenceVerdict {
         certificate: &super::audit::OptimizerCertificate,
         diagnostics: &[Diagnostic],
     ) -> Self {
-        let optimizer = optimizer_summary(certificate);
+        Self::compose_with_nparmax(
+            certificate,
+            diagnostics,
+            DEFAULT_CONVERGENCE_DERIVATIVE_NPARMAX,
+        )
+    }
+
+    fn compose_with_nparmax(
+        certificate: &super::audit::OptimizerCertificate,
+        diagnostics: &[Diagnostic],
+        derivative_nparmax: usize,
+    ) -> Self {
+        let optimizer = optimizer_summary(certificate, derivative_nparmax);
         let structural = structural_findings(diagnostics);
 
         if structural.is_empty() {
@@ -1503,12 +1589,13 @@ impl ConvergenceVerdict {
             // next_step from the optimizer summary alone. Reassurance
             // actions (e.g. "verification agrees") are not real
             // follow-ups, so they don't populate `next_step`.
-            let next_step = optimizer
+            let next_action_kind = optimizer
                 .actions
                 .iter()
                 .filter(|a| !a.is_reassurance())
                 .min_by_key(|a| a.priority())
-                .map(|a| a.text().to_string());
+                .copied();
+            let next_step = next_action_kind.map(|a| a.text().to_string());
 
             let (level, source) = match (optimizer.level, &next_step) {
                 (ConvergenceLevel::Certified, None) => {
@@ -1522,6 +1609,8 @@ impl ConvergenceVerdict {
                 level,
                 source,
                 headline: optimizer.headline,
+                evidence: optimizer.evidence,
+                next_action: next_action_kind.map(|action| ConvergenceNextAction::from(action)),
                 next_step,
             };
         }
@@ -1559,6 +1648,8 @@ impl ConvergenceVerdict {
             level: ConvergenceLevel::Failed,
             source,
             headline,
+            evidence: structural_verdict_evidence(&structural),
+            next_action: Some(primary.next_action()),
             next_step: Some(primary.next_step()),
         }
     }
@@ -1654,6 +1745,35 @@ impl NextActionKind {
     }
 }
 
+impl From<NextActionKind> for ConvergenceNextAction {
+    fn from(value: NextActionKind) -> Self {
+        match value {
+            NextActionKind::BudgetOrAlternate => {
+                ConvergenceNextAction::IncreaseBudgetOrAlternateOptimizer
+            }
+            NextActionKind::SuggestVerify => ConvergenceNextAction::VerifyConvergence,
+            NextActionKind::GateInferenceOnDerivative => {
+                ConvergenceNextAction::GateInferenceOnDerivativeEvidence
+            }
+            NextActionKind::GateWeakIdentification => {
+                ConvergenceNextAction::GateWeakIdentification
+            }
+            NextActionKind::PredictorScalingOrSimplifyRe => {
+                ConvergenceNextAction::RescaleOrSimplifyRandomEffects
+            }
+            NextActionKind::InspectEffectiveCovariance => {
+                ConvergenceNextAction::InspectEffectiveCovariance
+            }
+            NextActionKind::TreatAgreementAsReassuring => {
+                ConvergenceNextAction::TreatAgreementAsReassuring
+            }
+            NextActionKind::CompareVerificationRuns => {
+                ConvergenceNextAction::CompareVerificationRuns
+            }
+        }
+    }
+}
+
 /// Compact, level-aware summary of the optimizer dimension only. The
 /// verdict overlays this with structural findings; the audit lines
 /// (`convergence_interpretation`, `convergence_next_steps_line`) reuse
@@ -1662,12 +1782,17 @@ struct OptimizerSummary {
     level: ConvergenceLevel,
     headline: String,
     actions: Vec<NextActionKind>,
+    evidence: Vec<ConvergenceVerdictEvidence>,
 }
 
-fn optimizer_summary(certificate: &super::audit::OptimizerCertificate) -> OptimizerSummary {
+fn optimizer_summary(
+    certificate: &super::audit::OptimizerCertificate,
+    derivative_nparmax: usize,
+) -> OptimizerSummary {
     let mut level = ConvergenceLevel::Certified;
     let mut clauses: Vec<String> = Vec::new();
     let mut actions: Vec<NextActionKind> = Vec::new();
+    let evidence = optimizer_verdict_evidence(certificate, derivative_nparmax);
 
     let bump = |current: &mut ConvergenceLevel, target: ConvergenceLevel| {
         if level_severity(target) > level_severity(*current) {
@@ -1773,11 +1898,307 @@ fn optimizer_summary(certificate: &super::audit::OptimizerCertificate) -> Optimi
         }
     }
 
+    if matches!(level, ConvergenceLevel::Certified)
+        && !has_certified_derivative_evidence(certificate)
+    {
+        level = ConvergenceLevel::Ok;
+        clauses.push("derivative evidence is approximate".to_string());
+    }
+
     OptimizerSummary {
         level,
         headline: clauses.join("; "),
         actions,
+        evidence,
     }
+}
+
+fn optimizer_verdict_evidence(
+    certificate: &super::audit::OptimizerCertificate,
+    derivative_nparmax: usize,
+) -> Vec<ConvergenceVerdictEvidence> {
+    let mut evidence = Vec::new();
+    evidence.push(ConvergenceVerdictEvidence {
+        test_name: "optimizer_stop".to_string(),
+        observed: None,
+        threshold: None,
+        regime: ConvergenceRegime::OptimizerStop,
+        status: if certificate.evidence.optimizer_stop.acceptable_stop {
+            ConvergenceTestStatus::Passed
+        } else {
+            ConvergenceTestStatus::Failed
+        },
+        detail: optimizer_stop_detail(certificate),
+        doc_anchor: "docs/compiler_verdicts.md#optimizer-stop".to_string(),
+    });
+
+    evidence.push(ConvergenceVerdictEvidence {
+        test_name: "theta_regime".to_string(),
+        observed: Some(certificate.evidence.parameter_space.n_theta as f64),
+        threshold: Some(derivative_nparmax as f64),
+        regime: convergence_regime(certificate, derivative_nparmax),
+        status: ConvergenceTestStatus::Informational,
+        detail: theta_regime_detail(certificate, derivative_nparmax),
+        doc_anchor: theta_regime_doc_anchor(certificate, derivative_nparmax).to_string(),
+    });
+
+    for check in &certificate.checks {
+        match check {
+            super::audit::CertificateCheck::FreeGradientOk { tolerance, value } => {
+                evidence.push(ConvergenceVerdictEvidence {
+                    test_name: "free_gradient_kkt".to_string(),
+                    observed: Some(*value),
+                    threshold: Some(*tolerance),
+                    regime: convergence_regime(certificate, derivative_nparmax),
+                    status: ConvergenceTestStatus::Passed,
+                    detail: format!("max free-gradient {value:.6e} <= tolerance {tolerance:.6e}"),
+                    doc_anchor: "docs/compiler_verdicts.md#derivative-inspection".to_string(),
+                });
+            }
+            super::audit::CertificateCheck::BoundaryGradientOk { tolerance, value } => {
+                evidence.push(ConvergenceVerdictEvidence {
+                    test_name: "boundary_gradient_kkt".to_string(),
+                    observed: Some(*value),
+                    threshold: Some(*tolerance),
+                    regime: ConvergenceRegime::BoundaryTheta,
+                    status: ConvergenceTestStatus::Passed,
+                    detail: format!(
+                        "max boundary-gradient violation {value:.6e} <= tolerance {tolerance:.6e}"
+                    ),
+                    doc_anchor: "docs/compiler_verdicts.md#boundary-and-singular-fits"
+                        .to_string(),
+                });
+            }
+            super::audit::CertificateCheck::HessianPsdOnActiveSubspace { min_eigenvalue } => {
+                evidence.push(ConvergenceVerdictEvidence {
+                    test_name: "active_subspace_hessian_psd".to_string(),
+                    observed: Some(*min_eigenvalue),
+                    threshold: Some(0.0),
+                    regime: convergence_regime(certificate, derivative_nparmax),
+                    status: ConvergenceTestStatus::Passed,
+                    detail: format!(
+                        "active-subspace Hessian minimum eigenvalue {min_eigenvalue:.6e}"
+                    ),
+                    doc_anchor: "docs/compiler_verdicts.md#derivative-inspection".to_string(),
+                });
+            }
+            super::audit::CertificateCheck::RankOk { rank, expected } => {
+                evidence.push(ConvergenceVerdictEvidence {
+                    test_name: "active_subspace_hessian_rank".to_string(),
+                    observed: Some(*rank as f64),
+                    threshold: Some(*expected as f64),
+                    regime: convergence_regime(certificate, derivative_nparmax),
+                    status: ConvergenceTestStatus::Passed,
+                    detail: format!("active-subspace Hessian rank {rank} of {expected}"),
+                    doc_anchor: "docs/compiler_verdicts.md#derivative-inspection".to_string(),
+                });
+            }
+            super::audit::CertificateCheck::NotAssessed { reason } => {
+                evidence.push(ConvergenceVerdictEvidence {
+                    test_name: not_assessed_test_name(reason).to_string(),
+                    observed: skipped_observed(certificate, reason),
+                    threshold: skipped_threshold(derivative_nparmax, reason),
+                    regime: skipped_regime(certificate, derivative_nparmax, reason),
+                    status: ConvergenceTestStatus::Skipped,
+                    detail: reason.clone(),
+                    doc_anchor: skipped_doc_anchor(reason).to_string(),
+                });
+            }
+            super::audit::CertificateCheck::Failed { code, message } => {
+                evidence.push(ConvergenceVerdictEvidence {
+                    test_name: code.clone(),
+                    observed: failed_check_observed(certificate, code),
+                    threshold: None,
+                    regime: convergence_regime(certificate, derivative_nparmax),
+                    status: ConvergenceTestStatus::Failed,
+                    detail: if certificate.evidence.optimizer_stop.acceptable_stop {
+                        format!(
+                            "post-hoc inspection failed but does not override optimizer convergence: {message}"
+                        )
+                    } else {
+                        message.clone()
+                    },
+                    doc_anchor: "docs/compiler_verdicts.md#derivative-inspection".to_string(),
+                });
+            }
+        }
+    }
+
+    if let Some(verification) = &certificate.verification {
+        evidence.push(ConvergenceVerdictEvidence {
+            test_name: "convergence_verification".to_string(),
+            observed: Some(verification.runs.iter().filter(|run| run.agrees).count() as f64),
+            threshold: Some(verification.runs.len() as f64),
+            regime: ConvergenceRegime::Verification,
+            status: match verification.status {
+                super::audit::ConvergenceVerificationStatus::RestartAgrees
+                | super::audit::ConvergenceVerificationStatus::OptimizerConsensus => {
+                    ConvergenceTestStatus::Passed
+                }
+                super::audit::ConvergenceVerificationStatus::Fragile
+                | super::audit::ConvergenceVerificationStatus::Unstable => {
+                    ConvergenceTestStatus::Failed
+                }
+                super::audit::ConvergenceVerificationStatus::NotRun => {
+                    ConvergenceTestStatus::NotAssessed
+                }
+            },
+            detail: verification.message.clone(),
+            doc_anchor: "docs/compiler_verdicts.md#verification".to_string(),
+        });
+    }
+
+    evidence
+}
+
+fn optimizer_stop_detail(certificate: &super::audit::OptimizerCertificate) -> String {
+    let code = certificate
+        .evidence
+        .optimizer_stop
+        .return_code
+        .as_deref()
+        .unwrap_or("unknown");
+    if certificate.evidence.optimizer_stop.acceptable_stop {
+        format!("optimizer returned acceptable stop code {code}")
+    } else {
+        format!("optimizer stop code {code} is not acceptable")
+    }
+}
+
+fn convergence_regime(
+    certificate: &super::audit::OptimizerCertificate,
+    derivative_nparmax: usize,
+) -> ConvergenceRegime {
+    let space = &certificate.evidence.parameter_space;
+    if space.n_boundary > 0 {
+        ConvergenceRegime::BoundaryTheta
+    } else if space.n_theta > derivative_nparmax {
+        ConvergenceRegime::LargeTheta
+    } else if space.n_theta > 0 {
+        ConvergenceRegime::InteriorTheta
+    } else {
+        ConvergenceRegime::Unknown
+    }
+}
+
+fn theta_regime_detail(
+    certificate: &super::audit::OptimizerCertificate,
+    derivative_nparmax: usize,
+) -> String {
+    let space = &certificate.evidence.parameter_space;
+    if space.n_boundary > 0 {
+        format!(
+            "theta has {} parameter(s), {} on boundary; derivative KKT checks are skipped for boundary fits",
+            space.n_theta, space.n_boundary
+        )
+    } else if space.n_theta > derivative_nparmax {
+        format!(
+            "theta has {} parameter(s), above convergence_derivative_nparmax {}; finite-difference checks are skipped",
+            space.n_theta, derivative_nparmax
+        )
+    } else {
+        format!(
+            "theta has {} interior parameter(s), within convergence_derivative_nparmax {}",
+            space.n_theta, derivative_nparmax
+        )
+    }
+}
+
+fn theta_regime_doc_anchor(
+    certificate: &super::audit::OptimizerCertificate,
+    derivative_nparmax: usize,
+) -> &'static str {
+    match convergence_regime(certificate, derivative_nparmax) {
+        ConvergenceRegime::BoundaryTheta => {
+            "docs/compiler_verdicts.md#boundary-and-singular-fits"
+        }
+        ConvergenceRegime::LargeTheta => "docs/compiler_verdicts.md#large-theta-fits",
+        _ => "docs/compiler_verdicts.md#derivative-inspection",
+    }
+}
+
+fn not_assessed_test_name(reason: &str) -> &'static str {
+    if reason.contains("free-gradient") {
+        "free_gradient_kkt"
+    } else if reason.contains("boundary-gradient") {
+        "boundary_gradient_kkt"
+    } else if reason.contains("Hessian") {
+        "active_subspace_hessian"
+    } else {
+        "derivative_inspection"
+    }
+}
+
+fn skipped_observed(
+    certificate: &super::audit::OptimizerCertificate,
+    reason: &str,
+) -> Option<f64> {
+    if reason.contains("theta dimension") {
+        Some(certificate.evidence.parameter_space.n_theta as f64)
+    } else {
+        None
+    }
+}
+
+fn skipped_threshold(derivative_nparmax: usize, reason: &str) -> Option<f64> {
+    reason
+        .contains("convergence_derivative_nparmax")
+        .then_some(derivative_nparmax as f64)
+}
+
+fn skipped_regime(
+    certificate: &super::audit::OptimizerCertificate,
+    derivative_nparmax: usize,
+    reason: &str,
+) -> ConvergenceRegime {
+    if reason.contains("boundary") {
+        ConvergenceRegime::BoundaryTheta
+    } else if reason.contains("large-theta") || reason.contains("theta dimension") {
+        ConvergenceRegime::LargeTheta
+    } else {
+        convergence_regime(certificate, derivative_nparmax)
+    }
+}
+
+fn skipped_doc_anchor(reason: &str) -> &'static str {
+    if reason.contains("boundary") {
+        "docs/compiler_verdicts.md#boundary-and-singular-fits"
+    } else if reason.contains("large-theta") || reason.contains("theta dimension") {
+        "docs/compiler_verdicts.md#large-theta-fits"
+    } else {
+        "docs/compiler_verdicts.md#derivative-inspection"
+    }
+}
+
+fn failed_check_observed(
+    certificate: &super::audit::OptimizerCertificate,
+    code: &str,
+) -> Option<f64> {
+    match code {
+        "free_gradient_kkt_failed" => certificate.evidence.gradient.free_gradient_norm,
+        "boundary_gradient_kkt_failed" => certificate.evidence.gradient.kkt_boundary_gradient_max,
+        "hessian_active_subspace_not_psd" => certificate.evidence.hessian.min_eigenvalue,
+        "hessian_active_subspace_rank_deficient" => {
+            certificate.evidence.hessian.rank.map(|rank| rank as f64)
+        }
+        _ => None,
+    }
+}
+
+fn has_certified_derivative_evidence(certificate: &super::audit::OptimizerCertificate) -> bool {
+    matches!(
+        certificate.evidence.gradient.method,
+        super::audit::EvidenceMethod::Exact
+    ) && matches!(
+        certificate.evidence.hessian.method,
+        super::audit::EvidenceMethod::Exact
+    ) && matches!(
+        certificate.evidence.hessian.quality,
+        super::audit::EvidenceQuality::Certified
+    ) && matches!(
+        certificate.evidence.certification_quality,
+        super::audit::EvidenceQuality::Certified
+    )
 }
 
 fn level_severity(level: ConvergenceLevel) -> u8 {
@@ -1895,6 +2316,25 @@ impl StructuralFinding {
             ),
         }
     }
+
+    fn next_action(&self) -> ConvergenceNextAction {
+        ConvergenceNextAction::ReviseStructuralModel
+    }
+}
+
+fn structural_verdict_evidence(findings: &[StructuralFinding]) -> Vec<ConvergenceVerdictEvidence> {
+    findings
+        .iter()
+        .map(|finding| ConvergenceVerdictEvidence {
+            test_name: "structural_design".to_string(),
+            observed: None,
+            threshold: None,
+            regime: ConvergenceRegime::Structural,
+            status: ConvergenceTestStatus::Failed,
+            detail: finding.headline(),
+            doc_anchor: "docs/compiler_verdicts.md#structural-fit-status".to_string(),
+        })
+        .collect()
 }
 
 fn structural_findings(diagnostics: &[Diagnostic]) -> Vec<StructuralFinding> {
@@ -2053,9 +2493,23 @@ fn convergence_interpretation(
     if let super::audit::EvidenceQuality::Failed { reason } =
         &certificate.evidence.certification_quality
     {
-        status = max_status(status, AuditReportStatus::Warning);
+        let inspection_only = certificate.evidence.optimizer_stop.acceptable_stop;
+        status = max_status(
+            status,
+            if inspection_only {
+                AuditReportStatus::Info
+            } else {
+                AuditReportStatus::Warning
+            },
+        );
         if reason.contains("gradient") || reason.contains("KKT") {
-            parts.push(format!("stationarity is not certified: {reason}"));
+            if inspection_only {
+                parts.push(format!(
+                    "post-hoc stationarity inspection did not pass but does not override optimizer convergence: {reason}"
+                ));
+            } else {
+                parts.push(format!("stationarity is not certified: {reason}"));
+            }
         } else {
             parts.push(format!("certification failed: {reason}"));
         }
@@ -2063,10 +2517,24 @@ fn convergence_interpretation(
 
     match &certificate.evidence.hessian.quality {
         super::audit::EvidenceQuality::Failed { reason } => {
-            status = max_status(status, AuditReportStatus::Warning);
-            parts.push(format!(
-                "Hessian check failed or is flat; weak identification is possible: {reason}"
-            ));
+            let inspection_only = certificate.evidence.optimizer_stop.acceptable_stop;
+            status = max_status(
+                status,
+                if inspection_only {
+                    AuditReportStatus::Info
+                } else {
+                    AuditReportStatus::Warning
+                },
+            );
+            if inspection_only {
+                parts.push(format!(
+                    "post-hoc Hessian inspection did not pass but does not override optimizer convergence: {reason}"
+                ));
+            } else {
+                parts.push(format!(
+                    "Hessian check failed or is flat; weak identification is possible: {reason}"
+                ));
+            }
         }
         super::audit::EvidenceQuality::Unavailable { reason }
         | super::audit::EvidenceQuality::NotAssessed { reason } => {
@@ -2214,14 +2682,6 @@ fn action_status(certificate: &super::audit::OptimizerCertificate) -> AuditRepor
         AuditReportStatus::Error
     } else if !certificate.evidence.optimizer_stop.acceptable_stop
         || matches!(
-            certificate.evidence.hessian.quality,
-            super::audit::EvidenceQuality::Failed { .. }
-        )
-        || matches!(
-            certificate.evidence.certification_quality,
-            super::audit::EvidenceQuality::Failed { .. }
-        )
-        || matches!(
             certificate
                 .verification
                 .as_ref()
@@ -2230,6 +2690,14 @@ fn action_status(certificate: &super::audit::OptimizerCertificate) -> AuditRepor
         )
     {
         AuditReportStatus::Warning
+    } else if matches!(
+        certificate.evidence.hessian.quality,
+        super::audit::EvidenceQuality::Failed { .. }
+    ) || matches!(
+        certificate.evidence.certification_quality,
+        super::audit::EvidenceQuality::Failed { .. }
+    ) {
+        AuditReportStatus::Info
     } else if certificate.verification.is_none()
         || matches!(
             certificate.evidence.gradient.method,
@@ -2352,6 +2820,34 @@ fn evidence_quality_status(quality: &super::audit::EvidenceQuality) -> AuditRepo
         super::audit::EvidenceQuality::Unavailable { .. }
         | super::audit::EvidenceQuality::NotAssessed { .. } => AuditReportStatus::NotAssessed,
         super::audit::EvidenceQuality::Failed { .. } => AuditReportStatus::Warning,
+    }
+}
+
+fn hessian_evidence_status(certificate: &super::audit::OptimizerCertificate) -> AuditReportStatus {
+    if certificate.evidence.optimizer_stop.acceptable_stop
+        && matches!(
+            certificate.evidence.hessian.quality,
+            super::audit::EvidenceQuality::Failed { .. }
+        )
+    {
+        AuditReportStatus::Info
+    } else {
+        evidence_quality_status(&certificate.evidence.hessian.quality)
+    }
+}
+
+fn certification_quality_status(
+    certificate: &super::audit::OptimizerCertificate,
+) -> AuditReportStatus {
+    if certificate.evidence.optimizer_stop.acceptable_stop
+        && matches!(
+            certificate.evidence.certification_quality,
+            super::audit::EvidenceQuality::Failed { .. }
+        )
+    {
+        AuditReportStatus::Info
+    } else {
+        evidence_quality_status(&certificate.evidence.certification_quality)
     }
 }
 
@@ -2981,7 +3477,9 @@ mod tests {
         cert
     }
 
-    fn certificate_with_verification(status: ConvergenceVerificationStatus) -> OptimizerCertificate {
+    fn certificate_with_verification(
+        status: ConvergenceVerificationStatus,
+    ) -> OptimizerCertificate {
         let mut cert = clean_certificate();
         cert.verification = Some(ConvergenceVerification {
             status,
@@ -2999,8 +3497,13 @@ mod tests {
     }
 
     fn diag(code: DiagnosticCode, message: &str, terms: &[&str]) -> Diagnostic {
-        Diagnostic::new(code, DiagnosticSeverity::Warning, DiagnosticStage::DesignAudit, message)
-            .with_affected_terms(terms.iter().map(|t| t.to_string()).collect())
+        Diagnostic::new(
+            code,
+            DiagnosticSeverity::Warning,
+            DiagnosticStage::DesignAudit,
+            message,
+        )
+        .with_affected_terms(terms.iter().map(|t| t.to_string()).collect())
     }
 
     fn row_saturated_diag(term: &str) -> Diagnostic {
@@ -3020,9 +3523,29 @@ mod tests {
         let v = ConvergenceVerdict::compose(&cert, &[]);
         assert_eq!(v.level, ConvergenceLevel::Certified);
         assert_eq!(v.source, ConvergenceSource::Clean);
-        assert!(v.next_step.is_none(), "certified clean fits need no next step");
+        assert!(
+            v.next_step.is_none(),
+            "certified clean fits need no next step"
+        );
         assert!(v.headline.contains("interior"));
         assert!(v.headline.contains("verification agrees"));
+    }
+
+    #[test]
+    fn verdict_finite_difference_verified_fit_is_ok_not_certified() {
+        let mut cert = certificate_with_verification(ConvergenceVerificationStatus::RestartAgrees);
+        cert.evidence.gradient.method = EvidenceMethod::FiniteDifference;
+        cert.evidence.hessian.method = EvidenceMethod::FiniteDifference;
+        cert.evidence.certification_quality = EvidenceQuality::Approximate {
+            reason: "finite-difference derivative evidence".to_string(),
+        };
+
+        let v = ConvergenceVerdict::compose(&cert, &[]);
+
+        assert_eq!(v.level, ConvergenceLevel::Ok);
+        assert_eq!(v.source, ConvergenceSource::Clean);
+        assert!(v.next_step.is_none());
+        assert!(v.headline.contains("derivative evidence is approximate"));
     }
 
     #[test]
@@ -3098,7 +3621,9 @@ mod tests {
         assert_eq!(v.source, ConvergenceSource::Structural);
         assert!(v.headline.contains("structural"));
         assert!(v.headline.contains("row-saturated"));
-        let next = v.next_step.expect("structural failure must surface an action");
+        let next = v
+            .next_step
+            .expect("structural failure must surface an action");
         assert!(
             !next.contains("increase optimizer budget"),
             "must not suggest optimizer tinkering on structural failure: {next}"
@@ -3167,11 +3692,7 @@ mod tests {
         assert_eq!(v.level, ConvergenceLevel::NotAssessed);
         assert_eq!(v.source, ConvergenceSource::NotAssessed);
         assert!(v.headline.contains("not fitted"));
-        assert!(v
-            .next_step
-            .as_deref()
-            .unwrap_or("")
-            .contains(".fit()"));
+        assert!(v.next_step.as_deref().unwrap_or("").contains(".fit()"));
     }
 
     #[test]

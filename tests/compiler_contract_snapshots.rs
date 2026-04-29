@@ -3,7 +3,10 @@ use std::path::Path;
 
 use mixedmodels::compiler::{
     certify, compile_formula_ir, expected_statuses, generated_x_values, CompiledModelArtifact,
-    CompilerPolicy, FitStatus, GeneratorSpec, ModelAuditReport,
+    CompilerPolicy, EstimabilityAssessment, FitStatus, FixedContrastEstimability,
+    FixedEffectInferenceMethod, FixedEffectInferenceRow, FixedEffectInferenceRowKind,
+    FixedEffectInferenceStatus, FixedEffectInferenceTable, FixedEffectStatisticName, GeneratorSpec,
+    ModelAuditReport, ReductionRecord, ReductionTrigger, ReliabilityGrade,
 };
 use mixedmodels::datasets;
 use mixedmodels::formula::parse_formula;
@@ -55,6 +58,126 @@ fn penicillin_artifact() -> CompiledModelArtifact {
     let formula = parse_formula(&meta.fits[0].formula).unwrap();
     let model = LinearMixedModel::new(formula, &data, None).unwrap();
     model.compiler_artifact().clone()
+}
+
+fn fitted_sleepstudy_inference_table() -> FixedEffectInferenceTable {
+    let (data, _meta) = datasets::load("sleepstudy").unwrap();
+    let formula = parse_formula("Reaction ~ 1 + Days + (1 | Subject)").unwrap();
+    let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+    model.fit(true).unwrap();
+    model
+        .compiler_artifact()
+        .fixed_effect_inference_table
+        .clone()
+        .expect("fitted sleepstudy artifact should carry fixed-effect inference table")
+}
+
+fn fitted_penicillin_inference_table() -> FixedEffectInferenceTable {
+    let (data, meta) = datasets::load("penicillin").unwrap();
+    let formula = parse_formula(&meta.fits[0].formula).unwrap();
+    let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+    model.fit(true).unwrap();
+    model
+        .compiler_artifact()
+        .fixed_effect_inference_table
+        .clone()
+        .expect("fitted penicillin artifact should carry fixed-effect inference table")
+}
+
+fn boundary_fixed_effect_inference_table() -> FixedEffectInferenceTable {
+    let (data, meta) = datasets::load("dyestuff2").unwrap();
+    let formula = parse_formula(&meta.fits[0].formula).unwrap();
+    let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+    model.fit(false).unwrap();
+    model
+        .compiler_artifact()
+        .fixed_effect_inference_table
+        .clone()
+        .expect("boundary fit should carry fixed-effect inference table")
+}
+
+fn rank_deficient_fixed_effect_inference_table() -> FixedEffectInferenceTable {
+    let mut data = DataFrame::new();
+    let n = 30usize;
+    let x = (0..n).map(|idx| (idx % 5) as f64).collect::<Vec<_>>();
+    let x2 = x.iter().map(|value| 2.0 * value).collect::<Vec<_>>();
+    data.add_numeric("y", (0..n).map(|idx| (idx % 7) as f64 + 1.0).collect());
+    data.add_numeric("x", x);
+    data.add_numeric("x2", x2);
+    data.add_categorical("group", (0..n).map(|idx| format!("g{}", idx % 6)).collect());
+
+    let formula = parse_formula("y ~ 1 + x + x2 + (1 | group)").unwrap();
+    let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+    model.fit(true).unwrap();
+    model
+        .compiler_artifact()
+        .fixed_effect_inference_table
+        .clone()
+        .expect("rank-deficient fit should carry fixed-effect inference table")
+}
+
+fn regularized_fixed_effect_inference_table() -> FixedEffectInferenceTable {
+    let (data, _meta) = datasets::load("sleepstudy").unwrap();
+    let formula = parse_formula("Reaction ~ 1 + Days + (1 | Subject)").unwrap();
+    let mut policy = CompilerPolicy::default();
+    policy.random_strategy = mixedmodels::compiler::RandomStrategy::Regularized;
+    let mut model = LinearMixedModel::new_with_compiler_policy(formula, &data, None, policy)
+        .expect("regularized-policy sleepstudy model should construct");
+    model.fit(true).unwrap();
+    model
+        .compiler_artifact()
+        .fixed_effect_inference_table
+        .clone()
+        .expect("regularized fit should carry fixed-effect inference table")
+}
+
+fn selection_time_fixed_effect_inference_table() -> FixedEffectInferenceTable {
+    let (data, _meta) = datasets::load("sleepstudy").unwrap();
+    let formula = parse_formula("Reaction ~ 1 + Days + (1 | Subject)").unwrap();
+    let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+    model.compiler_artifact.reductions.push(ReductionRecord {
+        trigger: ReductionTrigger::SelectionTime,
+        phase: "post_selection".to_string(),
+        reason: "response-dependent random-effect selection".to_string(),
+        affected_term: "(1 | Subject)".to_string(),
+        replacement_term: None,
+        inference_consequence:
+            "ordinary fixed-effect p-values require a valid refit or selective-inference contract"
+                .to_string(),
+        diagnostics: Vec::new(),
+    });
+    model.fit(true).unwrap();
+    model
+        .compiler_artifact()
+        .fixed_effect_inference_table
+        .clone()
+        .expect("selection-time fit should carry fixed-effect inference table")
+}
+
+fn unavailable_se_fixed_effect_inference_table() -> FixedEffectInferenceTable {
+    FixedEffectInferenceTable::new(vec![FixedEffectInferenceRow {
+        label: "x".to_string(),
+        kind: FixedEffectInferenceRowKind::Coefficient,
+        estimate: Some(1.0),
+        std_error: None,
+        numerator_df: None,
+        denominator_df: None,
+        statistic: None,
+        statistic_name: Some(FixedEffectStatisticName::Z),
+        p_value: None,
+        method: FixedEffectInferenceMethod::AsymptoticWaldZ,
+        status: FixedEffectInferenceStatus::PValueUnavailable,
+        reliability: ReliabilityGrade::Low,
+        estimability: EstimabilityAssessment::FixedContrast(FixedContrastEstimability::estimable(
+            "x", 1, 1,
+        )),
+        reason: Some(
+            "standard error is unavailable, so the Wald z p-value is unavailable".to_string(),
+        ),
+        notes: vec![
+            "asymptotic Wald z is a labeled fallback, not a finite-sample correction".to_string(),
+        ],
+    }])
 }
 
 fn confounded_fixed_random_data() -> DataFrame {
@@ -401,6 +524,182 @@ fn assert_wire_fixture(relative_path: &str, actual: &str) {
     );
 }
 
+fn assert_fixed_effect_table_round_trips(table: &FixedEffectInferenceTable) {
+    assert_eq!(
+        table.schema_name,
+        mixedmodels::compiler::FIXED_EFFECT_INFERENCE_TABLE_SCHEMA
+    );
+    assert_eq!(
+        table.schema_version,
+        mixedmodels::compiler::FIXED_EFFECT_INFERENCE_TABLE_SCHEMA_VERSION
+    );
+    let json = pretty_json(table);
+    let decoded: FixedEffectInferenceTable = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded.schema_name, table.schema_name);
+    assert_eq!(decoded.schema_version, table.schema_version);
+    assert_eq!(decoded.rows.len(), table.rows.len());
+    assert_eq!(
+        decoded
+            .rows
+            .iter()
+            .map(|row| (&row.label, row.kind, row.method, row.status))
+            .collect::<Vec<_>>(),
+        table
+            .rows
+            .iter()
+            .map(|row| (&row.label, row.kind, row.method, row.status))
+            .collect::<Vec<_>>()
+    );
+}
+
+fn assert_fixed_effect_table_labels(table: &FixedEffectInferenceTable, expected: &[&str]) {
+    assert_eq!(
+        table
+            .rows
+            .iter()
+            .map(|row| row.label.as_str())
+            .collect::<Vec<_>>(),
+        expected
+    );
+}
+
+fn assert_all_rows_have_status(
+    table: &FixedEffectInferenceTable,
+    status: FixedEffectInferenceStatus,
+) {
+    assert!(
+        table.rows.iter().all(|row| row.status == status),
+        "expected all rows to have status {status:?}, got {:?}",
+        table
+            .rows
+            .iter()
+            .map(|row| (&row.label, row.status))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn fixed_effect_inference_tables_match_wire_fixture() {
+    let sleepstudy = fitted_sleepstudy_inference_table();
+    assert_fixed_effect_table_round_trips(&sleepstudy);
+    assert_fixed_effect_table_labels(&sleepstudy, &["(Intercept)", "Days"]);
+    assert_all_rows_have_status(&sleepstudy, FixedEffectInferenceStatus::Available);
+    assert!(sleepstudy.rows.iter().all(|row| {
+        row.kind == FixedEffectInferenceRowKind::Coefficient
+            && row.method == FixedEffectInferenceMethod::Satterthwaite
+            && row.reliability == ReliabilityGrade::Low
+            && row.statistic_name == Some(FixedEffectStatisticName::T)
+            && row.numerator_df.is_none()
+            && row.denominator_df.is_some()
+            && row.p_value.is_some()
+            && row
+                .notes
+                .iter()
+                .any(|note| note.contains("Satterthwaite denominator df"))
+    }));
+
+    let penicillin = fitted_penicillin_inference_table();
+    assert_fixed_effect_table_round_trips(&penicillin);
+    assert_fixed_effect_table_labels(&penicillin, &["(Intercept)"]);
+    assert_all_rows_have_status(&penicillin, FixedEffectInferenceStatus::Available);
+    assert!(penicillin.rows.iter().all(|row| {
+        row.method == FixedEffectInferenceMethod::Satterthwaite
+            && row.statistic_name == Some(FixedEffectStatisticName::T)
+            && row.denominator_df.is_some()
+            && row.p_value.is_some()
+    }));
+
+    let reduced_rank = rank_mixture_artifact()
+        .fixed_effect_inference_table
+        .expect("rank-mixture fitted artifact should carry fixed-effect inference table");
+    assert_fixed_effect_table_round_trips(&reduced_rank);
+    assert_fixed_effect_table_labels(&reduced_rank, &["(Intercept)", "x"]);
+    assert_all_rows_have_status(&reduced_rank, FixedEffectInferenceStatus::Available);
+    assert!(reduced_rank
+        .rows
+        .iter()
+        .all(|row| row.reliability == ReliabilityGrade::Low));
+
+    let boundary = boundary_fixed_effect_inference_table();
+    assert_fixed_effect_table_round_trips(&boundary);
+    assert_fixed_effect_table_labels(&boundary, &["(Intercept)"]);
+    assert_all_rows_have_status(&boundary, FixedEffectInferenceStatus::Available);
+
+    let rank_deficient = rank_deficient_fixed_effect_inference_table();
+    assert_fixed_effect_table_round_trips(&rank_deficient);
+    assert_fixed_effect_table_labels(&rank_deficient, &["(Intercept)", "x", "x2"]);
+    assert!(rank_deficient.rows.iter().any(|row| {
+        row.status == FixedEffectInferenceStatus::NotEstimable
+            && row.method == FixedEffectInferenceMethod::NotComputed
+            && row.p_value.is_none()
+            && row.reason.as_deref().unwrap_or("").contains("aliased")
+    }));
+
+    let regularized = regularized_fixed_effect_inference_table();
+    assert_fixed_effect_table_round_trips(&regularized);
+    assert_fixed_effect_table_labels(&regularized, &["(Intercept)", "Days"]);
+    assert_all_rows_have_status(&regularized, FixedEffectInferenceStatus::PValueUnavailable);
+    assert!(regularized.rows.iter().all(|row| {
+        row.method == FixedEffectInferenceMethod::NotComputed
+            && row.p_value.is_none()
+            && row
+                .reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("exploratory fit intent")
+    }));
+
+    let selection_time = selection_time_fixed_effect_inference_table();
+    assert_fixed_effect_table_round_trips(&selection_time);
+    assert_fixed_effect_table_labels(&selection_time, &["(Intercept)", "Days"]);
+    assert_all_rows_have_status(
+        &selection_time,
+        FixedEffectInferenceStatus::PValueUnavailable,
+    );
+    assert!(selection_time.rows.iter().all(|row| {
+        row.method == FixedEffectInferenceMethod::NotComputed
+            && row.p_value.is_none()
+            && row
+                .reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("selection-time model changes")
+    }));
+
+    let unavailable_se = unavailable_se_fixed_effect_inference_table();
+    assert_fixed_effect_table_round_trips(&unavailable_se);
+    assert_fixed_effect_table_labels(&unavailable_se, &["x"]);
+    assert_all_rows_have_status(
+        &unavailable_se,
+        FixedEffectInferenceStatus::PValueUnavailable,
+    );
+    assert!(unavailable_se.rows.iter().all(|row| {
+        row.std_error.is_none()
+            && row.p_value.is_none()
+            && row
+                .reason
+                .as_deref()
+                .unwrap_or("")
+                .contains("standard error is unavailable")
+    }));
+
+    let fixture = serde_json::json!({
+        "sleepstudy_confirmatory": sleepstudy,
+        "penicillin_confirmatory": penicillin,
+        "rank_mixture_reduced_rank": reduced_rank,
+        "dyestuff2_boundary": boundary,
+        "rank_deficient_fixed_effect": rank_deficient,
+        "regularized_fit_intent": regularized,
+        "selection_time_reduction": selection_time,
+        "unavailable_standard_error": unavailable_se,
+    });
+    let json = pretty_json(&fixture);
+    assert_wire_fixture(
+        "tests/fixtures/compiler_contract/fixed_effect_inference_tables_v1.json",
+        &json,
+    );
+}
+
 #[test]
 fn pathology_corpus_statuses_match_certificate_sets() {
     for relative_path in pathology_fixture_paths() {
@@ -451,6 +750,7 @@ fn compiled_artifact_matches_wire_fixture() {
         "mixedmodels.compiled_model_artifact"
     );
     assert_eq!(value["schema"]["schema_version"], 1);
+    assert!(value["fixed_effect_inference_table"].is_null());
     assert_eq!(
         value["design_audit"]["schema_name"],
         "mixedmodels.design_audit"

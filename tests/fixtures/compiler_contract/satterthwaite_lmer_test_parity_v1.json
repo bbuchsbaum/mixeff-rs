@@ -1,0 +1,50 @@
+{
+  "schema_version": "1.0.0",
+  "generated_with": {
+    "r_packages": ["lmerTest", "lme4"],
+    "method": "contest1D(..., ddf = \"Satterthwaite\")",
+    "source": "vendor/lmerTestR"
+  },
+  "cases": [
+    {
+      "name": "sleepstudy_random_intercept_days",
+      "formula": "reaction ~ days + (1 | subj)",
+      "coefficient": "days",
+      "estimate": 10.46728595959598,
+      "std_error": 0.80422142895360482,
+      "df": 161.00000005956616,
+      "statistic": 13.015427819692968,
+      "p_value": 6.412601233221317e-27
+    },
+    {
+      "name": "sleepstudy_random_slope_days",
+      "formula": "reaction ~ days + (days | subj)",
+      "coefficient": "days",
+      "estimate": 10.467285959596186,
+      "std_error": 1.545789643897278,
+      "df": 16.99998375285907,
+      "statistic": 6.771481489037435,
+      "p_value": 3.2638244421297836e-6
+    },
+    {
+      "name": "penicillin_crossed_intercept",
+      "formula": "diameter ~ 1 + (1 | plate) + (1 | sample)",
+      "coefficient": "(Intercept)",
+      "estimate": 22.97222222221934,
+      "std_error": 0.80859536165823642,
+      "df": 5.4865922641422635,
+      "statistic": 28.410034624869461,
+      "p_value": 3.623520989888313e-7
+    },
+    {
+      "name": "sleepstudy_unbalanced_random_slope_days",
+      "formula": "reaction ~ days + (days | subj)",
+      "coefficient": "days",
+      "estimate": 10.447913236727853,
+      "std_error": 1.6146414451916233,
+      "df": 16.0142381070293,
+      "statistic": 6.470732723875987,
+      "p_value": 7.691109249535897e-6
+    }
+  ]
+}

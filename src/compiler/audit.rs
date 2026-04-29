@@ -3577,6 +3577,48 @@ impl OptimizerCertificate {
             }
         };
     }
+
+    pub fn mark_derivative_checks_not_assessed(&mut self, reason: impl Into<String>) {
+        let reason = reason.into();
+        remove_derivative_not_assessed_checks(&mut self.checks);
+        self.checks.push(CertificateCheck::NotAssessed {
+            reason: format!("free-gradient KKT check skipped: {reason}"),
+        });
+        self.checks.push(CertificateCheck::NotAssessed {
+            reason: format!("projected boundary-gradient KKT check skipped: {reason}"),
+        });
+        self.checks.push(CertificateCheck::NotAssessed {
+            reason: format!("active-subspace Hessian check skipped: {reason}"),
+        });
+        self.evidence.gradient = GradientEvidence {
+            method: EvidenceMethod::NotAssessed {
+                reason: reason.clone(),
+            },
+            raw_gradient_norm: None,
+            scaled_gradient_norm: None,
+            free_gradient_norm: None,
+            projected_gradient_norm: None,
+            kkt_boundary_gradient_max: None,
+        };
+        self.evidence.hessian = HessianEvidence {
+            method: EvidenceMethod::NotAssessed {
+                reason: reason.clone(),
+            },
+            quality: EvidenceQuality::NotAssessed {
+                reason: reason.clone(),
+            },
+            min_eigenvalue: None,
+            condition_number: None,
+            rank: None,
+        };
+        if self.evidence.optimizer_stop.acceptable_stop {
+            self.evidence.certification_quality = EvidenceQuality::Approximate {
+                reason: format!(
+                    "optimizer stop accepted; derivative KKT/Hessian inspection skipped: {reason}"
+                ),
+            };
+        }
+    }
 }
 
 impl ConvergenceVerification {

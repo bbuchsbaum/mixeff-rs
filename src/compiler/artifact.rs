@@ -4,6 +4,7 @@ use crate::model::data::DataFrame;
 
 use super::audit::{audit_design, DesignAudit, OptimizerCertificate};
 use super::diagnostics::{Diagnostic, DiagnosticCode};
+use super::estimability::{EstimabilityAssessment, ReliabilityGrade};
 use super::ir::SemanticModel;
 use super::policy::{
     recommend_policy, CompilerPolicy, CompilerThresholds, PolicyAction, PolicyRecommendation,
@@ -19,6 +20,9 @@ pub const COMPILED_ARTIFACT_SCHEMA: &str = "mixedmodels.compiled_model_artifact"
 pub const COMPILED_ARTIFACT_SCHEMA_VERSION: u32 = 1;
 pub const MODEL_STATE_SUMMARY_SCHEMA: &str = "mixedmodels.model_state_summary";
 pub const MODEL_STATE_SUMMARY_SCHEMA_VERSION: u32 = 1;
+pub const FIXED_EFFECT_INFERENCE_TABLE_SCHEMA: &str = "mixedmodels.fixed_effect_inference_table";
+pub const FIXED_EFFECT_INFERENCE_TABLE_SCHEMA_VERSION: &str = "1.0.0";
+pub const FIXED_EFFECT_INFERENCE_TABLE_NAME: &str = "fixed_effect_inference";
 
 /// Threshold above which a single basis column is treated as carrying the
 /// full mass of a reduced-rank covariance direction. A direction with one
@@ -192,6 +196,115 @@ pub enum InferenceAvailability {
     NotAssessed { reason: String },
 }
 
+/// Versioned fixed-effect inference table stored on fitted artifacts.
+///
+/// The table is the durable row-level inference payload consumed by R and other
+/// clients. `CompiledModelArtifact::fixed_effect_inference_table` is `None` for
+/// prefit artifacts and becomes `Some(_)` after coefficient or contrast
+/// inference has been computed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FixedEffectInferenceTable {
+    pub schema_name: String,
+    pub schema_version: String,
+    pub crate_version: Option<String>,
+    pub rows: Vec<FixedEffectInferenceRow>,
+}
+
+impl FixedEffectInferenceTable {
+    pub fn new(rows: Vec<FixedEffectInferenceRow>) -> Self {
+        Self {
+            schema_name: FIXED_EFFECT_INFERENCE_TABLE_SCHEMA.to_string(),
+            schema_version: FIXED_EFFECT_INFERENCE_TABLE_SCHEMA_VERSION.to_string(),
+            crate_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            rows,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FixedEffectInferenceRow {
+    pub label: String,
+    pub kind: FixedEffectInferenceRowKind,
+    pub estimate: Option<f64>,
+    pub std_error: Option<f64>,
+    pub numerator_df: Option<f64>,
+    pub denominator_df: Option<f64>,
+    pub statistic: Option<f64>,
+    pub statistic_name: Option<FixedEffectStatisticName>,
+    pub p_value: Option<f64>,
+    pub method: FixedEffectInferenceMethod,
+    pub status: FixedEffectInferenceStatus,
+    pub reliability: ReliabilityGrade,
+    pub estimability: EstimabilityAssessment,
+    pub reason: Option<String>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FixedEffectInferenceRowKind {
+    Coefficient,
+    Contrast,
+    Term,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FixedEffectStatisticName {
+    Z,
+    T,
+    F,
+    ChiSquare,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FixedEffectInferenceMethod {
+    AsymptoticWaldZ,
+    Satterthwaite,
+    KenwardRoger,
+    Bootstrap,
+    NotComputed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FixedEffectInferenceStatus {
+    Available,
+    PValueUnavailable,
+    NotEstimable,
+    NotAssessed,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArtifactTable {
+    FixedEffectInference,
+}
+
+impl ArtifactTable {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ArtifactTable::FixedEffectInference => FIXED_EFFECT_INFERENCE_TABLE_NAME,
+        }
+    }
+}
+
+impl std::str::FromStr for ArtifactTable {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            FIXED_EFFECT_INFERENCE_TABLE_NAME | "fixed_effect_inference_table" => {
+                Ok(ArtifactTable::FixedEffectInference)
+            }
+            other => Err(format!(
+                "unsupported artifact table `{other}`; supported tables: {FIXED_EFFECT_INFERENCE_TABLE_NAME}"
+            )),
+        }
+    }
+}
+
 /// Fit intent taxonomy from the compiler v0 contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -233,6 +346,20 @@ impl FitIntent {
             FitIntent::ConfirmatoryAsSpecified | FitIntent::ConfirmatoryDesignCompiled
         )
     }
+
+    pub fn p_value_unavailable_reason(self) -> Option<String> {
+        match self {
+            FitIntent::ConfirmatoryAsSpecified | FitIntent::ConfirmatoryDesignCompiled => None,
+            FitIntent::Exploratory => Some(
+                "ordinary fixed-effect p-values are unavailable for exploratory fit intent"
+                    .to_string(),
+            ),
+            FitIntent::Predictive => Some(
+                "ordinary fixed-effect p-values are unavailable for predictive fit intent"
+                    .to_string(),
+            ),
+        }
+    }
 }
 
 fn fit_intent_for_policy(policy: &CompilerPolicy) -> FitIntent {
@@ -243,6 +370,7 @@ fn fit_intent_for_policy(policy: &CompilerPolicy) -> FitIntent {
         }
         RandomStrategy::MaximalFeasible => FitIntent::ConfirmatoryAsSpecified,
         RandomStrategy::Regularized => FitIntent::Exploratory,
+        RandomStrategy::Predictive => FitIntent::Predictive,
     }
 }
 
@@ -500,6 +628,8 @@ pub enum VarCorrEntryKind {
 pub struct CompiledModelArtifact {
     pub schema: SchemaMetadata,
     pub model_boundary: ModelBoundary,
+    #[serde(default)]
+    pub fixed_effect_inference_table: Option<FixedEffectInferenceTable>,
     pub requested_formula: String,
     pub semantic_model: SemanticModel,
     pub effective_formula: Option<String>,
@@ -540,6 +670,7 @@ impl CompiledModelArtifact {
         let mut artifact = Self {
             schema: SchemaMetadata::compiled_model_artifact(),
             model_boundary: ModelBoundary::lmm(),
+            fixed_effect_inference_table: None,
             requested_formula: requested_formula.into(),
             diagnostics: semantic_model.diagnostics.clone(),
             semantic_model,
@@ -628,6 +759,22 @@ impl CompiledModelArtifact {
 
     pub fn audit_report(&self) -> ModelAuditReport {
         ModelAuditReport::from_artifact(self)
+    }
+
+    pub fn table(&self, table: ArtifactTable) -> Option<serde_json::Value> {
+        match table {
+            ArtifactTable::FixedEffectInference => self
+                .fixed_effect_inference_table
+                .as_ref()
+                .map(|table| serde_json::to_value(table).expect("inference table serializes")),
+        }
+    }
+
+    pub fn table_by_name(
+        &self,
+        table: &str,
+    ) -> std::result::Result<Option<serde_json::Value>, String> {
+        Ok(self.table(table.parse()?))
     }
 
     /// Build a stable requested -> semantic -> supported -> fitted state view.
@@ -1383,6 +1530,115 @@ mod tests {
         let json = serde_json::to_string(&artifact).unwrap();
         let decoded: CompiledModelArtifact = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, artifact);
+    }
+
+    #[test]
+    fn compiled_artifact_serializes_prefit_inference_table_as_null() {
+        let formula = parse_formula("y ~ x + (1 | subject)").unwrap();
+        let semantic = compile_formula_ir(&formula);
+        let artifact = CompiledModelArtifact::new(formula.to_string(), semantic);
+
+        let value = serde_json::to_value(&artifact).unwrap();
+
+        assert!(value["fixed_effect_inference_table"].is_null());
+        assert!(artifact
+            .table(ArtifactTable::FixedEffectInference)
+            .is_none());
+        assert!(artifact
+            .table_by_name(FIXED_EFFECT_INFERENCE_TABLE_NAME)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn compiled_artifact_deserializes_missing_inference_table_as_none() {
+        let formula = parse_formula("y ~ x + (1 | subject)").unwrap();
+        let semantic = compile_formula_ir(&formula);
+        let artifact = CompiledModelArtifact::new(formula.to_string(), semantic);
+        let mut value = serde_json::to_value(&artifact).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("fixed_effect_inference_table");
+
+        let decoded: CompiledModelArtifact = serde_json::from_value(value).unwrap();
+
+        assert!(decoded.fixed_effect_inference_table.is_none());
+    }
+
+    #[test]
+    fn fixed_effect_inference_table_round_trips_on_artifact() {
+        let formula = parse_formula("y ~ x + (1 | subject)").unwrap();
+        let semantic = compile_formula_ir(&formula);
+        let mut artifact = CompiledModelArtifact::new(formula.to_string(), semantic);
+        artifact.fixed_effect_inference_table = Some(FixedEffectInferenceTable::new(vec![
+            FixedEffectInferenceRow {
+                label: "x".to_string(),
+                kind: FixedEffectInferenceRowKind::Coefficient,
+                estimate: Some(1.25),
+                std_error: Some(0.5),
+                numerator_df: None,
+                denominator_df: None,
+                statistic: Some(2.5),
+                statistic_name: Some(FixedEffectStatisticName::Z),
+                p_value: Some(0.0124),
+                method: FixedEffectInferenceMethod::AsymptoticWaldZ,
+                status: FixedEffectInferenceStatus::Available,
+                reliability: ReliabilityGrade::Low,
+                estimability: EstimabilityAssessment::FixedContrast(
+                    super::super::estimability::FixedContrastEstimability::estimable("x", 1, 1),
+                ),
+                reason: None,
+                notes: vec![
+                    "asymptotic Wald z is a labeled fallback, not a finite-sample correction"
+                        .to_string(),
+                ],
+            },
+        ]));
+
+        let json = serde_json::to_string(&artifact).unwrap();
+        let decoded: CompiledModelArtifact = serde_json::from_str(&json).unwrap();
+        let table = decoded
+            .fixed_effect_inference_table
+            .as_ref()
+            .expect("table should round-trip");
+
+        assert_eq!(table.schema_name, FIXED_EFFECT_INFERENCE_TABLE_SCHEMA);
+        assert_eq!(
+            table.schema_version,
+            FIXED_EFFECT_INFERENCE_TABLE_SCHEMA_VERSION
+        );
+        assert_eq!(table.rows.len(), 1);
+        assert_eq!(table.rows[0].label, "x");
+        assert_eq!(table.rows[0].numerator_df, None);
+        assert_eq!(table.rows[0].denominator_df, None);
+        assert_eq!(decoded, artifact);
+
+        let table_value = artifact
+            .table(ArtifactTable::FixedEffectInference)
+            .expect("bridge table accessor should expose fitted inference table");
+        assert_eq!(
+            table_value["schema_name"],
+            FIXED_EFFECT_INFERENCE_TABLE_SCHEMA
+        );
+        assert_eq!(
+            table_value["schema_version"],
+            FIXED_EFFECT_INFERENCE_TABLE_SCHEMA_VERSION
+        );
+        assert_eq!(table_value["rows"][0]["label"], "x");
+
+        let named = artifact
+            .table_by_name(FIXED_EFFECT_INFERENCE_TABLE_NAME)
+            .unwrap()
+            .expect("named bridge table accessor should expose inference table");
+        assert_eq!(named, table_value);
+        let alias = artifact
+            .table_by_name("fixed_effect_inference_table")
+            .unwrap()
+            .expect("legacy descriptive table name should remain accepted");
+        assert_eq!(alias, table_value);
+        let err = artifact.table_by_name("coeftable").unwrap_err();
+        assert!(err.contains("unsupported artifact table"));
     }
 
     #[test]

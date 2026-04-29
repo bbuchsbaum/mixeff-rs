@@ -1,0 +1,108 @@
+{
+  "schema_version": "1.0.0",
+  "generated_with": {
+    "r_version": "4.5.1",
+    "r_packages": {
+      "lme4": "2.0.1",
+      "lmerTest": "3.2.1",
+      "pbkrtest": "0.5.5"
+    },
+    "source": "vendor/lmerTestR plus pbkrtest",
+    "methods": [
+      "contest1D(..., ddf = \"Kenward-Roger\")",
+      "contestMD(..., ddf = \"Kenward-Roger\")",
+      "pbkrtest::KRmodcomp"
+    ]
+  },
+  "scalar_cases": [
+    {
+      "name": "sleepstudy_random_intercept_days",
+      "formula": "reaction ~ days + (1 | subj)",
+      "coefficient": "days",
+      "label": "days = 0",
+      "l": [[0.0, 1.0]],
+      "rhs": [0.0],
+      "estimate": 10.46728595959598,
+      "std_error": 0.8042214289536048,
+      "denominator_df": 160.9999999999982,
+      "statistic": 13.015427819692968,
+      "p_value": 6.412601273206877e-27
+    },
+    {
+      "name": "sleepstudy_random_slope_days",
+      "formula": "reaction ~ days + (days | subj)",
+      "coefficient": "days",
+      "label": "days = 0",
+      "l": [[0.0, 1.0]],
+      "rhs": [0.0],
+      "estimate": 10.467285959596186,
+      "std_error": 1.5457896438972805,
+      "denominator_df": 17.00000000000027,
+      "statistic": 6.7714814890374235,
+      "p_value": 3.263808017914875e-6
+    },
+    {
+      "name": "sleepstudy_random_slope_days_rhs10",
+      "formula": "reaction ~ days + (days | subj)",
+      "coefficient": "days",
+      "label": "days = 10",
+      "l": [[0.0, 1.0]],
+      "rhs": [10.0],
+      "estimate": 0.4672859595961863,
+      "std_error": 1.5457896438972805,
+      "denominator_df": 17.00000000000027,
+      "statistic": 0.30229595691820904,
+      "p_value": 0.7660937199879374
+    }
+  ],
+  "multi_df_cases": [
+    {
+      "name": "sleepstudy_intercept_and_days_joint",
+      "formula": "reaction ~ days + (days | subj)",
+      "label": "intercept_and_days = 0",
+      "l": [
+        [1.0, 0.0],
+        [0.0, 1.0]
+      ],
+      "rhs": [0.0, 0.0],
+      "numerator_df": 2.0,
+      "denominator_df": 16.000000000000298,
+      "statistic": 705.8357212845301,
+      "p_value": 2.488477287489459e-16,
+      "f_scaling": 0.9411764705882363,
+      "unscaled_statistic": 749.9504538648124,
+      "unscaled_p_value": 1.540257588426313e-16
+    },
+    {
+      "name": "sleepstudy_days_duplicate_rank_deficient_l",
+      "formula": "reaction ~ days + (days | subj)",
+      "label": "duplicated_days = 0",
+      "l": [
+        [0.0, 1.0],
+        [0.0, 1.0]
+      ],
+      "rhs": [0.0, 0.0],
+      "numerator_df": 1.0,
+      "denominator_df": 17.00000000000027,
+      "statistic": 45.85296155637648,
+      "p_value": 3.263808017914875e-6,
+      "f_scaling": 1.0,
+      "unscaled_statistic": 45.85296155637648,
+      "unscaled_p_value": 3.263808017914875e-6
+    },
+    {
+      "name": "sleepstudy_days_rhs10_f",
+      "formula": "reaction ~ days + (days | subj)",
+      "label": "days = 10",
+      "l": [[0.0, 1.0]],
+      "rhs": [10.0],
+      "numerator_df": 1.0,
+      "denominator_df": 17.00000000000027,
+      "statistic": 0.09138284556909569,
+      "p_value": 0.7660937199879374,
+      "f_scaling": 1.0,
+      "unscaled_statistic": 0.09138284556909569,
+      "unscaled_p_value": 0.7660937199879374
+    }
+  ]
+}

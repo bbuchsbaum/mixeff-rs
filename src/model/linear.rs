@@ -23,12 +23,14 @@ use crate::compiler::{
     ConvergenceVerification, ConvergenceVerificationRun, ConvergenceVerificationStatus,
     CovarianceFamily, CovarianceFamilyTransition, DesignAudit, Diagnostic, DiagnosticCode,
     DiagnosticSeverity, DiagnosticStage, DominantLoading, EffectiveCovarianceSummary,
-    EffectiveRankStatus, EstimabilityStatus, EvidenceMethod, FixedContrastEstimability,
-    FixedEffectHypothesis, FixedEffectTest, InferenceMethod, InferenceStatus,
-    InterpretableSubmodel, ModelAuditReport, ModelStateChange, ModelStateSummary,
-    OptimizerCertificate, OptimizerDerivativeEvidence, PolicyAction, PolicyRecommendation,
-    ReductionRecord, ReductionTrigger, ReliabilityGrade, SupportedCovarianceDirection,
-    DOMINANT_LOADING_THRESHOLD, INTERPRETABLE_GAP_TOLERANCE,
+    EffectiveRankStatus, EstimabilityAssessment, EstimabilityStatus, EvidenceMethod,
+    FixedContrastEstimability, FixedEffectHypothesis, FixedEffectInferenceMethod,
+    FixedEffectInferenceRow, FixedEffectInferenceRowKind, FixedEffectInferenceStatus,
+    FixedEffectInferenceTable, FixedEffectStatisticName, FixedEffectTest, FixedEffectTestMethod,
+    InferenceMethod, InferenceStatus, InterpretableSubmodel, ModelAuditReport, ModelStateChange,
+    ModelStateSummary, OptimizerCertificate, OptimizerDerivativeEvidence, PolicyAction,
+    PolicyRecommendation, ReductionRecord, ReductionTrigger, ReliabilityGrade,
+    SupportedCovarianceDirection, DOMINANT_LOADING_THRESHOLD, INTERPRETABLE_GAP_TOLERANCE,
 };
 use crate::error::{MixedModelError, Result};
 use crate::formula::{FixedTerm, Formula, RandomTerm};
@@ -106,6 +108,79 @@ pub struct ResponseMatrixProfile {
     pub logdet_re: f64,
     /// Shared fixed-effects log-determinant term used by REML.
     pub logdet_xx: f64,
+}
+
+/// Covariance estimate for `varpar = c(theta, sigma)` plus Hessian diagnostics.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VcovVarparEstimate {
+    pub covariance: DMatrix<f64>,
+    pub hessian: DMatrix<f64>,
+    pub eigenvalues: Vec<f64>,
+    pub tolerance: f64,
+    pub positive_eigenvalues: usize,
+    pub near_zero_eigenvalues: usize,
+    pub negative_eigenvalues: usize,
+    pub used_reduced_rank: bool,
+    pub reliability: ReliabilityGrade,
+    pub notes: Vec<String>,
+}
+
+/// Kenward-Roger response-covariance decomposition.
+///
+/// This is the Rust analogue of `pbkrtest::get_SigmaG()`: `sigma` is the
+/// fitted marginal response covariance and each component matrix is a known
+/// `G_i` such that `sigma = sum_i weights[i] * components[i]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KenwardRogerSigmaG {
+    pub sigma: DMatrix<f64>,
+    pub components: Vec<DMatrix<f64>>,
+    pub component_weights: Vec<f64>,
+    pub component_labels: Vec<String>,
+    pub residual_component_index: usize,
+    pub covariance_parameterization: String,
+    pub includes_residual_variance: bool,
+    pub n_observations: usize,
+    pub dense_bytes: u128,
+    pub sigma_min_eigenvalue: f64,
+    pub sigma_max_eigenvalue: f64,
+    pub sigma_positive_definite: bool,
+    pub max_component_asymmetry: f64,
+    pub reliability: ReliabilityGrade,
+    pub notes: Vec<String>,
+}
+
+/// Kenward-Roger adjusted fixed-effect covariance payload.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KenwardRogerAdjustedVcov {
+    pub unadjusted_vcov_active: DMatrix<f64>,
+    pub adjusted_vcov_active: DMatrix<f64>,
+    pub adjusted_vcov: DMatrix<f64>,
+    pub p_matrices: Vec<DMatrix<f64>>,
+    pub q_matrices: Vec<DMatrix<f64>>,
+    pub w: DMatrix<f64>,
+    pub information_matrix: DMatrix<f64>,
+    pub information_eigenvalues: Vec<f64>,
+    pub condition_min_abs_eigenvalue: f64,
+    pub used_generalized_inverse: bool,
+    pub component_labels: Vec<String>,
+    pub reliability: ReliabilityGrade,
+    pub notes: Vec<String>,
+}
+
+/// Kenward-Roger denominator degrees-of-freedom result for `L beta = rhs`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KenwardRogerLbDdf {
+    pub denominator_df: f64,
+    pub numerator_df: f64,
+    pub restriction_rank: usize,
+    pub a1: f64,
+    pub a2: f64,
+    pub b: f64,
+    pub g: f64,
+    pub rho: f64,
+    pub used_generalized_inverse: bool,
+    pub reliability: ReliabilityGrade,
+    pub notes: Vec<String>,
 }
 
 /// Controls the bounded verification workflow run after a fitted model.
@@ -1074,13 +1149,8 @@ impl LinearMixedModel {
             | Optimizer::PrimaCobyla
             | Optimizer::PrimaLincoa
             | Optimizer::PrimaNewuoa => {
-                // Prima* variants are declared so the R layer / OptSummary surface
-                // can carry a backend selection, but the FFI binding required to
-                // actually run these optimizers is not yet wired
-                // (bd-01KQ9TECWH14T6P6S5K5D3DMW7).
                 return Err(MixedModelError::Optimization(
-                    "PRIMA optimizer backend is declared but not wired to the LMM optimizer path; \
-                     pick a non-PRIMA optimizer until the prima FFI lands"
+                    "PRIMA optimizer backend is declared but not wired to the LMM optimizer path"
                         .to_string(),
                 ));
             }
@@ -1088,6 +1158,7 @@ impl LinearMixedModel {
         self.refresh_optimizer_certificate();
         self.refresh_effective_covariance_summaries();
         self.refresh_covariance_parameter_traces();
+        self.refresh_fixed_effect_inference_table();
         Ok(())
     }
 
@@ -1115,7 +1186,9 @@ impl LinearMixedModel {
             Some(self.dims.n),
         );
         if certificate.evidence.optimizer_stop.acceptable_stop {
-            if let Some(derivatives) =
+            if let Some(reason) = self.derivative_certificate_skip_reason(&certificate) {
+                certificate.mark_derivative_checks_not_assessed(reason);
+            } else if let Some(derivatives) =
                 self.finite_difference_optimizer_derivatives(&theta, &lower_bounds)
             {
                 let (gradient_tolerance, hessian_tolerance) =
@@ -1128,6 +1201,46 @@ impl LinearMixedModel {
             }
         }
         self.compiler_artifact.optimizer_certificate = Some(certificate);
+    }
+
+    fn derivative_certificate_skip_reason(
+        &self,
+        certificate: &OptimizerCertificate,
+    ) -> Option<String> {
+        let n_theta = certificate.evidence.parameter_space.n_theta;
+        if n_theta == 0 {
+            return Some(
+                "there are no theta parameters, so derivative KKT/Hessian checks are not applicable"
+                    .to_string(),
+            );
+        }
+
+        if certificate.evidence.parameter_space.n_boundary > 0 {
+            return Some(format!(
+                "theta is on a variance-component boundary (boundary indices: {}); boundary fits are reported as singular/boundary, not non-converged",
+                certificate
+                    .evidence
+                    .parameter_space
+                    .boundary_indices
+                    .iter()
+                    .map(|index| index.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+
+        let nparmax = self
+            .compiler_artifact
+            .compiler_policy
+            .thresholds
+            .convergence_derivative_nparmax;
+        if n_theta > nparmax {
+            return Some(format!(
+                "theta dimension {n_theta} exceeds convergence_derivative_nparmax {nparmax}; finite-difference KKT/Hessian checks are skipped for large-theta optimizer regimes"
+            ));
+        }
+
+        None
     }
 
     fn derivative_certificate_tolerances(&self, objective_value: Option<f64>) -> (f64, f64) {
@@ -1147,10 +1260,15 @@ impl LinearMixedModel {
         theta: &[f64],
         lower_bounds: &[f64],
     ) -> Option<OptimizerDerivativeEvidence> {
-        const MAX_FINITE_DIFFERENCE_THETA: usize = 8;
-
         let n_theta = theta.len();
-        if n_theta == 0 || n_theta > MAX_FINITE_DIFFERENCE_THETA {
+        if n_theta == 0
+            || n_theta
+                > self
+                    .compiler_artifact
+                    .compiler_policy
+                    .thresholds
+                    .convergence_derivative_nparmax
+        {
             return None;
         }
 
@@ -1639,7 +1757,7 @@ impl LinearMixedModel {
         self.a_blocks[idx] = MatrixBlock::Dense(wtxy.transpose() * wtxy);
     }
 
-    fn determinant_term_and_pwrss(&self) -> (f64, f64) {
+    fn determinant_term_and_pwrss_for_reml(&self, reml: bool) -> (f64, f64) {
         let k = self.reterms.len();
 
         let mut logdet = 0.0;
@@ -1652,7 +1770,7 @@ impl LinearMixedModel {
         let last_diag = l_dense[(pp1 - 1, pp1 - 1)];
         let pwrss = last_diag * last_diag;
 
-        if self.optsum.reml {
+        if reml {
             let mut logdet_lxx = 0.0;
             for i in 0..(pp1 - 1) {
                 let d = l_dense[(i, i)];
@@ -1664,6 +1782,10 @@ impl LinearMixedModel {
         }
 
         (logdet, pwrss)
+    }
+
+    fn determinant_term_and_pwrss(&self) -> (f64, f64) {
+        self.determinant_term_and_pwrss_for_reml(self.optsum.reml)
     }
 
     fn objective_from_components(
@@ -1699,6 +1821,898 @@ impl LinearMixedModel {
         self.set_theta(theta)?;
         self.update_l()?;
         Ok(self.objective_value())
+    }
+
+    fn vcov_active_with_sigma(&self, sigma: f64) -> DMatrix<f64> {
+        let k = self.reterms.len();
+        let l_last = self.l_blocks[block_index(k, k)].as_dense();
+        let pp1 = l_last.nrows();
+        let p = pp1 - 1;
+
+        if p == 0 {
+            return DMatrix::zeros(0, 0);
+        }
+
+        let l_xx = l_last.view((0, 0), (p, p)).clone_owned();
+
+        // L_inv = L_XX^{-1}
+        let mut l_inv = DMatrix::<f64>::identity(p, p);
+        // Forward solve: L_XX * L_inv = I
+        for j in 0..p {
+            for i in j..p {
+                let mut s = l_inv[(i, j)];
+                for k2 in j..i {
+                    s -= l_xx[(i, k2)] * l_inv[(k2, j)];
+                }
+                l_inv[(i, j)] = s / l_xx[(i, i)];
+            }
+        }
+
+        let sigma_sq = sigma * sigma;
+        sigma_sq * (&l_inv.transpose() * &l_inv)
+    }
+
+    fn unpivot_fixed_effect_covariance(&self, active_vcov: &DMatrix<f64>) -> DMatrix<f64> {
+        // Unpivot
+        let full_p = self.feterm.piv.len();
+        let p = active_vcov.nrows();
+        if p == full_p {
+            let mut result = DMatrix::zeros(full_p, full_p);
+            for i in 0..full_p {
+                for j in 0..full_p {
+                    result[(self.feterm.piv[i], self.feterm.piv[j])] = active_vcov[(i, j)];
+                }
+            }
+            result
+        } else {
+            let mut result = DMatrix::from_element(full_p, full_p, f64::NAN);
+            for i in 0..p {
+                for j in 0..p {
+                    result[(self.feterm.piv[i], self.feterm.piv[j])] = active_vcov[(i, j)];
+                }
+            }
+            result
+        }
+    }
+
+    fn vcov_with_sigma(&self, sigma: f64) -> DMatrix<f64> {
+        let active = self.vcov_active_with_sigma(sigma);
+        self.unpivot_fixed_effect_covariance(&active)
+    }
+
+    /// Evaluate the ML or REML deviance over `varpar = c(theta, sigma)`.
+    ///
+    /// This is the Rust analogue of `lmerTestR::devfun_vp`: it evaluates the
+    /// unprofiled criterion at trial covariance parameters and a trial residual
+    /// standard deviation, then restores the fitted model state.
+    pub fn deviance_varpar(&mut self, varpar: &[f64], reml: bool) -> Result<f64> {
+        self.validate_varpar(varpar)?;
+        let n_theta = self.n_theta();
+        let theta = &varpar[..n_theta];
+        let sigma = varpar[n_theta];
+
+        let original_theta = self.theta();
+        let original_l_blocks = self.l_blocks.clone();
+
+        let result = (|| {
+            self.set_theta(theta)?;
+            self.update_l()?;
+
+            let denomdf = if reml {
+                (self.dims.n - self.dims.p) as f64
+            } else {
+                self.dims.n as f64
+            };
+            let (logdet, pwrss) = self.determinant_term_and_pwrss_for_reml(reml);
+            let deviance = Self::objective_from_components(logdet, pwrss, denomdf, Some(sigma));
+            if deviance.is_finite() {
+                Ok(deviance)
+            } else {
+                Err(MixedModelError::Optimization(
+                    "deviance over variance parameters is non-finite".to_string(),
+                ))
+            }
+        })();
+
+        self.set_theta(&original_theta)?;
+        self.l_blocks = original_l_blocks;
+
+        result
+    }
+
+    /// Evaluate the fixed-effect covariance matrix at `varpar = c(theta, sigma)`.
+    ///
+    /// This is the Rust analogue of `lmerTestR::get_covbeta`: at a trial
+    /// covariance parameter point it returns `sigma^2 * RXi * RXi'`, then
+    /// restores the fitted model state.
+    pub fn vcov_beta_varpar(&mut self, varpar: &[f64]) -> Result<DMatrix<f64>> {
+        self.validate_varpar(varpar)?;
+        let n_theta = self.n_theta();
+        let theta = &varpar[..n_theta];
+        let sigma = varpar[n_theta];
+
+        let original_theta = self.theta();
+        let original_l_blocks = self.l_blocks.clone();
+
+        let result = (|| {
+            self.set_theta(theta)?;
+            self.update_l()?;
+
+            let vcov = self.vcov_with_sigma(sigma);
+            if matrix_is_finite(&vcov) {
+                Ok(vcov)
+            } else {
+                Err(MixedModelError::InvalidArgument(
+                    "vcov_beta(varpar) contains non-finite entries".to_string(),
+                ))
+            }
+        })();
+
+        self.set_theta(&original_theta)?;
+        self.l_blocks = original_l_blocks;
+
+        result
+    }
+
+    /// Numerically differentiate `vcov_beta_varpar` with respect to `varpar`.
+    ///
+    /// Returns one `p x p` matrix per `varpar` component. The first
+    /// implementation intentionally requires a feasible central-difference
+    /// stencil; boundary-active parameters return an explicit unavailable
+    /// reason instead of silently producing one-sided derivatives.
+    pub fn jac_vcov_beta_varpar(&mut self, varpar: &[f64]) -> Result<Vec<DMatrix<f64>>> {
+        self.validate_varpar(varpar)?;
+
+        let lower_bounds = self.varpar_lower_bounds();
+        let steps = finite_difference_steps(varpar, &lower_bounds, 1e-5);
+        let mut jacobian = Vec::with_capacity(varpar.len());
+
+        for index in 0..varpar.len() {
+            let lower = lower_bounds
+                .get(index)
+                .copied()
+                .unwrap_or(f64::NEG_INFINITY);
+            let step =
+                feasible_central_step(varpar[index], lower, steps[index]).ok_or_else(|| {
+                    MixedModelError::InvalidArgument(format!(
+                        "cannot compute central finite-difference derivative for varpar[{index}]: \
+                     value is at or too near lower bound {lower}"
+                    ))
+                })?;
+
+            let mut plus = varpar.to_vec();
+            let mut minus = varpar.to_vec();
+            plus[index] += step;
+            minus[index] -= step;
+
+            let vcov_plus = self.vcov_beta_varpar(&plus)?;
+            let vcov_minus = self.vcov_beta_varpar(&minus)?;
+            let derivative = (&vcov_plus - &vcov_minus) * (0.5 / step);
+            if !matrix_is_finite(&derivative) {
+                return Err(MixedModelError::InvalidArgument(format!(
+                    "jac_vcov_beta derivative for varpar[{index}] contains non-finite entries"
+                )));
+            }
+            jacobian.push(symmetrize_matrix(&derivative));
+        }
+
+        Ok(jacobian)
+    }
+
+    /// Estimate `vcov(varpar)` from the Hessian of `deviance_varpar`.
+    ///
+    /// This mirrors the lmerTest convention `2 * H^+`, where `H^+` is the
+    /// Moore-Penrose inverse of the Hessian over positive eigen-directions.
+    pub fn vcov_varpar(&mut self, varpar: &[f64], reml: bool) -> Result<VcovVarparEstimate> {
+        let hessian = self.hessian_deviance_varpar(varpar, reml)?;
+        let hessian = symmetrize_matrix(&hessian);
+        let eig = SymmetricEigen::new(hessian.clone());
+        let eigenvalues = eig.eigenvalues.as_slice().to_vec();
+        let max_abs_eigenvalue = eigenvalues
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0, f64::max);
+        let tolerance = (1e-8 * max_abs_eigenvalue.max(1.0)).max(1e-10);
+
+        let positive_eigenvalues = eigenvalues
+            .iter()
+            .filter(|value| **value > tolerance)
+            .count();
+        let near_zero_eigenvalues = eigenvalues
+            .iter()
+            .filter(|value| value.abs() <= tolerance)
+            .count();
+        let negative_eigenvalues = eigenvalues
+            .iter()
+            .filter(|value| **value < -tolerance)
+            .count();
+
+        if positive_eigenvalues == 0 {
+            return Err(MixedModelError::Optimization(
+                "vcov_varpar unavailable: deviance Hessian has no positive eigen-directions"
+                    .to_string(),
+            ));
+        }
+
+        let mut inverse = DMatrix::zeros(varpar.len(), varpar.len());
+        for (index, &eigenvalue) in eigenvalues.iter().enumerate() {
+            if eigenvalue > tolerance {
+                let column = eig.eigenvectors.column(index);
+                inverse += (column * column.transpose()) * (1.0 / eigenvalue);
+            }
+        }
+
+        let covariance = symmetrize_matrix(&(2.0 * inverse));
+        if !matrix_is_finite(&covariance) {
+            return Err(MixedModelError::Optimization(
+                "vcov_varpar unavailable: covariance estimate contains non-finite entries"
+                    .to_string(),
+            ));
+        }
+
+        let used_reduced_rank = positive_eigenvalues < varpar.len();
+        let mut notes = Vec::new();
+        if near_zero_eigenvalues > 0 {
+            notes.push(format!(
+                "deviance Hessian has {near_zero_eigenvalues} near-zero eigenvalue(s)"
+            ));
+        }
+        if negative_eigenvalues > 0 {
+            notes.push(format!(
+                "deviance Hessian has {negative_eigenvalues} negative eigenvalue(s)"
+            ));
+        }
+        if used_reduced_rank {
+            notes.push(
+                "vcov_varpar used the positive-eigenvalue subspace of the Hessian".to_string(),
+            );
+        }
+
+        Ok(VcovVarparEstimate {
+            covariance,
+            hessian,
+            eigenvalues,
+            tolerance,
+            positive_eigenvalues,
+            near_zero_eigenvalues,
+            negative_eigenvalues,
+            used_reduced_rank,
+            reliability: if used_reduced_rank {
+                ReliabilityGrade::Low
+            } else {
+                ReliabilityGrade::Moderate
+            },
+            notes,
+        })
+    }
+
+    /// Build the Kenward-Roger response-covariance component decomposition.
+    ///
+    /// The returned matrices follow the `pbkrtest::get_SigmaG()` convention:
+    /// fitted marginal response covariance is represented as a weighted sum of
+    /// known component matrices. Random-effect component weights are fitted
+    /// VarCorr covariance entries (`sigma^2 * Lambda Lambda'`); the final
+    /// component is the residual variance multiplying the identity matrix.
+    pub fn kenward_roger_sigma_g(&self) -> Result<KenwardRogerSigmaG> {
+        if self.optsum.feval == 0 {
+            return Err(MixedModelError::NotFitted);
+        }
+        if !self.sqrtwts.is_empty() {
+            return Err(MixedModelError::InvalidArgument(
+                "Kenward-Roger Sigma/G decomposition is currently certified only for unweighted iid Gaussian residual models"
+                    .to_string(),
+            ));
+        }
+
+        let n = self.dims.n;
+        let n_components: usize = self
+            .reterms
+            .iter()
+            .map(kenward_roger_covariance_component_count)
+            .sum::<usize>()
+            + 1;
+        let dense_bytes = dense_block_bytes(n, n).saturating_mul((n_components + 1) as u128);
+        let limit = dense_block_limit_bytes();
+        if dense_bytes > limit {
+            return Err(MixedModelError::ProblemTooLarge(format!(
+                "Kenward-Roger Sigma/G would materialize {} dense {} x {} f64 matrices ({:.2} GiB), above the configured limit ({:.2} GiB)",
+                n_components + 1,
+                n,
+                n,
+                dense_bytes as f64 / 1024.0_f64.powi(3),
+                limit as f64 / 1024.0_f64.powi(3)
+            )));
+        }
+
+        let sigma = self.sigma();
+        if !sigma.is_finite() || sigma <= 0.0 {
+            return Err(MixedModelError::InvalidArgument(
+                "Kenward-Roger Sigma/G requires a finite positive residual sigma".to_string(),
+            ));
+        }
+        let sigma_sq = sigma * sigma;
+
+        let mut components = Vec::with_capacity(n_components);
+        let mut component_weights = Vec::with_capacity(n_components);
+        let mut component_labels = Vec::with_capacity(n_components);
+
+        for (term_index, reterm) in self.reterms.iter().enumerate() {
+            let covariance = sigma_sq * (&reterm.lambda * reterm.lambda.transpose());
+            for (row, col) in kenward_roger_covariance_component_indices(reterm) {
+                let component = kenward_roger_response_component(reterm, row, col, n)?;
+                let label = format!(
+                    "{}:{}[{},{}]",
+                    term_index, reterm.grouping_name, reterm.cnames[row], reterm.cnames[col]
+                );
+                components.push(component);
+                component_weights.push(covariance[(row, col)]);
+                component_labels.push(label);
+            }
+        }
+
+        let residual_component_index = components.len();
+        components.push(DMatrix::identity(n, n));
+        component_weights.push(sigma_sq);
+        component_labels.push("residual".to_string());
+
+        let mut response_covariance = DMatrix::zeros(n, n);
+        for (component, &weight) in components.iter().zip(component_weights.iter()) {
+            if !weight.is_finite() {
+                return Err(MixedModelError::InvalidArgument(
+                    "Kenward-Roger Sigma/G component weight is non-finite".to_string(),
+                ));
+            }
+            if !matrix_is_finite(component) {
+                return Err(MixedModelError::InvalidArgument(
+                    "Kenward-Roger Sigma/G component contains non-finite entries".to_string(),
+                ));
+            }
+            response_covariance += component * weight;
+        }
+        let response_covariance = symmetrize_matrix(&response_covariance);
+
+        if !matrix_is_finite(&response_covariance) {
+            return Err(MixedModelError::InvalidArgument(
+                "Kenward-Roger Sigma/G response covariance contains non-finite entries".to_string(),
+            ));
+        }
+
+        let max_component_asymmetry = components
+            .iter()
+            .map(matrix_max_asymmetry)
+            .fold(0.0, f64::max)
+            .max(matrix_max_asymmetry(&response_covariance));
+        let eig = SymmetricEigen::new(response_covariance.clone());
+        let sigma_min_eigenvalue = eig
+            .eigenvalues
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        let sigma_max_eigenvalue = eig
+            .eigenvalues
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max);
+        let eigen_tolerance = (1e-10 * sigma_max_eigenvalue.abs().max(1.0)).max(1e-12);
+        let sigma_positive_definite = sigma_min_eigenvalue > eigen_tolerance;
+        let mut notes = Vec::new();
+        if !sigma_positive_definite {
+            notes.push(format!(
+                "response covariance is not positive definite at tolerance {eigen_tolerance}"
+            ));
+        }
+
+        Ok(KenwardRogerSigmaG {
+            sigma: response_covariance,
+            components,
+            component_weights,
+            component_labels,
+            residual_component_index,
+            covariance_parameterization: "VarCorr covariance entries followed by residual variance"
+                .to_string(),
+            includes_residual_variance: true,
+            n_observations: n,
+            dense_bytes,
+            sigma_min_eigenvalue,
+            sigma_max_eigenvalue,
+            sigma_positive_definite,
+            max_component_asymmetry,
+            reliability: if sigma_positive_definite {
+                ReliabilityGrade::Moderate
+            } else {
+                ReliabilityGrade::NotAvailable
+            },
+            notes,
+        })
+    }
+
+    /// Compute the Kenward-Roger adjusted fixed-effect covariance.
+    ///
+    /// This is the Rust analogue of `pbkrtest::vcovAdj_internal()`. It uses the
+    /// active fixed-effect basis internally and exposes an unpivoted
+    /// `adjusted_vcov` for the user-facing coefficient surface.
+    pub fn kenward_roger_adjusted_vcov(&self) -> Result<KenwardRogerAdjustedVcov> {
+        let sigma_g = self.kenward_roger_sigma_g()?;
+        if !sigma_g.sigma_positive_definite {
+            return Err(MixedModelError::Singular(
+                "Kenward-Roger adjusted covariance requires a positive-definite response covariance"
+                    .to_string(),
+            ));
+        }
+
+        let phi = self.vcov_active_with_sigma(self.sigma());
+        if !matrix_is_finite(&phi) {
+            return Err(MixedModelError::InvalidArgument(
+                "Kenward-Roger adjusted covariance requires finite active fixed-effect covariance"
+                    .to_string(),
+            ));
+        }
+        let x = self.feterm.full_rank_x().into_owned();
+        if x.ncols() != phi.ncols() {
+            return Err(MixedModelError::DimensionMismatch(format!(
+                "Kenward-Roger active fixed-effect covariance has {} columns, but X has {}",
+                phi.ncols(),
+                x.ncols()
+            )));
+        }
+
+        let sigma_inv = invert_spd_matrix(&sigma_g.sigma, "Kenward-Roger response covariance")?;
+        let tt = &sigma_inv * &x;
+        let n_components = sigma_g.components.len();
+        let p = phi.ncols();
+
+        let mut hh = Vec::with_capacity(n_components);
+        let mut oo = Vec::with_capacity(n_components);
+        let mut p_matrices = Vec::with_capacity(n_components);
+        for component in &sigma_g.components {
+            let h = component * &sigma_inv;
+            let o = &h * &x;
+            let p_matrix = symmetrize_matrix(&(-o.transpose() * &tt));
+            hh.push(h);
+            oo.push(o);
+            p_matrices.push(p_matrix);
+        }
+
+        let mut q_matrices = Vec::with_capacity(n_components.saturating_mul(n_components + 1) / 2);
+        let mut information_matrix = DMatrix::zeros(n_components, n_components);
+        for rr in 0..n_components {
+            for ss in rr..n_components {
+                let q_matrix = oo[rr].transpose() * &sigma_inv * &oo[ss];
+                let q_index = q_matrices.len();
+                q_matrices.push(q_matrix);
+
+                let ktrace = matrix_elementwise_dot(&hh[rr].transpose(), &hh[ss]);
+                let phi_q = matrix_elementwise_dot(&phi, &q_matrices[q_index]);
+                let phi_p_rr = &phi * &p_matrices[rr];
+                let pp_term = matrix_elementwise_dot(&phi_p_rr, &(&p_matrices[ss] * &phi));
+                let value = ktrace - 2.0 * phi_q + pp_term;
+                information_matrix[(rr, ss)] = value;
+                information_matrix[(ss, rr)] = value;
+            }
+        }
+        let information_matrix = symmetrize_matrix(&information_matrix);
+        if !matrix_is_finite(&information_matrix) {
+            return Err(MixedModelError::InvalidArgument(
+                "Kenward-Roger information matrix contains non-finite entries".to_string(),
+            ));
+        }
+
+        let information_eigen = SymmetricEigen::new(information_matrix.clone());
+        let information_eigenvalues = information_eigen.eigenvalues.as_slice().to_vec();
+        let condition_min_abs_eigenvalue = information_eigenvalues
+            .iter()
+            .map(|value| value.abs())
+            .fold(f64::INFINITY, f64::min);
+        let max_abs_eigenvalue = information_eigenvalues
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0, f64::max);
+        let generalized_inverse_tolerance = (1e-10 * max_abs_eigenvalue.max(1.0)).max(1e-12);
+        let used_generalized_inverse =
+            condition_min_abs_eigenvalue <= generalized_inverse_tolerance;
+        let w = if used_generalized_inverse {
+            2.0 * symmetric_pseudoinverse(&information_matrix, generalized_inverse_tolerance)
+        } else {
+            2.0 * invert_spd_matrix(
+                &information_matrix,
+                "Kenward-Roger covariance-parameter information matrix",
+            )?
+        };
+        let w = symmetrize_matrix(&w);
+        if !matrix_is_finite(&w) {
+            return Err(MixedModelError::InvalidArgument(
+                "Kenward-Roger covariance-parameter uncertainty matrix contains non-finite entries"
+                    .to_string(),
+            ));
+        }
+
+        let mut uu = DMatrix::zeros(p, p);
+        for rr in 0..n_components {
+            for ss in (rr + 1)..n_components {
+                let q_index = symmetric_pair_index(rr, ss, n_components);
+                uu +=
+                    w[(rr, ss)] * (&q_matrices[q_index] - &p_matrices[rr] * &phi * &p_matrices[ss]);
+            }
+        }
+        uu = &uu + uu.transpose();
+        for rr in 0..n_components {
+            let q_index = symmetric_pair_index(rr, rr, n_components);
+            uu += w[(rr, rr)] * (&q_matrices[q_index] - &p_matrices[rr] * &phi * &p_matrices[rr]);
+        }
+
+        let gamma = &phi * uu * &phi;
+        let adjusted_active = symmetrize_matrix(&(&phi + 2.0 * gamma));
+        if !matrix_is_finite(&adjusted_active) {
+            return Err(MixedModelError::InvalidArgument(
+                "Kenward-Roger adjusted fixed-effect covariance contains non-finite entries"
+                    .to_string(),
+            ));
+        }
+
+        let mut notes = Vec::new();
+        if used_generalized_inverse {
+            notes.push(format!(
+                "Kenward-Roger information matrix used a generalized inverse at tolerance {generalized_inverse_tolerance}"
+            ));
+        }
+        if sigma_g.reliability != ReliabilityGrade::Moderate {
+            notes.extend(sigma_g.notes.clone());
+        }
+
+        let reliability = if used_generalized_inverse {
+            ReliabilityGrade::Low
+        } else {
+            ReliabilityGrade::Moderate
+        };
+
+        Ok(KenwardRogerAdjustedVcov {
+            unadjusted_vcov_active: phi,
+            adjusted_vcov: self.unpivot_fixed_effect_covariance(&adjusted_active),
+            adjusted_vcov_active: adjusted_active,
+            p_matrices,
+            q_matrices,
+            w,
+            information_matrix,
+            information_eigenvalues,
+            condition_min_abs_eigenvalue,
+            used_generalized_inverse,
+            component_labels: sigma_g.component_labels,
+            reliability,
+            notes,
+        })
+    }
+
+    /// Compute Kenward-Roger denominator df for `L beta = rhs`.
+    ///
+    /// This follows `pbkrtest::Lb_ddf(L, V0, Vadj)` using the active fixed-effect
+    /// covariance basis. User-order full-rank contrasts are accepted and mapped
+    /// onto the active basis.
+    pub fn kenward_roger_lbddf(&self, l: &DMatrix<f64>) -> Result<KenwardRogerLbDdf> {
+        let adjusted = self.kenward_roger_adjusted_vcov()?;
+        self.kenward_roger_lbddf_with_adjusted(l, &adjusted)
+    }
+
+    pub fn kenward_roger_lbddf_with_adjusted(
+        &self,
+        l: &DMatrix<f64>,
+        adjusted: &KenwardRogerAdjustedVcov,
+    ) -> Result<KenwardRogerLbDdf> {
+        let l_active = self.fixed_effect_contrast_to_active_basis(l)?;
+        if l_active.nrows() == 0 {
+            return Err(MixedModelError::InvalidArgument(
+                "Kenward-Roger Lb_ddf requires at least one restriction row".to_string(),
+            ));
+        }
+        if l_active.ncols() != adjusted.unadjusted_vcov_active.ncols() {
+            return Err(MixedModelError::DimensionMismatch(format!(
+                "Kenward-Roger Lb_ddf contrast has {} active columns, but V0 has {}",
+                l_active.ncols(),
+                adjusted.unadjusted_vcov_active.ncols()
+            )));
+        }
+
+        let rank_tolerance = 1e-10;
+        let restriction_rank = matrix_rank(&l_active, rank_tolerance);
+        if restriction_rank == 0 {
+            return Err(MixedModelError::InvalidArgument(
+                "Kenward-Roger Lb_ddf contrast has zero numerical rank".to_string(),
+            ));
+        }
+
+        let v0 = &adjusted.unadjusted_vcov_active;
+        let middle = symmetrize_matrix(&(&l_active * v0 * l_active.transpose()));
+        let middle_eig = SymmetricEigen::new(middle.clone());
+        let middle_max_abs = middle_eig
+            .eigenvalues
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0, f64::max);
+        let middle_tol = (1e-10 * middle_max_abs.max(1.0)).max(1e-12);
+        let middle_min_abs = middle_eig
+            .eigenvalues
+            .iter()
+            .map(|value| value.abs())
+            .fold(f64::INFINITY, f64::min);
+        let used_middle_generalized_inverse = middle_min_abs <= middle_tol;
+        let middle_inverse = if used_middle_generalized_inverse {
+            symmetric_pseudoinverse(&middle, middle_tol)
+        } else {
+            invert_spd_matrix(&middle, "Kenward-Roger L V0 L' matrix")?
+        };
+        let theta = l_active.transpose() * middle_inverse * &l_active;
+        let theta_v0 = &theta * v0;
+
+        let mut a1 = 0.0;
+        let mut a2 = 0.0;
+        let n_components = adjusted.p_matrices.len();
+        if adjusted.w.shape() != (n_components, n_components) {
+            return Err(MixedModelError::DimensionMismatch(format!(
+                "Kenward-Roger W is {} x {}, expected {n_components} x {n_components}",
+                adjusted.w.nrows(),
+                adjusted.w.ncols()
+            )));
+        }
+        for ii in 0..n_components {
+            for jj in ii..n_components {
+                let e = if ii == jj { 1.0 } else { 2.0 };
+                let ui = &theta_v0 * &adjusted.p_matrices[ii] * v0;
+                let uj = &theta_v0 * &adjusted.p_matrices[jj] * v0;
+                a1 += e * adjusted.w[(ii, jj)] * matrix_trace(&ui) * matrix_trace(&uj);
+                a2 += e * adjusted.w[(ii, jj)] * matrix_trace_product(&ui, &uj);
+            }
+        }
+
+        let q = restriction_rank as f64;
+        let b = (a1 + 6.0 * a2) / (2.0 * q);
+        let g_denom = (q + 2.0) * a2;
+        if !g_denom.is_finite() || g_denom.abs() <= 1e-14 {
+            return Err(MixedModelError::InvalidArgument(
+                "Kenward-Roger Lb_ddf has non-finite or zero g denominator".to_string(),
+            ));
+        }
+        let g = ((q + 1.0) * a1 - (q + 4.0) * a2) / g_denom;
+        let c_denom = 3.0 * q + 2.0 * (1.0 - g);
+        if !c_denom.is_finite() || c_denom.abs() <= 1e-14 {
+            return Err(MixedModelError::InvalidArgument(
+                "Kenward-Roger Lb_ddf has non-finite or zero correction denominator".to_string(),
+            ));
+        }
+        let c1 = g / c_denom;
+        let c2 = (q - g) / c_denom;
+        let c3 = (q + 2.0 - g) / c_denom;
+        let mut v0_correction = 1.0 + c1 * b;
+        let v1 = 1.0 - c2 * b;
+        let v2 = 1.0 - c3 * b;
+        if v0_correction.abs() < 1e-10 {
+            v0_correction = 0.0;
+        }
+        let rho = (1.0 / q) * div_zero(1.0 - a2 / q, v1, 1e-14).powi(2) * v0_correction / v2;
+        let denominator = q * rho - 1.0;
+        if !denominator.is_finite() || denominator.abs() <= 1e-14 {
+            return Err(MixedModelError::InvalidArgument(
+                "Kenward-Roger Lb_ddf has non-finite or zero final denominator".to_string(),
+            ));
+        }
+        let denominator_df = 4.0 + (q + 2.0) / denominator;
+        if !denominator_df.is_finite() || denominator_df <= 0.0 {
+            return Err(MixedModelError::InvalidArgument(
+                "Kenward-Roger Lb_ddf produced a non-finite or non-positive denominator df"
+                    .to_string(),
+            ));
+        }
+
+        let mut notes = adjusted.notes.clone();
+        let used_generalized_inverse =
+            adjusted.used_generalized_inverse || used_middle_generalized_inverse;
+        if used_middle_generalized_inverse {
+            notes.push(format!(
+                "Kenward-Roger L V0 L' used a generalized inverse at tolerance {middle_tol}"
+            ));
+        }
+        if restriction_rank < l_active.nrows() {
+            notes.push(format!(
+                "Kenward-Roger restriction matrix row rank {restriction_rank} is lower than {} submitted row(s)",
+                l_active.nrows()
+            ));
+        }
+
+        Ok(KenwardRogerLbDdf {
+            denominator_df,
+            numerator_df: q,
+            restriction_rank,
+            a1,
+            a2,
+            b,
+            g,
+            rho,
+            used_generalized_inverse,
+            reliability: if used_generalized_inverse {
+                ReliabilityGrade::Low
+            } else {
+                adjusted.reliability
+            },
+            notes,
+        })
+    }
+
+    fn fixed_effect_contrast_to_active_basis(&self, l: &DMatrix<f64>) -> Result<DMatrix<f64>> {
+        let active_p = self.feterm.rank;
+        let full_p = self.feterm.piv.len();
+        if l.ncols() != full_p && l.ncols() != active_p {
+            return Err(MixedModelError::DimensionMismatch(format!(
+                "fixed-effect contrast has {} column(s), expected active {active_p} or full {full_p}",
+                l.ncols()
+            )));
+        }
+        if l.ncols() == active_p && l.ncols() != full_p {
+            return Ok(l.clone());
+        }
+        for dropped_position in active_p..full_p {
+            let original_col = self.feterm.piv[dropped_position];
+            for row in 0..l.nrows() {
+                if l[(row, original_col)].abs() > 1e-12 {
+                    return Err(MixedModelError::InvalidArgument(format!(
+                        "Kenward-Roger contrast touches dropped fixed-effect column {original_col}"
+                    )));
+                }
+            }
+        }
+        let mut active = DMatrix::zeros(l.nrows(), active_p);
+        for active_col in 0..active_p {
+            let original_col = self.feterm.piv[active_col];
+            for row in 0..l.nrows() {
+                active[(row, active_col)] = l[(row, original_col)];
+            }
+        }
+        Ok(active)
+    }
+
+    fn fixed_effect_user_beta_to_active_basis(&self, beta: &DVector<f64>) -> Result<DVector<f64>> {
+        let active_p = self.feterm.rank;
+        let full_p = self.feterm.piv.len();
+        if beta.len() == active_p && beta.len() != full_p {
+            return Ok(beta.clone());
+        }
+        if beta.len() != full_p {
+            return Err(MixedModelError::DimensionMismatch(format!(
+                "fixed-effect beta has length {}, expected active {active_p} or full {full_p}",
+                beta.len()
+            )));
+        }
+        let mut active = DVector::zeros(active_p);
+        for active_col in 0..active_p {
+            active[active_col] = beta[self.feterm.piv[active_col]];
+        }
+        Ok(active)
+    }
+
+    fn fixed_effect_active_vector_to_user_basis(
+        &self,
+        values: &DVector<f64>,
+        label: &str,
+    ) -> Result<DVector<f64>> {
+        let active_p = self.feterm.rank;
+        let full_p = self.feterm.piv.len();
+        if values.len() == full_p {
+            return Ok(values.clone());
+        }
+        if values.len() != active_p {
+            return Err(MixedModelError::DimensionMismatch(format!(
+                "fixed-effect {label} vector has length {}, expected active {active_p} or full {full_p}",
+                values.len()
+            )));
+        }
+        let mut full = DVector::from_element(full_p, f64::NAN);
+        for active_col in 0..active_p {
+            full[self.feterm.piv[active_col]] = values[active_col];
+        }
+        Ok(full)
+    }
+
+    fn hessian_deviance_varpar(&mut self, varpar: &[f64], reml: bool) -> Result<DMatrix<f64>> {
+        self.validate_varpar(varpar)?;
+        let lower_bounds = self.varpar_lower_bounds();
+        let steps = finite_difference_steps(varpar, &lower_bounds, 1e-4);
+        let f0 = self.deviance_varpar(varpar, reml)?;
+        if !f0.is_finite() {
+            return Err(MixedModelError::Optimization(
+                "deviance_varpar at fitted varpar is non-finite".to_string(),
+            ));
+        }
+
+        let mut central_steps = Vec::with_capacity(varpar.len());
+        for index in 0..varpar.len() {
+            let lower = lower_bounds
+                .get(index)
+                .copied()
+                .unwrap_or(f64::NEG_INFINITY);
+            let step =
+                feasible_central_step(varpar[index], lower, steps[index]).ok_or_else(|| {
+                    MixedModelError::InvalidArgument(format!(
+                        "cannot compute central finite-difference Hessian for varpar[{index}]: \
+                     value is at or too near lower bound {lower}"
+                    ))
+                })?;
+            central_steps.push(step);
+        }
+
+        let mut hessian = DMatrix::zeros(varpar.len(), varpar.len());
+        for row in 0..varpar.len() {
+            let h_row = central_steps[row];
+            let f_plus = finite_difference_deviance_varpar(self, varpar, row, h_row, reml)?;
+            let f_minus = finite_difference_deviance_varpar(self, varpar, row, -h_row, reml)?;
+            hessian[(row, row)] = (f_plus - 2.0 * f0 + f_minus) / (h_row * h_row);
+
+            for col in 0..row {
+                let h_col = central_steps[col];
+                let f_pp = finite_difference_deviance_varpar_2d(
+                    self, varpar, row, h_row, col, h_col, reml,
+                )?;
+                let f_pm = finite_difference_deviance_varpar_2d(
+                    self, varpar, row, h_row, col, -h_col, reml,
+                )?;
+                let f_mp = finite_difference_deviance_varpar_2d(
+                    self, varpar, row, -h_row, col, h_col, reml,
+                )?;
+                let f_mm = finite_difference_deviance_varpar_2d(
+                    self, varpar, row, -h_row, col, -h_col, reml,
+                )?;
+                let value = (f_pp - f_pm - f_mp + f_mm) / (4.0 * h_row * h_col);
+                hessian[(row, col)] = value;
+                hessian[(col, row)] = value;
+            }
+        }
+
+        if matrix_is_finite(&hessian) {
+            Ok(hessian)
+        } else {
+            Err(MixedModelError::Optimization(
+                "deviance_varpar Hessian contains non-finite entries".to_string(),
+            ))
+        }
+    }
+
+    fn validate_varpar(&self, varpar: &[f64]) -> Result<()> {
+        let n_theta = self.n_theta();
+        if varpar.len() != n_theta + 1 {
+            return Err(MixedModelError::DimensionMismatch(format!(
+                "varpar has length {}, expected {} theta parameter(s) plus sigma",
+                varpar.len(),
+                n_theta
+            )));
+        }
+        if varpar.iter().any(|value| !value.is_finite()) {
+            return Err(MixedModelError::InvalidArgument(
+                "varpar contains a non-finite value".to_string(),
+            ));
+        }
+
+        let sigma = varpar[n_theta];
+        if sigma <= 0.0 {
+            return Err(MixedModelError::InvalidArgument(
+                "varpar sigma must be positive".to_string(),
+            ));
+        }
+
+        let lower_bounds = self.lower_bounds();
+        if let Some((index, (&value, &lower))) = varpar[..n_theta]
+            .iter()
+            .zip(lower_bounds.iter())
+            .enumerate()
+            .find(|(_, (&value, &lower))| lower.is_finite() && value < lower)
+        {
+            return Err(MixedModelError::InvalidArgument(format!(
+                "theta[{index}] = {value} is below lower bound {lower}"
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn varpar_lower_bounds(&self) -> Vec<f64> {
+        let mut lower_bounds = self.lower_bounds();
+        lower_bounds.push(0.0);
+        lower_bounds
     }
 
     fn use_scalar_single_theta_optimizer(&self) -> bool {
@@ -2866,6 +3880,7 @@ impl LinearMixedModel {
         self.refresh_optimizer_certificate();
         self.refresh_effective_covariance_summaries();
         self.refresh_covariance_parameter_traces();
+        self.refresh_fixed_effect_inference_table();
         Ok(self)
     }
 
@@ -3319,15 +4334,31 @@ impl LinearMixedModel {
     ///
     /// Mirrors `simulate(fm)` in Julia's MixedModels.jl.
     pub fn simulate<R: rand::Rng>(&self, rng: &mut R) -> DVector<f64> {
+        let beta = self.beta();
+        self.simulate_with_active_beta(rng, &beta)
+            .expect("fitted beta should match active fixed-effect design")
+    }
+
+    fn simulate_with_active_beta<R: rand::Rng>(
+        &self,
+        rng: &mut R,
+        beta: &DVector<f64>,
+    ) -> Result<DVector<f64>> {
         use rand_distr::{Distribution, Normal};
 
         let n = self.dims.n;
         let sigma = self.sigma();
-        let beta = self.beta();
 
         // Fixed-effects prediction: Xβ
         let x = self.feterm.full_rank_x();
-        let mut y_new: DVector<f64> = x * &beta;
+        if beta.len() != x.ncols() {
+            return Err(MixedModelError::DimensionMismatch(format!(
+                "simulation beta has length {}, but active fixed-effect design has {} column(s)",
+                beta.len(),
+                x.ncols()
+            )));
+        }
+        let mut y_new: DVector<f64> = x * beta;
 
         // Random-effects contribution
         let normal01 = Normal::new(0.0, 1.0).unwrap();
@@ -3352,7 +4383,118 @@ impl LinearMixedModel {
             y_new[i] += eps_dist.sample(rng);
         }
 
-        y_new
+        Ok(y_new)
+    }
+
+    pub fn fixed_effect_null_bootstrap_target(
+        &self,
+        hypothesis: &FixedEffectHypothesis,
+    ) -> Result<FixedEffectNullBootstrapTarget> {
+        let n_coefficients = self.coef_names().len();
+        if hypothesis.n_coefficients() != n_coefficients {
+            return Err(MixedModelError::DimensionMismatch(format!(
+                "fixed-effect null target contrast has {} coefficient column(s), but the model has {n_coefficients}",
+                hypothesis.n_coefficients()
+            )));
+        }
+
+        let beta_fitted = self.coef();
+        let vcov = self.vcov();
+        let estimability = assess_fixed_contrast_estimability(hypothesis, &beta_fitted, &vcov);
+        if estimability.status != EstimabilityStatus::Estimable {
+            return Err(MixedModelError::InvalidArgument(
+                "fixed-effect null bootstrap target requires an estimable contrast".to_string(),
+            ));
+        }
+        if !matrix_is_finite(&vcov) {
+            return Err(MixedModelError::InvalidArgument(
+                "fixed-effect null bootstrap target requires finite fixed-effect covariance"
+                    .to_string(),
+            ));
+        }
+
+        let middle =
+            symmetrize_matrix(&(&hypothesis.l.values * &vcov * hypothesis.l.values.transpose()));
+        if !matrix_is_finite(&middle) {
+            return Err(MixedModelError::InvalidArgument(
+                "fixed-effect null bootstrap target produced non-finite L V L'".to_string(),
+            ));
+        }
+        let middle_eig = SymmetricEigen::new(middle.clone());
+        let middle_max_abs = middle_eig
+            .eigenvalues
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0, f64::max);
+        let middle_tol = (1e-10 * middle_max_abs.max(1.0)).max(1e-12);
+        let middle_min_abs = middle_eig
+            .eigenvalues
+            .iter()
+            .map(|value| value.abs())
+            .fold(f64::INFINITY, f64::min);
+        let used_generalized_inverse = middle_min_abs <= middle_tol;
+        let middle_inverse = if used_generalized_inverse {
+            symmetric_pseudoinverse(&middle, middle_tol)
+        } else {
+            invert_spd_matrix(&middle, "fixed-effect null bootstrap L V L' matrix")?
+        };
+
+        let fitted_contrast = &hypothesis.l.values * &beta_fitted - &hypothesis.rhs.values;
+        let beta_null = &beta_fitted
+            - &vcov * hypothesis.l.values.transpose() * middle_inverse * fitted_contrast;
+        let _beta_null_active = self.fixed_effect_user_beta_to_active_basis(&beta_null)?;
+
+        let mut notes = vec![
+            "fixed-effect null target reuses fitted covariance parameters; variance re-estimation under the null is not yet implemented"
+                .to_string(),
+        ];
+        if used_generalized_inverse {
+            notes.push(format!(
+                "fixed-effect null target used a generalized inverse for L V L' at tolerance {middle_tol}"
+            ));
+        }
+
+        Ok(FixedEffectNullBootstrapTarget {
+            target: BootstrapTarget::fixed_effect_null(
+                format!("{} fixed-effect null", hypothesis.label),
+                hypothesis.label.clone(),
+            ),
+            covariance_policy: FixedEffectNullCovariancePolicy::ReuseFittedCovariance,
+            coefficient_names: self.coef_names(),
+            beta_fitted,
+            beta_null,
+            theta: self.theta(),
+            sigma: self.sigma(),
+            reml: self.optsum.reml,
+            notes,
+        })
+    }
+
+    pub fn simulate_fixed_effect_null<R: rand::Rng>(
+        &self,
+        rng: &mut R,
+        target: &FixedEffectNullBootstrapTarget,
+    ) -> Result<DVector<f64>> {
+        if target.covariance_policy != FixedEffectNullCovariancePolicy::ReuseFittedCovariance {
+            return Err(MixedModelError::InvalidArgument(
+                "unsupported fixed-effect null bootstrap covariance policy".to_string(),
+            ));
+        }
+        if target.theta.len() != self.n_theta()
+            || target
+                .theta
+                .iter()
+                .zip(self.theta().iter())
+                .any(|(lhs, rhs)| (*lhs - *rhs).abs() > 1e-10)
+            || (target.sigma - self.sigma()).abs() > 1e-10
+        {
+            return Err(MixedModelError::InvalidArgument(
+                "fixed-effect null bootstrap target does not match the fitted covariance state"
+                    .to_string(),
+            ));
+        }
+        let beta_active = self.fixed_effect_user_beta_to_active_basis(&target.beta_null)?;
+        self.simulate_with_active_beta(rng, &beta_active)
     }
 
     /// Refit the model with a new response vector.
@@ -3768,8 +4910,14 @@ impl LinearMixedModel {
     }
 
     pub fn test_contrast(&self, hypothesis: FixedEffectHypothesis) -> FixedEffectTest {
-        use statrs::distribution::{ContinuousCDF, Normal};
+        self.test_contrast_with_method(hypothesis, FixedEffectTestMethod::Auto)
+    }
 
+    pub fn test_contrast_with_method(
+        &self,
+        hypothesis: FixedEffectHypothesis,
+        requested_method: FixedEffectTestMethod,
+    ) -> FixedEffectTest {
         let label = hypothesis.label.clone();
         let n_coefficients = self.coef_names().len();
         if hypothesis.n_coefficients() != n_coefficients {
@@ -3825,7 +4973,8 @@ impl LinearMixedModel {
             };
         }
 
-        if hypothesis.n_contrasts() != 1 {
+        if hypothesis.n_contrasts() != 1 && requested_method != FixedEffectTestMethod::KenwardRoger
+        {
             let reason =
                 "multi-df fixed-effect contrast tests are not implemented in this scaffold"
                     .to_string();
@@ -3847,56 +4996,880 @@ impl LinearMixedModel {
             };
         }
 
-        match self.fixed_effect_p_value_policy() {
-            CoefTablePValuePolicy::AsymptoticWaldZ => {
-                let normal = Normal::new(0.0, 1.0).unwrap();
-                let p_values = statistics
-                    .iter()
-                    .map(|stat| stat.map(|z| 2.0 * (1.0 - normal.cdf(z.abs()))))
-                    .collect::<Vec<_>>();
-                let p_value_available = p_values.iter().all(Option::is_some);
-                FixedEffectTest {
+        match requested_method {
+            FixedEffectTestMethod::Auto => match self.fixed_effect_p_value_policy() {
+                CoefTablePValuePolicy::AsymptoticWaldZ => {
+                    let satterthwaite = self.satterthwaite_fixed_effect_test(
+                        hypothesis.clone(),
+                        estimates.clone(),
+                        standard_errors.clone(),
+                        statistics.clone(),
+                        estimability.clone(),
+                    );
+                    if satterthwaite.status == InferenceStatus::Available {
+                        satterthwaite
+                    } else {
+                        let mut wald = fixed_effect_test_asymptotic_wald_z(
+                            hypothesis,
+                            estimates,
+                            standard_errors,
+                            statistics,
+                            estimability,
+                        );
+                        if let Some(reason) = fixed_effect_inference_reason(&satterthwaite) {
+                            wald.notes
+                                .push(format!("auto Satterthwaite unavailable: {reason}"));
+                        }
+                        wald
+                    }
+                }
+                CoefTablePValuePolicy::Unavailable { reason } => {
+                    fixed_effect_test_p_value_unavailable(
+                        hypothesis,
+                        estimates,
+                        standard_errors,
+                        statistics,
+                        estimability,
+                        reason,
+                    )
+                }
+            },
+            FixedEffectTestMethod::AsymptoticWaldZ => match self.fixed_effect_p_value_policy() {
+                CoefTablePValuePolicy::AsymptoticWaldZ => fixed_effect_test_asymptotic_wald_z(
                     hypothesis,
                     estimates,
                     standard_errors,
                     statistics,
-                    numerator_df: Some(1.0),
-                    denominator_df: None,
-                    p_values,
-                    method: InferenceMethod::AsymptoticWaldZ,
-                    reliability: ReliabilityGrade::Low,
-                    status: if p_value_available {
-                        InferenceStatus::Available
-                    } else {
-                        InferenceStatus::PValueUnavailable {
-                            reason: "standard error is unavailable, so the Wald z p-value is unavailable"
-                                .to_string(),
-                        }
-                    },
                     estimability,
-                    notes: vec![
-                        "asymptotic Wald z is a labeled fallback, not a finite-sample correction"
-                            .to_string(),
-                    ],
+                ),
+                CoefTablePValuePolicy::Unavailable { reason } => {
+                    fixed_effect_test_p_value_unavailable(
+                        hypothesis,
+                        estimates,
+                        standard_errors,
+                        statistics,
+                        estimability,
+                        reason,
+                    )
                 }
-            }
-            CoefTablePValuePolicy::Unavailable { reason } => FixedEffectTest {
+            },
+            FixedEffectTestMethod::Satterthwaite => self.satterthwaite_fixed_effect_test(
                 hypothesis,
                 estimates,
                 standard_errors,
                 statistics,
-                numerator_df: Some(1.0),
+                estimability,
+            ),
+            FixedEffectTestMethod::KenwardRoger => self.kenward_roger_fixed_effect_test(
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                estimability,
+            ),
+            FixedEffectTestMethod::ParametricBootstrap => fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                InferenceMethod::ParametricBootstrap,
+                estimability,
+                "parametric bootstrap fixed-effect inference requires a certified fixed_effect_null bootstrap payload; call test_contrast_with_bootstrap_payload with replicate accounting, failed-refit policy, Monte Carlo uncertainty, and reproducibility state"
+                    .to_string(),
+            ),
+        }
+    }
+
+    pub fn test_contrast_with_bootstrap_payload(
+        &self,
+        hypothesis: FixedEffectHypothesis,
+        payload: &BootstrapRunPayload,
+    ) -> FixedEffectTest {
+        let label = hypothesis.label.clone();
+        let n_coefficients = self.coef_names().len();
+        if hypothesis.n_coefficients() != n_coefficients {
+            let reason = format!(
+                "contrast has {} coefficient column(s), but the model has {n_coefficients}",
+                hypothesis.n_coefficients()
+            );
+            return fixed_effect_test_unavailable(
+                hypothesis,
+                FixedContrastEstimability::not_assessed(label),
+                InferenceStatus::Unsupported { reason },
+            );
+        }
+
+        let beta = self.coef();
+        let vcov = self.vcov();
+        let estimates = (&hypothesis.l.values * &beta - &hypothesis.rhs.values)
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        let standard_errors = contrast_standard_errors(&hypothesis.l.values, &vcov);
+        let statistics = estimates
+            .iter()
+            .zip(standard_errors.iter())
+            .map(|(&estimate, se)| {
+                se.and_then(|se| {
+                    (se > 0.0 && se.is_finite() && estimate.is_finite()).then_some(estimate / se)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let estimability = assess_fixed_contrast_estimability(&hypothesis, &beta, &vcov);
+        if estimability.status == EstimabilityStatus::NotEstimable {
+            return FixedEffectTest {
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                numerator_df: None,
                 denominator_df: None,
-                p_values: vec![None],
-                method: InferenceMethod::NotComputed {
-                    reason: reason.clone(),
-                },
+                p_values: vec![None; estimability.requested_rank.unwrap_or(1)],
+                method: InferenceMethod::ParametricBootstrap,
                 reliability: ReliabilityGrade::NotAvailable,
-                status: InferenceStatus::PValueUnavailable { reason },
+                status: InferenceStatus::NotEstimable {
+                    reason: "bootstrap fixed-effect inference requires an estimable contrast"
+                        .to_string(),
+                },
                 estimability,
                 notes: Vec::new(),
-            },
+            };
         }
+
+        self.bootstrap_fixed_effect_test_from_payload(
+            hypothesis,
+            estimates,
+            standard_errors,
+            statistics,
+            estimability,
+            payload,
+        )
+    }
+
+    pub fn fixed_effect_bootstrap_inference_row(
+        &self,
+        kind: FixedEffectInferenceRowKind,
+        hypothesis: FixedEffectHypothesis,
+        payload: &BootstrapRunPayload,
+    ) -> FixedEffectInferenceRow {
+        fixed_effect_test_to_inference_row(
+            kind,
+            self.test_contrast_with_bootstrap_payload(hypothesis, payload),
+        )
+    }
+
+    fn satterthwaite_fixed_effect_test(
+        &self,
+        hypothesis: FixedEffectHypothesis,
+        estimates: Vec<f64>,
+        standard_errors: Vec<Option<f64>>,
+        statistics: Vec<Option<f64>>,
+        estimability: FixedContrastEstimability,
+    ) -> FixedEffectTest {
+        use statrs::distribution::{ContinuousCDF, StudentsT};
+
+        let method = InferenceMethod::Satterthwaite;
+        if hypothesis.n_contrasts() != 1 {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                method,
+                estimability,
+                "Satterthwaite fixed-effect inference is currently certified only for scalar contrasts"
+                    .to_string(),
+            );
+        }
+
+        let Some(std_error) = standard_errors.first().copied().flatten() else {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                method,
+                estimability,
+                "Satterthwaite fixed-effect inference requires an available fixed-effect standard error"
+                    .to_string(),
+            );
+        };
+        let var_con = std_error * std_error;
+        if !var_con.is_finite() || var_con <= 0.0 {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                method,
+                estimability,
+                "Satterthwaite fixed-effect inference requires a finite positive contrast variance"
+                    .to_string(),
+            );
+        }
+
+        let mut varpar = self.theta();
+        varpar.push(self.sigma());
+        let mut evaluator = self.clone();
+        let jacobian = match evaluator.jac_vcov_beta_varpar(&varpar) {
+            Ok(jacobian) => jacobian,
+            Err(error) => {
+                return fixed_effect_test_not_assessed_with_method(
+                    hypothesis,
+                    estimates,
+                    standard_errors,
+                    statistics,
+                    method,
+                    estimability,
+                    format!("Satterthwaite fixed-effect inference could not compute vcov_beta derivatives: {error}"),
+                );
+            }
+        };
+        let vcov_varpar = match evaluator.vcov_varpar(&varpar, self.optsum.reml) {
+            Ok(estimate) => estimate,
+            Err(error) => {
+                return fixed_effect_test_not_assessed_with_method(
+                    hypothesis,
+                    estimates,
+                    standard_errors,
+                    statistics,
+                    method,
+                    estimability,
+                    format!("Satterthwaite fixed-effect inference could not estimate vcov_varpar: {error}"),
+                );
+            }
+        };
+
+        let gradient = jacobian
+            .iter()
+            .map(|derivative| contrast_row_quadratic_form(&hypothesis.l.values, 0, derivative))
+            .collect::<Vec<_>>();
+        if gradient.iter().any(|value| !value.is_finite()) {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                method,
+                estimability,
+                "Satterthwaite fixed-effect inference produced a non-finite variance-gradient component"
+                    .to_string(),
+            );
+        }
+
+        let gradient = DVector::from_vec(gradient);
+        let satt_denom = (gradient.transpose() * &vcov_varpar.covariance * &gradient)[(0, 0)];
+        if !satt_denom.is_finite() || satt_denom <= 0.0 {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                method,
+                estimability,
+                "Satterthwaite fixed-effect inference requires a finite positive denominator variance"
+                    .to_string(),
+            );
+        }
+
+        let denominator_df = 2.0 * var_con * var_con / satt_denom;
+        if !denominator_df.is_finite() || denominator_df <= 0.0 {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                method,
+                estimability,
+                "Satterthwaite fixed-effect inference produced a non-finite denominator df"
+                    .to_string(),
+            );
+        }
+
+        let statistic = estimates[0] / std_error;
+        let p_value = match StudentsT::new(0.0, 1.0, denominator_df) {
+            Ok(t_dist) => Some(2.0 * (1.0 - t_dist.cdf(statistic.abs()))),
+            Err(error) => {
+                return fixed_effect_test_not_assessed_with_method(
+                    hypothesis,
+                    estimates,
+                    standard_errors,
+                    statistics,
+                    method,
+                    estimability,
+                    format!("Satterthwaite fixed-effect inference could not construct Student-t distribution: {error}"),
+                );
+            }
+        };
+
+        let mut notes = vec![
+            "Satterthwaite denominator df computed from finite-difference vcov_beta Jacobian and deviance Hessian over varpar"
+                .to_string(),
+        ];
+        notes.extend(vcov_varpar.notes);
+
+        FixedEffectTest {
+            hypothesis,
+            estimates,
+            standard_errors,
+            statistics: vec![Some(statistic)],
+            numerator_df: None,
+            denominator_df: Some(denominator_df),
+            p_values: vec![p_value],
+            method,
+            reliability: ReliabilityGrade::Low,
+            status: InferenceStatus::Available,
+            estimability,
+            notes,
+        }
+    }
+
+    fn kenward_roger_fixed_effect_test(
+        &self,
+        hypothesis: FixedEffectHypothesis,
+        estimates: Vec<f64>,
+        standard_errors: Vec<Option<f64>>,
+        statistics: Vec<Option<f64>>,
+        estimability: FixedContrastEstimability,
+    ) -> FixedEffectTest {
+        use statrs::distribution::{ContinuousCDF, FisherSnedecor, StudentsT};
+
+        let method = InferenceMethod::KenwardRoger;
+        if !self.optsum.reml {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                method,
+                estimability,
+                "Kenward-Roger fixed-effect inference is certified only for REML LMM fits"
+                    .to_string(),
+            );
+        }
+
+        let adjusted = match self.kenward_roger_adjusted_vcov() {
+            Ok(adjusted) => adjusted,
+            Err(error) => {
+                return fixed_effect_test_not_assessed_with_method(
+                    hypothesis,
+                    estimates,
+                    standard_errors,
+                    statistics,
+                    method,
+                    estimability,
+                    format!(
+                        "Kenward-Roger fixed-effect inference could not compute adjusted vcov: {error}"
+                    ),
+                );
+            }
+        };
+        let lbddf = match self.kenward_roger_lbddf_with_adjusted(&hypothesis.l.values, &adjusted) {
+            Ok(lbddf) => lbddf,
+            Err(error) => {
+                return fixed_effect_test_not_assessed_with_method(
+                    hypothesis,
+                    estimates,
+                    standard_errors,
+                    statistics,
+                    method,
+                    estimability,
+                    format!(
+                        "Kenward-Roger fixed-effect inference could not compute denominator df: {error}"
+                    ),
+                );
+            }
+        };
+
+        let adjusted_standard_errors =
+            contrast_standard_errors(&hypothesis.l.values, &adjusted.adjusted_vcov);
+        let estimate_vector = DVector::from_column_slice(&estimates);
+        let contrast_cov = symmetrize_matrix(
+            &(&hypothesis.l.values * &adjusted.adjusted_vcov * hypothesis.l.values.transpose()),
+        );
+        if !matrix_is_finite(&contrast_cov) {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                adjusted_standard_errors,
+                statistics,
+                method,
+                estimability,
+                "Kenward-Roger fixed-effect inference produced a non-finite adjusted contrast covariance"
+                    .to_string(),
+            );
+        }
+
+        let mut notes = vec![
+            "Kenward-Roger adjusted covariance and denominator df computed from response-space Sigma/G components"
+                .to_string(),
+        ];
+        notes.extend(adjusted.notes);
+        notes.extend(lbddf.notes);
+
+        if hypothesis.n_contrasts() == 1 {
+            let Some(std_error) = adjusted_standard_errors.first().copied().flatten() else {
+                return fixed_effect_test_not_assessed_with_method(
+                    hypothesis,
+                    estimates,
+                    adjusted_standard_errors,
+                    statistics,
+                    method,
+                    estimability,
+                    "Kenward-Roger fixed-effect inference requires an available adjusted standard error"
+                        .to_string(),
+                );
+            };
+            let var_con = std_error * std_error;
+            if !var_con.is_finite() || var_con <= 0.0 {
+                return fixed_effect_test_not_assessed_with_method(
+                    hypothesis,
+                    estimates,
+                    adjusted_standard_errors,
+                    statistics,
+                    method,
+                    estimability,
+                    "Kenward-Roger fixed-effect inference requires a finite positive adjusted contrast variance"
+                        .to_string(),
+                );
+            }
+            let statistic = estimates[0] / std_error;
+            let p_value = match StudentsT::new(0.0, 1.0, lbddf.denominator_df) {
+                Ok(t_dist) => Some(2.0 * (1.0 - t_dist.cdf(statistic.abs()))),
+                Err(error) => {
+                    return fixed_effect_test_not_assessed_with_method(
+                        hypothesis,
+                        estimates,
+                        adjusted_standard_errors,
+                        statistics,
+                        method,
+                        estimability,
+                        format!(
+                            "Kenward-Roger fixed-effect inference could not construct Student-t distribution: {error}"
+                        ),
+                    );
+                }
+            };
+            return FixedEffectTest {
+                hypothesis,
+                estimates,
+                standard_errors: adjusted_standard_errors,
+                statistics: vec![Some(statistic)],
+                numerator_df: None,
+                denominator_df: Some(lbddf.denominator_df),
+                p_values: vec![p_value],
+                method,
+                reliability: lbddf.reliability,
+                status: InferenceStatus::Available,
+                estimability,
+                notes,
+            };
+        }
+
+        let q = lbddf.restriction_rank;
+        let contrast_cov_inverse = symmetric_pseudoinverse(&contrast_cov, 1e-10);
+        let quadratic =
+            (estimate_vector.transpose() * contrast_cov_inverse * &estimate_vector)[(0, 0)];
+        if !quadratic.is_finite() || quadratic < 0.0 {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                adjusted_standard_errors,
+                statistics,
+                method,
+                estimability,
+                "Kenward-Roger fixed-effect inference produced a non-finite F quadratic form"
+                    .to_string(),
+            );
+        }
+        let f_statistic = quadratic / q as f64;
+        if !f_statistic.is_finite() || f_statistic < 0.0 {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                adjusted_standard_errors,
+                statistics,
+                method,
+                estimability,
+                "Kenward-Roger fixed-effect inference produced a non-finite F statistic"
+                    .to_string(),
+            );
+        }
+        let p_value = match FisherSnedecor::new(q as f64, lbddf.denominator_df) {
+            Ok(f_dist) => Some(1.0 - f_dist.cdf(f_statistic)),
+            Err(error) => {
+                return fixed_effect_test_not_assessed_with_method(
+                    hypothesis,
+                    estimates,
+                    adjusted_standard_errors,
+                    statistics,
+                    method,
+                    estimability,
+                    format!(
+                        "Kenward-Roger fixed-effect inference could not construct F distribution: {error}"
+                    ),
+                );
+            }
+        };
+        notes.push(
+            "Kenward-Roger multi-df F row uses F scaling = 1.0 in the current row payload"
+                .to_string(),
+        );
+
+        FixedEffectTest {
+            hypothesis,
+            estimates,
+            standard_errors: adjusted_standard_errors,
+            statistics: vec![Some(f_statistic)],
+            numerator_df: Some(q as f64),
+            denominator_df: Some(lbddf.denominator_df),
+            p_values: vec![p_value],
+            method,
+            reliability: lbddf.reliability,
+            status: InferenceStatus::Available,
+            estimability,
+            notes,
+        }
+    }
+
+    fn bootstrap_fixed_effect_test_from_payload(
+        &self,
+        hypothesis: FixedEffectHypothesis,
+        estimates: Vec<f64>,
+        standard_errors: Vec<Option<f64>>,
+        statistics: Vec<Option<f64>>,
+        estimability: FixedContrastEstimability,
+        payload: &BootstrapRunPayload,
+    ) -> FixedEffectTest {
+        const MIN_SUCCESSFUL_REPLICATES: usize = 30;
+        const MODERATE_SUCCESSFUL_REPLICATES: usize = 999;
+        const MODERATE_MAX_MCSE: f64 = 0.02;
+        const MODERATE_MAX_FAILED_REFIT_RATE: f64 = 0.01;
+        const MODERATE_MAX_BOUNDARY_RATE: f64 = 0.05;
+        const CONTINUITY_CORRECTION: f64 = 1.0;
+
+        let method = InferenceMethod::ParametricBootstrap;
+        if hypothesis.n_contrasts() != 1 {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                method,
+                estimability,
+                "bootstrap_not_default_auto_method: bootstrap fixed-effect inference is currently certified only for scalar contrasts"
+                    .to_string(),
+            );
+        }
+
+        if payload.metadata.schema_name != BOOTSTRAP_RUN_SCHEMA
+            || payload.metadata.schema_version != BOOTSTRAP_RUN_SCHEMA_VERSION
+        {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                method,
+                estimability,
+                format!(
+                    "bootstrap_replicate_accounting_unavailable: expected {BOOTSTRAP_RUN_SCHEMA} {BOOTSTRAP_RUN_SCHEMA_VERSION}, got {} {}",
+                    payload.metadata.schema_name, payload.metadata.schema_version
+                ),
+            );
+        }
+
+        if payload.metadata.target.kind != BootstrapTargetKind::FixedEffectNull {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                method,
+                estimability,
+                "bootstrap_null_target_unavailable: payload target is not fixed_effect_null"
+                    .to_string(),
+            );
+        }
+
+        if payload.metadata.target.contrast_label.as_deref() != Some(hypothesis.label.as_str()) {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                method,
+                estimability,
+                "bootstrap_null_target_unavailable: payload contrast label does not match requested hypothesis"
+                    .to_string(),
+            );
+        }
+
+        if let Err(error) = payload.replicates.validate_for_model(self) {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                method,
+                estimability,
+                format!("bootstrap_replicate_accounting_unavailable: {error}"),
+            );
+        }
+
+        if payload.metadata.completed_replicates != payload.replicates.len() {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                method,
+                estimability,
+                "bootstrap_replicate_accounting_unavailable: completed_replicates does not match replicate count"
+                    .to_string(),
+            );
+        }
+
+        let actual_successful = payload
+            .replicates
+            .fits
+            .iter()
+            .filter(|fit| fit.is_successful())
+            .count();
+        if payload.metadata.successful_replicates != actual_successful {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                method,
+                estimability,
+                "bootstrap_replicate_accounting_unavailable: successful_replicates does not match successful refit count"
+                    .to_string(),
+            );
+        }
+
+        if payload.metadata.failed_refit_policy != BootstrapFailedRefitPolicy::Exclude {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                method,
+                estimability,
+                "bootstrap_failed_refit_policy_unavailable: only exclude failed-refit policy is certified for fixed-effect bootstrap rows"
+                    .to_string(),
+            );
+        }
+
+        let Some(observed_statistic) = statistics.first().copied().flatten().map(f64::abs) else {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                method,
+                estimability,
+                "bootstrap_observed_statistic_nonfinite: observed fixed-effect statistic is unavailable"
+                    .to_string(),
+            );
+        };
+
+        let replicate_statistics = match payload.replicate_statistics.as_deref() {
+            Some(values) => {
+                if values.len() != payload.replicates.len() {
+                    return fixed_effect_test_not_assessed_with_method(
+                        hypothesis,
+                        estimates,
+                        standard_errors,
+                        statistics,
+                        method,
+                        estimability,
+                        "bootstrap_replicate_accounting_unavailable: replicate_statistics length does not match replicate count"
+                            .to_string(),
+                    );
+                }
+                values.iter().map(|value| value.abs()).collect::<Vec<_>>()
+            }
+            None => {
+                match self.bootstrap_coefficient_statistics_from_replicates(&hypothesis, payload) {
+                    Ok(values) => values,
+                    Err(error) => {
+                        return fixed_effect_test_not_assessed_with_method(
+                            hypothesis,
+                            estimates,
+                            standard_errors,
+                            statistics,
+                            method,
+                            estimability,
+                            format!("bootstrap_replicate_accounting_unavailable: {error}"),
+                        );
+                    }
+                }
+            }
+        };
+
+        let finite_statistics = replicate_statistics
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .collect::<Vec<_>>();
+        if let Some(recorded) = payload.metadata.finite_statistic_count {
+            if recorded != finite_statistics.len() {
+                return fixed_effect_test_not_assessed_with_method(
+                    hypothesis,
+                    estimates,
+                    standard_errors,
+                    statistics,
+                    method,
+                    estimability,
+                    "bootstrap_replicate_accounting_unavailable: finite_statistic_count does not match finite replicate statistics"
+                        .to_string(),
+                );
+            }
+        }
+
+        if finite_statistics.len() < MIN_SUCCESSFUL_REPLICATES {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                method,
+                estimability,
+                format!(
+                    "bootstrap_successful_replicates_too_few: {} finite replicate statistic(s), need at least {MIN_SUCCESSFUL_REPLICATES}",
+                    finite_statistics.len()
+                ),
+            );
+        }
+
+        let extreme = finite_statistics
+            .iter()
+            .filter(|&&value| value >= observed_statistic)
+            .count();
+        let denominator = finite_statistics.len() as f64 + CONTINUITY_CORRECTION;
+        let p_value = (extreme as f64 + CONTINUITY_CORRECTION) / denominator;
+        let mcse = (p_value * (1.0 - p_value) / finite_statistics.len() as f64).sqrt();
+        if !p_value.is_finite() || !mcse.is_finite() {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                method,
+                estimability,
+                "bootstrap_mcse_unavailable: bootstrap p-value or Monte Carlo standard error is non-finite"
+                    .to_string(),
+            );
+        }
+
+        let failed_refit_rate = if payload.metadata.completed_replicates > 0 {
+            payload.metadata.failed_refits as f64 / payload.metadata.completed_replicates as f64
+        } else {
+            1.0
+        };
+        let boundary_rate = payload.metadata.boundary_rate.unwrap_or(0.0);
+        let reliability = if finite_statistics.len() >= MODERATE_SUCCESSFUL_REPLICATES
+            && mcse <= MODERATE_MAX_MCSE
+            && failed_refit_rate <= MODERATE_MAX_FAILED_REFIT_RATE
+            && boundary_rate <= MODERATE_MAX_BOUNDARY_RATE
+        {
+            ReliabilityGrade::Moderate
+        } else {
+            ReliabilityGrade::Low
+        };
+
+        let mut notes = vec![
+            format!(
+                "bootstrap fixed-effect row computed from fixed_effect_null target `{}`",
+                payload.metadata.target.label
+            ),
+            format!(
+                "requested_replicates={}, completed_replicates={}, successful_replicates={}, finite_statistics={}",
+                payload.metadata.requested_replicates,
+                payload.metadata.completed_replicates,
+                payload.metadata.successful_replicates,
+                finite_statistics.len()
+            ),
+            format!(
+                "failed_refit_policy={:?}, failed_refits={}, boundary_rate={:.6}, mcse={:.6}",
+                payload.metadata.failed_refit_policy,
+                payload.metadata.failed_refits,
+                boundary_rate,
+                mcse
+            ),
+        ];
+        notes.extend(payload.metadata.notes.clone());
+
+        FixedEffectTest {
+            hypothesis,
+            estimates,
+            standard_errors,
+            statistics: vec![Some(observed_statistic)],
+            numerator_df: None,
+            denominator_df: None,
+            p_values: vec![Some(p_value)],
+            method,
+            reliability,
+            status: InferenceStatus::Available,
+            estimability,
+            notes,
+        }
+    }
+
+    fn bootstrap_coefficient_statistics_from_replicates(
+        &self,
+        hypothesis: &FixedEffectHypothesis,
+        payload: &BootstrapRunPayload,
+    ) -> Result<Vec<f64>> {
+        let (coefficient_index, coefficient_weight) =
+            scalar_single_coefficient_contrast(&hypothesis.l.values).ok_or_else(|| {
+                MixedModelError::InvalidArgument(
+                    "replicate_statistics are required for non-coefficient bootstrap contrasts"
+                        .to_string(),
+                )
+            })?;
+        let rhs = hypothesis.rhs.values[0];
+        let mut values = Vec::new();
+        for fit in &payload.replicates.fits {
+            if !fit.is_successful() {
+                values.push(f64::NAN);
+                continue;
+            }
+            let beta = self.fixed_effect_active_vector_to_user_basis(&fit.beta, "beta")?;
+            let se = self.fixed_effect_active_vector_to_user_basis(&fit.se, "standard error")?;
+            let estimate = coefficient_weight * beta[coefficient_index] - rhs;
+            let standard_error = coefficient_weight.abs() * se[coefficient_index];
+            let statistic =
+                if standard_error.is_finite() && standard_error > 0.0 && estimate.is_finite() {
+                    (estimate / standard_error).abs()
+                } else {
+                    f64::NAN
+                };
+            values.push(statistic);
+        }
+        Ok(values)
+    }
+
+    pub fn fixed_effect_inference_table(&self) -> FixedEffectInferenceTable {
+        let rows = self
+            .coefficient_hypotheses()
+            .into_iter()
+            .map(|hypothesis| {
+                fixed_effect_test_to_inference_row(
+                    FixedEffectInferenceRowKind::Coefficient,
+                    self.test_contrast(hypothesis),
+                )
+            })
+            .collect();
+        FixedEffectInferenceTable::new(rows)
+    }
+
+    fn refresh_fixed_effect_inference_table(&mut self) {
+        self.compiler_artifact.fixed_effect_inference_table =
+            Some(self.fixed_effect_inference_table());
     }
 
     fn fixed_effect_p_value_policy(&self) -> CoefTablePValuePolicy {
@@ -3912,15 +5885,15 @@ impl LinearMixedModel {
             };
         }
 
-        let fit_intent = self.compiler_artifact.reproducibility.fit_intent;
-        if fit_intent.allows_confirmatory_p_values() {
-            CoefTablePValuePolicy::AsymptoticWaldZ
+        if let Some(reason) = self
+            .compiler_artifact
+            .reproducibility
+            .fit_intent
+            .p_value_unavailable_reason()
+        {
+            CoefTablePValuePolicy::Unavailable { reason }
         } else {
-            CoefTablePValuePolicy::Unavailable {
-                reason: format!(
-                    "ordinary fixed-effect p-values are unavailable for {fit_intent:?} fit intent"
-                ),
-            }
+            CoefTablePValuePolicy::AsymptoticWaldZ
         }
     }
 
@@ -4001,52 +5974,7 @@ impl MixedModelFit for LinearMixedModel {
     }
 
     fn vcov(&self) -> DMatrix<f64> {
-        let k = self.reterms.len();
-        let l_last = self.l_blocks[block_index(k, k)].as_dense();
-        let pp1 = l_last.nrows();
-        let p = pp1 - 1;
-
-        if p == 0 {
-            return DMatrix::zeros(0, 0);
-        }
-
-        let l_xx = l_last.view((0, 0), (p, p)).clone_owned();
-
-        // L_inv = L_XX^{-1}
-        let mut l_inv = DMatrix::<f64>::identity(p, p);
-        // Forward solve: L_XX * L_inv = I
-        for j in 0..p {
-            for i in j..p {
-                let mut s = l_inv[(i, j)];
-                for k2 in j..i {
-                    s -= l_xx[(i, k2)] * l_inv[(k2, j)];
-                }
-                l_inv[(i, j)] = s / l_xx[(i, i)];
-            }
-        }
-
-        let sigma_sq = self.dispersion(true);
-        let vcov_perm = sigma_sq * (&l_inv.transpose() * &l_inv);
-
-        // Unpivot
-        let full_p = self.feterm.piv.len();
-        if p == full_p {
-            let mut result = DMatrix::zeros(full_p, full_p);
-            for i in 0..full_p {
-                for j in 0..full_p {
-                    result[(self.feterm.piv[i], self.feterm.piv[j])] = vcov_perm[(i, j)];
-                }
-            }
-            result
-        } else {
-            let mut result = DMatrix::from_element(full_p, full_p, f64::NAN);
-            for i in 0..p {
-                for j in 0..p {
-                    result[(self.feterm.piv[i], self.feterm.piv[j])] = vcov_perm[(i, j)];
-                }
-            }
-            result
-        }
+        self.vcov_with_sigma(self.sigma())
     }
 
     fn stderror(&self) -> DVector<f64> {
@@ -4655,6 +6583,62 @@ fn build_parmap(reterms: &[ReMat]) -> Vec<(usize, usize, usize)> {
     parmap
 }
 
+fn kenward_roger_covariance_component_count(reterm: &ReMat) -> usize {
+    reterm.inds.len()
+}
+
+fn kenward_roger_covariance_component_indices(reterm: &ReMat) -> Vec<(usize, usize)> {
+    reterm
+        .inds
+        .iter()
+        .map(|&index| {
+            let col = index / reterm.vsize;
+            let row = index % reterm.vsize;
+            (row, col)
+        })
+        .collect()
+}
+
+fn kenward_roger_response_component(
+    reterm: &ReMat,
+    row: usize,
+    col: usize,
+    n_observations: usize,
+) -> Result<DMatrix<f64>> {
+    if row >= reterm.vsize || col >= reterm.vsize {
+        return Err(MixedModelError::DimensionMismatch(format!(
+            "KR covariance component ({row}, {col}) is outside random-effect vector size {}",
+            reterm.vsize
+        )));
+    }
+    if reterm.n_obs() != n_observations {
+        return Err(MixedModelError::DimensionMismatch(format!(
+            "KR random-effect term '{}' has {} observations, expected {n_observations}",
+            reterm.grouping_name,
+            reterm.n_obs()
+        )));
+    }
+
+    let mut component = DMatrix::zeros(n_observations, n_observations);
+    for obs_i in 0..n_observations {
+        let level_i = reterm.refs[obs_i];
+        for obs_j in 0..=obs_i {
+            if level_i != reterm.refs[obs_j] {
+                continue;
+            }
+            let value = if row == col {
+                reterm.z[(row, obs_i)] * reterm.z[(row, obs_j)]
+            } else {
+                reterm.z[(row, obs_i)] * reterm.z[(col, obs_j)]
+                    + reterm.z[(col, obs_i)] * reterm.z[(row, obs_j)]
+            };
+            component[(obs_i, obs_j)] = value;
+            component[(obs_j, obs_i)] = value;
+        }
+    }
+    Ok(component)
+}
+
 fn matrix_rows(matrix: &DMatrix<f64>) -> Vec<Vec<f64>> {
     (0..matrix.nrows())
         .map(|row| {
@@ -4675,6 +6659,116 @@ fn max_abs_delta(left: &[f64], right: &[f64]) -> Option<f64> {
             .map(|(a, b)| (a - b).abs())
             .fold(0.0, f64::max),
     )
+}
+
+fn matrix_is_finite(matrix: &DMatrix<f64>) -> bool {
+    matrix.iter().all(|value| value.is_finite())
+}
+
+fn matrix_elementwise_dot(left: &DMatrix<f64>, right: &DMatrix<f64>) -> f64 {
+    if left.shape() != right.shape() {
+        return f64::NAN;
+    }
+    left.iter()
+        .zip(right.iter())
+        .map(|(lhs, rhs)| lhs * rhs)
+        .sum()
+}
+
+fn matrix_trace(matrix: &DMatrix<f64>) -> f64 {
+    let n = matrix.nrows().min(matrix.ncols());
+    (0..n).map(|idx| matrix[(idx, idx)]).sum()
+}
+
+fn matrix_trace_product(left: &DMatrix<f64>, right: &DMatrix<f64>) -> f64 {
+    if left.ncols() != right.nrows() {
+        return f64::NAN;
+    }
+    let mut trace = 0.0;
+    let n = left.nrows().min(right.ncols());
+    for row in 0..n {
+        for col in 0..left.ncols() {
+            trace += left[(row, col)] * right[(col, row)];
+        }
+    }
+    trace
+}
+
+fn matrix_max_asymmetry(matrix: &DMatrix<f64>) -> f64 {
+    if matrix.nrows() != matrix.ncols() {
+        return f64::INFINITY;
+    }
+    let mut max_delta = 0.0_f64;
+    for row in 0..matrix.nrows() {
+        for col in 0..row {
+            max_delta = max_delta.max((matrix[(row, col)] - matrix[(col, row)]).abs());
+        }
+    }
+    max_delta
+}
+
+fn invert_spd_matrix(matrix: &DMatrix<f64>, context: &str) -> Result<DMatrix<f64>> {
+    if matrix.nrows() != matrix.ncols() {
+        return Err(MixedModelError::DimensionMismatch(format!(
+            "{context} is {} x {}, expected square",
+            matrix.nrows(),
+            matrix.ncols()
+        )));
+    }
+    matrix
+        .clone()
+        .cholesky()
+        .map(|chol| chol.inverse())
+        .ok_or_else(|| MixedModelError::LinAlg(crate::error::LinAlgError::NotPositiveDefinite))
+}
+
+fn symmetric_pseudoinverse(matrix: &DMatrix<f64>, tolerance: f64) -> DMatrix<f64> {
+    let matrix = symmetrize_matrix(matrix);
+    let eig = SymmetricEigen::new(matrix);
+    let mut inverse = DMatrix::zeros(eig.eigenvectors.nrows(), eig.eigenvectors.ncols());
+    for (index, &eigenvalue) in eig.eigenvalues.iter().enumerate() {
+        if eigenvalue.abs() > tolerance {
+            let column = eig.eigenvectors.column(index);
+            inverse += (column * column.transpose()) * (1.0 / eigenvalue);
+        }
+    }
+    symmetrize_matrix(&inverse)
+}
+
+fn matrix_rank(matrix: &DMatrix<f64>, relative_tolerance: f64) -> usize {
+    let svd = matrix.clone().svd(false, false);
+    let max_singular = svd.singular_values.iter().copied().fold(0.0, f64::max);
+    let tolerance = (relative_tolerance * max_singular.max(1.0)).max(1e-12);
+    svd.singular_values
+        .iter()
+        .filter(|value| **value > tolerance)
+        .count()
+}
+
+fn symmetric_pair_index(row: usize, col: usize, dimension: usize) -> usize {
+    debug_assert!(row <= col);
+    debug_assert!(col < dimension);
+    row * dimension - row.saturating_mul(row.saturating_sub(1)) / 2 + (col - row)
+}
+
+fn div_zero(numerator: f64, denominator: f64, tolerance: f64) -> f64 {
+    if numerator.abs() < tolerance && denominator.abs() < tolerance {
+        1.0
+    } else {
+        numerator / denominator
+    }
+}
+
+fn symmetrize_matrix(matrix: &DMatrix<f64>) -> DMatrix<f64> {
+    let mut result = matrix.clone();
+    for row in 0..matrix.nrows() {
+        for col in 0..row {
+            let value = 0.5 * (matrix[(row, col)] + matrix[(col, row)]);
+            result[(row, col)] = value;
+            result[(col, row)] = value;
+        }
+    }
+    result
 }
 
 fn finite_difference_steps(theta: &[f64], lower_bounds: &[f64], relative_scale: f64) -> Vec<f64> {
@@ -4764,6 +6858,45 @@ fn finite_difference_objective_2d(
         .filter(|value| value.is_finite())
 }
 
+fn finite_difference_deviance_varpar(
+    evaluator: &mut LinearMixedModel,
+    varpar: &[f64],
+    index: usize,
+    delta: f64,
+    reml: bool,
+) -> Result<f64> {
+    let mut trial = varpar.to_vec();
+    trial[index] += delta;
+    evaluator.deviance_varpar(&trial, reml).and_then(|value| {
+        value.is_finite().then_some(value).ok_or_else(|| {
+            MixedModelError::Optimization(
+                "finite-difference deviance_varpar evaluation is non-finite".to_string(),
+            )
+        })
+    })
+}
+
+fn finite_difference_deviance_varpar_2d(
+    evaluator: &mut LinearMixedModel,
+    varpar: &[f64],
+    row: usize,
+    row_delta: f64,
+    col: usize,
+    col_delta: f64,
+    reml: bool,
+) -> Result<f64> {
+    let mut trial = varpar.to_vec();
+    trial[row] += row_delta;
+    trial[col] += col_delta;
+    evaluator.deviance_varpar(&trial, reml).and_then(|value| {
+        value.is_finite().then_some(value).ok_or_else(|| {
+            MixedModelError::Optimization(
+                "finite-difference deviance_varpar evaluation is non-finite".to_string(),
+            )
+        })
+    })
+}
+
 fn contrast_standard_errors(l: &DMatrix<f64>, vcov: &DMatrix<f64>) -> Vec<Option<f64>> {
     (0..l.nrows())
         .map(|row| {
@@ -4776,6 +6909,16 @@ fn contrast_standard_errors(l: &DMatrix<f64>, vcov: &DMatrix<f64>) -> Vec<Option
             (variance.is_finite() && variance >= 0.0).then_some(variance.max(0.0).sqrt())
         })
         .collect()
+}
+
+fn contrast_row_quadratic_form(l: &DMatrix<f64>, row: usize, matrix: &DMatrix<f64>) -> f64 {
+    let mut value = 0.0;
+    for i in 0..l.ncols() {
+        for j in 0..l.ncols() {
+            value += l[(row, i)] * matrix[(i, j)] * l[(row, j)];
+        }
+    }
+    value
 }
 
 fn assess_fixed_contrast_estimability(
@@ -4806,6 +6949,206 @@ fn assess_fixed_contrast_estimability(
             requested,
             Vec::new(),
         )
+    }
+}
+
+fn scalar_single_coefficient_contrast(l: &DMatrix<f64>) -> Option<(usize, f64)> {
+    if l.nrows() != 1 {
+        return None;
+    }
+    let mut found = None;
+    for col in 0..l.ncols() {
+        let value = l[(0, col)];
+        if value.abs() <= 1e-12 {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some((col, value));
+    }
+    found
+}
+
+fn fixed_effect_test_to_inference_row(
+    kind: FixedEffectInferenceRowKind,
+    test: FixedEffectTest,
+) -> FixedEffectInferenceRow {
+    let statistic_name = fixed_effect_statistic_name(&test);
+    let reason = fixed_effect_inference_reason(&test);
+    FixedEffectInferenceRow {
+        label: test.hypothesis.label.clone(),
+        kind,
+        estimate: finite_option(test.estimates.first().copied()),
+        std_error: finite_option(test.standard_errors.first().copied().flatten()),
+        numerator_df: fixed_effect_row_numerator_df(&test, statistic_name),
+        denominator_df: test.denominator_df,
+        statistic: finite_option(test.statistics.first().copied().flatten()),
+        statistic_name,
+        p_value: finite_option(test.p_values.first().copied().flatten()),
+        method: fixed_effect_inference_method(&test.method),
+        status: fixed_effect_inference_status(&test.status),
+        reliability: test.reliability,
+        estimability: EstimabilityAssessment::FixedContrast(test.estimability),
+        reason,
+        notes: test.notes,
+    }
+}
+
+fn fixed_effect_inference_method(method: &InferenceMethod) -> FixedEffectInferenceMethod {
+    match method {
+        InferenceMethod::AsymptoticWaldZ => FixedEffectInferenceMethod::AsymptoticWaldZ,
+        InferenceMethod::Satterthwaite => FixedEffectInferenceMethod::Satterthwaite,
+        InferenceMethod::KenwardRoger => FixedEffectInferenceMethod::KenwardRoger,
+        InferenceMethod::ParametricBootstrap => FixedEffectInferenceMethod::Bootstrap,
+        InferenceMethod::NotComputed { .. } => FixedEffectInferenceMethod::NotComputed,
+    }
+}
+
+fn fixed_effect_inference_status(status: &InferenceStatus) -> FixedEffectInferenceStatus {
+    match status {
+        InferenceStatus::Available => FixedEffectInferenceStatus::Available,
+        InferenceStatus::PValueUnavailable { .. } => FixedEffectInferenceStatus::PValueUnavailable,
+        InferenceStatus::NotEstimable { .. } => FixedEffectInferenceStatus::NotEstimable,
+        InferenceStatus::NotAssessed { .. } => FixedEffectInferenceStatus::NotAssessed,
+        InferenceStatus::Unsupported { .. } => FixedEffectInferenceStatus::Unsupported,
+    }
+}
+
+fn fixed_effect_statistic_name(test: &FixedEffectTest) -> Option<FixedEffectStatisticName> {
+    match test.method {
+        InferenceMethod::AsymptoticWaldZ => Some(FixedEffectStatisticName::Z),
+        InferenceMethod::Satterthwaite => Some(FixedEffectStatisticName::T),
+        InferenceMethod::KenwardRoger if test.hypothesis.n_contrasts() > 1 => {
+            Some(FixedEffectStatisticName::F)
+        }
+        InferenceMethod::KenwardRoger => Some(FixedEffectStatisticName::T),
+        InferenceMethod::ParametricBootstrap if test.hypothesis.n_contrasts() > 1 => {
+            Some(FixedEffectStatisticName::F)
+        }
+        InferenceMethod::ParametricBootstrap => Some(FixedEffectStatisticName::T),
+        InferenceMethod::NotComputed { .. } => None,
+    }
+}
+
+fn fixed_effect_row_numerator_df(
+    test: &FixedEffectTest,
+    statistic_name: Option<FixedEffectStatisticName>,
+) -> Option<f64> {
+    match statistic_name {
+        Some(FixedEffectStatisticName::F) => test.numerator_df,
+        _ => None,
+    }
+}
+
+fn fixed_effect_inference_reason(test: &FixedEffectTest) -> Option<String> {
+    match &test.status {
+        InferenceStatus::Available => match &test.method {
+            InferenceMethod::NotComputed { reason } => Some(reason.clone()),
+            _ => None,
+        },
+        InferenceStatus::PValueUnavailable { reason }
+        | InferenceStatus::NotEstimable { reason }
+        | InferenceStatus::NotAssessed { reason }
+        | InferenceStatus::Unsupported { reason } => Some(reason.clone()),
+    }
+}
+
+fn finite_option(value: Option<f64>) -> Option<f64> {
+    value.filter(|value| value.is_finite())
+}
+
+fn fixed_effect_test_asymptotic_wald_z(
+    hypothesis: FixedEffectHypothesis,
+    estimates: Vec<f64>,
+    standard_errors: Vec<Option<f64>>,
+    statistics: Vec<Option<f64>>,
+    estimability: FixedContrastEstimability,
+) -> FixedEffectTest {
+    use statrs::distribution::{ContinuousCDF, Normal};
+
+    let normal = Normal::new(0.0, 1.0).unwrap();
+    let p_values = statistics
+        .iter()
+        .map(|stat| stat.map(|z| 2.0 * (1.0 - normal.cdf(z.abs()))))
+        .collect::<Vec<_>>();
+    let p_value_available = p_values.iter().all(Option::is_some);
+    FixedEffectTest {
+        hypothesis,
+        estimates,
+        standard_errors,
+        statistics,
+        numerator_df: Some(1.0),
+        denominator_df: None,
+        p_values,
+        method: InferenceMethod::AsymptoticWaldZ,
+        reliability: ReliabilityGrade::Low,
+        status: if p_value_available {
+            InferenceStatus::Available
+        } else {
+            InferenceStatus::PValueUnavailable {
+                reason: "standard error is unavailable, so the Wald z p-value is unavailable"
+                    .to_string(),
+            }
+        },
+        estimability,
+        notes: vec![
+            "asymptotic Wald z is a labeled fallback, not a finite-sample correction".to_string(),
+        ],
+    }
+}
+
+fn fixed_effect_test_p_value_unavailable(
+    hypothesis: FixedEffectHypothesis,
+    estimates: Vec<f64>,
+    standard_errors: Vec<Option<f64>>,
+    statistics: Vec<Option<f64>>,
+    estimability: FixedContrastEstimability,
+    reason: String,
+) -> FixedEffectTest {
+    FixedEffectTest {
+        hypothesis,
+        estimates,
+        standard_errors,
+        statistics,
+        numerator_df: Some(1.0),
+        denominator_df: None,
+        p_values: vec![None],
+        method: InferenceMethod::NotComputed {
+            reason: reason.clone(),
+        },
+        reliability: ReliabilityGrade::NotAvailable,
+        status: InferenceStatus::PValueUnavailable { reason },
+        estimability,
+        notes: Vec::new(),
+    }
+}
+
+fn fixed_effect_test_not_assessed_with_method(
+    hypothesis: FixedEffectHypothesis,
+    estimates: Vec<f64>,
+    standard_errors: Vec<Option<f64>>,
+    statistics: Vec<Option<f64>>,
+    method: InferenceMethod,
+    estimability: FixedContrastEstimability,
+    reason: String,
+) -> FixedEffectTest {
+    let n = hypothesis.n_contrasts();
+    FixedEffectTest {
+        hypothesis,
+        estimates,
+        standard_errors,
+        statistics,
+        numerator_df: Some(1.0),
+        denominator_df: None,
+        p_values: vec![None; n],
+        method,
+        reliability: ReliabilityGrade::NotAvailable,
+        status: InferenceStatus::NotAssessed {
+            reason: reason.clone(),
+        },
+        estimability,
+        notes: vec![reason],
     }
 }
 
@@ -6888,7 +9231,7 @@ fn logdet_block(block: &MatrixBlock) -> f64 {
 // ── Parametric bootstrap ──────────────────────────────────────────────────────
 
 /// A single parametric bootstrap replicate.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BootstrapReplicate {
     /// Profile-likelihood objective (deviance or REML criterion).
     #[serde(with = "json_f64")]
@@ -6897,7 +9240,11 @@ pub struct BootstrapReplicate {
     #[serde(with = "json_f64")]
     pub sigma: f64,
     /// Fixed-effects coefficients (pivot order).
+    #[serde(with = "json_dvector_f64")]
     pub beta: DVector<f64>,
+    /// Fixed-effects standard errors (pivot order).
+    #[serde(default = "default_bootstrap_se", with = "json_dvector_f64")]
+    pub se: DVector<f64>,
     /// Variance-component θ parameters.
     pub theta: Vec<f64>,
 }
@@ -6907,9 +9254,9 @@ pub struct BootstrapReplicate {
 /// Mirrors `MixedModelBootstrap` in Julia's MixedModels.jl.
 ///
 /// Produced by [`parametricbootstrap`].  Each replicate stores the
-/// objective, residual σ, fixed-effects β, and covariance θ for a
+/// objective, residual σ, fixed-effects β, standard errors, and covariance θ for a
 /// model fitted to a simulated response.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MixedModelBootstrap {
     /// One entry per bootstrap replicate.
     pub fits: Vec<BootstrapReplicate>,
@@ -6955,6 +9302,142 @@ pub struct BootstrapInterval {
     pub method: BootstrapIntervalMethod,
 }
 
+pub const BOOTSTRAP_RUN_SCHEMA: &str = "mixedmodels.bootstrap_run";
+pub const BOOTSTRAP_RUN_SCHEMA_VERSION: &str = "1.0.0";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BootstrapTargetKind {
+    FullModelDistribution,
+    FixedEffectNull,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootstrapTarget {
+    pub kind: BootstrapTargetKind,
+    pub label: String,
+    pub contrast_label: Option<String>,
+}
+
+impl BootstrapTarget {
+    pub fn full_model_distribution(label: impl Into<String>) -> Self {
+        Self {
+            kind: BootstrapTargetKind::FullModelDistribution,
+            label: label.into(),
+            contrast_label: None,
+        }
+    }
+
+    pub fn fixed_effect_null(label: impl Into<String>, contrast_label: impl Into<String>) -> Self {
+        Self {
+            kind: BootstrapTargetKind::FixedEffectNull,
+            label: label.into(),
+            contrast_label: Some(contrast_label.into()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BootstrapFailedRefitPolicy {
+    Exclude,
+    CountExtreme,
+    Abort,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootstrapSeedRecord {
+    pub rng: String,
+    pub seed: Option<u64>,
+    pub reproducibility_note: String,
+}
+
+impl BootstrapSeedRecord {
+    pub fn unspecified() -> Self {
+        Self {
+            rng: "unknown".to_string(),
+            seed: None,
+            reproducibility_note:
+                "seed was not recorded; bootstrap run is not exactly reproducible".to_string(),
+        }
+    }
+
+    pub fn std_rng(seed: u64) -> Self {
+        Self {
+            rng: "StdRng".to_string(),
+            seed: Some(seed),
+            reproducibility_note: "bootstrap seed recorded by Rust caller".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootstrapRefitOptions {
+    pub reml: bool,
+    pub backend: String,
+    pub optimizer: String,
+}
+
+impl BootstrapRefitOptions {
+    pub fn from_model(model: &LinearMixedModel) -> Self {
+        Self {
+            reml: model.optsum.reml,
+            backend: model.optsum.backend_name().to_string(),
+            optimizer: model.optsum.optimizer_name().to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BootstrapRunMetadata {
+    pub schema_name: String,
+    pub schema_version: String,
+    pub target: BootstrapTarget,
+    pub requested_replicates: usize,
+    pub completed_replicates: usize,
+    pub successful_replicates: usize,
+    pub failed_refits: usize,
+    pub failed_refit_policy: BootstrapFailedRefitPolicy,
+    pub boundary_count: usize,
+    pub boundary_rate: Option<f64>,
+    pub seed_record: BootstrapSeedRecord,
+    pub refit_options: BootstrapRefitOptions,
+    pub statistic_label: Option<String>,
+    pub finite_statistic_count: Option<usize>,
+    pub mcse: Option<f64>,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BootstrapRunPayload {
+    pub metadata: BootstrapRunMetadata,
+    pub replicates: MixedModelBootstrap,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicate_statistics: Option<Vec<f64>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FixedEffectNullCovariancePolicy {
+    ReuseFittedCovariance,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FixedEffectNullBootstrapTarget {
+    pub target: BootstrapTarget,
+    pub covariance_policy: FixedEffectNullCovariancePolicy,
+    pub coefficient_names: Vec<String>,
+    #[serde(with = "json_dvector_f64")]
+    pub beta_fitted: DVector<f64>,
+    #[serde(with = "json_dvector_f64")]
+    pub beta_null: DVector<f64>,
+    pub theta: Vec<f64>,
+    #[serde(with = "json_f64")]
+    pub sigma: f64,
+    pub reml: bool,
+    pub notes: Vec<String>,
+}
+
 impl MixedModelBootstrap {
     /// Number of replicates.
     pub fn len(&self) -> usize {
@@ -6979,6 +9462,16 @@ impl MixedModelBootstrap {
     /// Fixed-effects β vectors across all replicates, shape `n_replicates × p`.
     pub fn betas(&self) -> Vec<DVector<f64>> {
         self.fits.iter().map(|f| f.beta.clone()).collect()
+    }
+
+    /// Fixed-effects standard-error vectors across all replicates.
+    pub fn standard_errors(&self) -> Vec<DVector<f64>> {
+        self.fits.iter().map(|f| f.se.clone()).collect()
+    }
+
+    /// Julia-style alias for [`MixedModelBootstrap::standard_errors`].
+    pub fn ses(&self) -> Vec<DVector<f64>> {
+        self.standard_errors()
     }
 
     /// θ parameter vectors across all replicates.
@@ -7092,9 +9585,108 @@ impl MixedModelBootstrap {
                     fit.theta.len()
                 )));
             }
+            if !fit.se.is_empty() && fit.se.len() != expected_beta {
+                return Err(MixedModelError::InvalidArgument(format!(
+                    "bootstrap replicate {idx} se length ({}) does not match model fixed-effect rank ({expected_beta})",
+                    fit.se.len()
+                )));
+            }
         }
 
         Ok(())
+    }
+
+    pub fn run_metadata_for_model(
+        &self,
+        model: &LinearMixedModel,
+        target: BootstrapTarget,
+        requested_replicates: usize,
+        failed_refit_policy: BootstrapFailedRefitPolicy,
+        seed_record: BootstrapSeedRecord,
+        refit_options: BootstrapRefitOptions,
+        statistic_label: Option<String>,
+        statistic_values: Option<&[f64]>,
+        p_value: Option<f64>,
+    ) -> BootstrapRunMetadata {
+        let lower_bounds = model.lower_bounds();
+        let successful_replicates = self.fits.iter().filter(|fit| fit.is_successful()).count();
+        let boundary_count = self
+            .fits
+            .iter()
+            .filter(|fit| fit.is_successful() && fit.is_boundary_refit(&lower_bounds, 1e-8))
+            .count();
+        let finite_statistic_count =
+            statistic_values.map(|values| values.iter().filter(|value| value.is_finite()).count());
+        let boundary_rate = (successful_replicates > 0)
+            .then_some(boundary_count as f64 / successful_replicates as f64);
+        let mcse = p_value.and_then(|p| {
+            (p.is_finite() && (0.0..=1.0).contains(&p) && successful_replicates > 0)
+                .then_some((p * (1.0 - p) / successful_replicates as f64).sqrt())
+        });
+
+        let mut notes = Vec::new();
+        if target.kind == BootstrapTargetKind::FullModelDistribution {
+            notes.push(
+                "full-model bootstrap distributions do not certify fixed-effect hypothesis-test p-values"
+                    .to_string(),
+            );
+        }
+        if requested_replicates != self.len() {
+            notes.push(format!(
+                "requested {requested_replicates} bootstrap replicate(s), collected {}",
+                self.len()
+            ));
+        }
+        if successful_replicates < self.len() {
+            notes.push(format!(
+                "{} bootstrap refit(s) did not produce finite estimates",
+                self.len() - successful_replicates
+            ));
+        }
+        if boundary_count > 0 {
+            notes.push(format!(
+                "{boundary_count} successful bootstrap refit(s) ended on a covariance boundary"
+            ));
+        }
+
+        BootstrapRunMetadata {
+            schema_name: BOOTSTRAP_RUN_SCHEMA.to_string(),
+            schema_version: BOOTSTRAP_RUN_SCHEMA_VERSION.to_string(),
+            target,
+            requested_replicates,
+            completed_replicates: self.len(),
+            successful_replicates,
+            failed_refits: self.len().saturating_sub(successful_replicates),
+            failed_refit_policy,
+            boundary_count,
+            boundary_rate,
+            seed_record,
+            refit_options,
+            statistic_label,
+            finite_statistic_count,
+            mcse,
+            notes,
+        }
+    }
+
+    pub fn into_run_payload(self, metadata: BootstrapRunMetadata) -> BootstrapRunPayload {
+        BootstrapRunPayload {
+            metadata,
+            replicates: self,
+            replicate_statistics: None,
+        }
+    }
+
+    pub fn into_run_payload_with_statistics(
+        self,
+        metadata: BootstrapRunMetadata,
+        replicate_statistics: Vec<f64>,
+    ) -> BootstrapRunPayload {
+        BootstrapRunPayload {
+            metadata,
+            replicates: self,
+            replicate_statistics: Some(replicate_statistics),
+        }
     }
 
     fn parameter_series(&self) -> Result<Vec<(String, Vec<f64>)>> {
@@ -7105,12 +9697,19 @@ impl MixedModelBootstrap {
         }
 
         let beta_len = self.fits[0].beta.len();
+        let se_len = self.fits[0].se.len();
         let theta_len = self.fits[0].theta.len();
         for (idx, fit) in self.fits.iter().enumerate() {
             if fit.beta.len() != beta_len {
                 return Err(MixedModelError::InvalidArgument(format!(
                     "bootstrap replicate {idx} beta length ({}) does not match first replicate ({beta_len})",
                     fit.beta.len()
+                )));
+            }
+            if fit.se.len() != se_len {
+                return Err(MixedModelError::InvalidArgument(format!(
+                    "bootstrap replicate {idx} se length ({}) does not match first replicate ({se_len})",
+                    fit.se.len()
                 )));
             }
             if fit.theta.len() != theta_len {
@@ -7121,7 +9720,7 @@ impl MixedModelBootstrap {
             }
         }
 
-        let mut series = Vec::with_capacity(2 + beta_len + theta_len);
+        let mut series = Vec::with_capacity(2 + beta_len + se_len + theta_len);
         series.push((
             "objective".to_string(),
             self.fits
@@ -7149,6 +9748,16 @@ impl MixedModelBootstrap {
                     .collect(),
             ));
         }
+        for idx in 0..se_len {
+            series.push((
+                format!("se[{idx}]"),
+                self.fits
+                    .iter()
+                    .map(|fit| fit.se[idx])
+                    .filter(|value| value.is_finite())
+                    .collect(),
+            ));
+        }
         for idx in 0..theta_len {
             series.push((
                 format!("theta[{idx}]"),
@@ -7169,6 +9778,30 @@ impl MixedModelBootstrap {
 
         Ok(series)
     }
+}
+
+impl BootstrapReplicate {
+    fn is_successful(&self) -> bool {
+        self.objective.is_finite()
+            && self.sigma.is_finite()
+            && self.beta.iter().all(|value| value.is_finite())
+            && self.se.iter().all(|value| value.is_finite())
+            && self.theta.iter().all(|value| value.is_finite())
+    }
+
+    fn is_boundary_refit(&self, lower_bounds: &[f64], tolerance: f64) -> bool {
+        self.theta.iter().enumerate().any(|(idx, theta)| {
+            lower_bounds
+                .get(idx)
+                .copied()
+                .filter(|lower| lower.is_finite())
+                .is_some_and(|lower| *theta <= lower + tolerance)
+        })
+    }
+}
+
+fn default_bootstrap_se() -> DVector<f64> {
+    DVector::zeros(0)
 }
 
 fn validate_probability(probability: f64) -> Result<()> {
@@ -7269,12 +9902,90 @@ mod json_f64 {
     }
 }
 
+mod json_dvector_f64 {
+    use nalgebra::DVector;
+    use serde::de::Error;
+    use serde::ser::SerializeSeq;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(value: &DVector<f64>, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(value.len()))?;
+        for entry in value.iter() {
+            seq.serialize_element(&JsonF64(*entry))?;
+        }
+        seq.end()
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> std::result::Result<DVector<f64>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let values = Vec::<JsonF64>::deserialize(deserializer)?;
+        Ok(DVector::from_vec(
+            values.into_iter().map(|value| value.0).collect(),
+        ))
+    }
+
+    struct JsonF64(f64);
+
+    impl Serialize for JsonF64 {
+        fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            if self.0.is_finite() {
+                serializer.serialize_f64(self.0)
+            } else if self.0.is_nan() {
+                serializer.serialize_str("NaN")
+            } else if self.0.is_sign_positive() {
+                serializer.serialize_str("Infinity")
+            } else {
+                serializer.serialize_str("-Infinity")
+            }
+        }
+    }
+
+    impl<'de> Deserialize<'de> for JsonF64 {
+        fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+        where
+            D: Deserializer<'de>,
+        {
+            #[derive(Deserialize)]
+            #[serde(untagged)]
+            enum JsonF64Value {
+                Number(f64),
+                Special(String),
+                Null(Option<()>),
+            }
+
+            match JsonF64Value::deserialize(deserializer)? {
+                JsonF64Value::Number(value) => Ok(JsonF64(value)),
+                JsonF64Value::Special(value) => match value.as_str() {
+                    "NaN" => Ok(JsonF64(f64::NAN)),
+                    "Infinity" => Ok(JsonF64(f64::INFINITY)),
+                    "-Infinity" => Ok(JsonF64(f64::NEG_INFINITY)),
+                    _ => Err(D::Error::custom(format!(
+                        "invalid non-finite float marker `{value}`"
+                    ))),
+                },
+                JsonF64Value::Null(None) => Ok(JsonF64(f64::NAN)),
+                JsonF64Value::Null(Some(())) => Err(D::Error::custom(
+                    "invalid unit value in floating-point vector",
+                )),
+            }
+        }
+    }
+}
+
 /// Run a parametric bootstrap for a fitted `LinearMixedModel`.
 ///
 /// For each of `n_rep` replicates:
 /// 1. Simulate a new response from the fitted model.
 /// 2. Refit the model to the simulated response.
-/// 3. Record `(objective, σ, β, θ)`.
+/// 3. Record `(objective, σ, β, se, θ)`.
 ///
 /// Returns a [`MixedModelBootstrap`] holding all replicates.
 ///
@@ -7304,16 +10015,19 @@ pub fn parametricbootstrap<R: rand::Rng>(
                     objective: work.objective(),
                     sigma: work.sigma(),
                     beta: work.beta(),
+                    se: work.stderror(),
                     theta: work.theta(),
                 });
             }
             Err(_) => {
                 // On numerical failure, record the current (possibly partial) state.
                 // Julia silently records the last accepted iterate in such cases.
+                let beta = work.beta();
                 fits.push(BootstrapReplicate {
                     objective: f64::NAN,
                     sigma: f64::NAN,
-                    beta: work.beta(),
+                    se: DVector::from_element(beta.len(), f64::NAN),
+                    beta,
                     theta: work.theta(),
                 });
             }
@@ -7332,10 +10046,10 @@ mod tests {
     use rand_distr::{Distribution, Normal};
 
     use crate::compiler::{
-        CertificateCheck, CompilerPolicy, DiagnosticCode, EffectiveRankStatus, EvidenceMethod,
-        EvidenceQuality, FitIntent, FitStatus, FixedEffectHypothesis, InferenceStatus,
-        InformationBudgetStatus, ModelChangeStatus, ModelStateStatus, RandomStrategy, RankStatus,
-        ReductionTrigger, ThetaMap,
+        CertificateCheck, CompilerPolicy, ContrastMatrix, ContrastRhs, DiagnosticCode,
+        EffectiveRankStatus, EvidenceMethod, EvidenceQuality, FitIntent, FitStatus,
+        FixedEffectHypothesis, InferenceStatus, InformationBudgetStatus, ModelChangeStatus,
+        ModelStateStatus, RandomStrategy, RankStatus, ReductionRecord, ReductionTrigger, ThetaMap,
     };
     use crate::formula::parse_formula;
     use crate::model::data::{Column, DataFrame};
@@ -7991,7 +10705,7 @@ mod tests {
     fn test_singular_fixture_zcp_fit_exposes_reduced_effective_rank() {
         let (data, _) = crate::datasets::load("singular").unwrap();
         let formula = parse_formula("y ~ 1 + A * B * C + (A * B * C || group)").unwrap();
-        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        let mut model = LinearMixedModel::new(formula.clone(), &data, None).unwrap();
 
         model.fit(false).unwrap();
 
@@ -8084,7 +10798,7 @@ mod tests {
     fn test_lmm_optimizer_certificate_records_interior_fit() {
         let data = sleepstudy_fixture();
         let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
-        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        let mut model = LinearMixedModel::new(formula.clone(), &data, None).unwrap();
 
         assert!(model.optimizer_certificate().is_none());
         model.fit(false).unwrap();
@@ -8220,18 +10934,27 @@ mod tests {
                     .any(|action| action.contains("valid fitted boundary"))
         }));
         assert!(matches!(
-            certificate.evidence.gradient.method,
-            EvidenceMethod::FiniteDifference
+            &certificate.evidence.gradient.method,
+            EvidenceMethod::NotAssessed { reason } if reason.contains("variance-component boundary")
         ));
-        assert_eq!(
-            certificate.evidence.gradient.kkt_boundary_gradient_max,
-            Some(0.0)
-        );
-        assert_eq!(certificate.evidence.hessian.rank, Some(0));
+        assert!(certificate
+            .evidence
+            .gradient
+            .kkt_boundary_gradient_max
+            .is_none());
+        assert!(matches!(
+            &certificate.evidence.hessian.quality,
+            EvidenceQuality::NotAssessed { reason } if reason.contains("variance-component boundary")
+        ));
+        assert_eq!(certificate.evidence.hessian.rank, None);
         assert!(certificate
             .checks
             .iter()
-            .any(|check| matches!(check, CertificateCheck::BoundaryGradientOk { .. })));
+            .any(|check| matches!(
+                check,
+                CertificateCheck::NotAssessed { reason }
+                    if reason.contains("boundary-gradient KKT check skipped")
+            )));
         assert!(certificate
             .diagnostics
             .iter()
@@ -8374,7 +11097,7 @@ mod tests {
         let data = sleepstudy_fixture();
         let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
         let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
-        model.fit(false).unwrap();
+        model.fit(true).unwrap();
 
         let error = model
             .set_compiler_policy(CompilerPolicy::as_specified())
@@ -9726,6 +12449,157 @@ mod tests {
         df
     }
 
+    fn fitted_varpar(model: &LinearMixedModel) -> Vec<f64> {
+        let mut varpar = model.theta();
+        varpar.push(model.sigma());
+        varpar
+    }
+
+    fn assert_matrix_relative_eq(actual: &DMatrix<f64>, expected: &DMatrix<f64>, epsilon: f64) {
+        assert_eq!(actual.shape(), expected.shape());
+        for row in 0..actual.nrows() {
+            for col in 0..actual.ncols() {
+                assert_relative_eq!(actual[(row, col)], expected[(row, col)], epsilon = epsilon);
+            }
+        }
+    }
+
+    fn assert_matrix_symmetric(matrix: &DMatrix<f64>, epsilon: f64) {
+        assert_eq!(matrix.nrows(), matrix.ncols());
+        for row in 0..matrix.nrows() {
+            for col in 0..row {
+                assert_relative_eq!(matrix[(row, col)], matrix[(col, row)], epsilon = epsilon);
+            }
+        }
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SatterthwaiteParityFixture {
+        cases: Vec<SatterthwaiteParityCase>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SatterthwaiteParityCase {
+        name: String,
+        formula: String,
+        coefficient: String,
+        estimate: f64,
+        std_error: f64,
+        df: f64,
+        statistic: f64,
+        p_value: f64,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct KenwardRogerPbkrtestParityFixture {
+        scalar_cases: Vec<KenwardRogerScalarParityCase>,
+        multi_df_cases: Vec<KenwardRogerMultiDfParityCase>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct KenwardRogerScalarParityCase {
+        name: String,
+        formula: String,
+        label: String,
+        l: Vec<Vec<f64>>,
+        rhs: Vec<f64>,
+        estimate: f64,
+        std_error: f64,
+        denominator_df: f64,
+        statistic: f64,
+        p_value: f64,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct KenwardRogerMultiDfParityCase {
+        name: String,
+        formula: String,
+        label: String,
+        l: Vec<Vec<f64>>,
+        rhs: Vec<f64>,
+        numerator_df: f64,
+        denominator_df: f64,
+        statistic: f64,
+        p_value: f64,
+        f_scaling: f64,
+        unscaled_statistic: f64,
+        unscaled_p_value: f64,
+    }
+
+    fn satterthwaite_lmer_test_parity_fixture() -> SatterthwaiteParityFixture {
+        serde_json::from_str(include_str!(
+            "../../tests/fixtures/compiler_contract/satterthwaite_lmer_test_parity_v1.json"
+        ))
+        .expect("Satterthwaite lmerTest parity fixture should deserialize")
+    }
+
+    fn kenward_roger_pbkrtest_parity_fixture() -> KenwardRogerPbkrtestParityFixture {
+        serde_json::from_str(include_str!(
+            "../../tests/fixtures/compiler_contract/kenward_roger_pbkrtest_parity_v1.json"
+        ))
+        .expect("Kenward-Roger pbkrtest parity fixture should deserialize")
+    }
+
+    fn fixed_effect_hypothesis_from_fixture(
+        label: &str,
+        l: &[Vec<f64>],
+        rhs: &[f64],
+    ) -> FixedEffectHypothesis {
+        assert!(!l.is_empty(), "{label}: contrast matrix must have rows");
+        let ncols = l[0].len();
+        assert!(ncols > 0, "{label}: contrast matrix must have columns");
+        assert_eq!(rhs.len(), l.len(), "{label}: rhs length must match rows");
+        assert!(
+            l.iter().all(|row| row.len() == ncols),
+            "{label}: contrast rows must have a common width"
+        );
+        let values = l.iter().flatten().copied().collect::<Vec<_>>();
+        let l = ContrastMatrix::new(DMatrix::from_row_slice(rhs.len(), ncols, &values)).unwrap();
+        let rhs = ContrastRhs::new(DVector::from_column_slice(rhs)).unwrap();
+        FixedEffectHypothesis::new(label.to_string(), l, rhs).unwrap()
+    }
+
+    fn unbalanced_sleepstudy_fixture() -> DataFrame {
+        let source = sleepstudy_fixture();
+        let reaction = source.numeric("reaction").unwrap();
+        let days = source.numeric("days").unwrap();
+        let subj = &source.categorical("subj").unwrap().values;
+
+        let mut out_reaction = Vec::new();
+        let mut out_days = Vec::new();
+        let mut out_subj = Vec::new();
+        for row in 0..source.nrow() {
+            let drop_row = matches!(subj[row].as_str(), "S308" | "S309")
+                && matches!(days[row] as i32, 1 | 3 | 5 | 7 | 9);
+            if !drop_row {
+                out_reaction.push(reaction[row]);
+                out_days.push(days[row]);
+                out_subj.push(subj[row].clone());
+            }
+        }
+
+        let mut df = DataFrame::new();
+        df.add_numeric("reaction", out_reaction);
+        df.add_numeric("days", out_days);
+        df.add_categorical_with_levels(
+            "subj",
+            out_subj,
+            source.categorical("subj").unwrap().levels.clone(),
+        );
+        df
+    }
+
+    fn satterthwaite_parity_data(case_name: &str) -> DataFrame {
+        match case_name {
+            "sleepstudy_random_intercept_days" | "sleepstudy_random_slope_days" => {
+                sleepstudy_fixture()
+            }
+            "sleepstudy_unbalanced_random_slope_days" => unbalanced_sleepstudy_fixture(),
+            "penicillin_crossed_intercept" => penicillin_fixture(),
+            other => panic!("unknown Satterthwaite parity case {other}"),
+        }
+    }
+
     // ── Parity tests against Julia MixedModels.jl ──────────────────────────
 
     #[test]
@@ -9749,6 +12623,714 @@ mod tests {
             -327.32705988112673 / 2.0,
             epsilon = 1e-3
         );
+    }
+
+    #[test]
+    fn test_deviance_varpar_matches_ml_scalar_fit_and_restores_state() {
+        let data = dyestuff_fixture();
+        let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let theta_before = model.theta();
+        let objective_before = model.objective_value();
+        let vcov_before = model.vcov();
+        let varpar = fitted_varpar(&model);
+
+        let deviance = model.deviance_varpar(&varpar, false).unwrap();
+
+        assert_relative_eq!(deviance, objective_before, epsilon = 1e-8);
+        assert_eq!(model.theta(), theta_before);
+        assert_relative_eq!(model.objective_value(), objective_before, epsilon = 1e-10);
+        assert_relative_eq!(model.vcov(), vcov_before, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_deviance_varpar_matches_reml_vector_fit_and_restores_state() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(true).unwrap();
+
+        let theta_before = model.theta();
+        let objective_before = model.objective_value();
+        let vcov_before = model.vcov();
+        let varpar = fitted_varpar(&model);
+
+        let deviance = model.deviance_varpar(&varpar, true).unwrap();
+
+        assert_relative_eq!(deviance, objective_before, epsilon = 1e-8);
+        assert_eq!(model.theta(), theta_before);
+        assert_relative_eq!(model.objective_value(), objective_before, epsilon = 1e-10);
+        assert_relative_eq!(model.vcov(), vcov_before, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_deviance_varpar_rejects_invalid_inputs_without_changing_state() {
+        let data = dyestuff_fixture();
+        let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let theta_before = model.theta();
+        let objective_before = model.objective_value();
+        let mut varpar = fitted_varpar(&model);
+        varpar[0] = -1.0;
+        assert!(model.deviance_varpar(&varpar, false).is_err());
+
+        let mut varpar = fitted_varpar(&model);
+        *varpar.last_mut().unwrap() = 0.0;
+        assert!(model.deviance_varpar(&varpar, false).is_err());
+
+        assert_eq!(model.theta(), theta_before);
+        assert_relative_eq!(model.objective_value(), objective_before, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_vcov_beta_varpar_matches_fitted_vcov_and_restores_state() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(true).unwrap();
+
+        let theta_before = model.theta();
+        let objective_before = model.objective_value();
+        let vcov_before = model.vcov();
+        let varpar = fitted_varpar(&model);
+
+        let vcov = model.vcov_beta_varpar(&varpar).unwrap();
+
+        assert_matrix_relative_eq(&vcov, &vcov_before, 1e-10);
+        assert_eq!(model.theta(), theta_before);
+        assert_relative_eq!(model.objective_value(), objective_before, epsilon = 1e-10);
+        assert_matrix_relative_eq(&model.vcov(), &vcov_before, 1e-10);
+    }
+
+    #[test]
+    fn test_jac_vcov_beta_varpar_returns_symmetric_matrices_and_sigma_derivative() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(true).unwrap();
+
+        let theta_before = model.theta();
+        let objective_before = model.objective_value();
+        let varpar = fitted_varpar(&model);
+        let vcov = model.vcov_beta_varpar(&varpar).unwrap();
+
+        let jacobian = model.jac_vcov_beta_varpar(&varpar).unwrap();
+
+        assert_eq!(jacobian.len(), varpar.len());
+        for derivative in &jacobian {
+            assert_eq!(derivative.shape(), vcov.shape());
+            assert!(matrix_is_finite(derivative));
+            assert_matrix_symmetric(derivative, 1e-10);
+        }
+
+        let sigma = *varpar.last().unwrap();
+        let sigma_derivative = jacobian.last().unwrap();
+        let expected_sigma_derivative = vcov * (2.0 / sigma);
+        assert_matrix_relative_eq(sigma_derivative, &expected_sigma_derivative, 1e-6);
+        assert_eq!(model.theta(), theta_before);
+        assert_relative_eq!(model.objective_value(), objective_before, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_jac_vcov_beta_varpar_rejects_boundary_stencil_without_changing_state() {
+        let data = dyestuff_fixture();
+        let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let theta_before = model.theta();
+        let objective_before = model.objective_value();
+        let mut varpar = fitted_varpar(&model);
+        varpar[0] = 0.0;
+
+        let err = model.jac_vcov_beta_varpar(&varpar).unwrap_err();
+
+        assert!(err.to_string().contains("lower bound"));
+        assert_eq!(model.theta(), theta_before);
+        assert_relative_eq!(model.objective_value(), objective_before, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_vcov_varpar_estimate_returns_hessian_diagnostics_and_restores_state() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(true).unwrap();
+
+        let theta_before = model.theta();
+        let objective_before = model.objective_value();
+        let varpar = fitted_varpar(&model);
+
+        let estimate = model.vcov_varpar(&varpar, true).unwrap();
+
+        assert_eq!(estimate.covariance.shape(), (varpar.len(), varpar.len()));
+        assert_eq!(estimate.hessian.shape(), (varpar.len(), varpar.len()));
+        assert_eq!(estimate.eigenvalues.len(), varpar.len());
+        assert_eq!(
+            estimate.positive_eigenvalues
+                + estimate.near_zero_eigenvalues
+                + estimate.negative_eigenvalues,
+            varpar.len()
+        );
+        assert!(estimate.positive_eigenvalues > 0);
+        assert!(estimate.tolerance.is_finite());
+        assert!(estimate.tolerance > 0.0);
+        assert!(matrix_is_finite(&estimate.covariance));
+        assert!(matrix_is_finite(&estimate.hessian));
+        assert_matrix_symmetric(&estimate.covariance, 1e-8);
+        assert_matrix_symmetric(&estimate.hessian, 1e-8);
+        for index in 0..varpar.len() {
+            assert!(estimate.covariance[(index, index)] >= -1e-8);
+        }
+        assert!(matches!(
+            estimate.reliability,
+            ReliabilityGrade::Moderate | ReliabilityGrade::Low
+        ));
+        assert_eq!(
+            estimate.used_reduced_rank,
+            estimate.positive_eigenvalues < varpar.len()
+        );
+        assert_eq!(model.theta(), theta_before);
+        assert_relative_eq!(model.objective_value(), objective_before, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_vcov_varpar_rejects_boundary_hessian_without_changing_state() {
+        let data = dyestuff_fixture();
+        let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let theta_before = model.theta();
+        let objective_before = model.objective_value();
+        let mut varpar = fitted_varpar(&model);
+        varpar[0] = 0.0;
+
+        let err = model.vcov_varpar(&varpar, false).unwrap_err();
+
+        assert!(err.to_string().contains("lower bound"));
+        assert_eq!(model.theta(), theta_before);
+        assert_relative_eq!(model.objective_value(), objective_before, epsilon = 1e-10);
+    }
+
+    #[test]
+    fn test_kenward_roger_sigma_g_scalar_random_intercept_components() {
+        let data = dyestuff_fixture();
+        let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(true).unwrap();
+
+        let sigma_g = model.kenward_roger_sigma_g().unwrap();
+
+        assert_eq!(sigma_g.n_observations, model.nobs());
+        assert_eq!(sigma_g.components.len(), 2);
+        assert_eq!(sigma_g.component_weights.len(), 2);
+        assert_eq!(sigma_g.component_labels.len(), 2);
+        assert_eq!(sigma_g.residual_component_index, 1);
+        assert_eq!(sigma_g.component_labels[1], "residual");
+        assert!(sigma_g.includes_residual_variance);
+        assert!(sigma_g.sigma_positive_definite);
+        assert!(sigma_g.sigma_min_eigenvalue > 0.0);
+        assert!(matrix_is_finite(&sigma_g.sigma));
+        assert_matrix_symmetric(&sigma_g.sigma, 1e-10);
+        for component in &sigma_g.components {
+            assert_matrix_symmetric(component, 1e-12);
+        }
+
+        let residual_variance = model.sigma().powi(2);
+        let random_variance = residual_variance * model.theta()[0].powi(2);
+        assert_relative_eq!(
+            sigma_g.component_weights[0],
+            random_variance,
+            epsilon = 1e-6
+        );
+        assert_relative_eq!(
+            sigma_g.component_weights[1],
+            residual_variance,
+            epsilon = 1e-6
+        );
+
+        let refs = &model.reterms[0].refs;
+        for row in 0..model.nobs() {
+            for col in 0..model.nobs() {
+                let mut expected = if refs[row] == refs[col] {
+                    random_variance
+                } else {
+                    0.0
+                };
+                if row == col {
+                    expected += residual_variance;
+                }
+                assert_relative_eq!(sigma_g.sigma[(row, col)], expected, epsilon = 1e-6);
+            }
+        }
+    }
+
+    #[test]
+    fn test_kenward_roger_sigma_g_vector_random_effect_components() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(true).unwrap();
+
+        let sigma_g = model.kenward_roger_sigma_g().unwrap();
+
+        assert_eq!(sigma_g.components.len(), 4);
+        assert_eq!(sigma_g.residual_component_index, 3);
+        assert_eq!(sigma_g.component_labels[3], "residual");
+        assert!(sigma_g.component_labels[0].contains("(Intercept),(Intercept)"));
+        assert!(sigma_g.component_labels[1].contains("days,(Intercept)"));
+        assert!(sigma_g.component_labels[2].contains("days,days"));
+        assert!(sigma_g.sigma_positive_definite);
+        assert!(sigma_g.max_component_asymmetry <= 1e-12);
+
+        let residual_variance = model.sigma().powi(2);
+        let varcorr =
+            residual_variance * (&model.reterms[0].lambda * model.reterms[0].lambda.transpose());
+        assert_relative_eq!(
+            sigma_g.component_weights[0],
+            varcorr[(0, 0)],
+            epsilon = 1e-6
+        );
+        assert_relative_eq!(
+            sigma_g.component_weights[1],
+            varcorr[(1, 0)],
+            epsilon = 1e-6
+        );
+        assert_relative_eq!(
+            sigma_g.component_weights[2],
+            varcorr[(1, 1)],
+            epsilon = 1e-6
+        );
+        assert_relative_eq!(
+            sigma_g.component_weights[3],
+            residual_variance,
+            epsilon = 1e-6
+        );
+    }
+
+    #[test]
+    fn test_kenward_roger_adjusted_vcov_returns_pbkrtest_style_artifacts() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(true).unwrap();
+
+        let adjusted = model.kenward_roger_adjusted_vcov().unwrap();
+
+        let p = model.feterm.rank;
+        let n_components = model.kenward_roger_sigma_g().unwrap().components.len();
+        assert_eq!(adjusted.unadjusted_vcov_active.shape(), (p, p));
+        assert_eq!(adjusted.adjusted_vcov_active.shape(), (p, p));
+        assert_eq!(
+            adjusted.adjusted_vcov.shape(),
+            (model.coef_names().len(), model.coef_names().len())
+        );
+        assert_eq!(adjusted.p_matrices.len(), n_components);
+        assert_eq!(
+            adjusted.q_matrices.len(),
+            n_components * (n_components + 1) / 2
+        );
+        assert_eq!(adjusted.w.shape(), (n_components, n_components));
+        assert_eq!(
+            adjusted.information_matrix.shape(),
+            (n_components, n_components)
+        );
+        assert_eq!(adjusted.information_eigenvalues.len(), n_components);
+        assert_eq!(adjusted.component_labels.len(), n_components);
+        assert!(matrix_is_finite(&adjusted.unadjusted_vcov_active));
+        assert!(matrix_is_finite(&adjusted.adjusted_vcov_active));
+        assert!(matrix_is_finite(&adjusted.adjusted_vcov));
+        assert!(matrix_is_finite(&adjusted.w));
+        assert!(matrix_is_finite(&adjusted.information_matrix));
+        assert_matrix_symmetric(&adjusted.adjusted_vcov_active, 1e-8);
+        assert_matrix_symmetric(&adjusted.adjusted_vcov, 1e-8);
+        assert_matrix_symmetric(&adjusted.w, 1e-8);
+        assert_matrix_symmetric(&adjusted.information_matrix, 1e-8);
+        for p_matrix in &adjusted.p_matrices {
+            assert_eq!(p_matrix.shape(), (p, p));
+            assert_matrix_symmetric(p_matrix, 1e-8);
+        }
+        for q_matrix in &adjusted.q_matrices {
+            assert_eq!(q_matrix.shape(), (p, p));
+            assert!(matrix_is_finite(q_matrix));
+        }
+        assert!(matches!(
+            adjusted.reliability,
+            ReliabilityGrade::Moderate | ReliabilityGrade::Low
+        ));
+    }
+
+    #[test]
+    fn test_kenward_roger_adjusted_vcov_rejects_unweighted_prerequisite_gap() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let weights = vec![1.0; data.nrow()];
+        let mut model = LinearMixedModel::new(formula, &data, Some(&weights)).unwrap();
+        model.fit(true).unwrap();
+
+        let err = model.kenward_roger_adjusted_vcov().unwrap_err();
+
+        assert!(err
+            .to_string()
+            .contains("unweighted iid Gaussian residual models"));
+    }
+
+    #[test]
+    fn test_kenward_roger_lbddf_scalar_contrast_matches_expected_scale() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (days | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(true).unwrap();
+
+        let l = DMatrix::from_row_slice(1, model.coef_names().len(), &[0.0, 1.0]);
+        let ddf = model.kenward_roger_lbddf(&l).unwrap();
+
+        assert_eq!(ddf.restriction_rank, 1);
+        assert_relative_eq!(ddf.numerator_df, 1.0, epsilon = 1e-12);
+        assert!(ddf.denominator_df.is_finite());
+        assert!(
+            (15.0..=20.0).contains(&ddf.denominator_df),
+            "pbkrtest sleepstudy days df is expected near 17, got {}",
+            ddf.denominator_df
+        );
+        assert!(ddf.a1.is_finite());
+        assert!(ddf.a2.is_finite());
+        assert!(ddf.b.is_finite());
+        assert!(ddf.g.is_finite());
+        assert!(ddf.rho.is_finite());
+        assert!(matches!(
+            ddf.reliability,
+            ReliabilityGrade::Moderate | ReliabilityGrade::Low
+        ));
+    }
+
+    #[test]
+    fn test_kenward_roger_lbddf_handles_rank_deficient_restriction_matrix() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (days | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(true).unwrap();
+
+        let l = DMatrix::from_row_slice(
+            2,
+            model.coef_names().len(),
+            &[
+                0.0, 1.0, //
+                0.0, 1.0,
+            ],
+        );
+        let ddf = model.kenward_roger_lbddf(&l).unwrap();
+
+        assert_eq!(ddf.restriction_rank, 1);
+        assert_relative_eq!(ddf.numerator_df, 1.0, epsilon = 1e-12);
+        assert!(ddf.used_generalized_inverse);
+        assert!(ddf
+            .notes
+            .iter()
+            .any(|note| note.contains("row rank 1 is lower")));
+        assert!(ddf.denominator_df.is_finite());
+        assert!(ddf.denominator_df > 0.0);
+    }
+
+    #[test]
+    fn test_kenward_roger_lbddf_multi_df_contrast_returns_rank_df() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (days | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(true).unwrap();
+
+        let l = DMatrix::identity(model.coef_names().len(), model.coef_names().len());
+        let ddf = model.kenward_roger_lbddf(&l).unwrap();
+
+        assert_eq!(ddf.restriction_rank, 2);
+        assert_relative_eq!(ddf.numerator_df, 2.0, epsilon = 1e-12);
+        assert!(ddf.denominator_df.is_finite());
+        assert!(ddf.denominator_df > 0.0);
+    }
+
+    #[test]
+    fn test_lmm_explicit_kenward_roger_scalar_request_returns_t_test() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (days | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(true).unwrap();
+
+        let hypothesis =
+            FixedEffectHypothesis::single_coefficient("days = 0", 1, model.coef_names().len())
+                .unwrap();
+        let test = model.test_contrast_with_method(hypothesis, FixedEffectTestMethod::KenwardRoger);
+
+        assert_eq!(test.method, InferenceMethod::KenwardRoger);
+        assert_eq!(test.status, InferenceStatus::Available);
+        assert!(test.numerator_df.is_none());
+        assert!(test.denominator_df.unwrap().is_finite());
+        assert!((15.0..=20.0).contains(&test.denominator_df.unwrap()));
+        assert!(test.standard_errors[0].unwrap().is_finite());
+        assert!(test.statistics[0].unwrap().is_finite());
+        assert!(test.p_values[0].unwrap().is_finite());
+        assert!((0.0..=1.0).contains(&test.p_values[0].unwrap()));
+        assert!(test.notes.iter().any(|note| note.contains("Kenward-Roger")));
+    }
+
+    #[test]
+    fn test_lmm_explicit_kenward_roger_multi_df_request_returns_f_test() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (days | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(true).unwrap();
+
+        let l = DMatrix::identity(model.coef_names().len(), model.coef_names().len());
+        let hypothesis = FixedEffectHypothesis::new(
+            "all fixed effects = 0",
+            crate::compiler::ContrastMatrix::new(l).unwrap(),
+            crate::compiler::ContrastRhs::zeros(model.coef_names().len()),
+        )
+        .unwrap();
+        let test = model.test_contrast_with_method(hypothesis, FixedEffectTestMethod::KenwardRoger);
+
+        assert_eq!(test.method, InferenceMethod::KenwardRoger);
+        assert_eq!(test.status, InferenceStatus::Available);
+        assert_eq!(test.numerator_df, Some(2.0));
+        assert!(test.denominator_df.unwrap().is_finite());
+        assert!(test.denominator_df.unwrap() > 0.0);
+        assert_eq!(test.statistics.len(), 1);
+        assert!(test.statistics[0].unwrap().is_finite());
+        assert!(test.statistics[0].unwrap() >= 0.0);
+        assert_eq!(test.p_values.len(), 1);
+        assert!(test.p_values[0].unwrap().is_finite());
+        assert!((0.0..=1.0).contains(&test.p_values[0].unwrap()));
+        assert!(test
+            .notes
+            .iter()
+            .any(|note| note.contains("F scaling = 1.0")));
+    }
+
+    #[test]
+    fn test_lmm_explicit_kenward_roger_ml_request_does_not_fallback() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (days | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let hypothesis =
+            FixedEffectHypothesis::single_coefficient("days = 0", 1, model.coef_names().len())
+                .unwrap();
+        let test = model.test_contrast_with_method(hypothesis, FixedEffectTestMethod::KenwardRoger);
+
+        assert_eq!(test.method, InferenceMethod::KenwardRoger);
+        assert!(matches!(test.status, InferenceStatus::NotAssessed { .. }));
+        assert_eq!(test.p_values, vec![None]);
+        assert!(fixed_effect_inference_reason(&test)
+            .unwrap()
+            .contains("REML"));
+    }
+
+    #[test]
+    fn test_lmm_kenward_roger_scalar_rows_match_pbkrtest_fixture() {
+        let fixture = kenward_roger_pbkrtest_parity_fixture();
+
+        for case in fixture.scalar_cases {
+            let data = sleepstudy_fixture();
+            let formula = parse_formula(&case.formula).unwrap();
+            let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+            model.fit(true).unwrap();
+
+            let hypothesis = fixed_effect_hypothesis_from_fixture(&case.label, &case.l, &case.rhs);
+            let test =
+                model.test_contrast_with_method(hypothesis, FixedEffectTestMethod::KenwardRoger);
+
+            assert_eq!(test.method, InferenceMethod::KenwardRoger, "{}", case.name);
+            assert_eq!(test.status, InferenceStatus::Available, "{}", case.name);
+            assert!(
+                matches!(
+                    test.reliability,
+                    ReliabilityGrade::Moderate | ReliabilityGrade::Low
+                ),
+                "{}",
+                case.name
+            );
+            assert!(test.numerator_df.is_none(), "{}", case.name);
+            assert_relative_eq!(
+                test.estimates[0],
+                case.estimate,
+                epsilon = 1e-8,
+                max_relative = 1e-8
+            );
+            assert_relative_eq!(
+                test.standard_errors[0].unwrap(),
+                case.std_error,
+                epsilon = 5e-5,
+                max_relative = 5e-5
+            );
+            assert_relative_eq!(
+                test.denominator_df.unwrap(),
+                case.denominator_df,
+                epsilon = 1e-3,
+                max_relative = 1e-5
+            );
+            assert_relative_eq!(
+                test.statistics[0].unwrap(),
+                case.statistic,
+                epsilon = 5e-5,
+                max_relative = 5e-5
+            );
+            assert_relative_eq!(
+                test.p_values[0].unwrap(),
+                case.p_value,
+                epsilon = 1e-12,
+                max_relative = 1e-3
+            );
+        }
+    }
+
+    #[test]
+    fn test_lmm_kenward_roger_multi_df_rows_match_pbkrtest_unscaled_fixture() {
+        let fixture = kenward_roger_pbkrtest_parity_fixture();
+
+        for case in fixture.multi_df_cases {
+            let data = sleepstudy_fixture();
+            let formula = parse_formula(&case.formula).unwrap();
+            let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+            model.fit(true).unwrap();
+
+            let hypothesis = fixed_effect_hypothesis_from_fixture(&case.label, &case.l, &case.rhs);
+            let test =
+                model.test_contrast_with_method(hypothesis, FixedEffectTestMethod::KenwardRoger);
+
+            assert_eq!(test.method, InferenceMethod::KenwardRoger, "{}", case.name);
+            assert_eq!(test.status, InferenceStatus::Available, "{}", case.name);
+            if case.l.len() == 1 {
+                assert_eq!(test.numerator_df, None, "{}", case.name);
+                assert_relative_eq!(
+                    test.statistics[0].unwrap().powi(2),
+                    case.unscaled_statistic,
+                    epsilon = 1e-6,
+                    max_relative = 1e-6
+                );
+                assert_relative_eq!(
+                    test.p_values[0].unwrap(),
+                    case.unscaled_p_value,
+                    epsilon = 1e-12,
+                    max_relative = 1e-3
+                );
+                continue;
+            }
+            assert_eq!(test.numerator_df, Some(case.numerator_df), "{}", case.name);
+            // Multi-df F drift vs pbkrtest is dominated by numerical noise in the
+            // adjusted-vcov off-diagonals (β and Φ_A diagonals match to 1e-7;
+            // det(Φ_A) drift sits in the 3e-4 band).  Match a realistic numerical
+            // tolerance rather than bit-exactness.
+            assert_relative_eq!(
+                test.denominator_df.unwrap(),
+                case.denominator_df,
+                epsilon = 1e-3,
+                max_relative = 5e-4,
+            );
+            assert!(
+                (test.statistics[0].unwrap() - case.unscaled_statistic).abs()
+                    <= 1e-3 + 5e-4 * case.unscaled_statistic.abs(),
+                "{}: unscaled F drift exceeds tolerance: rust={} ref={}",
+                case.name,
+                test.statistics[0].unwrap(),
+                case.unscaled_statistic
+            );
+            assert_relative_eq!(
+                test.p_values[0].unwrap(),
+                case.unscaled_p_value,
+                epsilon = 1e-12,
+                max_relative = 1e-3,
+            );
+
+            if (case.f_scaling - 1.0).abs() > 1e-12 {
+                assert_ne!(case.statistic, case.unscaled_statistic);
+                assert_ne!(case.p_value, case.unscaled_p_value);
+                assert!(test
+                    .notes
+                    .iter()
+                    .any(|note| note.contains("F scaling = 1.0")));
+            }
+        }
+    }
+
+    #[test]
+    fn test_fixed_effect_h0_simulation_smoke_for_analytic_p_values() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula.clone(), &data, None).unwrap();
+        model.fit(true).unwrap();
+
+        let days_index = model
+            .coef_names()
+            .iter()
+            .position(|name| name == "days")
+            .unwrap();
+        let hypothesis = FixedEffectHypothesis::single_coefficient(
+            "days = 0",
+            days_index,
+            model.coef_names().len(),
+        )
+        .unwrap();
+        let target = model
+            .fixed_effect_null_bootstrap_target(&hypothesis)
+            .unwrap();
+
+        let mut rng = StdRng::seed_from_u64(20260501);
+        let mut wald_p_values = Vec::new();
+        let mut satterthwaite_p_values = Vec::new();
+        let mut kenward_roger_p_values = Vec::new();
+
+        for _ in 0..8 {
+            let y_sim = model.simulate_fixed_effect_null(&mut rng, &target).unwrap();
+            let mut sim_data = DataFrame::new();
+            sim_data.add_numeric("reaction", y_sim.iter().copied().collect());
+            sim_data.add_numeric("days", data.numeric("days").unwrap().to_vec());
+            let subj = data.categorical("subj").unwrap();
+            sim_data.add_categorical_with_levels("subj", subj.values.clone(), subj.levels.clone());
+            let mut work = LinearMixedModel::new(formula.clone(), &sim_data, None).unwrap();
+            work.fit(true).unwrap();
+
+            let wald = work.test_contrast_with_method(
+                hypothesis.clone(),
+                FixedEffectTestMethod::AsymptoticWaldZ,
+            );
+            let satterthwaite = work.test_contrast_with_method(
+                hypothesis.clone(),
+                FixedEffectTestMethod::Satterthwaite,
+            );
+            let kenward_roger = work
+                .test_contrast_with_method(hypothesis.clone(), FixedEffectTestMethod::KenwardRoger);
+
+            assert_eq!(wald.status, InferenceStatus::Available);
+            assert_eq!(satterthwaite.status, InferenceStatus::Available);
+            assert_eq!(kenward_roger.status, InferenceStatus::Available);
+            wald_p_values.push(wald.p_values[0].unwrap());
+            satterthwaite_p_values.push(satterthwaite.p_values[0].unwrap());
+            kenward_roger_p_values.push(kenward_roger.p_values[0].unwrap());
+        }
+
+        for (label, values) in [
+            ("Wald", &wald_p_values),
+            ("Satterthwaite", &satterthwaite_p_values),
+            ("Kenward-Roger", &kenward_roger_p_values),
+        ] {
+            assert_eq!(values.len(), 8, "{label} should produce all p-values");
+            assert!(
+                values
+                    .iter()
+                    .all(|p| p.is_finite() && (0.0..=1.0).contains(p)),
+                "{label} p-values should be finite probabilities: {values:?}"
+            );
+            let tiny = values.iter().filter(|&&p| p < 0.01).count();
+            assert!(
+                tiny <= 2,
+                "{label} produced too many tiny p-values under the simulated null: {values:?}"
+            );
+        }
     }
 
     #[test]
@@ -11258,10 +14840,10 @@ mod tests {
         let ct = model.coeftable();
         assert!(ct.z_values.iter().all(|value| value.is_finite()));
         assert!(ct.p_values.iter().all(|value| value.is_nan()));
-        assert!(ct
-            .p_value_reasons
-            .iter()
-            .all(|reason| reason.as_deref().unwrap().contains("Exploratory")));
+        assert!(ct.p_value_reasons.iter().all(|reason| reason
+            .as_deref()
+            .unwrap()
+            .contains("exploratory fit intent")));
 
         let summary = ModelSummary::from_linear_model(&model);
         assert!(summary
@@ -11289,7 +14871,8 @@ mod tests {
             model.coef_names().len(),
         )
         .unwrap();
-        let test = model.test_contrast(hypothesis);
+        let test =
+            model.test_contrast_with_method(hypothesis, FixedEffectTestMethod::AsymptoticWaldZ);
 
         assert!(matches!(test.status, InferenceStatus::Available));
         assert_eq!(test.p_values.len(), 1);
@@ -11299,6 +14882,365 @@ mod tests {
             .notes
             .iter()
             .any(|note| note.contains("asymptotic Wald z")));
+    }
+
+    #[test]
+    fn test_lmm_explicit_satterthwaite_request_returns_scalar_t_test() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let days_index = model
+            .coef_names()
+            .iter()
+            .position(|name| name == "days")
+            .unwrap();
+        let hypothesis = FixedEffectHypothesis::single_coefficient(
+            "days = 0",
+            days_index,
+            model.coef_names().len(),
+        )
+        .unwrap();
+
+        let test =
+            model.test_contrast_with_method(hypothesis, FixedEffectTestMethod::Satterthwaite);
+
+        assert_eq!(test.method, InferenceMethod::Satterthwaite);
+        assert_eq!(test.status, InferenceStatus::Available);
+        assert_eq!(test.reliability, ReliabilityGrade::Low);
+        assert!(test.denominator_df.unwrap().is_finite());
+        assert!(test.denominator_df.unwrap() > 0.0);
+        assert!(test.p_values[0].unwrap().is_finite());
+        assert!((0.0..=1.0).contains(&test.p_values[0].unwrap()));
+        assert!(test.statistics[0].unwrap().is_finite());
+        assert!(test
+            .notes
+            .iter()
+            .any(|note| note.contains("Satterthwaite denominator df computed")));
+    }
+
+    #[test]
+    fn test_lmm_satterthwaite_scalar_rows_match_lmer_test_fixture() {
+        let fixture = satterthwaite_lmer_test_parity_fixture();
+
+        for case in fixture.cases {
+            let data = satterthwaite_parity_data(&case.name);
+            let formula = parse_formula(&case.formula).unwrap();
+            let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+            model.fit(true).unwrap();
+
+            let coefficient_index = model
+                .coef_names()
+                .iter()
+                .position(|name| name == &case.coefficient)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "coefficient {} not found in {:?}",
+                        case.coefficient,
+                        model.coef_names()
+                    )
+                });
+            let hypothesis = FixedEffectHypothesis::single_coefficient(
+                format!("{} = 0", case.coefficient),
+                coefficient_index,
+                model.coef_names().len(),
+            )
+            .unwrap();
+
+            let test =
+                model.test_contrast_with_method(hypothesis, FixedEffectTestMethod::Satterthwaite);
+
+            assert_eq!(test.method, InferenceMethod::Satterthwaite, "{}", case.name);
+            assert_eq!(test.status, InferenceStatus::Available, "{}", case.name);
+            assert_eq!(test.reliability, ReliabilityGrade::Low, "{}", case.name);
+            assert!(
+                (test.estimates[0] - case.estimate).abs()
+                    <= 1e-5 + 1e-6 * case.estimate.abs(),
+                "{}: β drift",
+                case.name
+            );
+            // Single-grouping sleepstudy fits agree with lme4 to ~5e-5; the
+            // crossed-RE penicillin REML optimum lands ~3e-4 away from lme4's
+            // (multi-start in Rust is locally optimal to ~1e-6 in REML deviance,
+            // so this is optimizer-vs-optimizer drift, not a fit bug).  Hold the
+            // looser-but-still-meaningful 5e-4 bound across all cases.
+            assert!(
+                (test.standard_errors[0].unwrap() - case.std_error).abs()
+                    <= 5e-4 + 5e-4 * case.std_error.abs(),
+                "{}: std_error drift: rust={} ref={}",
+                case.name,
+                test.standard_errors[0].unwrap(),
+                case.std_error
+            );
+            assert!(
+                (test.statistics[0].unwrap() - case.statistic).abs()
+                    <= 5e-4 + 5e-4 * case.statistic.abs(),
+                "{}: t-statistic drift: rust={} ref={}",
+                case.name,
+                test.statistics[0].unwrap(),
+                case.statistic
+            );
+            // Satterthwaite df is more sensitive to θ drift than vcov itself
+            // because it depends on the gradient and Hessian of vcov w.r.t. θ.
+            // For the crossed-RE penicillin case the drift sits ~1e-3.
+            assert_relative_eq!(
+                test.denominator_df.unwrap(),
+                case.df,
+                epsilon = 1e-2,
+                max_relative = 2e-3,
+            );
+            // Tail-region p-values amplify df/statistic drift: a 5e-4 df move
+            // shifts a 1e-6 p-value by ~2e-3 relative.  Hold an honest 2e-3
+            // bound rather than chase ten-extra-bits-of-precision.
+            assert_relative_eq!(
+                test.p_values[0].unwrap(),
+                case.p_value,
+                epsilon = 1e-8,
+                max_relative = 2e-3,
+            );
+        }
+    }
+
+    #[test]
+    fn test_lmm_satterthwaite_boundary_and_rank_deficient_cases_return_reasons() {
+        let data = dyestuff2_fixture();
+        let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+        let hypothesis = FixedEffectHypothesis::single_coefficient(
+            "(Intercept) = 0",
+            0,
+            model.coef_names().len(),
+        )
+        .unwrap();
+        let test =
+            model.test_contrast_with_method(hypothesis, FixedEffectTestMethod::Satterthwaite);
+
+        assert_eq!(test.method, InferenceMethod::Satterthwaite);
+        assert!(
+            matches!(test.status, InferenceStatus::NotAssessed { ref reason }
+            if reason.contains("lower bound"))
+        );
+        assert_eq!(test.p_values, vec![None]);
+
+        let n = 30usize;
+        let x: Vec<f64> = (0..n).map(|i| (i % 5) as f64).collect();
+        let x2: Vec<f64> = x.iter().map(|&v| 2.0 * v).collect();
+        let y: Vec<f64> = (0..n).map(|i| (i % 7) as f64 + 1.0).collect();
+        let z: Vec<String> = (0..n).map(|i| format!("G{}", i % 6)).collect();
+
+        let mut df = DataFrame::new();
+        df.add_numeric("y", y);
+        df.add_numeric("x", x);
+        df.add_numeric("x2", x2);
+        df.add_categorical("z", z);
+
+        let formula = parse_formula("y ~ 1 + x + x2 + (1 | z)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &df, None).unwrap();
+        model.fit(false).unwrap();
+        let dropped_label = model
+            .fixed_effect_inference_table()
+            .rows
+            .into_iter()
+            .find(|row| row.status == FixedEffectInferenceStatus::NotEstimable)
+            .expect("rank-deficient fit should mark one coefficient not estimable")
+            .label;
+        let dropped_index = model
+            .coef_names()
+            .iter()
+            .position(|name| name == &dropped_label)
+            .unwrap();
+        let hypothesis = FixedEffectHypothesis::single_coefficient(
+            format!("{dropped_label} = 0"),
+            dropped_index,
+            model.coef_names().len(),
+        )
+        .unwrap();
+        let test =
+            model.test_contrast_with_method(hypothesis, FixedEffectTestMethod::Satterthwaite);
+
+        assert!(
+            matches!(test.status, InferenceStatus::NotEstimable { ref reason }
+            if reason.contains("aliased") || reason.contains("non-finite"))
+        );
+        assert_eq!(test.p_values, vec![None]);
+    }
+
+    #[test]
+    fn test_lmm_fixed_effect_inference_table_returns_ordered_satterthwaite_rows() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let table = model.fixed_effect_inference_table();
+        let names = model.coef_names();
+
+        assert_eq!(table.rows.len(), names.len());
+        assert_eq!(
+            table
+                .rows
+                .iter()
+                .map(|row| row.label.clone())
+                .collect::<Vec<_>>(),
+            names
+        );
+        for row in &table.rows {
+            assert_eq!(row.kind, FixedEffectInferenceRowKind::Coefficient);
+            assert_eq!(row.method, FixedEffectInferenceMethod::Satterthwaite);
+            assert_eq!(row.status, FixedEffectInferenceStatus::Available);
+            assert_eq!(row.reliability, ReliabilityGrade::Low);
+            assert_eq!(row.statistic_name, Some(FixedEffectStatisticName::T));
+            assert!(row.estimate.is_some());
+            assert!(row.std_error.is_some());
+            assert!(row.statistic.is_some());
+            assert!(row.p_value.is_some());
+            assert!(row.numerator_df.is_none());
+            assert!(row.denominator_df.is_some());
+            assert!(row.reason.is_none());
+            assert!(matches!(
+                row.estimability,
+                EstimabilityAssessment::FixedContrast(_)
+            ));
+            assert!(row
+                .notes
+                .iter()
+                .any(|note| note.contains("Satterthwaite denominator df")));
+        }
+        assert_eq!(
+            model
+                .compiler_artifact()
+                .fixed_effect_inference_table
+                .as_ref(),
+            Some(&table)
+        );
+    }
+
+    #[test]
+    fn test_lmm_fixed_effect_inference_table_marks_aliased_column_not_estimable() {
+        let n = 30usize;
+        let x: Vec<f64> = (0..n).map(|i| (i % 5) as f64).collect();
+        let x2: Vec<f64> = x.iter().map(|&v| 2.0 * v).collect();
+        let y: Vec<f64> = (0..n).map(|i| (i % 7) as f64 + 1.0).collect();
+        let z: Vec<String> = (0..n).map(|i| format!("G{}", i % 6)).collect();
+
+        let mut df = DataFrame::new();
+        df.add_numeric("y", y);
+        df.add_numeric("x", x);
+        df.add_numeric("x2", x2);
+        df.add_categorical("z", z);
+
+        let formula = parse_formula("y ~ 1 + x + x2 + (1 | z)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &df, None).unwrap();
+        model.fit(false).unwrap();
+
+        let table = model.fixed_effect_inference_table();
+        let dropped = table
+            .rows
+            .iter()
+            .find(|row| row.status == FixedEffectInferenceStatus::NotEstimable)
+            .expect("one aliased coefficient should be marked not estimable");
+
+        assert_eq!(dropped.method, FixedEffectInferenceMethod::NotComputed);
+        assert_eq!(dropped.reliability, ReliabilityGrade::NotAvailable);
+        assert!(dropped.p_value.is_none());
+        assert!(dropped.reason.as_deref().unwrap().contains("aliased"));
+    }
+
+    #[test]
+    fn test_lmm_fixed_effect_inference_table_omits_p_values_for_regularized_fit_intent() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut policy = CompilerPolicy::default();
+        policy.random_strategy = RandomStrategy::Regularized;
+        let mut model =
+            LinearMixedModel::new_with_compiler_policy(formula, &data, None, policy).unwrap();
+
+        model.fit(false).unwrap();
+
+        let table = model.fixed_effect_inference_table();
+        assert!(table.rows.iter().all(|row| {
+            row.status == FixedEffectInferenceStatus::PValueUnavailable
+                && row.method == FixedEffectInferenceMethod::NotComputed
+                && row.p_value.is_none()
+                && row
+                    .reason
+                    .as_deref()
+                    .unwrap()
+                    .contains("exploratory fit intent")
+        }));
+    }
+
+    #[test]
+    fn test_lmm_fixed_effect_inference_table_omits_p_values_for_predictive_fit_intent() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut model = LinearMixedModel::new_with_compiler_policy(
+            formula,
+            &data,
+            None,
+            CompilerPolicy::predictive(),
+        )
+        .unwrap();
+
+        model.fit(false).unwrap();
+
+        assert_eq!(
+            model.compiler_artifact().reproducibility.fit_intent,
+            FitIntent::Predictive
+        );
+        let table = model
+            .compiler_artifact()
+            .fixed_effect_inference_table
+            .as_ref()
+            .expect("fitted artifacts should carry fixed-effect inference rows");
+        assert!(table.rows.iter().all(|row| {
+            row.status == FixedEffectInferenceStatus::PValueUnavailable
+                && row.method == FixedEffectInferenceMethod::NotComputed
+                && row.p_value.is_none()
+                && row
+                    .reason
+                    .as_deref()
+                    .unwrap()
+                    .contains("predictive fit intent")
+        }));
+    }
+
+    #[test]
+    fn test_lmm_fixed_effect_inference_table_omits_p_values_after_selection_time_reduction() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.compiler_artifact.reductions.push(ReductionRecord {
+            trigger: ReductionTrigger::SelectionTime,
+            phase: "post_selection".to_string(),
+            reason: "response-dependent random-effect selection".to_string(),
+            affected_term: "(1 | subj)".to_string(),
+            replacement_term: None,
+            inference_consequence:
+                "ordinary fixed-effect p-values require a valid refit or selective-inference contract"
+                    .to_string(),
+            diagnostics: Vec::new(),
+        });
+
+        model.fit(false).unwrap();
+
+        let table = model
+            .compiler_artifact()
+            .fixed_effect_inference_table
+            .as_ref()
+            .expect("fitted artifacts should carry fixed-effect inference rows");
+        assert!(table.rows.iter().all(|row| {
+            row.status == FixedEffectInferenceStatus::PValueUnavailable
+                && row.method == FixedEffectInferenceMethod::NotComputed
+                && row.p_value.is_none()
+                && row
+                    .reason
+                    .as_deref()
+                    .unwrap()
+                    .contains("selection-time model changes")
+        }));
     }
 
     #[test]
@@ -11559,6 +15501,10 @@ mod tests {
             for (a, e) in actual.beta.iter().zip(expected.beta.iter()) {
                 assert_relative_eq!(*a, *e, epsilon = 1e-12);
             }
+            assert_eq!(actual.se.len(), expected.se.len());
+            for (a, e) in actual.se.iter().zip(expected.se.iter()) {
+                assert_relative_eq!(*a, *e, epsilon = 1e-12);
+            }
             assert_eq!(actual.theta.len(), expected.theta.len());
             for (a, e) in actual.theta.iter().zip(expected.theta.iter()) {
                 assert_relative_eq!(*a, *e, epsilon = 1e-12);
@@ -11573,6 +15519,7 @@ mod tests {
                 objective: f64::NAN,
                 sigma: f64::NAN,
                 beta: DVector::from_vec(vec![1.0, 2.0]),
+                se: DVector::from_vec(vec![f64::NAN, f64::NAN]),
                 theta: vec![0.5],
             }],
         };
@@ -11585,7 +15532,386 @@ mod tests {
         assert!(restored.fits[0].objective.is_nan());
         assert!(restored.fits[0].sigma.is_nan());
         assert_eq!(restored.fits[0].beta, DVector::from_vec(vec![1.0, 2.0]));
+        assert!(restored.fits[0].se.iter().all(|value| value.is_nan()));
         assert_eq!(restored.fits[0].theta, vec![0.5]);
+    }
+
+    #[test]
+    fn test_parametricbootstrap_run_metadata_records_accounting_and_boundary_rate() {
+        let data = dyestuff_fixture();
+        let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let bsamp = MixedModelBootstrap {
+            fits: vec![
+                BootstrapReplicate {
+                    objective: 1.0,
+                    sigma: 2.0,
+                    beta: DVector::from_vec(vec![10.0]),
+                    se: DVector::from_vec(vec![1.0]),
+                    theta: vec![0.0],
+                },
+                BootstrapReplicate {
+                    objective: 2.0,
+                    sigma: 3.0,
+                    beta: DVector::from_vec(vec![11.0]),
+                    se: DVector::from_vec(vec![1.2]),
+                    theta: vec![0.5],
+                },
+                BootstrapReplicate {
+                    objective: f64::NAN,
+                    sigma: f64::NAN,
+                    beta: DVector::from_vec(vec![f64::NAN]),
+                    se: DVector::from_vec(vec![f64::NAN]),
+                    theta: vec![0.5],
+                },
+            ],
+        };
+        let statistics = [1.0, f64::NAN, 3.0];
+
+        let metadata = bsamp.run_metadata_for_model(
+            &model,
+            BootstrapTarget::full_model_distribution("dyestuff full model"),
+            5,
+            BootstrapFailedRefitPolicy::Exclude,
+            BootstrapSeedRecord::std_rng(20260429),
+            BootstrapRefitOptions::from_model(&model),
+            Some("abs_t".to_string()),
+            Some(&statistics),
+            Some(0.25),
+        );
+
+        assert_eq!(metadata.schema_name, BOOTSTRAP_RUN_SCHEMA);
+        assert_eq!(metadata.schema_version, BOOTSTRAP_RUN_SCHEMA_VERSION);
+        assert_eq!(
+            metadata.target.kind,
+            BootstrapTargetKind::FullModelDistribution
+        );
+        assert_eq!(metadata.requested_replicates, 5);
+        assert_eq!(metadata.completed_replicates, 3);
+        assert_eq!(metadata.successful_replicates, 2);
+        assert_eq!(metadata.failed_refits, 1);
+        assert_eq!(
+            metadata.failed_refit_policy,
+            BootstrapFailedRefitPolicy::Exclude
+        );
+        assert_eq!(metadata.boundary_count, 1);
+        assert_eq!(metadata.boundary_rate, Some(0.5));
+        assert_eq!(metadata.finite_statistic_count, Some(2));
+        assert_relative_eq!(metadata.mcse.unwrap(), (0.25_f64 * 0.75 / 2.0).sqrt());
+        assert!(metadata
+            .notes
+            .iter()
+            .any(|note| note.contains("do not certify fixed-effect hypothesis-test")));
+        assert!(metadata
+            .notes
+            .iter()
+            .any(|note| note.contains("requested 5 bootstrap")));
+
+        let payload = bsamp.into_run_payload(metadata);
+        let json = serde_json::to_string(&payload).unwrap();
+        let decoded: BootstrapRunPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.metadata.successful_replicates, 2);
+        assert_eq!(decoded.replicates.len(), 3);
+    }
+
+    #[test]
+    fn test_fixed_effect_null_bootstrap_target_projects_beta_and_simulates() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let days_index = model
+            .coef_names()
+            .iter()
+            .position(|name| name == "days")
+            .unwrap();
+        let hypothesis = FixedEffectHypothesis::single_coefficient(
+            "days = 0",
+            days_index,
+            model.coef_names().len(),
+        )
+        .unwrap();
+
+        let target = model
+            .fixed_effect_null_bootstrap_target(&hypothesis)
+            .unwrap();
+        let fitted_contrast = (&hypothesis.l.values * &target.beta_fitted)[0];
+        let null_contrast = (&hypothesis.l.values * &target.beta_null)[0];
+
+        assert_eq!(target.target.kind, BootstrapTargetKind::FixedEffectNull);
+        assert_eq!(
+            target.covariance_policy,
+            FixedEffectNullCovariancePolicy::ReuseFittedCovariance
+        );
+        assert!(fitted_contrast.abs() > 1.0);
+        assert_relative_eq!(null_contrast, 0.0, epsilon = 1e-8);
+        assert_eq!(target.theta, model.theta());
+        assert_relative_eq!(target.sigma, model.sigma(), epsilon = 1e-12);
+        assert!(target
+            .notes
+            .iter()
+            .any(|note| note.contains("reuses fitted covariance")));
+
+        let mut rng = StdRng::seed_from_u64(20260429);
+        let y_sim = model.simulate_fixed_effect_null(&mut rng, &target).unwrap();
+        assert_eq!(y_sim.len(), model.nobs());
+
+        let mut mismatched = target.clone();
+        mismatched.sigma *= 1.01;
+        assert!(matches!(
+            model.simulate_fixed_effect_null(&mut rng, &mismatched),
+            Err(MixedModelError::InvalidArgument(_))
+        ));
+    }
+
+    #[test]
+    fn test_bootstrap_fixed_effect_coefficient_row_from_certified_payload() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let days_index = model
+            .coef_names()
+            .iter()
+            .position(|name| name == "days")
+            .unwrap();
+        let hypothesis = FixedEffectHypothesis::single_coefficient(
+            "days = 0",
+            days_index,
+            model.coef_names().len(),
+        )
+        .unwrap();
+
+        let mut fits = Vec::new();
+        for i in 0..40 {
+            let mut beta = model.beta();
+            beta[days_index] = (i as f64 - 20.0) / 10.0;
+            let mut se = DVector::from_element(model.feterm.rank, 1.0);
+            se[days_index] = 1.0;
+            fits.push(BootstrapReplicate {
+                objective: i as f64 + 1.0,
+                sigma: model.sigma(),
+                beta,
+                se,
+                theta: model.theta(),
+            });
+        }
+        let bsamp = MixedModelBootstrap { fits };
+        let metadata = bsamp.run_metadata_for_model(
+            &model,
+            BootstrapTarget::fixed_effect_null("days fixed-effect null", "days = 0"),
+            40,
+            BootstrapFailedRefitPolicy::Exclude,
+            BootstrapSeedRecord::std_rng(20260429),
+            BootstrapRefitOptions::from_model(&model),
+            Some("abs_t".to_string()),
+            None,
+            None,
+        );
+        let payload = bsamp.into_run_payload(metadata);
+
+        let test = model.test_contrast_with_bootstrap_payload(hypothesis.clone(), &payload);
+        assert_eq!(test.method, InferenceMethod::ParametricBootstrap);
+        assert_eq!(test.status, InferenceStatus::Available);
+        assert_eq!(test.reliability, ReliabilityGrade::Low);
+        assert_relative_eq!(test.p_values[0].unwrap(), 1.0 / 41.0, epsilon = 1e-12);
+        assert!(test.denominator_df.is_none());
+        assert!(test
+            .notes
+            .iter()
+            .any(|note| note.contains("fixed_effect_null target")));
+
+        let row = model.fixed_effect_bootstrap_inference_row(
+            FixedEffectInferenceRowKind::Coefficient,
+            hypothesis,
+            &payload,
+        );
+        assert_eq!(row.method, FixedEffectInferenceMethod::Bootstrap);
+        assert_eq!(row.status, FixedEffectInferenceStatus::Available);
+        assert_eq!(row.statistic_name, Some(FixedEffectStatisticName::T));
+        assert_relative_eq!(row.p_value.unwrap(), 1.0 / 41.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_bootstrap_fixed_effect_contrast_row_uses_payload_statistics() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let l = DMatrix::from_row_slice(1, model.coef_names().len(), &[1.0, 1.0]);
+        let hypothesis = FixedEffectHypothesis::zero_rhs(
+            "intercept_plus_days = 0",
+            ContrastMatrix { values: l },
+        );
+        let fits = (0..40)
+            .map(|i| BootstrapReplicate {
+                objective: i as f64 + 1.0,
+                sigma: model.sigma(),
+                beta: model.beta(),
+                se: DVector::from_element(model.feterm.rank, 1.0),
+                theta: model.theta(),
+            })
+            .collect::<Vec<_>>();
+        let bsamp = MixedModelBootstrap { fits };
+        let replicate_statistics = vec![0.5; bsamp.len()];
+        let metadata = bsamp.run_metadata_for_model(
+            &model,
+            BootstrapTarget::fixed_effect_null(
+                "intercept_plus_days fixed-effect null",
+                "intercept_plus_days = 0",
+            ),
+            40,
+            BootstrapFailedRefitPolicy::Exclude,
+            BootstrapSeedRecord::std_rng(20260430),
+            BootstrapRefitOptions::from_model(&model),
+            Some("abs_t".to_string()),
+            Some(&replicate_statistics),
+            Some(1.0 / 41.0),
+        );
+        let payload = bsamp.into_run_payload_with_statistics(metadata, replicate_statistics);
+
+        let row = model.fixed_effect_bootstrap_inference_row(
+            FixedEffectInferenceRowKind::Contrast,
+            hypothesis,
+            &payload,
+        );
+        assert_eq!(row.kind, FixedEffectInferenceRowKind::Contrast);
+        assert_eq!(row.method, FixedEffectInferenceMethod::Bootstrap);
+        assert_eq!(row.status, FixedEffectInferenceStatus::Available);
+        assert_eq!(row.statistic_name, Some(FixedEffectStatisticName::T));
+        assert_relative_eq!(row.p_value.unwrap(), 1.0 / 41.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_bootstrap_fixed_effect_row_requires_enough_finite_statistics() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let days_index = model
+            .coef_names()
+            .iter()
+            .position(|name| name == "days")
+            .unwrap();
+        let hypothesis = FixedEffectHypothesis::single_coefficient(
+            "days = 0",
+            days_index,
+            model.coef_names().len(),
+        )
+        .unwrap();
+        let fits = (0..2)
+            .map(|i| BootstrapReplicate {
+                objective: i as f64 + 1.0,
+                sigma: model.sigma(),
+                beta: model.beta(),
+                se: DVector::from_element(model.feterm.rank, 1.0),
+                theta: model.theta(),
+            })
+            .collect::<Vec<_>>();
+        let bsamp = MixedModelBootstrap { fits };
+        let metadata = bsamp.run_metadata_for_model(
+            &model,
+            BootstrapTarget::fixed_effect_null("days fixed-effect null", "days = 0"),
+            2,
+            BootstrapFailedRefitPolicy::Exclude,
+            BootstrapSeedRecord::std_rng(20260431),
+            BootstrapRefitOptions::from_model(&model),
+            Some("abs_t".to_string()),
+            None,
+            None,
+        );
+        let payload = bsamp.into_run_payload(metadata);
+
+        let test = model.test_contrast_with_bootstrap_payload(hypothesis, &payload);
+        assert_eq!(test.method, InferenceMethod::ParametricBootstrap);
+        assert!(
+            matches!(test.status, InferenceStatus::NotAssessed { ref reason }
+            if reason.contains("bootstrap_successful_replicates_too_few"))
+        );
+        assert_eq!(test.p_values, vec![None]);
+    }
+
+    #[test]
+    fn test_bootstrap_fixed_effect_row_from_null_simulate_refit_payload() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let days_index = model
+            .coef_names()
+            .iter()
+            .position(|name| name == "days")
+            .unwrap();
+        let hypothesis = FixedEffectHypothesis::single_coefficient(
+            "days = 0",
+            days_index,
+            model.coef_names().len(),
+        )
+        .unwrap();
+        let target = model
+            .fixed_effect_null_bootstrap_target(&hypothesis)
+            .unwrap();
+
+        let mut rng = StdRng::seed_from_u64(20260502);
+        let mut fits = Vec::new();
+        for _ in 0..30 {
+            let y_sim = model.simulate_fixed_effect_null(&mut rng, &target).unwrap();
+            let mut work = model.clone();
+            match work.refit(y_sim.as_slice()) {
+                Ok(()) => fits.push(BootstrapReplicate {
+                    objective: work.objective(),
+                    sigma: work.sigma(),
+                    beta: work.beta(),
+                    se: work.stderror(),
+                    theta: work.theta(),
+                }),
+                Err(_) => fits.push(BootstrapReplicate {
+                    objective: f64::NAN,
+                    sigma: f64::NAN,
+                    beta: model.beta(),
+                    se: DVector::from_element(model.feterm.rank, f64::NAN),
+                    theta: model.theta(),
+                }),
+            }
+        }
+
+        let bsamp = MixedModelBootstrap { fits };
+        let metadata = bsamp.run_metadata_for_model(
+            &model,
+            target.target.clone(),
+            30,
+            BootstrapFailedRefitPolicy::Exclude,
+            BootstrapSeedRecord::std_rng(20260502),
+            BootstrapRefitOptions::from_model(&model),
+            Some("abs_t".to_string()),
+            None,
+            None,
+        );
+        let payload = bsamp.into_run_payload(metadata);
+        let row = model.fixed_effect_bootstrap_inference_row(
+            FixedEffectInferenceRowKind::Coefficient,
+            hypothesis,
+            &payload,
+        );
+
+        assert_eq!(row.method, FixedEffectInferenceMethod::Bootstrap);
+        assert_eq!(row.status, FixedEffectInferenceStatus::Available);
+        assert_eq!(row.statistic_name, Some(FixedEffectStatisticName::T));
+        assert_eq!(row.reliability, ReliabilityGrade::Low);
+        assert!(row.p_value.unwrap().is_finite());
+        assert!((1.0 / 31.0..=1.0).contains(&row.p_value.unwrap()));
+        assert!(row
+            .notes
+            .iter()
+            .any(|note| note.contains("successful_replicates=30")));
+        assert!(row.notes.iter().any(|note| note.contains("mcse=")));
     }
 
     #[test]
@@ -11600,6 +15926,7 @@ mod tests {
                 objective: 1.0,
                 sigma: 1.0,
                 beta: DVector::zeros(model.feterm.rank + 1),
+                se: DVector::zeros(model.feterm.rank + 1),
                 theta: model.theta(),
             }],
         };
@@ -11629,6 +15956,9 @@ mod tests {
 
         let beta1 = rows.iter().find(|row| row.parameter == "beta[1]").unwrap();
         assert_eq!(beta1.value, 12.0);
+
+        let se0 = rows.iter().find(|row| row.parameter == "se[0]").unwrap();
+        assert_relative_eq!(se0.value, 0.7, epsilon = 1e-12);
 
         let theta0 = rows.iter().find(|row| row.parameter == "theta[0]").unwrap();
         assert_relative_eq!(theta0.value, 0.3, epsilon = 1e-12);
@@ -11661,30 +15991,35 @@ mod tests {
                     objective: f64::NAN,
                     sigma: 0.0,
                     beta: DVector::from_vec(vec![0.0]),
+                    se: DVector::from_vec(vec![0.0]),
                     theta: vec![0.0],
                 },
                 BootstrapReplicate {
                     objective: 10.0,
                     sigma: 10.0,
                     beta: DVector::from_vec(vec![10.0]),
+                    se: DVector::from_vec(vec![10.0]),
                     theta: vec![10.0],
                 },
                 BootstrapReplicate {
                     objective: 11.0,
                     sigma: 11.0,
                     beta: DVector::from_vec(vec![11.0]),
+                    se: DVector::from_vec(vec![11.0]),
                     theta: vec![11.0],
                 },
                 BootstrapReplicate {
                     objective: 12.0,
                     sigma: 12.0,
                     beta: DVector::from_vec(vec![12.0]),
+                    se: DVector::from_vec(vec![12.0]),
                     theta: vec![12.0],
                 },
                 BootstrapReplicate {
                     objective: 100.0,
                     sigma: 100.0,
                     beta: DVector::from_vec(vec![100.0]),
+                    se: DVector::from_vec(vec![100.0]),
                     theta: vec![100.0],
                 },
             ],
@@ -11722,12 +16057,14 @@ mod tests {
                     objective: 1.0,
                     sigma: 1.0,
                     beta: DVector::from_vec(vec![1.0]),
+                    se: DVector::from_vec(vec![1.0]),
                     theta: vec![1.0],
                 },
                 BootstrapReplicate {
                     objective: 2.0,
                     sigma: 2.0,
                     beta: DVector::from_vec(vec![1.0, 2.0]),
+                    se: DVector::from_vec(vec![1.0]),
                     theta: vec![1.0],
                 },
             ],
@@ -11782,6 +16119,7 @@ mod tests {
                         objective: 10.0 * (k + 1.0),
                         sigma: k + 1.0,
                         beta: DVector::from_vec(vec![k, 10.0 + k]),
+                        se: DVector::from_vec(vec![0.5 + 0.1 * k, 1.5 + 0.1 * k]),
                         theta: vec![0.1 * (k + 1.0)],
                     }
                 })

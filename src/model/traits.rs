@@ -4,6 +4,15 @@ use nalgebra::{DMatrix, DVector};
 
 use crate::types::OptSummary;
 
+/// Structural summary of one random-effects term.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RandomEffectTermInfo {
+    /// Grouping factor name.
+    pub group: String,
+    /// Random-effect basis columns for this grouping factor.
+    pub columns: Vec<String>,
+}
+
 /// Distribution families for GLMMs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Family {
@@ -185,6 +194,12 @@ pub trait MixedModelFit {
 
     /// Random effects (conditional modes), one matrix per grouping factor.
     fn ranef(&self) -> Vec<DMatrix<f64>>;
+
+    /// Random-effects term structure, used by model-comparison helpers to
+    /// reject obviously non-nested comparisons before computing LRT statistics.
+    fn random_effect_terms(&self) -> Vec<RandomEffectTermInfo> {
+        Vec::new()
+    }
 
     /// Conditional distribution family. `None` for ordinary `LinearMixedModel`s
     /// (Gaussian by construction); `Some(_)` for GLMMs.

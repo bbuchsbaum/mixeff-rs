@@ -21,7 +21,7 @@ use crate::error::{MixedModelError, Result};
 use crate::formula::Formula;
 use crate::model::data::DataFrame;
 use crate::model::linear::LinearMixedModel;
-use crate::model::traits::{Family, LinkFunction, MixedModelFit};
+use crate::model::traits::{Family, LinkFunction, MixedModelFit, RandomEffectTermInfo};
 use crate::stats::{BlockDescription, ModelSummary, VarCorr};
 use crate::types::OptSummary;
 
@@ -1015,6 +1015,10 @@ impl MixedModelFit for GeneralizedLinearMixedModel {
 
     fn ranef(&self) -> Vec<DMatrix<f64>> {
         self.b.clone()
+    }
+
+    fn random_effect_terms(&self) -> Vec<RandomEffectTermInfo> {
+        self.lmm.random_effect_terms()
     }
 
     fn family_kind(&self) -> Option<crate::model::traits::Family> {

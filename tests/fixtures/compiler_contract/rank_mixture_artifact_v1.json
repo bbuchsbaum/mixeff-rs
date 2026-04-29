@@ -21,6 +21,69 @@
       }
     }
   },
+  "fixed_effect_inference_table": {
+    "schema_name": "mixedmodels.fixed_effect_inference_table",
+    "schema_version": "1.0.0",
+    "crate_version": "0.1.0",
+    "rows": [
+      {
+        "label": "(Intercept)",
+        "kind": "coefficient",
+        "estimate": 10.000000083827498,
+        "std_error": 0.0434068870119898,
+        "numerator_df": null,
+        "denominator_df": null,
+        "statistic": 230.3781904716021,
+        "statistic_name": "z",
+        "p_value": 0.0,
+        "method": "asymptotic_wald_z",
+        "status": "available",
+        "reliability": "low",
+        "estimability": {
+          "estimand": "fixed_contrast",
+          "assessment": {
+            "label": "(Intercept)",
+            "status": "estimable",
+            "rank": 1,
+            "requested_rank": 1,
+            "diagnostics": []
+          }
+        },
+        "reason": null,
+        "notes": [
+          "asymptotic Wald z is a labeled fallback, not a finite-sample correction"
+        ]
+      },
+      {
+        "label": "x",
+        "kind": "coefficient",
+        "estimate": 2.0000000359260164,
+        "std_error": 0.018602927508815113,
+        "numerator_df": null,
+        "denominator_df": null,
+        "statistic": 107.5099623421262,
+        "statistic_name": "z",
+        "p_value": 0.0,
+        "method": "asymptotic_wald_z",
+        "status": "available",
+        "reliability": "low",
+        "estimability": {
+          "estimand": "fixed_contrast",
+          "assessment": {
+            "label": "x",
+            "status": "estimable",
+            "rank": 1,
+            "requested_rank": 1,
+            "diagnostics": []
+          }
+        },
+        "reason": null,
+        "notes": [
+          "asymptotic Wald z is a labeled fallback, not a finite-sample correction"
+        ]
+      }
+    ]
+  },
   "requested_formula": "y ~ 1 + x + (1 + x | group)",
   "semantic_model": {
     "schema_name": "mixedmodels.semantic_model",

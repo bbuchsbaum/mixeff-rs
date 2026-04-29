@@ -18,14 +18,18 @@ pub mod report;
 pub mod theta_map;
 
 pub use artifact::{
-    BasisLoading, CompiledModelArtifact, CovarianceParameterTrace, DerivativeAvailability,
-    DominantLoading, EffectiveCovarianceSummary, EffectiveRankStatus, FitIntent, FitMode,
-    InferenceAvailability, InterpretableSubmodel, LambdaSlotTrace, ModelBoundary,
-    ModelChangeStatus, ModelKind, ModelRandomTermState, ModelStageState, ModelStateChange,
-    ModelStateStage, ModelStateStatus, ModelStateSummary, ObjectiveApproximation,
+    ArtifactTable, BasisLoading, CompiledModelArtifact, CovarianceParameterTrace,
+    DerivativeAvailability, DominantLoading, EffectiveCovarianceSummary, EffectiveRankStatus,
+    FitIntent, FitMode, FixedEffectInferenceMethod, FixedEffectInferenceRow,
+    FixedEffectInferenceRowKind, FixedEffectInferenceStatus, FixedEffectInferenceTable,
+    FixedEffectStatisticName, InferenceAvailability, InterpretableSubmodel, LambdaSlotTrace,
+    ModelBoundary, ModelChangeStatus, ModelKind, ModelRandomTermState, ModelStageState,
+    ModelStateChange, ModelStateStage, ModelStateStatus, ModelStateSummary, ObjectiveApproximation,
     OptimizerCertificateScope, ParmapTrace, ReductionRecord, ReductionTrigger,
     ReproducibilityRecord, SchemaMetadata, SupportedCovarianceDirection, ThetaSlotTrace,
-    VarCorrEntryKind, VarCorrEntryTrace, DOMINANT_LOADING_THRESHOLD, INTERPRETABLE_GAP_TOLERANCE,
+    VarCorrEntryKind, VarCorrEntryTrace, DOMINANT_LOADING_THRESHOLD,
+    FIXED_EFFECT_INFERENCE_TABLE_NAME, FIXED_EFFECT_INFERENCE_TABLE_SCHEMA,
+    FIXED_EFFECT_INFERENCE_TABLE_SCHEMA_VERSION, INTERPRETABLE_GAP_TOLERANCE,
 };
 pub use audit::{
     audit_design, BasisAudit, CertificateCheck, ConvergenceEvidence, ConvergenceVerification,
@@ -45,9 +49,9 @@ pub use certificate::{
 pub use diagnostics::{Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticStage, FitStatus};
 pub use estimability::{
     ContrastMatrix, ContrastRhs, EstimabilityAssessment, EstimabilityStatus,
-    FixedContrastEstimability, FixedEffectHypothesis, FixedEffectTest, FixedTermEstimability,
-    InferenceMethod, InferenceStatus, KernelPathEstimability, RandomCovarianceEstimability,
-    RandomVarianceEstimability, ReliabilityGrade,
+    FixedContrastEstimability, FixedEffectHypothesis, FixedEffectTest, FixedEffectTestMethod,
+    FixedTermEstimability, InferenceMethod, InferenceStatus, KernelPathEstimability,
+    RandomCovarianceEstimability, RandomVarianceEstimability, ReliabilityGrade,
 };
 pub use explain::{explain_model, ModelExplanation};
 pub use ir::{

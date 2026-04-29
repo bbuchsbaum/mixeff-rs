@@ -411,6 +411,16 @@ pub enum InferenceMethod {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum FixedEffectTestMethod {
+    Auto,
+    AsymptoticWaldZ,
+    Satterthwaite,
+    KenwardRoger,
+    ParametricBootstrap,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReliabilityGrade {
     High,
     Moderate,

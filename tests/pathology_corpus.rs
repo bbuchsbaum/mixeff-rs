@@ -30,10 +30,10 @@ use mixedmodels::model::{Family, GeneralizedLinearMixedModel, LinearMixedModel, 
 use mixedmodels::pathology::{
     block_diagonal_crossings, certify, collinear_fe, detect_separation, effective_status,
     effective_status_from_artifact, empty_crossings, expected_statuses, extreme_prevalence,
-    generate, inferred_axes, lint_single_axis, map_error_to_status, near_singular_re,
-    pareto_sizes, scale_mismatch, set_group_sizes, singletons_with_slope, BoundaryKind,
-    Certificate, ExpectedStatusSet, FeSeparationKind, GeneratorSpec, PathologyAxis,
-    SeparationKind, StructuralIssue, WEAK_ID_THRESHOLD,
+    generate, inferred_axes, lint_single_axis, map_error_to_status, near_singular_re, pareto_sizes,
+    scale_mismatch, set_group_sizes, singletons_with_slope, BoundaryKind, Certificate,
+    ExpectedStatusSet, FeSeparationKind, GeneratorSpec, PathologyAxis, SeparationKind,
+    StructuralIssue, WEAK_ID_THRESHOLD,
 };
 
 /// Build the four foundation-stratum specs.

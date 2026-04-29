@@ -21,6 +21,7 @@
       }
     }
   },
+  "fixed_effect_inference_table": null,
   "requested_formula": "diameter ~ 1 + (1 | plate) + (1 | sample)",
   "semantic_model": {
     "schema_name": "mixedmodels.semantic_model",

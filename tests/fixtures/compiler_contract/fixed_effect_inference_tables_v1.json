@@ -1,0 +1,447 @@
+{
+  "dyestuff2_boundary": {
+    "crate_version": "0.1.0",
+    "rows": [
+      {
+        "denominator_df": null,
+        "estimability": {
+          "assessment": {
+            "diagnostics": [],
+            "label": "(Intercept)",
+            "rank": 1,
+            "requested_rank": 1,
+            "status": "estimable"
+          },
+          "estimand": "fixed_contrast"
+        },
+        "estimate": 5.665600000000001,
+        "kind": "coefficient",
+        "label": "(Intercept)",
+        "method": "asymptotic_wald_z",
+        "notes": [
+          "asymptotic Wald z is a labeled fallback, not a finite-sample correction",
+          "auto Satterthwaite unavailable: Satterthwaite fixed-effect inference could not compute vcov_beta derivatives: Invalid argument: cannot compute central finite-difference derivative for varpar[0]: value is at or too near lower bound 0"
+        ],
+        "numerator_df": null,
+        "p_value": 0.0,
+        "reason": null,
+        "reliability": "low",
+        "statistic": 8.494334531081904,
+        "statistic_name": "z",
+        "status": "available",
+        "std_error": 0.6669857396443258
+      }
+    ],
+    "schema_name": "mixedmodels.fixed_effect_inference_table",
+    "schema_version": "1.0.0"
+  },
+  "penicillin_confirmatory": {
+    "crate_version": "0.1.0",
+    "rows": [
+      {
+        "denominator_df": 5.4868519247876435,
+        "estimability": {
+          "assessment": {
+            "diagnostics": [],
+            "label": "(Intercept)",
+            "rank": 1,
+            "requested_rank": 1,
+            "status": "estimable"
+          },
+          "estimand": "fixed_contrast"
+        },
+        "estimate": 22.97222222222248,
+        "kind": "coefficient",
+        "label": "(Intercept)",
+        "method": "satterthwaite",
+        "notes": [
+          "Satterthwaite denominator df computed from finite-difference vcov_beta Jacobian and deviance Hessian over varpar"
+        ],
+        "numerator_df": null,
+        "p_value": 3.6210030041061714e-7,
+        "reason": null,
+        "reliability": "low",
+        "statistic": 28.410835785517058,
+        "statistic_name": "t",
+        "status": "available",
+        "std_error": 0.8085725599784358
+      }
+    ],
+    "schema_name": "mixedmodels.fixed_effect_inference_table",
+    "schema_version": "1.0.0"
+  },
+  "rank_deficient_fixed_effect": {
+    "crate_version": "0.1.0",
+    "rows": [
+      {
+        "denominator_df": null,
+        "estimability": {
+          "assessment": {
+            "diagnostics": [],
+            "label": "(Intercept)",
+            "rank": 1,
+            "requested_rank": 1,
+            "status": "estimable"
+          },
+          "estimand": "fixed_contrast"
+        },
+        "estimate": 4.166666666666669,
+        "kind": "coefficient",
+        "label": "(Intercept)",
+        "method": "asymptotic_wald_z",
+        "notes": [
+          "asymptotic Wald z is a labeled fallback, not a finite-sample correction",
+          "auto Satterthwaite unavailable: Satterthwaite fixed-effect inference requires an available fixed-effect standard error"
+        ],
+        "numerator_df": null,
+        "p_value": null,
+        "reason": "standard error is unavailable, so the Wald z p-value is unavailable",
+        "reliability": "low",
+        "statistic": null,
+        "statistic_name": "z",
+        "status": "p_value_unavailable",
+        "std_error": null
+      },
+      {
+        "denominator_df": null,
+        "estimability": {
+          "assessment": {
+            "diagnostics": [],
+            "label": "x",
+            "rank": 0,
+            "requested_rank": 1,
+            "status": "not_estimable"
+          },
+          "estimand": "fixed_contrast"
+        },
+        "estimate": 0.0,
+        "kind": "coefficient",
+        "label": "x",
+        "method": "not_computed",
+        "notes": [],
+        "numerator_df": null,
+        "p_value": null,
+        "reason": "contrast touches aliased or non-finite coefficient directions",
+        "reliability": "not_available",
+        "statistic": null,
+        "statistic_name": null,
+        "status": "not_estimable",
+        "std_error": null
+      },
+      {
+        "denominator_df": null,
+        "estimability": {
+          "assessment": {
+            "diagnostics": [],
+            "label": "x2",
+            "rank": 1,
+            "requested_rank": 1,
+            "status": "estimable"
+          },
+          "estimand": "fixed_contrast"
+        },
+        "estimate": -0.08333333333333373,
+        "kind": "coefficient",
+        "label": "x2",
+        "method": "asymptotic_wald_z",
+        "notes": [
+          "asymptotic Wald z is a labeled fallback, not a finite-sample correction",
+          "auto Satterthwaite unavailable: Satterthwaite fixed-effect inference requires an available fixed-effect standard error"
+        ],
+        "numerator_df": null,
+        "p_value": null,
+        "reason": "standard error is unavailable, so the Wald z p-value is unavailable",
+        "reliability": "low",
+        "statistic": null,
+        "statistic_name": "z",
+        "status": "p_value_unavailable",
+        "std_error": null
+      }
+    ],
+    "schema_name": "mixedmodels.fixed_effect_inference_table",
+    "schema_version": "1.0.0"
+  },
+  "rank_mixture_reduced_rank": {
+    "crate_version": "0.1.0",
+    "rows": [
+      {
+        "denominator_df": 130.83561018561446,
+        "estimability": {
+          "assessment": {
+            "diagnostics": [],
+            "label": "(Intercept)",
+            "rank": 1,
+            "requested_rank": 1,
+            "status": "estimable"
+          },
+          "estimand": "fixed_contrast"
+        },
+        "estimate": 10.000000083827498,
+        "kind": "coefficient",
+        "label": "(Intercept)",
+        "method": "satterthwaite",
+        "notes": [
+          "Satterthwaite denominator df computed from finite-difference vcov_beta Jacobian and deviance Hessian over varpar",
+          "deviance Hessian has 2 near-zero eigenvalue(s)",
+          "vcov_varpar used the positive-eigenvalue subspace of the Hessian"
+        ],
+        "numerator_df": null,
+        "p_value": 0.0,
+        "reason": null,
+        "reliability": "low",
+        "statistic": 230.3781904716021,
+        "statistic_name": "t",
+        "status": "available",
+        "std_error": 0.0434068870119898
+      },
+      {
+        "denominator_df": 130.8356101871162,
+        "estimability": {
+          "assessment": {
+            "diagnostics": [],
+            "label": "x",
+            "rank": 1,
+            "requested_rank": 1,
+            "status": "estimable"
+          },
+          "estimand": "fixed_contrast"
+        },
+        "estimate": 2.0000000359260164,
+        "kind": "coefficient",
+        "label": "x",
+        "method": "satterthwaite",
+        "notes": [
+          "Satterthwaite denominator df computed from finite-difference vcov_beta Jacobian and deviance Hessian over varpar",
+          "deviance Hessian has 2 near-zero eigenvalue(s)",
+          "vcov_varpar used the positive-eigenvalue subspace of the Hessian"
+        ],
+        "numerator_df": null,
+        "p_value": 0.0,
+        "reason": null,
+        "reliability": "low",
+        "statistic": 107.5099623421262,
+        "statistic_name": "t",
+        "status": "available",
+        "std_error": 0.018602927508815113
+      }
+    ],
+    "schema_name": "mixedmodels.fixed_effect_inference_table",
+    "schema_version": "1.0.0"
+  },
+  "regularized_fit_intent": {
+    "crate_version": "0.1.0",
+    "rows": [
+      {
+        "denominator_df": null,
+        "estimability": {
+          "assessment": {
+            "diagnostics": [],
+            "label": "(Intercept)",
+            "rank": 1,
+            "requested_rank": 1,
+            "status": "estimable"
+          },
+          "estimand": "fixed_contrast"
+        },
+        "estimate": 251.40510484848255,
+        "kind": "coefficient",
+        "label": "(Intercept)",
+        "method": "not_computed",
+        "notes": [],
+        "numerator_df": null,
+        "p_value": null,
+        "reason": "ordinary fixed-effect p-values are unavailable for exploratory fit intent",
+        "reliability": "not_available",
+        "statistic": 25.793809277001277,
+        "statistic_name": null,
+        "status": "p_value_unavailable",
+        "std_error": 9.746722639864005
+      },
+      {
+        "denominator_df": null,
+        "estimability": {
+          "assessment": {
+            "diagnostics": [],
+            "label": "Days",
+            "rank": 1,
+            "requested_rank": 1,
+            "status": "estimable"
+          },
+          "estimand": "fixed_contrast"
+        },
+        "estimate": 10.467285959595989,
+        "kind": "coefficient",
+        "label": "Days",
+        "method": "not_computed",
+        "notes": [],
+        "numerator_df": null,
+        "p_value": null,
+        "reason": "ordinary fixed-effect p-values are unavailable for exploratory fit intent",
+        "reliability": "not_available",
+        "statistic": 13.015428879637994,
+        "statistic_name": null,
+        "status": "p_value_unavailable",
+        "std_error": 0.8042213634597588
+      }
+    ],
+    "schema_name": "mixedmodels.fixed_effect_inference_table",
+    "schema_version": "1.0.0"
+  },
+  "selection_time_reduction": {
+    "crate_version": "0.1.0",
+    "rows": [
+      {
+        "denominator_df": null,
+        "estimability": {
+          "assessment": {
+            "diagnostics": [],
+            "label": "(Intercept)",
+            "rank": 1,
+            "requested_rank": 1,
+            "status": "estimable"
+          },
+          "estimand": "fixed_contrast"
+        },
+        "estimate": 251.40510484848255,
+        "kind": "coefficient",
+        "label": "(Intercept)",
+        "method": "not_computed",
+        "notes": [],
+        "numerator_df": null,
+        "p_value": null,
+        "reason": "ordinary fixed-effect p-values are unavailable after selection-time model changes",
+        "reliability": "not_available",
+        "statistic": 25.793809277001277,
+        "statistic_name": null,
+        "status": "p_value_unavailable",
+        "std_error": 9.746722639864005
+      },
+      {
+        "denominator_df": null,
+        "estimability": {
+          "assessment": {
+            "diagnostics": [],
+            "label": "Days",
+            "rank": 1,
+            "requested_rank": 1,
+            "status": "estimable"
+          },
+          "estimand": "fixed_contrast"
+        },
+        "estimate": 10.467285959595989,
+        "kind": "coefficient",
+        "label": "Days",
+        "method": "not_computed",
+        "notes": [],
+        "numerator_df": null,
+        "p_value": null,
+        "reason": "ordinary fixed-effect p-values are unavailable after selection-time model changes",
+        "reliability": "not_available",
+        "statistic": 13.015428879637994,
+        "statistic_name": null,
+        "status": "p_value_unavailable",
+        "std_error": 0.8042213634597588
+      }
+    ],
+    "schema_name": "mixedmodels.fixed_effect_inference_table",
+    "schema_version": "1.0.0"
+  },
+  "sleepstudy_confirmatory": {
+    "crate_version": "0.1.0",
+    "rows": [
+      {
+        "denominator_df": 22.809565841426373,
+        "estimability": {
+          "assessment": {
+            "diagnostics": [],
+            "label": "(Intercept)",
+            "rank": 1,
+            "requested_rank": 1,
+            "status": "estimable"
+          },
+          "estimand": "fixed_contrast"
+        },
+        "estimate": 251.40510484848255,
+        "kind": "coefficient",
+        "label": "(Intercept)",
+        "method": "satterthwaite",
+        "notes": [
+          "Satterthwaite denominator df computed from finite-difference vcov_beta Jacobian and deviance Hessian over varpar"
+        ],
+        "numerator_df": null,
+        "p_value": 0.0,
+        "reason": null,
+        "reliability": "low",
+        "statistic": 25.793809277001277,
+        "statistic_name": "t",
+        "status": "available",
+        "std_error": 9.746722639864005
+      },
+      {
+        "denominator_df": 160.9995708326261,
+        "estimability": {
+          "assessment": {
+            "diagnostics": [],
+            "label": "Days",
+            "rank": 1,
+            "requested_rank": 1,
+            "status": "estimable"
+          },
+          "estimand": "fixed_contrast"
+        },
+        "estimate": 10.467285959595989,
+        "kind": "coefficient",
+        "label": "Days",
+        "method": "satterthwaite",
+        "notes": [
+          "Satterthwaite denominator df computed from finite-difference vcov_beta Jacobian and deviance Hessian over varpar"
+        ],
+        "numerator_df": null,
+        "p_value": 0.0,
+        "reason": null,
+        "reliability": "low",
+        "statistic": 13.015428879637994,
+        "statistic_name": "t",
+        "status": "available",
+        "std_error": 0.8042213634597588
+      }
+    ],
+    "schema_name": "mixedmodels.fixed_effect_inference_table",
+    "schema_version": "1.0.0"
+  },
+  "unavailable_standard_error": {
+    "crate_version": "0.1.0",
+    "rows": [
+      {
+        "denominator_df": null,
+        "estimability": {
+          "assessment": {
+            "diagnostics": [],
+            "label": "x",
+            "rank": 1,
+            "requested_rank": 1,
+            "status": "estimable"
+          },
+          "estimand": "fixed_contrast"
+        },
+        "estimate": 1.0,
+        "kind": "coefficient",
+        "label": "x",
+        "method": "asymptotic_wald_z",
+        "notes": [
+          "asymptotic Wald z is a labeled fallback, not a finite-sample correction"
+        ],
+        "numerator_df": null,
+        "p_value": null,
+        "reason": "standard error is unavailable, so the Wald z p-value is unavailable",
+        "reliability": "low",
+        "statistic": null,
+        "statistic_name": "z",
+        "status": "p_value_unavailable",
+        "std_error": null
+      }
+    ],
+    "schema_name": "mixedmodels.fixed_effect_inference_table",
+    "schema_version": "1.0.0"
+  }
+}
