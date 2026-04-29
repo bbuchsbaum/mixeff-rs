@@ -335,7 +335,10 @@ mod tests {
         assert_eq!(kind, Some(FeSeparationKind::Complete));
         let beta = beta.expect("expected hyperplane direction for separated design");
         // Slope should be positive (since y = 1 happens on positive x).
-        assert!(beta[1] > SEPARATION_MARGIN_TOL, "slope should be positive: {beta:?}");
+        assert!(
+            beta[1] > SEPARATION_MARGIN_TOL,
+            "slope should be positive: {beta:?}"
+        );
     }
 
     #[test]

@@ -94,7 +94,10 @@ pub const GLMM_LINT_AXES: &[PathologyAxis] = &[
 pub fn inferred_axes(spec: &GeneratorSpec, certificate: &Certificate) -> Vec<PathologyAxis> {
     let mut axes = std::collections::BTreeSet::new();
 
-    if matches!(certificate.structural_issue, Some(StructuralIssue::Separation { .. })) {
+    if matches!(
+        certificate.structural_issue,
+        Some(StructuralIssue::Separation { .. })
+    ) {
         axes.insert(PathologyAxis::Separation);
     }
 
@@ -133,10 +136,7 @@ pub fn inferred_axes(spec: &GeneratorSpec, certificate: &Certificate) -> Vec<Pat
 /// listing the offending axes. The `IdentifiabilityCore` and
 /// `LinkNonlinearity` tags are deliberately exempt — see
 /// [`PathologyAxis`] for the rationale.
-pub fn lint_single_axis(
-    spec: &GeneratorSpec,
-    certificate: &Certificate,
-) -> Result<(), String> {
+pub fn lint_single_axis(spec: &GeneratorSpec, certificate: &Certificate) -> Result<(), String> {
     let axes = inferred_axes(spec, certificate);
     let glmm_axes: Vec<PathologyAxis> = axes
         .iter()

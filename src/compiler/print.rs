@@ -497,8 +497,8 @@ mod tests {
     #[test]
     fn model_print_certified_fit_omits_next_line() {
         use super::super::audit::{
-            ConvergenceVerification, ConvergenceVerificationStatus, EvidenceMethod, EvidenceQuality,
-            OptimizerCertificate,
+            ConvergenceVerification, ConvergenceVerificationStatus, EvidenceMethod,
+            EvidenceQuality, OptimizerCertificate,
         };
 
         let mut artifact = sample_artifact();
