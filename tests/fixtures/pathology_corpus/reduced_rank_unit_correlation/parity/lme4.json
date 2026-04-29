@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0.0",
+  "fixture": "reduced_rank_unit_correlation",
+  "stratum": "reduced-rank",
+  "engine": "lme4::lmer",
+  "version": "lme4 2.0.1; R 4.5.1",
+  "source": "scripts/parity_pathologies.R",
+  "status": "ok",
+  "warnings": [],
+  "converged": true,
+  "objective": -1153.2417586659205,
+  "theta": [25980.478645736806, 25980.478663999853, 0.00023185071736601826],
+  "beta": [2.017054512716812, 1.017054512741375],
+  "sigma": 1.0659307407768273e-05,
+  "loglik": 576.62087933296027,
+  "runtime_ms": 44.999999999999929,
+  "singular": false
+}

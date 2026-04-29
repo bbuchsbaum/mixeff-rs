@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0.0",
+  "fixture": "easy_full_rank",
+  "stratum": "easy",
+  "engine": "lme4::lmer",
+  "version": "lme4 2.0.1; R 4.5.1",
+  "source": "scripts/parity_pathologies.R",
+  "status": "ok",
+  "warnings": [],
+  "converged": true,
+  "objective": -181.36618096518006,
+  "theta": [24.073356708286695, 0.20897455806884169, 16.674734121390426],
+  "beta": [2.0430688172266662, 0.96299142136557359],
+  "sigma": 0.022045568855101862,
+  "loglik": 90.683090482590032,
+  "runtime_ms": 19.000000000000018,
+  "singular": false
+}

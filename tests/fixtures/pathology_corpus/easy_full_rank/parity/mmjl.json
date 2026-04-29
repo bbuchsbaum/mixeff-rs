@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0.0",
+  "fixture": "easy_full_rank",
+  "stratum": "easy",
+  "engine": "MixedModels.jl",
+  "version": "MixedModels 5.3.0; Julia 1.12.4",
+  "source": "scripts/parity_pathologies.jl",
+  "status": "ok",
+  "warnings": [],
+  "converged": true,
+  "objective": -181.36618096458949,
+  "theta": [24.073394559825385, 0.20901966444543132, 16.674779968610029],
+  "beta": [2.0430688172405751, 0.96299142231474621],
+  "sigma": 0.022045553934884665,
+  "loglik": 90.683090482294745,
+  "runtime_ms": 3057.9597949981689
+}
