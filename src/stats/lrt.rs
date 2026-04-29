@@ -211,6 +211,8 @@ pub struct LikelihoodRatioTest {
     pub chisq_dof: Vec<usize>,
     /// P-values for each test.
     pub pvalues: Vec<f64>,
+    /// Whether the larger model had a lower log-likelihood within optimizer tolerance.
+    pub loglik_within_optimizer_tol: Vec<bool>,
 }
 
 impl LikelihoodRatioTest {
@@ -249,6 +251,19 @@ impl LikelihoodRatioTest {
         if reml_flags.iter().any(|&r| r != reml_flags[0]) {
             return Err("Likelihood ratio test cannot mix REML- and ML-fitted models".to_string());
         }
+        if reml_flags[0] {
+            for i in 1..models.len() {
+                if !fixed_effect_spaces_are_equal(
+                    models[i - 1].model_matrix(),
+                    models[i].model_matrix(),
+                ) {
+                    return Err(
+                        "Likelihood ratio test under REML requires identical fixed effects across models; refit with REML=false."
+                            .to_string(),
+                    );
+                }
+            }
+        }
 
         // Family/link coherence: matches `MixedModels._samefamily`. `None`
         // (LMM/Gaussian) is treated as compatible with itself but not with
@@ -280,19 +295,26 @@ impl LikelihoodRatioTest {
         let mut chisq = Vec::new();
         let mut chisq_dof = Vec::new();
         let mut pvalues = Vec::new();
+        let mut loglik_within_optimizer_tol = Vec::new();
 
         for i in 1..models.len() {
             if dof[i] <= dof[i - 1] {
                 return Err("Likelihood ratio test is only valid for nested models".to_string());
             }
-            if loglik[i] + LOG_LIK_TOL < loglik[i - 1] {
+            let loglik_diff = loglik[i] - loglik[i - 1];
+            if loglik_diff < -LOG_LIK_TOL {
                 return Err(
                     "Log-likelihood must not be lower in models with more degrees of freedom"
                         .to_string(),
                 );
             }
 
-            let chi = 2.0 * (loglik[i] - loglik[i - 1]).abs();
+            let within_optimizer_tol = loglik_diff <= 0.0;
+            let chi = if within_optimizer_tol {
+                0.0
+            } else {
+                2.0 * loglik_diff
+            };
             let ddof = dof[i] - dof[i - 1];
             use statrs::distribution::{ChiSquared, ContinuousCDF};
             let dist = ChiSquared::new(ddof as f64).unwrap();
@@ -300,6 +322,7 @@ impl LikelihoodRatioTest {
             chisq.push(chi);
             chisq_dof.push(ddof);
             pvalues.push(pval);
+            loglik_within_optimizer_tol.push(within_optimizer_tol);
         }
 
         Ok(LikelihoodRatioTest {
@@ -311,6 +334,7 @@ impl LikelihoodRatioTest {
             chisq,
             chisq_dof,
             pvalues,
+            loglik_within_optimizer_tol,
         })
     }
 
@@ -572,6 +596,30 @@ fn fixed_effect_space_is_nested(smaller: &DMatrix<f64>, larger: &DMatrix<f64>) -
     stats_rank(&combined).0 == larger_rank
 }
 
+fn fixed_effect_spaces_are_equal(lhs: &DMatrix<f64>, rhs: &DMatrix<f64>) -> bool {
+    if lhs.nrows() != rhs.nrows() {
+        return false;
+    }
+
+    let lhs_rank = stats_rank(lhs).0;
+    let rhs_rank = stats_rank(rhs).0;
+    if lhs_rank != rhs_rank {
+        return false;
+    }
+
+    let mut combined = DMatrix::zeros(lhs.nrows(), lhs.ncols() + rhs.ncols());
+    for row in 0..lhs.nrows() {
+        for col in 0..lhs.ncols() {
+            combined[(row, col)] = lhs[(row, col)];
+        }
+        for col in 0..rhs.ncols() {
+            combined[(row, lhs.ncols() + col)] = rhs[(row, col)];
+        }
+    }
+
+    stats_rank(&combined).0 == lhs_rank
+}
+
 fn random_effect_terms_are_nested(
     smaller: &[RandomEffectTermInfo],
     larger: &[RandomEffectTermInfo],
@@ -795,6 +843,45 @@ mod tests {
             err,
             "Log-likelihood must not be lower in models with more degrees of freedom"
         );
+    }
+
+    #[test]
+    fn test_lrt_flags_loglik_within_tol() {
+        let m0 = DummyFit::new(180, 4, -100.0, Some("m0"));
+        let m1 = DummyFit::new(180, 5, m0.loglikelihood() - LOG_LIK_TOL * 0.5, Some("m1"));
+
+        let lrt = LikelihoodRatioTest::test(&[&m0, &m1]).unwrap();
+
+        assert_eq!(lrt.loglik_within_optimizer_tol, vec![true]);
+        assert_relative_eq!(lrt.chisq[0], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(lrt.pvalues[0], 1.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_lrt_strict_violation_still_rejects() {
+        let m0 = DummyFit::new(180, 4, -100.0, Some("m0"));
+        let m1 = DummyFit::new(180, 5, m0.loglikelihood() - LOG_LIK_TOL * 2.0, Some("m1"));
+
+        let err = LikelihoodRatioTest::test(&[&m0, &m1]).unwrap_err();
+
+        assert_eq!(
+            err,
+            "Log-likelihood must not be lower in models with more degrees of freedom"
+        );
+    }
+
+    #[test]
+    fn test_lrt_chi_nonneg_invariant() {
+        let m0 = DummyFit::new(180, 4, -100.0, Some("m0"));
+        let m1 = DummyFit::new(180, 5, m0.loglikelihood() - LOG_LIK_TOL * 0.5, Some("m1"));
+        let m2 = DummyFit::new(180, 6, -99.5, Some("m2"));
+
+        let lrt = LikelihoodRatioTest::test(&[&m0, &m1, &m2]).unwrap();
+
+        assert!(lrt.chisq.iter().all(|chi| *chi >= 0.0));
+        assert_eq!(lrt.loglik_within_optimizer_tol, vec![true, false]);
+        assert_relative_eq!(lrt.chisq[0], 0.0, epsilon = 1e-12);
+        assert_relative_eq!(lrt.chisq[1], 1.0, epsilon = 1e-9);
     }
 
     #[test]
@@ -1025,6 +1112,99 @@ mod tests {
             err,
             "Likelihood ratio test cannot mix REML- and ML-fitted models"
         );
+    }
+
+    #[test]
+    fn test_lrt_rejects_reml_with_fe_mismatch() {
+        let intercept = DMatrix::from_element(4, 1, 1.0);
+        let intercept_slope = DMatrix::from_row_slice(
+            4,
+            2,
+            &[
+                1.0, 0.0, //
+                1.0, 1.0, //
+                1.0, 2.0, //
+                1.0, 3.0,
+            ],
+        );
+        let m0 = DummyFit::new(4, 2, -10.0, Some("y ~ 1"))
+            .with_reml(true)
+            .with_model_matrix(intercept);
+        let m1 = DummyFit::new(4, 3, -9.0, Some("y ~ 1 + x"))
+            .with_reml(true)
+            .with_model_matrix(intercept_slope);
+
+        let err = LikelihoodRatioTest::test(&[&m0, &m1]).unwrap_err();
+
+        assert_eq!(
+            err,
+            "Likelihood ratio test under REML requires identical fixed effects across models; refit with REML=false."
+        );
+    }
+
+    #[test]
+    fn test_lrt_accepts_reml_with_identical_fe() {
+        let x = DMatrix::from_row_slice(
+            4,
+            2,
+            &[
+                1.0, 0.0, //
+                1.0, 1.0, //
+                1.0, 2.0, //
+                1.0, 3.0,
+            ],
+        );
+        let reordered_x = DMatrix::from_row_slice(
+            4,
+            2,
+            &[
+                0.0, 1.0, //
+                1.0, 1.0, //
+                2.0, 1.0, //
+                3.0, 1.0,
+            ],
+        );
+        let m0 = DummyFit::new(4, 3, -10.0, Some("y ~ 1 + x"))
+            .with_reml(true)
+            .with_model_matrix(x);
+        let m1 = DummyFit::new(4, 4, -9.0, Some("y ~ x + 1 + (1 | g)"))
+            .with_reml(true)
+            .with_model_matrix(reordered_x)
+            .with_random_terms(vec![RandomEffectTermInfo {
+                group: "g".to_string(),
+                columns: vec!["(Intercept)".to_string()],
+            }]);
+
+        let lrt = LikelihoodRatioTest::test(&[&m0, &m1]).unwrap();
+
+        assert_eq!(lrt.chisq_dof, vec![1]);
+        assert_relative_eq!(lrt.chisq[0], 2.0, epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_lrt_ml_with_nested_fe_still_works() {
+        let intercept = DMatrix::from_element(4, 1, 1.0);
+        let intercept_slope = DMatrix::from_row_slice(
+            4,
+            2,
+            &[
+                1.0, 0.0, //
+                1.0, 1.0, //
+                1.0, 2.0, //
+                1.0, 3.0,
+            ],
+        );
+        let m0 = DummyFit::new(4, 2, -10.0, Some("y ~ 1"))
+            .with_reml(false)
+            .with_model_matrix(intercept);
+        let m1 = DummyFit::new(4, 3, -9.0, Some("y ~ 1 + x"))
+            .with_reml(false)
+            .with_model_matrix(intercept_slope);
+
+        let lrt = LikelihoodRatioTest::test(&[&m0, &m1]).unwrap();
+
+        assert_eq!(lrt.chisq_dof, vec![1]);
+        assert_relative_eq!(lrt.chisq[0], 2.0, epsilon = 1e-12);
     }
 
     #[test]
