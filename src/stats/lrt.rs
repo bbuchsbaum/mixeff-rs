@@ -1758,6 +1758,80 @@ mod tests {
     }
 
     #[test]
+    fn test_model_comparison_table_marks_incompatible_pairs() {
+        use crate::model::traits::{Family, LinkFunction};
+
+        let m0 = DummyFit::new(4, 2, -10.0, Some("y ~ 1"))
+            .with_response(DVector::from_vec(vec![1.0, 2.0, 3.0, 4.0]));
+        let m_different_response = DummyFit::new(4, 3, -9.0, Some("z ~ 1 + x"))
+            .with_response(DVector::from_vec(vec![1.0, 2.0, 3.0, 5.0]));
+
+        let table = ModelComparisonTable::compare(&[&m0, &m_different_response]).unwrap();
+        assert!(!table.rows[1].lrt_available);
+        assert!(!table.rows[1].information_criteria_available);
+        assert_eq!(table.rows[1].pvalue, None);
+        assert_eq!(
+            table.rows[1].reason_code.as_deref(),
+            Some("different_response")
+        );
+
+        let err = ModelComparisonTable::compare_with_options(
+            &[&m0, &m_different_response],
+            ModelComparisonOptions {
+                method: ModelComparisonMethod::InformationCriteria,
+                refit_policy: ModelComparisonRefitPolicy::Never,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "information criteria require models fit to the same response values"
+        );
+
+        let bernoulli = DummyFit::new(4, 2, -10.0, Some("bernoulli"))
+            .with_family(Family::Bernoulli, LinkFunction::Logit);
+        let poisson = DummyFit::new(4, 3, -9.0, Some("poisson"))
+            .with_family(Family::Poisson, LinkFunction::Log);
+        let table = ModelComparisonTable::compare(&[&bernoulli, &poisson]).unwrap();
+        assert_eq!(
+            table.rows[1].reason_code.as_deref(),
+            Some("different_family")
+        );
+        assert!(!table.rows[1].information_criteria_available);
+        assert_eq!(table.rows[1].pvalue, None);
+
+        let logit = DummyFit::new(4, 2, -10.0, Some("logit"))
+            .with_family(Family::Bernoulli, LinkFunction::Logit);
+        let probit = DummyFit::new(4, 3, -9.0, Some("probit"))
+            .with_family(Family::Bernoulli, LinkFunction::Probit);
+        let table = ModelComparisonTable::compare(&[&logit, &probit]).unwrap();
+        assert_eq!(table.rows[1].reason_code.as_deref(), Some("different_link"));
+        assert!(!table.rows[1].information_criteria_available);
+        assert_eq!(table.rows[1].pvalue, None);
+    }
+
+    #[test]
+    fn test_model_comparison_table_lrt_method_rejects_non_nested_fixed_effects() {
+        let m0 = DummyFit::new(4, 3, -10.0, Some("y ~ 1 + x"))
+            .with_reml(false)
+            .with_model_matrix(intercept_x());
+        let m1 = DummyFit::new(4, 4, -8.0, Some("y ~ 1 + z"))
+            .with_reml(false)
+            .with_model_matrix(intercept_z());
+
+        let err = ModelComparisonTable::compare_with_options(
+            &[&m0, &m1],
+            ModelComparisonOptions {
+                method: ModelComparisonMethod::LikelihoodRatio,
+                refit_policy: ModelComparisonRefitPolicy::Never,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(err, "fixed-effect column spaces are not nested");
+    }
+
+    #[test]
     fn test_model_comparison_assessment_classifies_same_model_space() {
         let x = intercept_x();
         let m0 = DummyFit::new(4, 3, -10.0, Some("m0")).with_model_matrix(x.clone());
