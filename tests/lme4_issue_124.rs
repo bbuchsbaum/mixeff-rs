@@ -1,5 +1,3 @@
-#![cfg(feature = "nlopt")]
-
 use mixedmodels::compiler::{DiagnosticCode, DiagnosticSeverity};
 use mixedmodels::formula::parse_formula;
 use mixedmodels::model::{DataFrame, Family, GeneralizedLinearMixedModel, MixedModelFit};
