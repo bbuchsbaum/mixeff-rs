@@ -1741,10 +1741,8 @@ mod tests {
     use super::*;
     use crate::formula::parse_formula;
     use crate::model::data::DataFrame;
-    #[cfg(feature = "nlopt")]
     use approx::assert_relative_eq;
 
-    #[cfg(feature = "nlopt")]
     fn assert_glmm_theta_diagonals_nonnegative(model: &GeneralizedLinearMixedModel) {
         for (idx, &(_, row, col)) in model.lmm.parmap.iter().enumerate() {
             if row == col {
@@ -1761,7 +1759,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "nlopt")]
     fn resampled_contra_response(data: &DataFrame) -> Vec<f64> {
         data.numeric("use_num")
             .unwrap()
@@ -1779,7 +1776,6 @@ mod tests {
             .collect()
     }
 
-    #[cfg(feature = "nlopt")]
     fn refit_cold_contra_model(new_y: &[f64]) -> GeneralizedLinearMixedModel {
         let mut data = contra_fixture();
         data.add_numeric("use_num", new_y.to_vec()).unwrap();
@@ -1791,7 +1787,6 @@ mod tests {
         model
     }
 
-    #[cfg(feature = "nlopt")]
     fn glmm_retained_state_slots(model: &GeneralizedLinearMixedModel) -> usize {
         let matrix_slots = |matrix: &DMatrix<f64>| matrix.nrows() * matrix.ncols();
         let block_slots = |block: &MatrixBlock| block.nrows() * block.ncols();
@@ -2120,7 +2115,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "nlopt")]
     fn test_gamma_glmm_fit_estimates_pearson_dispersion() {
         let data = gamma_dispersion_fixture();
         let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
@@ -2557,7 +2551,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "nlopt")]
     #[test]
     fn test_glmm_fit_with_options_rejects_invalid_nagq_up_front() {
         // The fit entry point must preflight the AGQ guard, so users never
@@ -2591,7 +2584,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "nlopt")]
     #[test]
     fn test_glmm_refit_resets_theta_to_initial() {
         let data = contra_fixture();
@@ -2616,7 +2608,6 @@ mod tests {
         assert!(model.lmm.optsum.return_value.is_empty());
     }
 
-    #[cfg(feature = "nlopt")]
     #[test]
     fn test_glmm_bootstrap_does_not_warm_start() {
         let data = contra_fixture();
@@ -2642,7 +2633,6 @@ mod tests {
         assert_ne!(model.theta, fitted_theta);
     }
 
-    #[cfg(feature = "nlopt")]
     #[test]
     fn test_glmm_refit_after_resample_matches_cold_fit() {
         let data = contra_fixture();
@@ -2667,7 +2657,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "nlopt")]
     #[test]
     fn test_glmm_repeated_refit_does_not_accumulate_retained_state() {
         let data = contra_fixture();
@@ -2703,7 +2692,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "nlopt")]
     #[test]
     fn test_glmm_theta_probe_penalizes_invalid_theta() {
         let data = contra_fixture();
@@ -2719,7 +2707,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "nlopt")]
     #[test]
     fn test_glmm_final_theta_update_propagates_invalid_theta_error() {
         let data = contra_fixture();
@@ -2734,7 +2721,6 @@ mod tests {
         assert!(matches!(err, MixedModelError::InvalidArgument(_)));
     }
 
-    #[cfg(feature = "nlopt")]
     #[test]
     fn test_glmm_rectify_after_fit() {
         let data = contra_fixture();
@@ -2753,7 +2739,6 @@ mod tests {
         assert_glmm_theta_diagonals_nonnegative(&model);
     }
 
-    #[cfg(feature = "nlopt")]
     #[test]
     fn test_glmm_deviance_agq_restores_state() {
         // After a Laplace fit, snapshotting (u, eta, mu) and then calling
