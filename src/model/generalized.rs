@@ -844,7 +844,20 @@ impl GeneralizedLinearMixedModel {
 
     #[cfg(not(feature = "nlopt"))]
     fn fit_with_options_impl(&mut self, n_agq: usize, _verbose: bool) -> Result<&mut Self> {
-        self.fit_native_cobyla(n_agq)
+        match self.lmm.optsum.optimizer {
+            Optimizer::PatternSearch => self.fit_native_pattern_search(n_agq),
+            Optimizer::Cobyla => self.fit_native_cobyla(n_agq),
+            Optimizer::NloptBobyqa | Optimizer::NloptNewuoa => Err(MixedModelError::Optimization(
+                "NLopt GLMM optimizers require the `nlopt` feature; rebuild with `--features nlopt` or pick a native optimizer"
+                    .to_string(),
+            )),
+            Optimizer::PrimaBobyqa
+            | Optimizer::PrimaCobyla
+            | Optimizer::PrimaLincoa
+            | Optimizer::PrimaNewuoa => Err(MixedModelError::Optimization(
+                "PRIMA GLMM optimizers are not wired; pick a native optimizer".to_string(),
+            )),
+        }
     }
 
     #[cfg(feature = "nlopt")]
@@ -1027,6 +1040,157 @@ impl GeneralizedLinearMixedModel {
         self.lmm.optsum.return_value = return_value;
         self.lmm.optsum.feval = feval_count.get();
         self.lmm.optsum.fit_log = rc_refcell_into_inner_or_clone(fit_log);
+        self.lmm.compiler_artifact.optimizer_certificate =
+            Some(OptimizerCertificate::from_opt_summary_with_context(
+                &self.lmm.optsum,
+                &self.theta,
+                &self.lmm.lower_bounds(),
+                Some(self.lmm.dims.n),
+            ));
+        self.refresh_binomial_separation_diagnostics();
+        self.refresh_near_unit_random_effect_correlation_diagnostics();
+
+        Ok(self)
+    }
+
+    #[cfg(not(feature = "nlopt"))]
+    fn fit_native_pattern_search(&mut self, n_agq: usize) -> Result<&mut Self> {
+        let lower_bounds = self.lmm.lower_bounds();
+        let n_theta = self.theta.len();
+        let maxeval = if self.lmm.optsum.max_feval > 0 {
+            self.lmm.optsum.max_feval
+        } else {
+            500
+        };
+        let mut step_tol = self.lmm.optsum.xtol_abs.clone();
+        if step_tol.len() != n_theta {
+            step_tol = vec![1e-5; n_theta];
+        }
+        for tol in &mut step_tol {
+            *tol = tol.max(1e-5);
+        }
+        let mut step = self.lmm.optsum.initial_step.clone();
+        if step.len() != n_theta {
+            step = vec![0.75; n_theta];
+        }
+        for (value, tol) in step.iter_mut().zip(step_tol.iter()) {
+            *value = value.abs().max(*tol);
+        }
+
+        let mut theta = self.lmm.optsum.initial.clone();
+        project_theta_to_bounds(&mut theta, &lower_bounds);
+        let mut best_theta = theta.clone();
+        let mut best_fmin = f64::INFINITY;
+        let mut feval_count = 0i64;
+        let mut fit_log = Vec::with_capacity(self.lmm.optsum.fit_log.capacity());
+        let mut preferred_sign = vec![-1.0; n_theta];
+        for (idx, lower) in lower_bounds.iter().enumerate() {
+            if !lower.is_finite() {
+                preferred_sign[idx] = 1.0;
+            }
+        }
+
+        let mut current_f = record_pattern_search_eval(
+            self,
+            &theta,
+            n_agq,
+            &mut feval_count,
+            &mut fit_log,
+            &mut best_theta,
+            &mut best_fmin,
+        );
+        self.lmm.optsum.finitial = current_f;
+
+        while feval_count < maxeval && !steps_are_small(&step, &step_tol) {
+            let base_theta = theta.clone();
+            let base_f = current_f;
+            let mut moved = false;
+
+            for idx in 0..n_theta {
+                let mut accepted = false;
+                for dir in [preferred_sign[idx], -preferred_sign[idx]] {
+                    let mut trial = theta.clone();
+                    trial[idx] += dir * step[idx];
+                    project_theta_to_bounds(&mut trial, &lower_bounds);
+                    if (trial[idx] - theta[idx]).abs() <= step_tol[idx] * 0.5 {
+                        continue;
+                    }
+                    let ftrial = record_pattern_search_eval(
+                        self,
+                        &trial,
+                        n_agq,
+                        &mut feval_count,
+                        &mut fit_log,
+                        &mut best_theta,
+                        &mut best_fmin,
+                    );
+                    if ftrial + self.lmm.optsum.ftol_abs < current_f {
+                        theta = trial;
+                        current_f = ftrial;
+                        preferred_sign[idx] = dir;
+                        step[idx] = (step[idx] * 1.1).max(step_tol[idx]);
+                        moved = true;
+                        accepted = true;
+                        break;
+                    }
+                    if feval_count >= maxeval {
+                        break;
+                    }
+                }
+                if !accepted {
+                    preferred_sign[idx] = -preferred_sign[idx];
+                    step[idx] *= 0.5;
+                }
+                if feval_count >= maxeval {
+                    break;
+                }
+            }
+
+            if moved && feval_count < maxeval {
+                let mut pattern = theta.clone();
+                for idx in 0..n_theta {
+                    pattern[idx] += theta[idx] - base_theta[idx];
+                }
+                project_theta_to_bounds(&mut pattern, &lower_bounds);
+                if pattern != theta {
+                    let fpattern = record_pattern_search_eval(
+                        self,
+                        &pattern,
+                        n_agq,
+                        &mut feval_count,
+                        &mut fit_log,
+                        &mut best_theta,
+                        &mut best_fmin,
+                    );
+                    if fpattern + self.lmm.optsum.ftol_abs < current_f {
+                        theta = pattern;
+                        current_f = fpattern;
+                    }
+                }
+            }
+
+            if !moved {
+                for value in &mut step {
+                    *value *= 0.5;
+                }
+            }
+            if (base_f - current_f).abs() <= self.lmm.optsum.ftol_abs
+                && steps_are_small(&step, &step_tol)
+            {
+                break;
+            }
+        }
+
+        self.lmm.optsum.optimizer = Optimizer::PatternSearch;
+        self.lmm.optsum.backend = Optimizer::PatternSearch.canonical_backend();
+        self.finalize_theta_after_optimizer(&mut best_theta, n_agq)?;
+        self.lmm.optsum.return_value = if feval_count >= maxeval {
+            "MAXEVAL_REACHED".to_string()
+        } else {
+            "SUCCESS".to_string()
+        };
+        self.lmm.optsum.feval = feval_count;
+        self.lmm.optsum.fit_log = fit_log;
         self.lmm.compiler_artifact.optimizer_certificate =
             Some(OptimizerCertificate::from_opt_summary_with_context(
                 &self.lmm.optsum,
@@ -1321,6 +1485,45 @@ fn rc_refcell_into_inner_or_clone<T: Clone>(value: Rc<RefCell<Vec<T>>>) -> Vec<T
         Ok(cell) => cell.into_inner(),
         Err(value) => value.borrow().clone(),
     }
+}
+
+#[cfg(not(feature = "nlopt"))]
+fn project_theta_to_bounds(theta: &mut [f64], lower_bounds: &[f64]) {
+    for (value, lower) in theta.iter_mut().zip(lower_bounds.iter()) {
+        if lower.is_finite() && *value < *lower {
+            *value = *lower;
+        }
+    }
+}
+
+#[cfg(not(feature = "nlopt"))]
+fn steps_are_small(step: &[f64], step_tol: &[f64]) -> bool {
+    step.iter()
+        .zip(step_tol.iter())
+        .all(|(step, tol)| *step <= *tol)
+}
+
+#[cfg(not(feature = "nlopt"))]
+fn record_pattern_search_eval(
+    model: &mut GeneralizedLinearMixedModel,
+    theta: &[f64],
+    n_agq: usize,
+    feval_count: &mut i64,
+    fit_log: &mut Vec<FitLogEntry>,
+    best_theta: &mut Vec<f64>,
+    best_fmin: &mut f64,
+) -> f64 {
+    *feval_count += 1;
+    let objective = model.penalized_pirls_deviance_at_theta(theta, n_agq);
+    fit_log.push(FitLogEntry {
+        theta: theta.to_vec(),
+        objective,
+    });
+    if objective < *best_fmin {
+        *best_fmin = objective;
+        *best_theta = theta.to_vec();
+    }
+    objective
 }
 
 fn lower_triangle_pair(offset: usize) -> (usize, usize) {
@@ -2006,6 +2209,32 @@ mod tests {
         data
     }
 
+    fn two_term_poisson_fixture() -> DataFrame {
+        let mut y = Vec::new();
+        let mut x = Vec::new();
+        let mut g1 = Vec::new();
+        let mut g2 = Vec::new();
+        for a in 0..4 {
+            for b in 0..3 {
+                for obs in 0..3 {
+                    let xv = obs as f64 - 1.0;
+                    let eta = 1.0 + 0.15 * xv + [-0.25, 0.05, 0.2, -0.1][a] + [0.1, -0.15, 0.05][b];
+                    y.push(eta.exp().round().max(1.0));
+                    x.push(xv);
+                    g1.push(format!("g1_{}", a + 1));
+                    g2.push(format!("g2_{}", b + 1));
+                }
+            }
+        }
+
+        let mut data = DataFrame::new();
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_categorical("g1", g1).unwrap();
+        data.add_categorical("g2", g2).unwrap();
+        data
+    }
+
     #[test]
     fn test_glmm_constructor_accepts_gamma_with_positive_response() {
         let data = gamma_dispersion_fixture();
@@ -2046,6 +2275,50 @@ mod tests {
         assert!(model.lmm.optsum.fmin.is_finite());
         assert!(!model.lmm.optsum.fit_log.is_empty());
         assert!(model.lmm.compiler_artifact.optimizer_certificate.is_some());
+    }
+
+    #[cfg(not(feature = "nlopt"))]
+    #[test]
+    fn test_glmm_fit_uses_native_pattern_search_when_requested() {
+        let data = gamma_dispersion_fixture();
+        let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
+        let mut model = GeneralizedLinearMixedModel::new(
+            formula,
+            &data,
+            Family::Gamma,
+            Some(LinkFunction::Log),
+        )
+        .unwrap();
+        model.lmm.optsum.optimizer = Optimizer::PatternSearch;
+        model.lmm.optsum.max_feval = 120;
+
+        model.fit_with_options(true, 1, false).unwrap();
+
+        assert_eq!(model.lmm.optsum.optimizer, Optimizer::PatternSearch);
+        assert_eq!(model.lmm.optsum.backend.label(), "native");
+        assert!(model.lmm.optsum.feval > 0);
+        assert!(model.lmm.optsum.fmin.is_finite());
+        assert!(!model.lmm.optsum.fit_log.is_empty());
+        assert!(model.lmm.compiler_artifact.optimizer_certificate.is_some());
+    }
+
+    #[cfg(not(feature = "nlopt"))]
+    #[test]
+    fn test_glmm_pattern_search_handles_multitheta_poisson_fit() {
+        let data = two_term_poisson_fixture();
+        let formula = parse_formula("y ~ 1 + x + (1 | g1) + (1 | g2)").unwrap();
+        let mut model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Poisson, None).unwrap();
+        model.lmm.optsum.optimizer = Optimizer::PatternSearch;
+        model.lmm.optsum.max_feval = 180;
+
+        model.fit_with_options(true, 1, false).unwrap();
+
+        assert_eq!(model.theta.len(), 2);
+        assert_eq!(model.lmm.optsum.optimizer, Optimizer::PatternSearch);
+        assert!(model.theta.iter().all(|value| value.is_finite()));
+        assert!(model.theta.iter().all(|value| *value >= 0.0));
+        assert!(model.objective().is_finite());
     }
 
     #[test]
