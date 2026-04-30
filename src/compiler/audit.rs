@@ -1370,7 +1370,7 @@ fn audit_random_term(
     let mut diagnostics = Vec::new();
     let basis = expanded_basis_audit(term, &refs, data);
     if basis_was_expanded(term, &basis) {
-        let diagnostic = expanded_basis_diagnostic(term, &basis);
+        let diagnostic = expanded_basis_diagnostic(term, &basis, data);
         global_diagnostics.push(diagnostic.clone());
         diagnostics.push(diagnostic);
     }
@@ -1445,11 +1445,7 @@ fn expanded_basis_audit(
     refs: &Option<Vec<usize>>,
     data: &DataFrame,
 ) -> Vec<BasisAudit> {
-    let coding = if term.intercept == InterceptPolicy::Omitted {
-        RandomBasisCoding::CellMeans
-    } else {
-        RandomBasisCoding::Treatment
-    };
+    let coding = random_basis_coding(term);
     let mut basis = Vec::new();
 
     for coefficient in &term.basis {
@@ -1698,12 +1694,29 @@ fn basis_was_expanded(term: &RandomTermIr, basis: &[BasisAudit]) -> bool {
     semantic != expanded
 }
 
-fn expanded_basis_diagnostic(term: &RandomTermIr, basis: &[BasisAudit]) -> Diagnostic {
+fn expanded_basis_diagnostic(
+    term: &RandomTermIr,
+    basis: &[BasisAudit],
+    data: &DataFrame,
+) -> Diagnostic {
+    let coding = random_basis_coding(term);
+    let explicit_contrast_variables = explicit_contrast_variables(term, data);
+    let contrast_available = !explicit_contrast_variables.is_empty();
+    let contrast_used = contrast_available && coding == RandomBasisCoding::Treatment;
+    let message = if contrast_available && coding == RandomBasisCoding::CellMeans {
+        format!(
+            "random-effect term '{}' uses cell-means coding by no-intercept categorical formula semantics; supplied contrast basis for {} was not used for this term",
+            term.source_syntax.text,
+            explicit_contrast_variables.join(", ")
+        )
+    } else {
+        "random-effect basis was expanded into optimizer columns".to_string()
+    };
     let mut diagnostic = Diagnostic::new(
         DiagnosticCode::FormulaCanonicalized,
         DiagnosticSeverity::Info,
         DiagnosticStage::DesignAudit,
-        "random-effect basis was expanded into optimizer columns",
+        message,
     )
     .with_affected_terms(vec![term.source_syntax.text.clone()]);
     diagnostic.payload.insert(
@@ -1721,7 +1734,61 @@ fn expanded_basis_diagnostic(term: &RandomTermIr, basis: &[BasisAudit]) -> Diagn
             .map(|basis| basis.name.clone())
             .collect::<Vec<_>>()),
     );
+    if contrast_available {
+        diagnostic.payload.insert(
+            "basis_coding".to_string(),
+            serde_json::json!(random_basis_coding_label(coding)),
+        );
+        diagnostic
+            .payload
+            .insert("contrast_available".to_string(), serde_json::json!(true));
+        diagnostic.payload.insert(
+            "contrast_used".to_string(),
+            serde_json::json!(contrast_used),
+        );
+        diagnostic.payload.insert(
+            "contrast_variables".to_string(),
+            serde_json::json!(explicit_contrast_variables),
+        );
+    }
+    if contrast_available && coding == RandomBasisCoding::CellMeans {
+        diagnostic.payload.insert(
+            "reason".to_string(),
+            serde_json::json!("no_intercept_categorical_formula_semantics"),
+        );
+    }
     diagnostic
+}
+
+fn random_basis_coding(term: &RandomTermIr) -> RandomBasisCoding {
+    if term.intercept == InterceptPolicy::Omitted {
+        RandomBasisCoding::CellMeans
+    } else {
+        RandomBasisCoding::Treatment
+    }
+}
+
+fn random_basis_coding_label(coding: RandomBasisCoding) -> &'static str {
+    match coding {
+        RandomBasisCoding::Treatment => "treatment",
+        RandomBasisCoding::CellMeans => "cell_means",
+    }
+}
+
+fn explicit_contrast_variables(term: &RandomTermIr, data: &DataFrame) -> Vec<String> {
+    let mut variables = std::collections::BTreeSet::new();
+    for coefficient in &term.basis {
+        for variable in coefficient.source.split(':') {
+            if data
+                .categorical(variable)
+                .and_then(|cat| cat.contrast.as_ref())
+                .is_some()
+            {
+                variables.insert(variable.to_string());
+            }
+        }
+    }
+    variables.into_iter().collect()
 }
 
 fn grouping_audit(
@@ -2606,7 +2673,7 @@ mod tests {
     use super::*;
     use crate::compiler::compile_formula_ir;
     use crate::formula::parse_formula;
-    use crate::model::data::DataFrame;
+    use crate::model::data::{CategoricalContrast, ContrastSource, DataFrame};
 
     fn repeated_subject_data() -> DataFrame {
         let mut data = DataFrame::new();
@@ -2674,6 +2741,38 @@ mod tests {
         data.add_numeric("x", x).unwrap();
         data.add_categorical("cond", cond).unwrap();
         data.add_categorical("subject", subject).unwrap();
+        data
+    }
+
+    fn categorical_subject_data_with_explicit_contrast() -> DataFrame {
+        let mut data = DataFrame::new();
+        data.add_numeric("y", vec![1.0, 2.0, 1.5, 2.5, 1.2, 2.2])
+            .unwrap();
+        data.add_categorical_with_contrast(
+            "anchor",
+            vec!["low", "high", "low", "high", "low", "high"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            vec!["low".to_string(), "high".to_string()],
+            CategoricalContrast::new(
+                vec!["low".to_string(), "high".to_string()],
+                DMatrix::from_row_slice(2, 1, &[0.5, -0.5]),
+                vec!["hi_minus_lo".to_string()],
+                false,
+                ContrastSource::Custom,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        data.add_categorical(
+            "subject",
+            vec!["s1", "s1", "s2", "s2", "s3", "s3"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        )
+        .unwrap();
         data
     }
 
@@ -3034,6 +3133,64 @@ mod tests {
         assert_eq!(
             diagnostic.payload.get("expanded_basis"),
             Some(&serde_json::json!(["cond: A", "cond: B", "cond: C"]))
+        );
+    }
+
+    #[test]
+    fn design_audit_explains_no_intercept_factor_bypasses_explicit_contrast() {
+        let formula = parse_formula("y ~ anchor + (0 + anchor | subject)").unwrap();
+        let semantic = compile_formula_ir(&formula);
+        let audit = audit_design(
+            &semantic,
+            &categorical_subject_data_with_explicit_contrast(),
+        );
+
+        let term = &audit.random_terms[0];
+        assert_eq!(term.basis_size, 2);
+        assert_eq!(
+            term.basis
+                .iter()
+                .map(|basis| basis.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["anchor: low", "anchor: high"]
+        );
+        assert!(term
+            .basis
+            .iter()
+            .all(|basis| basis.kind.as_str() == "categorical_cell"));
+
+        let diagnostic = term
+            .diagnostics
+            .iter()
+            .find(|d| d.code == DiagnosticCode::FormulaCanonicalized)
+            .expect("cell-means expansion diagnostic should be attached to term");
+        assert!(diagnostic
+            .message
+            .contains("uses cell-means coding by no-intercept categorical formula semantics"));
+        assert!(diagnostic
+            .message
+            .contains("supplied contrast basis for anchor was not used"));
+        assert_eq!(
+            diagnostic.payload.get("basis_coding"),
+            Some(&serde_json::json!("cell_means"))
+        );
+        assert_eq!(
+            diagnostic.payload.get("contrast_available"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            diagnostic.payload.get("contrast_used"),
+            Some(&serde_json::json!(false))
+        );
+        assert_eq!(
+            diagnostic.payload.get("contrast_variables"),
+            Some(&serde_json::json!(["anchor"]))
+        );
+        assert_eq!(
+            diagnostic.payload.get("reason"),
+            Some(&serde_json::json!(
+                "no_intercept_categorical_formula_semantics"
+            ))
         );
     }
 

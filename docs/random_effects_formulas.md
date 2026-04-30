@@ -204,7 +204,7 @@ A categorical basis variable contributes a column block. Two parameterizations, 
 
 - **Treatment coding (default when `InterceptPolicy::Included` is in effect for this term)**: one Z column per non-reference level (`L − 1` columns). Reference level = first observed level unless the frontend supplied an explicit categorical contrast basis. Each default column is the indicator for that level.
 - **Explicit contrast coding (when `CategoricalColumn.contrast` is present and treatment coding is in effect)**: one Z column per supplied contrast column. The row values are looked up from the supplied `levels x k` numeric matrix, column names come from `contrast_column_names`, and the same basis is used by fixed effects, random slopes, and interactions.
-- **Cell-means coding (when the basis is `0 + factor` and `InterceptPolicy::Omitted`)**: one Z column per level (`L` columns). This is the "one variance per condition" parameterization commonly written `(0 + cond | g)` in lme4.
+- **Cell-means coding (when the basis is `0 + factor` and `InterceptPolicy::Omitted`)**: one Z column per level (`L` columns). This is the "one variance per condition" parameterization commonly written `(0 + cond | g)` in lme4. This no-intercept formula semantics takes precedence even when an explicit contrast basis is available for the factor.
 
 The design audit records categorical bases under `fixed_effects.contrast_bases`.
 Each entry includes `variable`, `levels`, `contrast_matrix`, `column_names`,
@@ -225,8 +225,9 @@ expansion, explicit frontend-supplied contrast bases, and cell-means
 `0 + factor` expansion materialize in the random-effect basis. Design audit
 reports the expanded basis columns, records categorical contrast/defaulting
 metadata, emits a `FormulaCanonicalized` diagnostic with semantic and expanded
-basis payloads, and ThetaMap records both `user_basis` and optimizer-facing
-`optimizer_basis` for round-tripping.
+basis payloads, and marks no-intercept categorical terms that used cell-means
+coding despite an available explicit contrast basis. ThetaMap records both
+`user_basis` and optimizer-facing `optimizer_basis` for round-tripping.
 
 ### 4.3 Interaction basis
 

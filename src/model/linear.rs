@@ -11549,6 +11549,61 @@ mod tests {
     }
 
     #[test]
+    fn test_random_effect_no_intercept_factor_uses_cell_means_with_explicit_contrast() {
+        let mut data = DataFrame::new();
+        data.add_numeric("y", vec![1.0, 2.0, 1.5, 2.5, 1.2, 2.2])
+            .unwrap();
+        data.add_categorical_with_contrast(
+            "anchor",
+            vec!["low", "high", "low", "high", "low", "high"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+            vec!["low".to_string(), "high".to_string()],
+            crate::model::data::CategoricalContrast::new(
+                vec!["low".to_string(), "high".to_string()],
+                DMatrix::from_row_slice(2, 1, &[0.5, -0.5]),
+                vec!["hi_minus_lo".to_string()],
+                false,
+                crate::model::data::ContrastSource::Custom,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        data.add_categorical(
+            "subj",
+            vec!["s1", "s1", "s2", "s2", "s3", "s3"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        )
+        .unwrap();
+
+        let formula = parse_formula("y ~ anchor + (0 + anchor | subj)").unwrap();
+        let model = LinearMixedModel::new(formula, &data, None).unwrap();
+
+        assert_eq!(model.reterms[0].cnames, vec!["anchor: low", "anchor: high"]);
+        assert_eq!(
+            model.reterms[0]
+                .z
+                .row(0)
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![1.0, 0.0, 1.0, 0.0, 1.0, 0.0]
+        );
+        assert_eq!(
+            model.reterms[0]
+                .z
+                .row(1)
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0]
+        );
+    }
+
+    #[test]
     fn test_random_effect_categorical_cell_means_preserves_zero_correlation_map() {
         let mut data = DataFrame::new();
         data.add_numeric("y", vec![1.0, 2.0, 3.0, 1.5, 2.5, 3.5])
