@@ -298,6 +298,168 @@ pub struct ModelComparisonAssessment {
     pub valid_alternatives: Vec<ModelComparisonAlternative>,
 }
 
+/// Requested comparison mode for [`ModelComparisonTable`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelComparisonMethod {
+    /// Use likelihood-ratio columns for adjacent comparisons where they are
+    /// valid; otherwise leave them empty and report the reason.
+    Auto,
+    /// Require likelihood-ratio comparisons unless a non-refitting policy asks
+    /// the table to report why refitting is needed.
+    LikelihoodRatio,
+    /// Report information-criteria rows without likelihood-ratio statistics.
+    InformationCriteria,
+}
+
+/// Policy for comparisons that would require ML refits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelComparisonRefitPolicy {
+    /// Return an error when a requested comparison would require ML refits.
+    Error,
+    /// Mark the row as requiring ML refits. The Rust layer does not refit.
+    Ml,
+    /// Never refit; mark the row and leave likelihood-ratio columns empty.
+    Never,
+}
+
+/// Options for building a [`ModelComparisonTable`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ModelComparisonOptions {
+    pub method: ModelComparisonMethod,
+    pub refit_policy: ModelComparisonRefitPolicy,
+}
+
+impl Default for ModelComparisonOptions {
+    fn default() -> Self {
+        Self {
+            method: ModelComparisonMethod::Auto,
+            refit_policy: ModelComparisonRefitPolicy::Never,
+        }
+    }
+}
+
+/// One display row in a model comparison table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelComparisonRow {
+    pub label: String,
+    pub nobs: usize,
+    pub dof: usize,
+    pub loglik: f64,
+    pub deviance: f64,
+    pub aic: f64,
+    pub bic: f64,
+    pub delta_aic: f64,
+    pub delta_bic: f64,
+    pub chisq: Option<f64>,
+    pub chisq_dof: Option<usize>,
+    pub pvalue: Option<f64>,
+    pub loglik_within_optimizer_tol: Option<bool>,
+    pub comparison_class: Option<ModelComparisonClass>,
+    pub lrt_available: bool,
+    pub information_criteria_available: bool,
+    pub requires_ml_refit: bool,
+    pub reason: Option<String>,
+}
+
+/// Information-criteria table with optional valid LRT columns.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelComparisonTable {
+    pub method: ModelComparisonMethod,
+    pub refit_policy: ModelComparisonRefitPolicy,
+    pub rows: Vec<ModelComparisonRow>,
+    pub assessments: Vec<ModelComparisonAssessment>,
+    /// Present for API honesty: automatic refitting is not performed here.
+    pub refit_performed: bool,
+}
+
+impl ModelComparisonTable {
+    /// Build a comparison table using automatic method selection and no refits.
+    pub fn compare(models: &[&dyn MixedModelFit]) -> Result<Self, String> {
+        Self::compare_with_options(models, ModelComparisonOptions::default())
+    }
+
+    /// Build a comparison table with an explicit method and refit policy.
+    pub fn compare_with_options(
+        models: &[&dyn MixedModelFit],
+        options: ModelComparisonOptions,
+    ) -> Result<Self, String> {
+        if models.len() < 2 {
+            return Err("At least two models are needed".to_string());
+        }
+
+        let assessments = assess_model_comparison_sequence(models)?;
+        validate_model_comparison_options(&assessments, options)?;
+
+        let aic: Vec<f64> = models.iter().map(|model| model.aic()).collect();
+        let bic: Vec<f64> = models.iter().map(|model| model.bic()).collect();
+        let min_aic = finite_min(&aic);
+        let min_bic = finite_min(&bic);
+        let mut rows = Vec::with_capacity(models.len());
+
+        for (idx, model) in models.iter().enumerate() {
+            let assessment = idx.checked_sub(1).map(|previous| &assessments[previous]);
+            let lrt_values = assessment.and_then(|assessment| {
+                if options.method == ModelComparisonMethod::InformationCriteria {
+                    None
+                } else if assessment.lrt_available {
+                    Some(likelihood_ratio_values(models[idx - 1], *model))
+                } else {
+                    None
+                }
+            });
+
+            let (chisq, chisq_dof, pvalue, within_tol, lrt_reason) = match lrt_values {
+                Some(Ok(values)) => (
+                    Some(values.chisq),
+                    Some(values.chisq_dof),
+                    Some(values.pvalue),
+                    Some(values.loglik_within_optimizer_tol),
+                    None,
+                ),
+                Some(Err(reason)) => (None, None, None, None, Some(reason)),
+                None => (None, None, None, None, None),
+            };
+
+            let reason = comparison_row_reason(assessment, options.method, lrt_reason);
+            let lrt_available = chisq.is_some();
+            rows.push(ModelComparisonRow {
+                label: model
+                    .formula_label()
+                    .unwrap_or_else(|| format!("model{}", idx + 1)),
+                nobs: model.nobs(),
+                dof: model.dof(),
+                loglik: model.loglikelihood(),
+                deviance: -2.0 * model.loglikelihood(),
+                aic: aic[idx],
+                bic: bic[idx],
+                delta_aic: delta_from_min(aic[idx], min_aic),
+                delta_bic: delta_from_min(bic[idx], min_bic),
+                chisq,
+                chisq_dof,
+                pvalue,
+                loglik_within_optimizer_tol: within_tol,
+                comparison_class: assessment.map(|assessment| assessment.class),
+                lrt_available,
+                information_criteria_available: assessment
+                    .map(|assessment| assessment.information_criteria_available)
+                    .unwrap_or(true),
+                requires_ml_refit: assessment
+                    .map(|assessment| assessment.ml_refit_required)
+                    .unwrap_or(false),
+                reason,
+            });
+        }
+
+        Ok(Self {
+            method: options.method,
+            refit_policy: options.refit_policy,
+            rows,
+            assessments,
+            refit_performed: false,
+        })
+    }
+}
+
 impl ModelComparisonAssessment {
     /// Assess a pair of models in the supplied order.
     ///
@@ -353,61 +515,16 @@ impl LikelihoodRatioTest {
             return Err("Formula labels must match the number of models".to_string());
         }
 
+        let assessments = assess_model_comparison_sequence(models)?;
+        for assessment in &assessments {
+            if !assessment.lrt_available {
+                return Err(assessment.lrt_reason.clone().unwrap_or_else(|| {
+                    "ordinary likelihood-ratio test is unavailable for this comparison".to_string()
+                }));
+            }
+        }
+
         let nobs = models[0].nobs();
-        for m in models {
-            if m.nobs() != nobs {
-                return Err("All models must have the same number of observations".to_string());
-            }
-        }
-        let response = models[0].response();
-        for m in models.iter().skip(1) {
-            if !vectors_equal(response, m.response()) {
-                return Err("All models must be fit to the same response values".to_string());
-            }
-        }
-
-        // REML/ML coherence: matches `MixedModels` rejecting REML/ML mixes.
-        let reml_flags: Vec<bool> = models.iter().map(|m| m.opt_summary().reml).collect();
-        if reml_flags.iter().any(|&r| r != reml_flags[0]) {
-            return Err("Likelihood ratio test cannot mix REML- and ML-fitted models".to_string());
-        }
-        if reml_flags[0] {
-            for i in 1..models.len() {
-                if !fixed_effect_spaces_are_equal(
-                    models[i - 1].model_matrix(),
-                    models[i].model_matrix(),
-                ) {
-                    return Err(
-                        "Likelihood ratio test under REML requires identical fixed effects across models; refit with REML=false."
-                            .to_string(),
-                    );
-                }
-            }
-        }
-
-        // Family/link coherence: matches `MixedModels._samefamily`. `None`
-        // (LMM/Gaussian) is treated as compatible with itself but not with
-        // any explicit GLMM family.
-        let family_kinds: Vec<_> = models.iter().map(|m| m.family_kind()).collect();
-        if family_kinds.iter().any(|f| *f != family_kinds[0]) {
-            return Err(
-                "Likelihood ratio test cannot mix conditional distribution families".to_string(),
-            );
-        }
-        let link_kinds: Vec<_> = models.iter().map(|m| m.link_kind()).collect();
-        if link_kinds.iter().any(|l| *l != link_kinds[0]) {
-            return Err("Likelihood ratio test cannot mix link functions".to_string());
-        }
-
-        for i in 1..models.len() {
-            if !is_structurally_nested(models[i - 1], models[i]) {
-                return Err(
-                    "Likelihood ratio test is only valid for structurally nested models"
-                        .to_string(),
-                );
-            }
-        }
-
         let dof: Vec<usize> = models.iter().map(|m| m.dof()).collect();
         let loglik: Vec<f64> = models.iter().map(|m| m.loglikelihood()).collect();
         let deviance: Vec<f64> = loglik.iter().map(|ll| -2.0 * ll).collect();
@@ -418,9 +535,10 @@ impl LikelihoodRatioTest {
         let mut loglik_within_optimizer_tol = Vec::new();
 
         for i in 1..models.len() {
-            if dof[i] <= dof[i - 1] {
-                return Err("Likelihood ratio test is only valid for nested models".to_string());
-            }
+            debug_assert!(
+                dof[i] > dof[i - 1],
+                "comparison classifier should reject non-increasing degrees of freedom"
+            );
             let loglik_diff = loglik[i] - loglik[i - 1];
             if loglik_diff < -LOG_LIK_TOL {
                 return Err(
@@ -684,14 +802,6 @@ impl LikelihoodRatioTest {
 
         rows
     }
-}
-
-fn is_structurally_nested(smaller: &dyn MixedModelFit, larger: &dyn MixedModelFit) -> bool {
-    fixed_effect_space_is_nested(smaller.model_matrix(), larger.model_matrix())
-        && random_effect_terms_are_nested(
-            &smaller.random_effect_terms(),
-            &larger.random_effect_terms(),
-        )
 }
 
 fn fixed_effect_space_is_nested(smaller: &DMatrix<f64>, larger: &DMatrix<f64>) -> bool {
@@ -1062,6 +1172,125 @@ fn comparison_alternatives(
     alternatives
 }
 
+struct LrtValues {
+    chisq: f64,
+    chisq_dof: usize,
+    pvalue: f64,
+    loglik_within_optimizer_tol: bool,
+}
+
+fn validate_model_comparison_options(
+    assessments: &[ModelComparisonAssessment],
+    options: ModelComparisonOptions,
+) -> Result<(), String> {
+    for assessment in assessments {
+        if options.refit_policy == ModelComparisonRefitPolicy::Error && assessment.ml_refit_required
+        {
+            return Err(assessment
+                .ml_refit_reason
+                .clone()
+                .unwrap_or_else(|| "comparison requires ML refits".to_string()));
+        }
+
+        match options.method {
+            ModelComparisonMethod::Auto => {}
+            ModelComparisonMethod::LikelihoodRatio => {
+                if !assessment.lrt_available
+                    && !(assessment.ml_refit_required
+                        && options.refit_policy != ModelComparisonRefitPolicy::Error)
+                {
+                    return Err(assessment.lrt_reason.clone().unwrap_or_else(|| {
+                        "ordinary likelihood-ratio test is unavailable for this comparison"
+                            .to_string()
+                    }));
+                }
+            }
+            ModelComparisonMethod::InformationCriteria => {
+                if !assessment.information_criteria_available {
+                    return Err(assessment
+                        .information_criteria_reason
+                        .clone()
+                        .unwrap_or_else(|| {
+                            "information criteria are unavailable for this comparison".to_string()
+                        }));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn likelihood_ratio_values(
+    smaller: &dyn MixedModelFit,
+    larger: &dyn MixedModelFit,
+) -> Result<LrtValues, String> {
+    let loglik_diff = larger.loglikelihood() - smaller.loglikelihood();
+    if loglik_diff < -LOG_LIK_TOL {
+        return Err(
+            "larger model has lower log-likelihood; likelihood-ratio columns omitted".to_string(),
+        );
+    }
+
+    let loglik_within_optimizer_tol = loglik_diff <= 0.0;
+    let chisq = if loglik_within_optimizer_tol {
+        0.0
+    } else {
+        2.0 * loglik_diff
+    };
+    let chisq_dof = larger.dof() - smaller.dof();
+    use statrs::distribution::{ChiSquared, ContinuousCDF};
+    let dist = ChiSquared::new(chisq_dof as f64).unwrap();
+    let pvalue = 1.0 - dist.cdf(chisq);
+
+    Ok(LrtValues {
+        chisq,
+        chisq_dof,
+        pvalue,
+        loglik_within_optimizer_tol,
+    })
+}
+
+fn comparison_row_reason(
+    assessment: Option<&ModelComparisonAssessment>,
+    method: ModelComparisonMethod,
+    lrt_reason: Option<String>,
+) -> Option<String> {
+    if let Some(reason) = lrt_reason {
+        return Some(reason);
+    }
+
+    let assessment = assessment?;
+    if assessment.ml_refit_required {
+        return assessment.ml_refit_reason.clone();
+    }
+    if method == ModelComparisonMethod::InformationCriteria {
+        return Some(
+            "information-criteria comparison requested; likelihood-ratio columns omitted"
+                .to_string(),
+        );
+    }
+    if !assessment.lrt_available {
+        return assessment.lrt_reason.clone();
+    }
+    None
+}
+
+fn finite_min(values: &[f64]) -> Option<f64> {
+    values
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .min_by(|left, right| left.total_cmp(right))
+}
+
+fn delta_from_min(value: f64, minimum: Option<f64>) -> f64 {
+    match minimum {
+        Some(minimum) if value.is_finite() => value - minimum,
+        _ => f64::NAN,
+    }
+}
+
 fn vectors_equal(lhs: &DVector<f64>, rhs: &DVector<f64>) -> bool {
     lhs.len() == rhs.len()
         && lhs
@@ -1305,6 +1534,140 @@ mod tests {
         }
     }
 
+    fn lrt_refusal_from_assessment(
+        smaller: &dyn MixedModelFit,
+        larger: &dyn MixedModelFit,
+    ) -> String {
+        let assessment = ModelComparisonAssessment::assess(smaller, larger);
+        assert!(!assessment.lrt_available);
+
+        let err = LikelihoodRatioTest::test(&[smaller, larger]).unwrap_err();
+
+        assert_eq!(Some(err.as_str()), assessment.lrt_reason.as_deref());
+        err
+    }
+
+    #[test]
+    fn test_model_comparison_table_reports_valid_lrt_columns_for_nested_models() {
+        let small_x = DMatrix::from_element(4, 1, 1.0);
+        let large_x = intercept_x();
+        let m0 = DummyFit::new(4, 2, -10.0, Some("y ~ 1"))
+            .with_reml(false)
+            .with_model_matrix(small_x);
+        let m1 = DummyFit::new(4, 3, -7.0, Some("y ~ 1 + x"))
+            .with_reml(false)
+            .with_model_matrix(large_x);
+
+        let table = ModelComparisonTable::compare(&[&m0, &m1]).unwrap();
+
+        assert_eq!(table.method, ModelComparisonMethod::Auto);
+        assert!(!table.refit_performed);
+        assert_eq!(table.rows.len(), 2);
+        assert_eq!(table.rows[0].label, "y ~ 1");
+        assert_eq!(table.rows[1].label, "y ~ 1 + x");
+        assert_eq!(
+            table.rows[1].comparison_class,
+            Some(ModelComparisonClass::NestedFixedEffects)
+        );
+        assert!(table.rows[1].lrt_available);
+        assert_eq!(table.rows[1].chisq_dof, Some(1));
+        assert_relative_eq!(table.rows[1].chisq.unwrap(), 6.0);
+        assert!(table.rows[1].pvalue.unwrap() < 0.05);
+        assert!(table.rows[1].reason.is_none());
+    }
+
+    #[test]
+    fn test_model_comparison_table_keeps_ic_rows_for_non_nested_models() {
+        let m0 = DummyFit::new(4, 3, -10.0, Some("y ~ 1 + x"))
+            .with_reml(false)
+            .with_model_matrix(intercept_x());
+        let m1 = DummyFit::new(4, 4, -8.0, Some("y ~ 1 + z"))
+            .with_reml(false)
+            .with_model_matrix(intercept_z());
+
+        let table = ModelComparisonTable::compare(&[&m0, &m1]).unwrap();
+
+        assert_eq!(table.rows.len(), 2);
+        assert_relative_eq!(table.rows[0].aic, 26.0);
+        assert_relative_eq!(table.rows[1].aic, 24.0);
+        assert_relative_eq!(table.rows[0].delta_aic, 2.0);
+        assert_relative_eq!(table.rows[1].delta_aic, 0.0);
+        assert!(!table.rows[1].lrt_available);
+        assert_eq!(table.rows[1].chisq, None);
+        assert_eq!(table.rows[1].chisq_dof, None);
+        assert_eq!(table.rows[1].pvalue, None);
+        assert_eq!(
+            table.rows[1].reason.as_deref(),
+            Some("fixed-effect column spaces are not nested")
+        );
+        assert!(table.rows[1].information_criteria_available);
+    }
+
+    #[test]
+    fn test_model_comparison_table_reports_ml_refit_required_without_refitting() {
+        let small_x = DMatrix::from_element(4, 1, 1.0);
+        let large_x = intercept_x();
+        let m0 = DummyFit::new(4, 2, -10.0, Some("y ~ 1"))
+            .with_reml(true)
+            .with_model_matrix(small_x);
+        let m1 = DummyFit::new(4, 3, -7.0, Some("y ~ 1 + x"))
+            .with_reml(true)
+            .with_model_matrix(large_x);
+
+        let table = ModelComparisonTable::compare(&[&m0, &m1]).unwrap();
+
+        assert!(!table.refit_performed);
+        assert!(!table.rows[1].lrt_available);
+        assert!(table.rows[1].requires_ml_refit);
+        assert_eq!(
+            table.rows[1].reason.as_deref(),
+            Some(
+                "models differ in fixed effects but were fitted by REML; refit with ML for fixed-effect likelihood comparisons"
+            )
+        );
+
+        let err = ModelComparisonTable::compare_with_options(
+            &[&m0, &m1],
+            ModelComparisonOptions {
+                method: ModelComparisonMethod::Auto,
+                refit_policy: ModelComparisonRefitPolicy::Error,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "models differ in fixed effects but were fitted by REML; refit with ML for fixed-effect likelihood comparisons"
+        );
+    }
+
+    #[test]
+    fn test_model_comparison_table_can_omit_lrt_when_ic_requested() {
+        let small_x = DMatrix::from_element(4, 1, 1.0);
+        let large_x = intercept_x();
+        let m0 = DummyFit::new(4, 2, -10.0, Some("y ~ 1"))
+            .with_reml(false)
+            .with_model_matrix(small_x);
+        let m1 = DummyFit::new(4, 3, -7.0, Some("y ~ 1 + x"))
+            .with_reml(false)
+            .with_model_matrix(large_x);
+
+        let table = ModelComparisonTable::compare_with_options(
+            &[&m0, &m1],
+            ModelComparisonOptions {
+                method: ModelComparisonMethod::InformationCriteria,
+                refit_policy: ModelComparisonRefitPolicy::Never,
+            },
+        )
+        .unwrap();
+
+        assert!(!table.rows[1].lrt_available);
+        assert_eq!(table.rows[1].chisq, None);
+        assert_eq!(
+            table.rows[1].reason.as_deref(),
+            Some("information-criteria comparison requested; likelihood-ratio columns omitted")
+        );
+    }
+
     #[test]
     fn test_model_comparison_assessment_classifies_same_model_space() {
         let x = intercept_x();
@@ -1534,9 +1897,12 @@ mod tests {
     fn test_lrt_rejects_non_increasing_dof() {
         let m0 = DummyFit::new(180, 6, -876.0, Some("m0"));
         let m1 = DummyFit::new(180, 4, -875.0, Some("m1"));
-        let err = LikelihoodRatioTest::test(&[&m0, &m1]).unwrap_err();
+        let err = lrt_refusal_from_assessment(&m0, &m1);
 
-        assert_eq!(err, "Likelihood ratio test is only valid for nested models");
+        assert_eq!(
+            err,
+            "larger model must have more degrees of freedom than the smaller model"
+        );
     }
 
     #[test]
@@ -1609,9 +1975,9 @@ mod tests {
         let m1 = DummyFit::new(4, 3, -9.0, Some("z ~ 1 + x"))
             .with_response(DVector::from_vec(vec![1.0, 2.0, 3.0, 5.0]));
 
-        let err = LikelihoodRatioTest::test(&[&m0, &m1]).unwrap_err();
+        let err = lrt_refusal_from_assessment(&m0, &m1);
 
-        assert_eq!(err, "All models must be fit to the same response values");
+        assert_eq!(err, "models were not fitted to the same response values");
     }
 
     #[test]
@@ -1643,12 +2009,9 @@ mod tests {
             .with_reml(false)
             .with_model_matrix(large_x);
 
-        let err = LikelihoodRatioTest::test(&[&m0, &m1]).unwrap_err();
+        let err = lrt_refusal_from_assessment(&m0, &m1);
 
-        assert_eq!(
-            err,
-            "Likelihood ratio test is only valid for structurally nested models"
-        );
+        assert_eq!(err, "fixed-effect column spaces are not nested");
     }
 
     #[test]
@@ -1666,12 +2029,9 @@ mod tests {
         let m1 = DummyFit::new(10, 3, -9.0, Some("y ~ 1 + (1 | item)"))
             .with_random_terms(vec![item_intercept]);
 
-        let err = LikelihoodRatioTest::test(&[&m0, &m1]).unwrap_err();
+        let err = lrt_refusal_from_assessment(&m0, &m1);
 
-        assert_eq!(
-            err,
-            "Likelihood ratio test is only valid for structurally nested models"
-        );
+        assert_eq!(err, "random-effect term structures are not nested");
     }
 
     #[test]
@@ -1751,12 +2111,9 @@ mod tests {
             columns: vec!["(Intercept)".to_string()],
         }]);
 
-        let err = LikelihoodRatioTest::test(&[&lm1, &mixed_intercept]).unwrap_err();
+        let err = lrt_refusal_from_assessment(&lm1, &mixed_intercept);
 
-        assert_eq!(
-            err,
-            "Likelihood ratio test is only valid for structurally nested models"
-        );
+        assert_eq!(err, "models appear nested only in the reverse order");
     }
 
     #[test]
@@ -1846,10 +2203,10 @@ mod tests {
         let m_ml = DummyFit::new(180, 4, -897.0, Some("m0")).with_reml(false);
         let m_reml = DummyFit::new(180, 6, -876.0, Some("m1")).with_reml(true);
 
-        let err = LikelihoodRatioTest::test(&[&m_ml, &m_reml]).unwrap_err();
+        let err = lrt_refusal_from_assessment(&m_ml, &m_reml);
         assert_eq!(
             err,
-            "Likelihood ratio test cannot mix REML- and ML-fitted models"
+            "models mix REML and ML fit criteria; refit with a common criterion"
         );
     }
 
@@ -1873,11 +2230,11 @@ mod tests {
             .with_reml(true)
             .with_model_matrix(intercept_slope);
 
-        let err = LikelihoodRatioTest::test(&[&m0, &m1]).unwrap_err();
+        let err = lrt_refusal_from_assessment(&m0, &m1);
 
         assert_eq!(
             err,
-            "Likelihood ratio test under REML requires identical fixed effects across models; refit with REML=false."
+            "REML likelihood-ratio tests require identical fixed effects; refit with ML"
         );
     }
 
@@ -1954,11 +2311,8 @@ mod tests {
         let m_poisson = DummyFit::new(180, 6, -876.0, Some("m_poisson"))
             .with_family(Family::Poisson, LinkFunction::Log);
 
-        let err = LikelihoodRatioTest::test(&[&m_bernoulli, &m_poisson]).unwrap_err();
-        assert_eq!(
-            err,
-            "Likelihood ratio test cannot mix conditional distribution families"
-        );
+        let err = lrt_refusal_from_assessment(&m_bernoulli, &m_poisson);
+        assert_eq!(err, "models have different conditional response families");
     }
 
     #[test]
@@ -1969,8 +2323,8 @@ mod tests {
         let m_probit = DummyFit::new(180, 6, -876.0, Some("m_probit"))
             .with_family(Family::Bernoulli, LinkFunction::Probit);
 
-        let err = LikelihoodRatioTest::test(&[&m_logit, &m_probit]).unwrap_err();
-        assert_eq!(err, "Likelihood ratio test cannot mix link functions");
+        let err = lrt_refusal_from_assessment(&m_logit, &m_probit);
+        assert_eq!(err, "models have different link functions");
     }
 
     #[test]
@@ -1980,11 +2334,8 @@ mod tests {
         let m_glmm = DummyFit::new(180, 6, -876.0, Some("m_glmm"))
             .with_family(Family::Bernoulli, LinkFunction::Logit);
 
-        let err = LikelihoodRatioTest::test(&[&m_lmm, &m_glmm]).unwrap_err();
-        assert_eq!(
-            err,
-            "Likelihood ratio test cannot mix conditional distribution families"
-        );
+        let err = lrt_refusal_from_assessment(&m_lmm, &m_glmm);
+        assert_eq!(err, "models have different conditional response families");
     }
 
     #[test]
