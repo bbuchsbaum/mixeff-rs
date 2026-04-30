@@ -154,3 +154,70 @@ fn glmm_final_pirls_failure_records_stable_artifact_diagnostic() {
         .and_then(|value| value.as_str())
         .is_some_and(|reason| reason.contains("theta")));
 }
+
+#[test]
+fn glmm_boundary_theta_records_boundary_parameter_diagnostic() {
+    let data = gamma_diagnostic_fixture();
+    let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
+    let mut model =
+        GeneralizedLinearMixedModel::new(formula, &data, Family::Gamma, Some(LinkFunction::Log))
+            .unwrap();
+    model.lmm.optsum.optimizer = Optimizer::PatternSearch;
+    model.lmm.optsum.initial = vec![0.0];
+    model.lmm.optsum.max_feval = 1;
+
+    model.fit_with_options(true, 1, false).unwrap();
+
+    let certificate = model
+        .compiler_artifact()
+        .optimizer_certificate
+        .as_ref()
+        .expect("fitted GLMM should record an optimizer certificate");
+    let diagnostic = certificate
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == DiagnosticCode::BoundaryParameter)
+        .expect("theta on its lower bound should be diagnosed as a boundary parameter");
+    assert_eq!(diagnostic.severity, DiagnosticSeverity::Info);
+    assert_eq!(diagnostic.affected_terms, vec!["theta[0]"]);
+    assert_eq!(
+        diagnostic.payload.get("theta_index"),
+        Some(&serde_json::json!(0))
+    );
+    assert_eq!(
+        diagnostic.payload.get("lower_bound"),
+        Some(&serde_json::json!(0.0))
+    );
+}
+
+#[test]
+fn glmm_near_unit_random_effect_correlation_records_diagnostic() {
+    let data = gamma_diagnostic_fixture();
+    let formula = parse_formula("y ~ 1 + x + (1 + x | group)").unwrap();
+    let mut model =
+        GeneralizedLinearMixedModel::new(formula, &data, Family::Gamma, Some(LinkFunction::Log))
+            .unwrap();
+    model.lmm.optsum.optimizer = Optimizer::PatternSearch;
+    model.lmm.optsum.initial = vec![1.0, 1000.0, 0.001];
+    model.lmm.optsum.max_feval = 1;
+
+    model.fit_with_options(true, 1, false).unwrap();
+
+    let diagnostic = model
+        .compiler_artifact()
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == DiagnosticCode::NearUnitRandomEffectCorrelation)
+        .expect("near-unit random-effect correlation should be diagnosed");
+    assert_eq!(diagnostic.severity, DiagnosticSeverity::Warning);
+    assert_eq!(diagnostic.affected_terms, vec!["group"]);
+    assert!(diagnostic.message.contains("group"));
+    assert!(
+        diagnostic
+            .payload
+            .get("correlation")
+            .and_then(|value| value.as_f64())
+            .is_some_and(|correlation| correlation.abs() >= 0.99),
+        "near-unit correlation payload should record an absolute correlation above threshold"
+    );
+}
