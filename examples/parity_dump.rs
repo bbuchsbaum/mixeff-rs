@@ -3,8 +3,9 @@ use std::env;
 use mixedmodels::formula::parse_formula;
 use mixedmodels::model::data::DataFrame;
 use mixedmodels::model::generalized::GeneralizedLinearMixedModel;
-use mixedmodels::model::linear::{LinearMixedModel, MatrixBlock};
+use mixedmodels::model::linear::LinearMixedModel;
 use mixedmodels::model::traits::{Family, MixedModelFit};
+use mixedmodels::types::MatrixBlock;
 use serde::Serialize;
 
 fn simulate_data(n_subjects: usize, n_obs_per_subject: usize, seed: u64) -> DataFrame {

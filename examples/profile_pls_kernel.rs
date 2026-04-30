@@ -8,8 +8,9 @@ use std::time::Instant;
 
 use mixedmodels::formula::parse_formula;
 use mixedmodels::model::data::DataFrame;
-use mixedmodels::model::linear::{LinearMixedModel, MatrixBlock};
+use mixedmodels::model::linear::LinearMixedModel;
 use mixedmodels::model::traits::MixedModelFit;
+use mixedmodels::types::MatrixBlock;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rand_distr::{Distribution, Normal};

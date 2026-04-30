@@ -25,11 +25,11 @@ toml = { version = "0.8", default-features = false, features = ["parse"] }
 minilp = "0.2"
 
 [features]
-default = ["nlopt"]
+default = []
 # Enables NLopt (BOBYQA / large-θ paths and optional GLMM optimizer parity).
 # Requires CMake plus a C/C++ toolchain at build time, which is heavy
-# for downstream R/CRAN-tarball distribution. Disabling falls back to
-# COBYLA-based fits for LMMs and GLMMs.
+# for downstream R/CRAN-tarball distribution. The default build uses
+# COBYLA-based native fits for LMMs and GLMMs.
 nlopt = ["dep:nlopt"]
 # Enables the PRIMA C backend for explicitly requested Powell optimizers.
 # This first slice wires bounded LMM theta optimization through PRIMA BOBYQA

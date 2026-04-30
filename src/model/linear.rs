@@ -1093,7 +1093,7 @@ impl LinearMixedModel {
                 #[cfg(not(feature = "nlopt"))]
                 return Err(MixedModelError::Optimization(
                     "Optimizer::NloptBobyqa requires the `nlopt` feature; \
-                     rebuild with default features or pick a non-NLopt optimizer"
+                     rebuild with `--features nlopt` or pick a non-NLopt optimizer"
                         .to_string(),
                 ));
             }
@@ -1106,7 +1106,7 @@ impl LinearMixedModel {
                 #[cfg(not(feature = "nlopt"))]
                 return Err(MixedModelError::Optimization(
                     "Optimizer::NloptNewuoa requires the `nlopt` feature; \
-                     rebuild with default features or pick a non-NLopt optimizer"
+                     rebuild with `--features nlopt` or pick a non-NLopt optimizer"
                         .to_string(),
                 ));
             }
