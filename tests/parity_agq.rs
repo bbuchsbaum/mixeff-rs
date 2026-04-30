@@ -1,5 +1,3 @@
-#![cfg(feature = "nlopt")]
-
 use approx::assert_relative_eq;
 use serde::Deserialize;
 
@@ -8,7 +6,10 @@ use mixedmodels::formula::parse_formula;
 use mixedmodels::model::generalized::GeneralizedLinearMixedModel;
 use mixedmodels::model::traits::{Family, MixedModelFit};
 use mixedmodels::types::gh_norm;
+#[cfg(not(feature = "nlopt"))]
+use mixedmodels::types::Optimizer;
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct AgqFixture {
     schema_version: String,
@@ -190,6 +191,7 @@ fn test_gh_norm_constants_match_julia() {
     }
 }
 
+#[cfg(feature = "nlopt")]
 #[test]
 fn test_cbpp_agq5_deviance_matches_julia() {
     let expected = fixture();
@@ -214,6 +216,27 @@ fn test_cbpp_agq5_deviance_matches_julia() {
         model.deviance(expected.n_agq),
         expected.deviance_agq,
         epsilon = 1e-6
+    );
+}
+
+#[cfg(not(feature = "nlopt"))]
+#[test]
+fn test_cbpp_agq5_native_cobyla_fit_records_agq_contract() {
+    let expected = fixture();
+    let mut model = cbpp_model(expected.n_agq);
+
+    assert_eq!(model.nobs(), expected.nobs);
+    assert_eq!(model.dof(), expected.dof);
+    assert_eq!(expected.formula, "proportion ~ 1 + period + (1 | herd)");
+    assert_eq!(model.lmm.optsum.optimizer, Optimizer::Cobyla);
+    assert_eq!(model.lmm.optsum.backend.label(), "native");
+    assert_eq!(model.lmm.optsum.n_agq, expected.n_agq);
+    assert!(model.objective().is_finite());
+    assert!(model.deviance(1).is_finite());
+    assert!(model.deviance(expected.n_agq).is_finite());
+    assert!(
+        (model.deviance(1) - model.deviance(expected.n_agq)).abs() > 0.05,
+        "native AGQ path should remain distinct from the Laplace approximation"
     );
 }
 

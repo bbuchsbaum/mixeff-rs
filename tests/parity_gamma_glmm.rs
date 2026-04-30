@@ -1,5 +1,3 @@
-#![cfg(feature = "nlopt")]
-
 use approx::assert_relative_eq;
 use serde::Deserialize;
 
@@ -7,7 +5,10 @@ use mixedmodels::formula::parse_formula;
 use mixedmodels::model::data::DataFrame;
 use mixedmodels::model::generalized::GeneralizedLinearMixedModel;
 use mixedmodels::model::traits::{Family, LinkFunction, MixedModelFit};
+#[cfg(not(feature = "nlopt"))]
+use mixedmodels::types::Optimizer;
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct GammaGlmmFixture {
     schema_version: String,
@@ -36,6 +37,7 @@ struct DataRecipe {
     wiggle_modulus: usize,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct FitReference {
     beta: Vec<f64>,
@@ -47,6 +49,7 @@ struct FitReference {
     fitted_mu_head: Vec<f64>,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize)]
 struct EngineReference {
     engine: String,
@@ -136,6 +139,7 @@ fn fit_gamma_log(data: &DataFrame, formula: &str, n_agq: usize) -> GeneralizedLi
     model
 }
 
+#[cfg(feature = "nlopt")]
 #[test]
 fn test_gamma_log_glmm_matches_mixedmodels_jl_fixture() {
     let expected = fixture();
@@ -249,6 +253,37 @@ fn test_gamma_log_glmm_matches_mixedmodels_jl_fixture() {
     assert!(glmm_tmb.note.contains("not installed"));
 
     assert!(expected.notes.iter().any(|note| note.contains("glmer")));
+}
+
+#[cfg(not(feature = "nlopt"))]
+#[test]
+fn test_gamma_log_glmm_native_cobyla_preserves_fixture_contract() {
+    let expected = fixture();
+    let data = gamma_log_data();
+    let model = fit_gamma_log(&data, &expected.formula, expected.n_agq);
+
+    assert_eq!(expected.schema_version, "1.0.0");
+    assert!(expected.source.contains("MixedModels.jl"));
+    assert_eq!(expected.family, "gamma");
+    assert_eq!(expected.link, "log");
+    assert_eq!(model.nobs(), expected.nobs);
+    assert_eq!(model.dof(), expected.dof);
+    assert_eq!(model.lmm.optsum.optimizer, Optimizer::Cobyla);
+    assert_eq!(model.lmm.optsum.backend.label(), "native");
+    assert_eq!(model.theta().len(), expected.rust_reference.theta.len());
+    assert_eq!(model.fixef().len(), expected.rust_reference.beta.len());
+    assert!(model.objective().is_finite());
+    assert!(model.loglikelihood().is_finite());
+    assert!(model.dispersion(false).is_finite());
+    assert!(model.dispersion(true).is_finite());
+    for fitted in model
+        .fitted()
+        .iter()
+        .take(expected.rust_reference.fitted_mu_head.len())
+    {
+        assert!(fitted.is_finite());
+        assert!(*fitted > 0.0);
+    }
 }
 
 #[test]
