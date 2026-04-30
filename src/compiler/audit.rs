@@ -933,39 +933,67 @@ fn audit_fixed_effects(semantic_model: &SemanticModel, data: &DataFrame) -> Fixe
     let rank = fixed_rank_assessment(&matrix);
     let aliased_columns = aliased_columns(&matrix, rank.rank.unwrap_or(0), &columns);
     if rank.status == RankStatus::RankDeficient {
-        diagnostics.push(
-            Diagnostic::new(
-                DiagnosticCode::FixedEffectRankDeficient,
-                DiagnosticSeverity::Warning,
-                DiagnosticStage::DesignAudit,
-                format!(
-                    "fixed-effect design matrix has rank {} but {} columns",
-                    rank.rank.unwrap_or(0),
-                    rank.expected.unwrap_or(0)
-                ),
-            )
-            .with_affected_terms(aliased_columns.clone()),
+        let observed_rank = rank.rank.unwrap_or(0);
+        let requested_columns = rank.expected.unwrap_or(0);
+        let mut diagnostic = Diagnostic::new(
+            DiagnosticCode::FixedEffectRankDeficient,
+            DiagnosticSeverity::Warning,
+            DiagnosticStage::DesignAudit,
+            format!(
+                "fixed-effect formula is rank-deficient (rank {observed_rank} of {requested_columns}); some requested coefficients are not separately estimable from the observed data"
+            ),
+        )
+        .with_affected_terms(aliased_columns.clone())
+        .with_suggested_actions(vec![
+            "drop redundant fixed-effect terms, combine sparse factor levels, or test only estimable contrasts"
+                .to_string(),
+        ]);
+        diagnostic
+            .payload
+            .insert("rank".to_string(), serde_json::json!(observed_rank));
+        diagnostic.payload.insert(
+            "requested_columns".to_string(),
+            serde_json::json!(requested_columns),
         );
+        diagnostic.payload.insert(
+            "aliased_columns".to_string(),
+            serde_json::json!(aliased_columns.clone()),
+        );
+        diagnostics.push(diagnostic);
     }
 
     for empty_cell in &empty_cells {
-        diagnostics.push(
-            Diagnostic::new(
-                DiagnosticCode::FixedEffectEmptyCell,
-                DiagnosticSeverity::Warning,
-                DiagnosticStage::DesignAudit,
-                format!(
-                    "fixed-effect interaction '{}' has an empty observed cell: {}",
-                    empty_cell.term,
-                    empty_cell.levels.join(":")
-                ),
-            )
-            .with_affected_terms(vec![empty_cell.term.clone()])
-            .with_suggested_actions(vec![
-                "test estimable contrasts over observed cells or simplify the unsupported interaction"
-                    .to_string(),
-            ]),
+        let cell = format_factor_level_assignment(&empty_cell.factors, &empty_cell.levels);
+        let mut diagnostic = Diagnostic::new(
+            DiagnosticCode::FixedEffectEmptyCell,
+            DiagnosticSeverity::Warning,
+            DiagnosticStage::DesignAudit,
+            format!(
+                "interaction '{}' has no observations for {}; effects that depend on this cell are not estimable",
+                empty_cell.term, cell
+            ),
+        )
+        .with_affected_terms(vec![empty_cell.term.clone()])
+        .with_suggested_actions(vec![
+            "test estimable contrasts over observed cells or simplify the unsupported interaction"
+                .to_string(),
+        ]);
+        diagnostic.payload.insert(
+            "term".to_string(),
+            serde_json::json!(empty_cell.term.clone()),
         );
+        diagnostic.payload.insert(
+            "factors".to_string(),
+            serde_json::json!(empty_cell.factors.clone()),
+        );
+        diagnostic.payload.insert(
+            "levels".to_string(),
+            serde_json::json!(empty_cell.levels.clone()),
+        );
+        diagnostic
+            .payload
+            .insert("cell".to_string(), serde_json::json!(cell));
+        diagnostics.push(diagnostic);
     }
 
     let aliased_set = aliased_columns
@@ -1018,6 +1046,15 @@ fn audit_fixed_effects(semantic_model: &SemanticModel, data: &DataFrame) -> Fixe
         empty_cells,
         diagnostics,
     }
+}
+
+fn format_factor_level_assignment(factors: &[String], levels: &[String]) -> String {
+    factors
+        .iter()
+        .zip(levels.iter())
+        .map(|(factor, level)| format!("{factor}={level}"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 struct FixedDesignBuilder<'a> {

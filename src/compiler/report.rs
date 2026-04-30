@@ -409,9 +409,70 @@ fn fixed_effect_section(artifact: &CompiledModelArtifact) -> AuditReportSection 
         detail: fixed.empty_cells.len().to_string(),
     });
 
+    if let Some(detail) = fixed_effect_plain_diagnosis(fixed) {
+        lines.push(AuditReportLine {
+            label: "plain diagnosis".to_string(),
+            status: AuditReportStatus::Warning,
+            detail,
+        });
+    }
+
     AuditReportSection {
         title: "Fixed Effects".to_string(),
         lines,
+    }
+}
+
+fn fixed_effect_plain_diagnosis(fixed: &super::audit::FixedEffectAudit) -> Option<String> {
+    if fixed.rank.status != RankStatus::RankDeficient || fixed.empty_cells.is_empty() {
+        return None;
+    }
+
+    let empty_cell = fixed.empty_cells.first()?;
+    let term = &empty_cell.term;
+    let missing = fixed
+        .empty_cells
+        .iter()
+        .filter(|cell| cell.term.as_str() == term.as_str())
+        .count();
+    let rank = fixed
+        .rank
+        .rank
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let expected = fixed
+        .rank
+        .expected
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let combination_word = if missing == 1 {
+        "combination"
+    } else {
+        "combinations"
+    };
+
+    Some(format!(
+        "{} has {} unobserved {} across {}; the fixed-effect design is rank-deficient (rank {} of {}). Only effects supported by observed cells are estimable; use observed {} cell means, simplify the formula, or collect the missing combinations before testing all pairwise interaction contrasts.",
+        term,
+        missing,
+        combination_word,
+        format_factor_list(&empty_cell.factors),
+        rank,
+        expected,
+        term
+    ))
+}
+
+fn format_factor_list(factors: &[String]) -> String {
+    match factors {
+        [] => "the interaction factors".to_string(),
+        [one] => one.clone(),
+        [first, second] => format!("{first} and {second}"),
+        _ => {
+            let mut parts = factors.to_vec();
+            let last = parts.pop().expect("nonempty factors");
+            format!("{}, and {}", parts.join(", "), last)
+        }
     }
 }
 
@@ -3461,8 +3522,30 @@ mod tests {
         assert_eq!(audit.fixed_effect_rank.rank, Some(3));
         assert_eq!(audit.fixed_effect_rank.expected, Some(9));
         assert_eq!(audit.fixed_effects.empty_cells.len(), 6);
+        let rank_diagnostic = audit
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == DiagnosticCode::FixedEffectRankDeficient)
+            .expect("rank-deficient fixed-effect diagnostic");
+        assert_eq!(
+            rank_diagnostic.message,
+            "fixed-effect formula is rank-deficient (rank 3 of 9); some requested coefficients are not separately estimable from the observed data"
+        );
+        assert_eq!(
+            rank_diagnostic.payload.get("rank"),
+            Some(&serde_json::json!(3))
+        );
+        assert_eq!(
+            rank_diagnostic.payload.get("requested_columns"),
+            Some(&serde_json::json!(9))
+        );
         assert!(audit.diagnostics.iter().any(|diagnostic| {
             diagnostic.code == DiagnosticCode::FixedEffectEmptyCell
+                && diagnostic.message.contains(
+                    "interaction 'Time:Cell_Type' has no observations for Time=Week6, Cell_Type=CD163_in_HA"
+                )
+                && diagnostic.payload.get("cell")
+                    == Some(&serde_json::json!("Time=Week6, Cell_Type=CD163_in_HA"))
                 && diagnostic
                     .suggested_actions
                     .iter()
@@ -3476,6 +3559,9 @@ mod tests {
         assert!(text.contains("Fixed Effects"));
         assert!(text.contains("rank [WARNING]: 3 of 9"));
         assert!(text.contains("empty cells [WARNING]: 6"));
+        assert!(text.contains(
+            "plain diagnosis [WARNING]: Time:Cell_Type has 6 unobserved combinations across Time and Cell_Type; the fixed-effect design is rank-deficient (rank 3 of 9). Only effects supported by observed cells are estimable; use observed Time:Cell_Type cell means, simplify the formula, or collect the missing combinations before testing all pairwise interaction contrasts."
+        ));
         assert!(text.contains("fixed_effect_rank_deficient"));
         assert!(text.contains("fixed_effect_empty_cell"));
         assert!(text.contains("test estimable contrasts over observed cells"));
