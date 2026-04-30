@@ -9,13 +9,14 @@
 //! the conditional modes, with optional adaptive Gauss-Hermite quadrature.
 
 use nalgebra::{DMatrix, DVector};
+#[cfg(not(feature = "nlopt"))]
+use std::cell::Cell;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 use crate::compiler::{
-    CompiledModelArtifact, CompilerPolicy, ModelAuditReport, ModelBoundary, ObjectiveApproximation,
-};
-#[cfg(feature = "nlopt")]
-use crate::compiler::{
-    Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticStage, OptimizerCertificate,
+    CompiledModelArtifact, CompilerPolicy, Diagnostic, DiagnosticCode, DiagnosticSeverity,
+    DiagnosticStage, ModelAuditReport, ModelBoundary, ObjectiveApproximation, OptimizerCertificate,
 };
 use crate::error::{MixedModelError, Result};
 use crate::formula::Formula;
@@ -23,7 +24,7 @@ use crate::model::data::DataFrame;
 use crate::model::linear::LinearMixedModel;
 use crate::model::traits::{Family, LinkFunction, MixedModelFit, RandomEffectTermInfo};
 use crate::stats::{BlockDescription, ModelSummary, VarCorr};
-use crate::types::{MatrixBlock, OptSummary};
+use crate::types::{FitLogEntry, MatrixBlock, OptSummary, Optimizer};
 
 /// A generalized linear mixed-effects model.
 #[derive(Debug, Clone)]
@@ -842,14 +843,8 @@ impl GeneralizedLinearMixedModel {
     }
 
     #[cfg(not(feature = "nlopt"))]
-    fn fit_with_options_impl(&mut self, _n_agq: usize, _verbose: bool) -> Result<&mut Self> {
-        Err(MixedModelError::Optimization(
-            "GLMM fitting currently requires the `nlopt` feature; \
-             rebuild with default features (or `--features nlopt`) to fit \
-             generalized linear mixed models. The Laplace and AGQ paths use \
-             NLopt's BOBYQA optimizer for the outer θ search."
-                .to_string(),
-        ))
+    fn fit_with_options_impl(&mut self, n_agq: usize, _verbose: bool) -> Result<&mut Self> {
+        self.fit_native_cobyla(n_agq)
     }
 
     #[cfg(feature = "nlopt")]
@@ -859,16 +854,27 @@ impl GeneralizedLinearMixedModel {
         let n_theta = self.theta.len();
         let lb = self.lmm.lower_bounds();
         let initial_theta = self.lmm.optsum.initial.clone();
+        self.lmm.optsum.optimizer = Optimizer::NloptBobyqa;
+        self.lmm.optsum.backend = Optimizer::NloptBobyqa.canonical_backend();
 
         let mut feval_count: i64 = 0;
         let feval_ptr = &mut feval_count as *mut i64;
+        let fit_log: Rc<RefCell<Vec<FitLogEntry>>> = Rc::new(RefCell::new(Vec::with_capacity(
+            self.lmm.optsum.fit_log.capacity(),
+        )));
 
         let obj_fn = {
             let model_ptr = self as *mut GeneralizedLinearMixedModel;
+            let fit_log = Rc::clone(&fit_log);
             move |theta: &[f64], _grad: Option<&mut [f64]>, _data: &mut ()| -> f64 {
                 let model = unsafe { &mut *model_ptr };
                 unsafe { *feval_ptr += 1 };
-                model.penalized_pirls_deviance_at_theta(theta, n_agq)
+                let objective = model.penalized_pirls_deviance_at_theta(theta, n_agq);
+                fit_log.borrow_mut().push(FitLogEntry {
+                    theta: theta.to_vec(),
+                    objective,
+                });
+                objective
             }
         };
 
@@ -897,6 +903,7 @@ impl GeneralizedLinearMixedModel {
 
         let mut theta = initial_theta;
         let nlopt_result = optimizer.optimize(&mut theta);
+        drop(optimizer);
 
         self.finalize_theta_after_optimizer(&mut theta, n_agq)?;
         self.lmm.optsum.return_value = match nlopt_result {
@@ -904,6 +911,7 @@ impl GeneralizedLinearMixedModel {
             Err((status, _fmin)) => format!("FAILED:{status:?}"),
         };
         self.lmm.optsum.feval = feval_count;
+        self.lmm.optsum.fit_log = rc_refcell_into_inner_or_clone(fit_log);
         self.lmm.compiler_artifact.optimizer_certificate =
             Some(OptimizerCertificate::from_opt_summary_with_context(
                 &self.lmm.optsum,
@@ -917,7 +925,121 @@ impl GeneralizedLinearMixedModel {
         Ok(self)
     }
 
-    #[cfg(feature = "nlopt")]
+    #[cfg(not(feature = "nlopt"))]
+    fn fit_native_cobyla(&mut self, n_agq: usize) -> Result<&mut Self> {
+        let lb = self.lmm.lower_bounds();
+        let initial_theta = self.lmm.optsum.initial.clone();
+        self.lmm.optsum.optimizer = Optimizer::Cobyla;
+        self.lmm.optsum.backend = Optimizer::Cobyla.canonical_backend();
+
+        let best_theta: Rc<RefCell<Vec<f64>>> = Rc::new(RefCell::new(initial_theta.clone()));
+        let best_fmin: Rc<Cell<f64>> = Rc::new(Cell::new(f64::INFINITY));
+        let feval_count: Rc<Cell<i64>> = Rc::new(Cell::new(0i64));
+        let fit_log: Rc<RefCell<Vec<FitLogEntry>>> = Rc::new(RefCell::new(Vec::with_capacity(
+            self.lmm.optsum.fit_log.capacity(),
+        )));
+
+        let objective_fn = {
+            let model_ptr = self as *mut GeneralizedLinearMixedModel;
+            let best_theta = Rc::clone(&best_theta);
+            let best_fmin = Rc::clone(&best_fmin);
+            let feval_count = Rc::clone(&feval_count);
+            let fit_log = Rc::clone(&fit_log);
+            move |theta: &[f64], _data: &mut ()| -> f64 {
+                feval_count.set(feval_count.get() + 1);
+                let objective =
+                    unsafe { (&mut *model_ptr).penalized_pirls_deviance_at_theta(theta, n_agq) };
+                fit_log.borrow_mut().push(FitLogEntry {
+                    theta: theta.to_vec(),
+                    objective,
+                });
+                if objective < best_fmin.get() {
+                    best_fmin.set(objective);
+                    *best_theta.borrow_mut() = theta.to_vec();
+                }
+                objective
+            }
+        };
+
+        let bounds: Vec<(f64, f64)> = lb.iter().map(|&lo| (lo, f64::INFINITY)).collect();
+        let constraint_fns: Vec<Box<dyn cobyla::Func<()>>> = lb
+            .iter()
+            .enumerate()
+            .filter(|(_, &lo)| lo > f64::NEG_INFINITY)
+            .map(|(i, &lo)| {
+                Box::new(move |x: &[f64], _: &mut ()| -> f64 { x[i] - lo })
+                    as Box<dyn cobyla::Func<()>>
+            })
+            .collect();
+        let cons_refs: Vec<&dyn cobyla::Func<()>> =
+            constraint_fns.iter().map(|f| f.as_ref()).collect();
+        let maxeval = if self.lmm.optsum.max_feval > 0 {
+            self.lmm.optsum.max_feval as usize
+        } else {
+            500
+        };
+        let stop_tol = cobyla::StopTols {
+            ftol_rel: self.lmm.optsum.ftol_rel,
+            ftol_abs: self.lmm.optsum.ftol_abs,
+            xtol_rel: self.lmm.optsum.xtol_rel,
+            xtol_abs: self.lmm.optsum.xtol_abs.clone(),
+            ..cobyla::StopTols::default()
+        };
+
+        let result = cobyla::minimize(
+            objective_fn,
+            &initial_theta,
+            &bounds,
+            &cons_refs,
+            (),
+            maxeval,
+            cobyla::RhoBeg::All(0.75),
+            Some(stop_tol),
+        );
+
+        let (mut theta, return_value) = match result {
+            Ok((status, x_opt, fmin)) if fmin.is_finite() => {
+                (x_opt, Self::cobyla_success_status_label(status))
+            }
+            Ok((status, _x_opt, _fmin)) => (
+                best_theta.borrow().clone(),
+                Self::cobyla_success_status_label(status),
+            ),
+            Err((status @ cobyla::FailStatus::RoundoffLimited, _x_opt, _fmin)) => (
+                best_theta.borrow().clone(),
+                Self::cobyla_fail_status_label(status),
+            ),
+            Err((status, x_opt, fmin)) if fmin.is_finite() => {
+                (x_opt, Self::cobyla_fail_status_label(status))
+            }
+            Err((status, _x_opt, _fmin)) if best_fmin.get().is_finite() => (
+                best_theta.borrow().clone(),
+                Self::cobyla_fail_status_label(status),
+            ),
+            Err((_status, _x_opt, _fmin)) => {
+                return Err(MixedModelError::Optimization(
+                    "COBYLA optimization failed while fitting GLMM".to_string(),
+                ));
+            }
+        };
+
+        self.finalize_theta_after_optimizer(&mut theta, n_agq)?;
+        self.lmm.optsum.return_value = return_value;
+        self.lmm.optsum.feval = feval_count.get();
+        self.lmm.optsum.fit_log = rc_refcell_into_inner_or_clone(fit_log);
+        self.lmm.compiler_artifact.optimizer_certificate =
+            Some(OptimizerCertificate::from_opt_summary_with_context(
+                &self.lmm.optsum,
+                &self.theta,
+                &self.lmm.lower_bounds(),
+                Some(self.lmm.dims.n),
+            ));
+        self.refresh_binomial_separation_diagnostics();
+        self.refresh_near_unit_random_effect_correlation_diagnostics();
+
+        Ok(self)
+    }
+
     fn finalize_theta_after_optimizer(&mut self, theta: &mut Vec<f64>, n_agq: usize) -> Result<()> {
         LinearMixedModel::rectify_theta_columns(theta, &self.lmm.parmap, self.lmm.reterms.len());
 
@@ -933,7 +1055,6 @@ impl GeneralizedLinearMixedModel {
         Ok(())
     }
 
-    #[cfg(feature = "nlopt")]
     fn update_pirls_at_theta(&mut self, theta: &[f64], vary_beta: bool) -> Result<()> {
         if theta.len() != self.theta.len() {
             return Err(MixedModelError::DimensionMismatch(format!(
@@ -986,7 +1107,6 @@ impl GeneralizedLinearMixedModel {
         total
     }
 
-    #[cfg(feature = "nlopt")]
     fn penalized_pirls_deviance_at_theta(&mut self, theta: &[f64], n_agq: usize) -> f64 {
         match self.update_pirls_at_theta(theta, true) {
             Ok(()) => {
@@ -1001,7 +1121,6 @@ impl GeneralizedLinearMixedModel {
         }
     }
 
-    #[cfg(feature = "nlopt")]
     fn refresh_near_unit_random_effect_correlation_diagnostics(&mut self) {
         const NEAR_UNIT_CORR_THRESHOLD: f64 = 0.99;
 
@@ -1064,7 +1183,6 @@ impl GeneralizedLinearMixedModel {
         }
     }
 
-    #[cfg(feature = "nlopt")]
     fn refresh_binomial_separation_diagnostics(&mut self) {
         self.lmm
             .compiler_artifact
@@ -1090,7 +1208,6 @@ impl GeneralizedLinearMixedModel {
         }
     }
 
-    #[cfg(feature = "nlopt")]
     fn conservative_binomial_separation_diagnostics(&self) -> Vec<Diagnostic> {
         if !matches!(self.family, Family::Bernoulli | Family::Binomial)
             || self.link != LinkFunction::Logit
@@ -1142,6 +1259,30 @@ impl GeneralizedLinearMixedModel {
 
         diagnostics
     }
+
+    #[cfg(not(feature = "nlopt"))]
+    fn cobyla_success_status_label(status: cobyla::SuccessStatus) -> String {
+        match status {
+            cobyla::SuccessStatus::Success => "SUCCESS".to_string(),
+            cobyla::SuccessStatus::StopValReached => "STOPVAL_REACHED".to_string(),
+            cobyla::SuccessStatus::FtolReached => "FTOL_REACHED".to_string(),
+            cobyla::SuccessStatus::XtolReached => "XTOL_REACHED".to_string(),
+            cobyla::SuccessStatus::MaxEvalReached => "MAXEVAL_REACHED".to_string(),
+            cobyla::SuccessStatus::MaxTimeReached => "MAXTIME_REACHED".to_string(),
+        }
+    }
+
+    #[cfg(not(feature = "nlopt"))]
+    fn cobyla_fail_status_label(status: cobyla::FailStatus) -> String {
+        match status {
+            cobyla::FailStatus::Failure => "FAILURE".to_string(),
+            cobyla::FailStatus::InvalidArgs => "INVALID_ARGS".to_string(),
+            cobyla::FailStatus::OutOfMemory => "OUT_OF_MEMORY".to_string(),
+            cobyla::FailStatus::RoundoffLimited => "ROUNDOFF_LIMITED".to_string(),
+            cobyla::FailStatus::ForcedStop => "FORCED_STOP".to_string(),
+            cobyla::FailStatus::UnexpectedError => "UNEXPECTED_ERROR".to_string(),
+        }
+    }
 }
 
 /// Diagonal entries of a [`MatrixBlock`].
@@ -1175,7 +1316,13 @@ fn matrix_block_diag(block: &MatrixBlock) -> Vec<f64> {
     }
 }
 
-#[cfg(feature = "nlopt")]
+fn rc_refcell_into_inner_or_clone<T: Clone>(value: Rc<RefCell<Vec<T>>>) -> Vec<T> {
+    match Rc::try_unwrap(value) {
+        Ok(cell) => cell.into_inner(),
+        Err(value) => value.borrow().clone(),
+    }
+}
+
 fn lower_triangle_pair(offset: usize) -> (usize, usize) {
     let mut row = 1usize;
     let mut remaining = offset;
@@ -1186,14 +1333,12 @@ fn lower_triangle_pair(offset: usize) -> (usize, usize) {
     (row, remaining)
 }
 
-#[cfg(feature = "nlopt")]
 #[derive(Debug, Clone, Copy)]
 struct BinaryColumnSplit {
     low: f64,
     high: f64,
 }
 
-#[cfg(feature = "nlopt")]
 #[derive(Debug, Clone, Copy)]
 struct OutcomeCounts {
     n: usize,
@@ -1201,17 +1346,14 @@ struct OutcomeCounts {
     failures: usize,
 }
 
-#[cfg(feature = "nlopt")]
 fn is_binary_response(value: f64) -> bool {
     (value - 0.0).abs() < 1e-12 || (value - 1.0).abs() < 1e-12
 }
 
-#[cfg(feature = "nlopt")]
 fn is_intercept_column(name: &str) -> bool {
     matches!(name, "1" | "(Intercept)" | "Intercept" | "intercept")
 }
 
-#[cfg(feature = "nlopt")]
 fn binary_column_split(values: impl Iterator<Item = f64>) -> Option<BinaryColumnSplit> {
     let mut unique = Vec::new();
     for value in values {
@@ -1238,7 +1380,6 @@ fn binary_column_split(values: impl Iterator<Item = f64>) -> Option<BinaryColumn
     })
 }
 
-#[cfg(feature = "nlopt")]
 fn outcome_counts_for_value(
     values: impl Iterator<Item = f64>,
     y: impl Iterator<Item = f64>,
@@ -1262,7 +1403,6 @@ fn outcome_counts_for_value(
     counts
 }
 
-#[cfg(feature = "nlopt")]
 fn separation_diagnostic_for_side(
     column_name: &str,
     value: f64,
@@ -1331,12 +1471,10 @@ fn separation_diagnostic_for_side(
     Some(diagnostic)
 }
 
-#[cfg(feature = "nlopt")]
 fn side_is_pure(counts: OutcomeCounts) -> bool {
     counts.n > 0 && (counts.successes == counts.n || counts.failures == counts.n)
 }
 
-#[cfg(feature = "nlopt")]
 fn complement_has_opposite(side: OutcomeCounts, complement: OutcomeCounts) -> bool {
     if side.successes == side.n {
         complement.failures > 0
@@ -1345,7 +1483,6 @@ fn complement_has_opposite(side: OutcomeCounts, complement: OutcomeCounts) -> bo
     }
 }
 
-#[cfg(feature = "nlopt")]
 fn format_column_value(value: f64) -> String {
     if (value.round() - value).abs() < 1e-12 {
         format!("{value:.0}")
@@ -1890,6 +2027,30 @@ mod tests {
         assert_eq!(model.family, Family::Gamma);
         assert_eq!(model.dispersion(false), 1.0);
         assert_eq!(model.dispersion(true), 1.0);
+    }
+
+    #[cfg(not(feature = "nlopt"))]
+    #[test]
+    fn test_glmm_fit_uses_native_cobyla_without_nlopt() {
+        let data = gamma_dispersion_fixture();
+        let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
+        let mut model = GeneralizedLinearMixedModel::new(
+            formula,
+            &data,
+            Family::Gamma,
+            Some(LinkFunction::Log),
+        )
+        .unwrap();
+        model.lmm.optsum.max_feval = 50;
+
+        model.fit_with_options(true, 1, false).unwrap();
+
+        assert_eq!(model.lmm.optsum.optimizer, Optimizer::Cobyla);
+        assert_eq!(model.lmm.optsum.backend.label(), "native");
+        assert!(model.lmm.optsum.feval > 0);
+        assert!(model.lmm.optsum.fmin.is_finite());
+        assert!(!model.lmm.optsum.fit_log.is_empty());
+        assert!(model.lmm.compiler_artifact.optimizer_certificate.is_some());
     }
 
     #[test]

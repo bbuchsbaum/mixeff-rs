@@ -26,11 +26,10 @@ minilp = "0.2"
 
 [features]
 default = ["nlopt"]
-# Enables NLopt (BOBYQA / large-θ paths and the GLMM AGQ optimizer).
+# Enables NLopt (BOBYQA / large-θ paths and optional GLMM optimizer parity).
 # Requires CMake plus a C/C++ toolchain at build time, which is heavy
 # for downstream R/CRAN-tarball distribution. Disabling falls back to
-# COBYLA-based fits (LMM keeps full functionality; GLMM fitting
-# returns a structured error directing callers to enable the feature).
+# COBYLA-based fits for LMMs and GLMMs.
 nlopt = ["dep:nlopt"]
 # Enables the PRIMA C backend for explicitly requested Powell optimizers.
 # This first slice wires bounded LMM theta optimization through PRIMA BOBYQA
