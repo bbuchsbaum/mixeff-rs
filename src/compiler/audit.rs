@@ -3797,13 +3797,14 @@ impl OptimizerCertificate {
         for &index in &boundary_indices {
             let lower = lower_bounds.get(index).copied().unwrap_or(f64::NAN);
             let value = theta.get(index).copied().unwrap_or(f64::NAN);
+            let parameter_label = format!("covariance parameter {}", index + 1);
             let mut diagnostic = Diagnostic::new(
                 DiagnosticCode::BoundaryParameter,
                 DiagnosticSeverity::Info,
                 DiagnosticStage::Certification,
-                format!("theta[{index}] is on its lower bound"),
+                format!("{parameter_label} is on its lower bound"),
             )
-            .with_affected_terms(vec![format!("theta[{index}]")])
+            .with_affected_terms(vec![parameter_label])
             .with_suggested_actions(vec![
                 "treat a boundary covariance estimate as a valid fitted boundary, not by itself an optimizer failure".to_string(),
                 "inspect the Effective Covariance section for unsupported random-effect directions".to_string(),

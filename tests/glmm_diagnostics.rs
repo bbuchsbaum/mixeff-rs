@@ -179,7 +179,9 @@ fn glmm_boundary_theta_records_boundary_parameter_diagnostic() {
         .find(|diagnostic| diagnostic.code == DiagnosticCode::BoundaryParameter)
         .expect("theta on its lower bound should be diagnosed as a boundary parameter");
     assert_eq!(diagnostic.severity, DiagnosticSeverity::Info);
-    assert_eq!(diagnostic.affected_terms, vec!["theta[0]"]);
+    assert_eq!(diagnostic.affected_terms, vec!["covariance parameter 1"]);
+    assert!(diagnostic.message.contains("covariance parameter 1"));
+    assert!(!diagnostic.message.contains("theta[0]"));
     assert_eq!(
         diagnostic.payload.get("theta_index"),
         Some(&serde_json::json!(0))

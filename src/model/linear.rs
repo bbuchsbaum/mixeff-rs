@@ -1177,7 +1177,83 @@ impl LinearMixedModel {
                 );
             }
         }
+        self.reword_optimizer_certificate_diagnostics(&mut certificate);
         self.compiler_artifact.optimizer_certificate = Some(certificate);
+    }
+
+    fn reword_optimizer_certificate_diagnostics(&self, certificate: &mut OptimizerCertificate) {
+        for diagnostic in &mut certificate.diagnostics {
+            if diagnostic.code != DiagnosticCode::BoundaryParameter {
+                continue;
+            }
+            let Some(theta_index) = diagnostic
+                .payload
+                .get("theta_index")
+                .and_then(serde_json::Value::as_u64)
+                .map(|value| value as usize)
+            else {
+                continue;
+            };
+            let Some((term_id, source_syntax, parameter_role)) =
+                self.covariance_parameter_context(theta_index)
+            else {
+                continue;
+            };
+
+            diagnostic.message =
+                format!("{parameter_role} in {source_syntax} is on its lower bound");
+            diagnostic.affected_terms = vec![source_syntax.clone()];
+            diagnostic
+                .payload
+                .insert("term_id".to_string(), serde_json::json!(term_id));
+            diagnostic.payload.insert(
+                "source_syntax".to_string(),
+                serde_json::json!(source_syntax),
+            );
+            diagnostic.payload.insert(
+                "parameter_role".to_string(),
+                serde_json::json!(parameter_role),
+            );
+        }
+    }
+
+    fn covariance_parameter_context(&self, theta_index: usize) -> Option<(String, String, String)> {
+        for theta_map in &self.compiler_artifact.theta_maps {
+            let block = theta_map.block();
+            let Some(slot) = block
+                .theta_slots
+                .iter()
+                .find(|slot| slot.global_index == Some(theta_index))
+            else {
+                continue;
+            };
+            let row_basis = block
+                .optimizer_basis
+                .get(slot.lambda_row)
+                .cloned()
+                .unwrap_or_else(|| format!("basis {}", slot.lambda_row + 1));
+            let col_basis = block
+                .optimizer_basis
+                .get(slot.lambda_col)
+                .cloned()
+                .unwrap_or_else(|| format!("basis {}", slot.lambda_col + 1));
+            let parameter_role = if slot.lambda_row == slot.lambda_col {
+                format!("standard deviation for {row_basis}")
+            } else {
+                format!("covariance link between {row_basis} and {col_basis}")
+            };
+            let source_syntax = self
+                .compiler_artifact
+                .semantic_model
+                .random_terms
+                .iter()
+                .find(|term| term.id == block.term_id)
+                .map(|term| term.source_syntax.text.clone())
+                .unwrap_or_else(|| format!("random-effect term for {}", block.group));
+            return Some((block.term_id.clone(), source_syntax, parameter_role));
+        }
+
+        None
     }
 
     fn derivative_certificate_skip_reason(
@@ -1194,7 +1270,7 @@ impl LinearMixedModel {
 
         if certificate.evidence.parameter_space.n_boundary > 0 {
             return Some(format!(
-                "theta is on a variance-component boundary (boundary indices: {}); boundary fits are reported as singular/boundary, not non-converged",
+                "one or more covariance parameters are on a variance-component boundary (parameter indices: {}); boundary fits are reported as singular/boundary, not non-converged",
                 certificate
                     .evidence
                     .parameter_space
@@ -1397,6 +1473,14 @@ impl LinearMixedModel {
             let term_id = theta_map
                 .map(|map| map.block().term_id.clone())
                 .unwrap_or_else(|| format!("r{term_index}"));
+            let source_syntax = self
+                .compiler_artifact
+                .semantic_model
+                .random_terms
+                .iter()
+                .find(|term| term.id == term_id)
+                .map(|term| term.source_syntax.text.clone())
+                .unwrap_or_else(|| format!("random-effect term for {}", reterm.grouping_name));
             let requested_basis = theta_map
                 .map(|map| map.block().optimizer_basis.clone())
                 .filter(|basis| basis.len() == reterm.vsize)
@@ -1529,11 +1613,18 @@ impl LinearMixedModel {
                     DiagnosticSeverity::Info,
                     DiagnosticStage::Certification,
                     format!(
-                        "fitted covariance for {term_id} has effective rank {supported_rank} of requested rank {requested_rank}"
+                        "fitted covariance for {source_syntax} has effective rank {supported_rank} of requested rank {requested_rank}"
                     ),
                 )
-                .with_affected_terms(vec![term_id.clone()])
+                .with_affected_terms(vec![source_syntax.clone()])
                 .with_suggested_actions(suggested_actions);
+                diagnostic
+                    .payload
+                    .insert("term_id".to_string(), serde_json::json!(term_id.clone()));
+                diagnostic.payload.insert(
+                    "source_syntax".to_string(),
+                    serde_json::json!(source_syntax.clone()),
+                );
                 diagnostic.payload.insert(
                     "rank_tolerance".to_string(),
                     serde_json::json!(rank_tolerance),
@@ -1577,7 +1668,7 @@ impl LinearMixedModel {
                         supported_rank
                     )),
                     inference_consequence: inference_consequence.clone(),
-                    diagnostics: vec![diagnostic],
+                    diagnostics: Vec::new(),
                 });
 
                 if let Some(theta_map) = theta_map {
@@ -1600,9 +1691,6 @@ impl LinearMixedModel {
         self.compiler_artifact
             .covariance_transitions
             .extend(transitions);
-        self.compiler_artifact
-            .diagnostics
-            .extend(diagnostics.clone());
 
         if !diagnostics.is_empty() {
             if let Some(certificate) = &mut self.compiler_artifact.optimizer_certificate {
@@ -11937,6 +12025,24 @@ mod tests {
                     .iter()
                     .any(|action| action.contains("valid fitted boundary"))
         }));
+        let boundary_diagnostic = certificate
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == DiagnosticCode::BoundaryParameter)
+            .expect("boundary parameter diagnostic");
+        assert_eq!(boundary_diagnostic.affected_terms, vec!["(1 | batch)"]);
+        assert!(boundary_diagnostic
+            .message
+            .contains("standard deviation for intercept in (1 | batch)"));
+        assert!(!boundary_diagnostic.message.contains("theta[0]"));
+        assert_eq!(
+            boundary_diagnostic.payload.get("theta_index"),
+            Some(&serde_json::json!(0))
+        );
+        assert_eq!(
+            boundary_diagnostic.payload.get("term_id"),
+            Some(&serde_json::json!("r0"))
+        );
         assert!(matches!(
             &certificate.evidence.gradient.method,
             EvidenceMethod::NotAssessed { reason } if reason.contains("variance-component boundary")
@@ -11957,6 +12063,30 @@ mod tests {
                 if reason.contains("boundary-gradient KKT check skipped")
         )));
         assert!(certificate
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == DiagnosticCode::CovarianceReduced));
+        let covariance_diagnostic = certificate
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == DiagnosticCode::CovarianceReduced)
+            .expect("covariance reduced diagnostic");
+        assert_eq!(covariance_diagnostic.affected_terms, vec!["(1 | batch)"]);
+        assert!(covariance_diagnostic
+            .message
+            .contains("fitted covariance for (1 | batch)"));
+        assert!(!covariance_diagnostic.message.contains("r0"));
+        assert_eq!(
+            covariance_diagnostic.payload.get("term_id"),
+            Some(&serde_json::json!("r0"))
+        );
+        assert!(model
+            .compiler_artifact()
+            .reductions
+            .iter()
+            .all(|reduction| reduction.diagnostics.is_empty()));
+        assert!(!model
+            .compiler_artifact()
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == DiagnosticCode::CovarianceReduced));
