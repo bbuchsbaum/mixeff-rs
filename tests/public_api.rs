@@ -13,11 +13,12 @@ use mixedmodels::model::{
     ResponseMatrixProfile, VcovVarparEstimate, BOOTSTRAP_RUN_SCHEMA, BOOTSTRAP_RUN_SCHEMA_VERSION,
 };
 use mixedmodels::stats::{
-    coeftable_to_markdown, profile, profile_beta, profile_betas, profile_sigma, profile_theta,
-    profile_theta_scalar, restore_replicates, restorereplicates, save_replicates, savereplicates,
-    shortest_cov_int, BlockDescription, CoefTable, CoefTablePValuePolicy, ConfintRow,
-    LikelihoodRatioTest, LinearModelFit, MixedModelProfile, ModelSummary, ModelSummaryRow,
-    ProfileRow, VarCorr, VarCorrComponent,
+    assess_model_comparison_sequence, coeftable_to_markdown, profile, profile_beta, profile_betas,
+    profile_sigma, profile_theta, profile_theta_scalar, restore_replicates, restorereplicates,
+    save_replicates, savereplicates, shortest_cov_int, BlockDescription, CoefTable,
+    CoefTablePValuePolicy, ConfintRow, FixedEffectComparison, LikelihoodRatioTest, LinearModelFit,
+    MixedModelProfile, ModelComparisonAlternative, ModelComparisonAssessment, ModelComparisonClass,
+    ModelSummary, ModelSummaryRow, ProfileRow, RandomEffectComparison, VarCorr, VarCorrComponent,
 };
 use mixedmodels::types::MatrixBlock;
 
@@ -170,11 +171,16 @@ fn intended_stats_barrel_exports_compile_for_downstream_users() {
     assert_type::<BlockDescription>();
     assert_type::<CoefTable>();
     assert_type::<CoefTablePValuePolicy>();
+    assert_type::<FixedEffectComparison>();
     assert_type::<LikelihoodRatioTest>();
     assert_type::<LinearModelFit>();
+    assert_type::<ModelComparisonAlternative>();
+    assert_type::<ModelComparisonAssessment>();
+    assert_type::<ModelComparisonClass>();
     assert_type::<ModelSummary>();
     assert_type::<ModelSummaryRow>();
     assert_type::<ProfileRow>();
+    assert_type::<RandomEffectComparison>();
     assert_type::<MixedModelProfile>();
     assert_type::<ConfintRow>();
     assert_type::<VarCorr>();
@@ -182,6 +188,7 @@ fn intended_stats_barrel_exports_compile_for_downstream_users() {
 
     let _ = coeftable_to_markdown as fn(&CoefTable) -> String;
     let _ = shortest_cov_int as fn(&mut [f64], f64) -> (f64, f64);
+    let _ = assess_model_comparison_sequence;
     let _ = profile;
     let _ = profile_beta;
     let _ = profile_betas;

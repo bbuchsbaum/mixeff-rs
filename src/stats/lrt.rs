@@ -218,6 +218,117 @@ pub struct LikelihoodRatioTest {
     pub loglik_within_optimizer_tol: Vec<bool>,
 }
 
+/// High-level structural class for comparing two fitted model objects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelComparisonClass {
+    /// Same response, family/link, fit criterion, fixed-effect space, random
+    /// terms, and model degrees of freedom.
+    SameModelSpace,
+    /// Fixed-effect space grows while random-effect terms are unchanged.
+    NestedFixedEffects,
+    /// Random-effect terms grow while fixed-effect space is unchanged.
+    NestedRandomEffects,
+    /// Both fixed-effect space and random-effect terms grow.
+    NestedFixedAndRandomEffects,
+    /// Fixed effects and random-effect columns are unchanged, but degrees of
+    /// freedom differ. This is the shape of covariance-parameter comparisons
+    /// such as diagonal versus full covariance for the same random basis.
+    SameFixedEffectsCovarianceDifference,
+    /// Fixed-effect spaces are incompatible for a nested-model LRT.
+    NonNestedFixedEffects,
+    /// Random-effect terms are incompatible for a nested-model LRT.
+    NonNestedRandomEffects,
+    /// Models were not fitted to the same response values.
+    DifferentResponse,
+    /// Conditional response families differ.
+    DifferentFamily,
+    /// Link functions differ.
+    DifferentLink,
+    /// REML-fitted and ML-fitted models were mixed.
+    MixedFitCriterion,
+    /// Models have equal or decreasing degrees of freedom in the requested
+    /// order, even though their spaces otherwise look nested.
+    InvalidModelOrder,
+}
+
+/// Coarse fixed-effect relation used by [`ModelComparisonAssessment`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixedEffectComparison {
+    Same,
+    Nested,
+    ReverseNested,
+    NonNested,
+}
+
+/// Coarse random-effect relation used by [`ModelComparisonAssessment`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RandomEffectComparison {
+    Same,
+    Nested,
+    ReverseNested,
+    NonNested,
+}
+
+/// Suggested valid comparison route when the requested LRT is unavailable or
+/// not the best default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelComparisonAlternative {
+    MlRefitLikelihoodRatio,
+    RemlLikelihoodRatio,
+    InformationCriteria,
+    FixedEffectContrastTest,
+    ParametricBootstrap,
+    CrossValidation,
+    ReorderModels,
+    RefitWithCommonCriterion,
+}
+
+/// Structured preflight assessment for comparing two fitted models.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelComparisonAssessment {
+    pub class: ModelComparisonClass,
+    pub fixed_effects: FixedEffectComparison,
+    pub random_effects: RandomEffectComparison,
+    pub lrt_available: bool,
+    pub lrt_reason: Option<String>,
+    pub information_criteria_available: bool,
+    pub information_criteria_reason: Option<String>,
+    pub ml_refit_required: bool,
+    pub ml_refit_reason: Option<String>,
+    pub valid_alternatives: Vec<ModelComparisonAlternative>,
+}
+
+impl ModelComparisonAssessment {
+    /// Assess a pair of models in the supplied order.
+    ///
+    /// The order is meaningful for LRT availability: the first model is treated
+    /// as the smaller/null model and the second as the larger/alternative model.
+    pub fn assess(smaller: &dyn MixedModelFit, larger: &dyn MixedModelFit) -> Self {
+        assess_model_pair(smaller, larger)
+    }
+
+    pub fn lrt_is_available(&self) -> bool {
+        self.lrt_available
+    }
+
+    pub fn information_criteria_are_available(&self) -> bool {
+        self.information_criteria_available
+    }
+}
+
+/// Assess each adjacent pair in a model sequence.
+pub fn assess_model_comparison_sequence(
+    models: &[&dyn MixedModelFit],
+) -> Result<Vec<ModelComparisonAssessment>, String> {
+    if models.len() < 2 {
+        return Err("At least two models are needed".to_string());
+    }
+    Ok(models
+        .windows(2)
+        .map(|pair| ModelComparisonAssessment::assess(pair[0], pair[1]))
+        .collect())
+}
+
 impl LikelihoodRatioTest {
     /// Perform a likelihood ratio test on two or more nested models.
     ///
@@ -651,6 +762,306 @@ fn random_effect_term_is_nested(
             .all(|column| larger.columns.iter().any(|candidate| candidate == column))
 }
 
+fn assess_model_pair(
+    smaller: &dyn MixedModelFit,
+    larger: &dyn MixedModelFit,
+) -> ModelComparisonAssessment {
+    let same_response =
+        smaller.nobs() == larger.nobs() && vectors_equal(smaller.response(), larger.response());
+    let same_family = smaller.family_kind() == larger.family_kind();
+    let same_link = smaller.link_kind() == larger.link_kind();
+    let same_fit_criterion = smaller.opt_summary().reml == larger.opt_summary().reml;
+    let fixed_effects = fixed_effect_comparison(smaller.model_matrix(), larger.model_matrix());
+    let random_effects = random_effect_comparison(
+        &smaller.random_effect_terms(),
+        &larger.random_effect_terms(),
+    );
+    let dof_increases = larger.dof() > smaller.dof();
+    let same_model_space = fixed_effects == FixedEffectComparison::Same
+        && random_effects == RandomEffectComparison::Same
+        && smaller.dof() == larger.dof();
+
+    let class = if !same_response {
+        ModelComparisonClass::DifferentResponse
+    } else if !same_family {
+        ModelComparisonClass::DifferentFamily
+    } else if !same_link {
+        ModelComparisonClass::DifferentLink
+    } else if !same_fit_criterion {
+        ModelComparisonClass::MixedFitCriterion
+    } else if same_model_space {
+        ModelComparisonClass::SameModelSpace
+    } else if fixed_effects == FixedEffectComparison::Same
+        && random_effects == RandomEffectComparison::Same
+        && dof_increases
+    {
+        ModelComparisonClass::SameFixedEffectsCovarianceDifference
+    } else if fixed_effects == FixedEffectComparison::Nested
+        && random_effects == RandomEffectComparison::Same
+    {
+        ModelComparisonClass::NestedFixedEffects
+    } else if fixed_effects == FixedEffectComparison::Same
+        && random_effects == RandomEffectComparison::Nested
+    {
+        ModelComparisonClass::NestedRandomEffects
+    } else if fixed_effects == FixedEffectComparison::Nested
+        && random_effects == RandomEffectComparison::Nested
+    {
+        ModelComparisonClass::NestedFixedAndRandomEffects
+    } else if matches!(fixed_effects, FixedEffectComparison::ReverseNested)
+        || matches!(random_effects, RandomEffectComparison::ReverseNested)
+    {
+        ModelComparisonClass::InvalidModelOrder
+    } else if fixed_effects == FixedEffectComparison::NonNested {
+        ModelComparisonClass::NonNestedFixedEffects
+    } else if random_effects == RandomEffectComparison::NonNested {
+        ModelComparisonClass::NonNestedRandomEffects
+    } else {
+        ModelComparisonClass::InvalidModelOrder
+    };
+
+    let reml = smaller.opt_summary().reml;
+    let fixed_effects_match = fixed_effects == FixedEffectComparison::Same;
+    let structurally_nested = matches!(
+        class,
+        ModelComparisonClass::NestedFixedEffects
+            | ModelComparisonClass::NestedRandomEffects
+            | ModelComparisonClass::NestedFixedAndRandomEffects
+            | ModelComparisonClass::SameFixedEffectsCovarianceDifference
+    );
+    let lrt_available = structurally_nested
+        && dof_increases
+        && same_response
+        && same_family
+        && same_link
+        && same_fit_criterion
+        && (!reml || fixed_effects_match);
+    let lrt_reason = if lrt_available {
+        None
+    } else {
+        Some(lrt_unavailable_reason(
+            class,
+            reml,
+            fixed_effects_match,
+            dof_increases,
+        ))
+    };
+
+    let ml_refit_required = same_response
+        && same_family
+        && same_link
+        && same_fit_criterion
+        && reml
+        && fixed_effects != FixedEffectComparison::Same;
+    let ml_refit_reason = ml_refit_required.then(|| {
+        "models differ in fixed effects but were fitted by REML; refit with ML for fixed-effect likelihood comparisons".to_string()
+    });
+
+    let information_criteria_available = same_response
+        && same_family
+        && same_link
+        && same_fit_criterion
+        && (!reml || fixed_effects_match);
+    let information_criteria_reason = if information_criteria_available {
+        None
+    } else {
+        Some(information_criteria_unavailable_reason(
+            same_response,
+            same_family,
+            same_link,
+            same_fit_criterion,
+            reml,
+            fixed_effects_match,
+        ))
+    };
+
+    let valid_alternatives = comparison_alternatives(
+        class,
+        lrt_available,
+        information_criteria_available,
+        ml_refit_required,
+        reml,
+        fixed_effects,
+        random_effects,
+    );
+
+    ModelComparisonAssessment {
+        class,
+        fixed_effects,
+        random_effects,
+        lrt_available,
+        lrt_reason,
+        information_criteria_available,
+        information_criteria_reason,
+        ml_refit_required,
+        ml_refit_reason,
+        valid_alternatives,
+    }
+}
+
+fn fixed_effect_comparison(smaller: &DMatrix<f64>, larger: &DMatrix<f64>) -> FixedEffectComparison {
+    if fixed_effect_spaces_are_equal(smaller, larger) {
+        FixedEffectComparison::Same
+    } else if fixed_effect_space_is_nested(smaller, larger) {
+        FixedEffectComparison::Nested
+    } else if fixed_effect_space_is_nested(larger, smaller) {
+        FixedEffectComparison::ReverseNested
+    } else {
+        FixedEffectComparison::NonNested
+    }
+}
+
+fn random_effect_comparison(
+    smaller: &[RandomEffectTermInfo],
+    larger: &[RandomEffectTermInfo],
+) -> RandomEffectComparison {
+    if random_effect_terms_are_equal(smaller, larger) {
+        RandomEffectComparison::Same
+    } else if random_effect_terms_are_nested(smaller, larger) {
+        RandomEffectComparison::Nested
+    } else if random_effect_terms_are_nested(larger, smaller) {
+        RandomEffectComparison::ReverseNested
+    } else {
+        RandomEffectComparison::NonNested
+    }
+}
+
+fn random_effect_terms_are_equal(
+    lhs: &[RandomEffectTermInfo],
+    rhs: &[RandomEffectTermInfo],
+) -> bool {
+    lhs.len() == rhs.len()
+        && lhs.iter().all(|left| {
+            rhs.iter()
+                .any(|right| random_effect_term_matches(left, right))
+        })
+}
+
+fn random_effect_term_matches(lhs: &RandomEffectTermInfo, rhs: &RandomEffectTermInfo) -> bool {
+    lhs.group == rhs.group
+        && lhs.columns.len() == rhs.columns.len()
+        && lhs
+            .columns
+            .iter()
+            .all(|column| rhs.columns.iter().any(|candidate| candidate == column))
+}
+
+fn lrt_unavailable_reason(
+    class: ModelComparisonClass,
+    reml: bool,
+    fixed_effects_match: bool,
+    dof_increases: bool,
+) -> String {
+    match class {
+        ModelComparisonClass::DifferentResponse => {
+            "models were not fitted to the same response values".to_string()
+        }
+        ModelComparisonClass::DifferentFamily => {
+            "models have different conditional response families".to_string()
+        }
+        ModelComparisonClass::DifferentLink => "models have different link functions".to_string(),
+        ModelComparisonClass::MixedFitCriterion => {
+            "models mix REML and ML fit criteria; refit with a common criterion".to_string()
+        }
+        ModelComparisonClass::SameModelSpace => "models describe the same model space".to_string(),
+        ModelComparisonClass::InvalidModelOrder if !dof_increases => {
+            "larger model must have more degrees of freedom than the smaller model".to_string()
+        }
+        ModelComparisonClass::InvalidModelOrder => {
+            "models appear nested only in the reverse order".to_string()
+        }
+        ModelComparisonClass::NonNestedFixedEffects => {
+            "fixed-effect column spaces are not nested".to_string()
+        }
+        ModelComparisonClass::NonNestedRandomEffects => {
+            "random-effect term structures are not nested".to_string()
+        }
+        _ if reml && !fixed_effects_match => {
+            "REML likelihood-ratio tests require identical fixed effects; refit with ML".to_string()
+        }
+        _ if !dof_increases => {
+            "larger model must have more degrees of freedom than the smaller model".to_string()
+        }
+        _ => "ordinary likelihood-ratio test is unavailable for this comparison".to_string(),
+    }
+}
+
+fn information_criteria_unavailable_reason(
+    same_response: bool,
+    same_family: bool,
+    same_link: bool,
+    same_fit_criterion: bool,
+    reml: bool,
+    fixed_effects_match: bool,
+) -> String {
+    if !same_response {
+        "information criteria require models fit to the same response values".to_string()
+    } else if !same_family {
+        "information criteria require a common conditional response family".to_string()
+    } else if !same_link {
+        "information criteria require a common link function".to_string()
+    } else if !same_fit_criterion {
+        "information criteria require a common REML/ML fit criterion".to_string()
+    } else if reml && !fixed_effects_match {
+        "REML information criteria are not comparable across different fixed effects".to_string()
+    } else {
+        "information criteria are unavailable for this comparison".to_string()
+    }
+}
+
+fn comparison_alternatives(
+    class: ModelComparisonClass,
+    lrt_available: bool,
+    information_criteria_available: bool,
+    ml_refit_required: bool,
+    reml: bool,
+    fixed_effects: FixedEffectComparison,
+    random_effects: RandomEffectComparison,
+) -> Vec<ModelComparisonAlternative> {
+    let mut alternatives = Vec::new();
+    if lrt_available {
+        alternatives.push(if reml {
+            ModelComparisonAlternative::RemlLikelihoodRatio
+        } else {
+            ModelComparisonAlternative::MlRefitLikelihoodRatio
+        });
+    }
+    if ml_refit_required {
+        alternatives.push(ModelComparisonAlternative::MlRefitLikelihoodRatio);
+        alternatives.push(ModelComparisonAlternative::RefitWithCommonCriterion);
+    }
+    if class == ModelComparisonClass::MixedFitCriterion {
+        alternatives.push(ModelComparisonAlternative::RefitWithCommonCriterion);
+    }
+    if information_criteria_available {
+        alternatives.push(ModelComparisonAlternative::InformationCriteria);
+    }
+    if matches!(
+        fixed_effects,
+        FixedEffectComparison::Nested | FixedEffectComparison::NonNested
+    ) {
+        alternatives.push(ModelComparisonAlternative::FixedEffectContrastTest);
+    }
+    if matches!(
+        random_effects,
+        RandomEffectComparison::Nested | RandomEffectComparison::NonNested
+    ) || class == ModelComparisonClass::SameFixedEffectsCovarianceDifference
+    {
+        alternatives.push(ModelComparisonAlternative::ParametricBootstrap);
+    }
+    if class == ModelComparisonClass::InvalidModelOrder {
+        alternatives.push(ModelComparisonAlternative::ReorderModels);
+    }
+    if matches!(
+        class,
+        ModelComparisonClass::NonNestedFixedEffects | ModelComparisonClass::NonNestedRandomEffects
+    ) {
+        alternatives.push(ModelComparisonAlternative::CrossValidation);
+    }
+    alternatives.dedup();
+    alternatives
+}
+
 fn vectors_equal(lhs: &DVector<f64>, rhs: &DVector<f64>) -> bool {
     lhs.len() == rhs.len()
         && lhs
@@ -845,6 +1256,278 @@ mod tests {
         fn link_kind(&self) -> Option<crate::model::traits::LinkFunction> {
             self.link
         }
+    }
+
+    fn intercept_x() -> DMatrix<f64> {
+        DMatrix::from_row_slice(
+            4,
+            2,
+            &[
+                1.0, 0.0, //
+                1.0, 1.0, //
+                1.0, 2.0, //
+                1.0, 3.0,
+            ],
+        )
+    }
+
+    fn intercept_z() -> DMatrix<f64> {
+        DMatrix::from_row_slice(
+            4,
+            2,
+            &[
+                1.0, 0.0, //
+                1.0, 1.0, //
+                1.0, 0.0, //
+                1.0, 1.0,
+            ],
+        )
+    }
+
+    fn subject_intercept() -> RandomEffectTermInfo {
+        RandomEffectTermInfo {
+            group: "subject".to_string(),
+            columns: vec!["(Intercept)".to_string()],
+        }
+    }
+
+    fn subject_intercept_slope() -> RandomEffectTermInfo {
+        RandomEffectTermInfo {
+            group: "subject".to_string(),
+            columns: vec!["(Intercept)".to_string(), "x".to_string()],
+        }
+    }
+
+    fn item_intercept() -> RandomEffectTermInfo {
+        RandomEffectTermInfo {
+            group: "item".to_string(),
+            columns: vec!["(Intercept)".to_string()],
+        }
+    }
+
+    #[test]
+    fn test_model_comparison_assessment_classifies_same_model_space() {
+        let x = intercept_x();
+        let m0 = DummyFit::new(4, 3, -10.0, Some("m0")).with_model_matrix(x.clone());
+        let m1 = DummyFit::new(4, 3, -10.0, Some("m1")).with_model_matrix(x);
+
+        let assessment = ModelComparisonAssessment::assess(&m0, &m1);
+
+        assert_eq!(assessment.class, ModelComparisonClass::SameModelSpace);
+        assert_eq!(assessment.fixed_effects, FixedEffectComparison::Same);
+        assert_eq!(assessment.random_effects, RandomEffectComparison::Same);
+        assert!(!assessment.lrt_available);
+        assert_eq!(
+            assessment.lrt_reason.as_deref(),
+            Some("models describe the same model space")
+        );
+        assert!(assessment.information_criteria_available);
+        assert!(!assessment.ml_refit_required);
+    }
+
+    #[test]
+    fn test_model_comparison_assessment_classifies_nested_fixed_effects() {
+        let intercept = DMatrix::from_element(4, 1, 1.0);
+        let m0 = DummyFit::new(4, 2, -10.0, Some("m0"))
+            .with_reml(false)
+            .with_model_matrix(intercept);
+        let m1 = DummyFit::new(4, 3, -9.0, Some("m1"))
+            .with_reml(false)
+            .with_model_matrix(intercept_x());
+
+        let assessment = ModelComparisonAssessment::assess(&m0, &m1);
+
+        assert_eq!(assessment.class, ModelComparisonClass::NestedFixedEffects);
+        assert_eq!(assessment.fixed_effects, FixedEffectComparison::Nested);
+        assert_eq!(assessment.random_effects, RandomEffectComparison::Same);
+        assert!(assessment.lrt_available);
+        assert!(assessment.information_criteria_available);
+        assert!(assessment
+            .valid_alternatives
+            .contains(&ModelComparisonAlternative::FixedEffectContrastTest));
+    }
+
+    #[test]
+    fn test_model_comparison_assessment_classifies_nested_random_effects() {
+        let x = intercept_x();
+        let m0 = DummyFit::new(4, 3, -10.0, Some("m0"))
+            .with_model_matrix(x.clone())
+            .with_random_terms(vec![subject_intercept()]);
+        let m1 = DummyFit::new(4, 5, -9.0, Some("m1"))
+            .with_model_matrix(x)
+            .with_random_terms(vec![subject_intercept_slope()]);
+
+        let assessment = ModelComparisonAssessment::assess(&m0, &m1);
+
+        assert_eq!(assessment.class, ModelComparisonClass::NestedRandomEffects);
+        assert_eq!(assessment.fixed_effects, FixedEffectComparison::Same);
+        assert_eq!(assessment.random_effects, RandomEffectComparison::Nested);
+        assert!(assessment.lrt_available);
+        assert!(assessment
+            .valid_alternatives
+            .contains(&ModelComparisonAlternative::ParametricBootstrap));
+    }
+
+    #[test]
+    fn test_model_comparison_assessment_classifies_covariance_difference() {
+        let x = intercept_x();
+        let random = subject_intercept_slope();
+        let m0 = DummyFit::new(4, 4, -10.0, Some("diagonal"))
+            .with_model_matrix(x.clone())
+            .with_random_terms(vec![random.clone()]);
+        let m1 = DummyFit::new(4, 5, -9.0, Some("full"))
+            .with_model_matrix(x)
+            .with_random_terms(vec![random]);
+
+        let assessment = ModelComparisonAssessment::assess(&m0, &m1);
+
+        assert_eq!(
+            assessment.class,
+            ModelComparisonClass::SameFixedEffectsCovarianceDifference
+        );
+        assert_eq!(assessment.fixed_effects, FixedEffectComparison::Same);
+        assert_eq!(assessment.random_effects, RandomEffectComparison::Same);
+        assert!(assessment.lrt_available);
+        assert!(assessment
+            .valid_alternatives
+            .contains(&ModelComparisonAlternative::ParametricBootstrap));
+    }
+
+    #[test]
+    fn test_model_comparison_assessment_classifies_non_nested_fixed_effects() {
+        let m0 = DummyFit::new(4, 3, -10.0, Some("m0"))
+            .with_reml(false)
+            .with_model_matrix(intercept_x());
+        let m1 = DummyFit::new(4, 3, -9.0, Some("m1"))
+            .with_reml(false)
+            .with_model_matrix(intercept_z());
+
+        let assessment = ModelComparisonAssessment::assess(&m0, &m1);
+
+        assert_eq!(
+            assessment.class,
+            ModelComparisonClass::NonNestedFixedEffects
+        );
+        assert_eq!(assessment.fixed_effects, FixedEffectComparison::NonNested);
+        assert!(!assessment.lrt_available);
+        assert_eq!(
+            assessment.lrt_reason.as_deref(),
+            Some("fixed-effect column spaces are not nested")
+        );
+        assert!(assessment.information_criteria_available);
+        assert!(assessment
+            .valid_alternatives
+            .contains(&ModelComparisonAlternative::CrossValidation));
+    }
+
+    #[test]
+    fn test_model_comparison_assessment_classifies_non_nested_random_effects() {
+        let x = intercept_x();
+        let m0 = DummyFit::new(4, 4, -10.0, Some("m0"))
+            .with_model_matrix(x.clone())
+            .with_random_terms(vec![subject_intercept()]);
+        let m1 = DummyFit::new(4, 5, -9.0, Some("m1"))
+            .with_model_matrix(x)
+            .with_random_terms(vec![item_intercept()]);
+
+        let assessment = ModelComparisonAssessment::assess(&m0, &m1);
+
+        assert_eq!(
+            assessment.class,
+            ModelComparisonClass::NonNestedRandomEffects
+        );
+        assert_eq!(assessment.random_effects, RandomEffectComparison::NonNested);
+        assert!(!assessment.lrt_available);
+        assert_eq!(
+            assessment.lrt_reason.as_deref(),
+            Some("random-effect term structures are not nested")
+        );
+        assert!(assessment.information_criteria_available);
+    }
+
+    #[test]
+    fn test_model_comparison_assessment_classifies_incompatible_inputs() {
+        use crate::model::traits::{Family, LinkFunction};
+
+        let m0 = DummyFit::new(4, 2, -10.0, Some("m0"))
+            .with_response(DVector::from_vec(vec![1.0, 2.0, 3.0, 4.0]));
+        let m_different_response = DummyFit::new(4, 3, -9.0, Some("m1"))
+            .with_response(DVector::from_vec(vec![1.0, 2.0, 3.0, 5.0]));
+        assert_eq!(
+            ModelComparisonAssessment::assess(&m0, &m_different_response).class,
+            ModelComparisonClass::DifferentResponse
+        );
+
+        let bernoulli = DummyFit::new(4, 2, -10.0, Some("bernoulli"))
+            .with_family(Family::Bernoulli, LinkFunction::Logit);
+        let poisson = DummyFit::new(4, 3, -9.0, Some("poisson"))
+            .with_family(Family::Poisson, LinkFunction::Log);
+        assert_eq!(
+            ModelComparisonAssessment::assess(&bernoulli, &poisson).class,
+            ModelComparisonClass::DifferentFamily
+        );
+
+        let logit = DummyFit::new(4, 2, -10.0, Some("logit"))
+            .with_family(Family::Bernoulli, LinkFunction::Logit);
+        let probit = DummyFit::new(4, 3, -9.0, Some("probit"))
+            .with_family(Family::Bernoulli, LinkFunction::Probit);
+        assert_eq!(
+            ModelComparisonAssessment::assess(&logit, &probit).class,
+            ModelComparisonClass::DifferentLink
+        );
+
+        let ml = DummyFit::new(4, 2, -10.0, Some("ml")).with_reml(false);
+        let reml = DummyFit::new(4, 3, -9.0, Some("reml")).with_reml(true);
+        let assessment = ModelComparisonAssessment::assess(&ml, &reml);
+        assert_eq!(assessment.class, ModelComparisonClass::MixedFitCriterion);
+        assert!(!assessment.information_criteria_available);
+        assert!(assessment
+            .valid_alternatives
+            .contains(&ModelComparisonAlternative::RefitWithCommonCriterion));
+    }
+
+    #[test]
+    fn test_model_comparison_assessment_marks_ml_refit_for_reml_fixed_effect_change() {
+        let intercept = DMatrix::from_element(4, 1, 1.0);
+        let m0 = DummyFit::new(4, 2, -10.0, Some("m0"))
+            .with_reml(true)
+            .with_model_matrix(intercept);
+        let m1 = DummyFit::new(4, 3, -9.0, Some("m1"))
+            .with_reml(true)
+            .with_model_matrix(intercept_x());
+
+        let assessment = ModelComparisonAssessment::assess(&m0, &m1);
+
+        assert_eq!(assessment.class, ModelComparisonClass::NestedFixedEffects);
+        assert!(!assessment.lrt_available);
+        assert!(assessment.ml_refit_required);
+        assert_eq!(
+            assessment.ml_refit_reason.as_deref(),
+            Some("models differ in fixed effects but were fitted by REML; refit with ML for fixed-effect likelihood comparisons")
+        );
+        assert!(!assessment.information_criteria_available);
+    }
+
+    #[test]
+    fn test_model_comparison_sequence_assesses_adjacent_pairs() {
+        let intercept = DMatrix::from_element(4, 1, 1.0);
+        let m0 = DummyFit::new(4, 2, -10.0, Some("m0")).with_model_matrix(intercept);
+        let m1 = DummyFit::new(4, 3, -9.0, Some("m1")).with_model_matrix(intercept_x());
+        let m2 = DummyFit::new(4, 4, -8.0, Some("m2"))
+            .with_model_matrix(intercept_x())
+            .with_random_terms(vec![subject_intercept()]);
+
+        let assessments = assess_model_comparison_sequence(&[&m0, &m1, &m2]).unwrap();
+
+        assert_eq!(assessments.len(), 2);
+        assert_eq!(
+            assessments[0].class,
+            ModelComparisonClass::NestedFixedEffects
+        );
+        assert_eq!(
+            assessments[1].class,
+            ModelComparisonClass::NestedRandomEffects
+        );
     }
 
     #[test]

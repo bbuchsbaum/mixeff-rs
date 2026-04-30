@@ -14,7 +14,11 @@ pub use bootstrap::{
     restore_replicates, restorereplicates, save_replicates, savereplicates, shortest_cov_int,
 };
 pub use coeftable::{coeftable_to_markdown, CoefTable, CoefTablePValuePolicy};
-pub use lrt::{LikelihoodRatioTest, LinearModelFit};
+pub use lrt::{
+    assess_model_comparison_sequence, FixedEffectComparison, LikelihoodRatioTest, LinearModelFit,
+    ModelComparisonAlternative, ModelComparisonAssessment, ModelComparisonClass,
+    RandomEffectComparison,
+};
 pub use model_summary::{ModelSummary, ModelSummaryRow};
 pub use profile::{
     profile, profile_beta, profile_betas, profile_sigma, profile_theta, profile_theta_scalar,
