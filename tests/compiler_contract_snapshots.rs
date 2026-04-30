@@ -1122,6 +1122,18 @@ fn rank_mixture_artifact_matches_wire_fixture() {
         72
     );
     assert_eq!(
+        value["optimizer_certificate"]["diagnostics"][0]["message"],
+        "fitted covariance for (1 + x | group) has effective rank 1 of requested rank 2"
+    );
+    assert_eq!(
+        value["optimizer_certificate"]["diagnostics"][0]["affected_terms"][0],
+        "(1 + x | group)"
+    );
+    assert_eq!(
+        value["optimizer_certificate"]["diagnostics"][0]["payload"]["term_id"],
+        "r0"
+    );
+    assert_eq!(
         value["optimizer_certificate"]["evidence"]["gradient"]["method"],
         "finite_difference"
     );
@@ -1397,8 +1409,17 @@ fn intercept_dominant_reduced_rank_emits_interpretable_submodel() {
     );
     assert_eq!(suggestion["within_tolerance"], serde_json::json!(true));
     assert_eq!(
-        value["diagnostics"][0]["payload"]["interpretable_submodel"]["suggested_formula"],
+        value["optimizer_certificate"]["diagnostics"][0]["payload"]["interpretable_submodel"]
+            ["suggested_formula"],
         "(1 | group)"
+    );
+    assert_eq!(
+        value["optimizer_certificate"]["diagnostics"][0]["message"],
+        "fitted covariance for (1 + x | group) has effective rank 1 of requested rank 2"
+    );
+    assert_eq!(
+        value["optimizer_certificate"]["diagnostics"][0]["payload"]["term_id"],
+        "r0"
     );
     assert_wire_fixture(
         "tests/fixtures/compiler_contract/intercept_dominant_reduced_rank_artifact_v1.json",
