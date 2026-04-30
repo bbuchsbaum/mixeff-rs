@@ -3303,6 +3303,7 @@ fn diagnostic_code_label(code: &DiagnosticCode) -> &'static str {
         DiagnosticCode::NearUnitRandomEffectCorrelation => "near_unit_random_effect_correlation",
         DiagnosticCode::BinomialSeparation => "binomial_separation",
         DiagnosticCode::NotIdentifiable => "not_identifiable",
+        DiagnosticCode::InvalidAgqRequest => "invalid_agq_request",
         DiagnosticCode::OptimizerNotAssessed => "optimizer_not_assessed",
         DiagnosticCode::OptimizerNonconvergence => "optimizer_nonconvergence",
         DiagnosticCode::InferenceUnavailable => "inference_unavailable",

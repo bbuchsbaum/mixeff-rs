@@ -75,3 +75,42 @@ fn glmm_maxeval_stop_records_optimizer_nonconvergence_diagnostic() {
         "a fitted optimizer failure should not reuse the pre-fit not-assessed diagnostic code"
     );
 }
+
+#[test]
+fn glmm_invalid_agq_request_records_stable_artifact_diagnostic() {
+    let data = gamma_diagnostic_fixture();
+    let formula = parse_formula("y ~ 1 + x + (1 + x | group)").unwrap();
+    let mut model =
+        GeneralizedLinearMixedModel::new(formula, &data, Family::Gamma, Some(LinkFunction::Log))
+            .unwrap();
+    let feval_before = model.lmm.optsum.feval;
+
+    let err = model
+        .fit_with_options(true, 7, false)
+        .expect_err("AGQ should be refused for vector-valued random effects");
+
+    assert!(err.to_string().contains("n_agq = 7"));
+    assert_eq!(
+        model.lmm.optsum.feval, feval_before,
+        "invalid AGQ request should fail before optimizer evaluations"
+    );
+    let diagnostic = model
+        .compiler_artifact()
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == DiagnosticCode::InvalidAgqRequest)
+        .expect("invalid AGQ request should be recorded on the artifact");
+    assert_eq!(diagnostic.severity, DiagnosticSeverity::Error);
+    assert!(diagnostic.message.contains("n_agq = 7"));
+    assert_eq!(diagnostic.affected_terms, vec!["(1 + x | group)"]);
+    assert_eq!(diagnostic.payload.get("n_agq"), Some(&serde_json::json!(7)));
+    assert_eq!(
+        diagnostic.payload.get("random_effect_term_count"),
+        Some(&serde_json::json!(1))
+    );
+    assert!(diagnostic
+        .payload
+        .get("reason")
+        .and_then(|value| value.as_str())
+        .is_some_and(|reason| reason.contains("requires exactly one scalar random-effects term")));
+}

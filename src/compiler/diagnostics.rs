@@ -77,6 +77,7 @@ pub enum DiagnosticCode {
     NearUnitRandomEffectCorrelation,
     BinomialSeparation,
     NotIdentifiable,
+    InvalidAgqRequest,
     OptimizerNotAssessed,
     OptimizerNonconvergence,
     InferenceUnavailable,
@@ -167,6 +168,7 @@ mod tests {
                 "\"covariance_assumption\"",
             ),
             (DiagnosticCode::StructuralRefusal, "\"structural_refusal\""),
+            (DiagnosticCode::InvalidAgqRequest, "\"invalid_agq_request\""),
             (
                 DiagnosticCode::OptimizerNonconvergence,
                 "\"optimizer_nonconvergence\"",

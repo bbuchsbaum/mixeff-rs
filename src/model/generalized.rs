@@ -24,7 +24,7 @@ use crate::model::data::DataFrame;
 use crate::model::linear::LinearMixedModel;
 use crate::model::traits::{Family, LinkFunction, MixedModelFit, RandomEffectTermInfo};
 use crate::stats::{BlockDescription, ModelSummary, VarCorr};
-use crate::types::{FitLogEntry, MatrixBlock, OptSummary, Optimizer};
+use crate::types::{FitLogEntry, MatrixBlock, OptSummary, Optimizer, ReMat};
 
 /// A generalized linear mixed-effects model.
 #[derive(Debug, Clone)]
@@ -677,6 +677,61 @@ impl GeneralizedLinearMixedModel {
         Ok(())
     }
 
+    fn record_invalid_agq_diagnostic(&mut self, n_agq: usize, reason: &str) {
+        self.lmm
+            .compiler_artifact
+            .diagnostics
+            .retain(|diagnostic| diagnostic.code != DiagnosticCode::InvalidAgqRequest);
+
+        let affected_terms = self
+            .lmm
+            .reterms
+            .iter()
+            .map(random_effect_term_label)
+            .collect::<Vec<_>>();
+        let term_summaries = self
+            .lmm
+            .reterms
+            .iter()
+            .map(|term| {
+                serde_json::json!({
+                    "group": &term.grouping_name,
+                    "columns": &term.cnames,
+                    "basis_dimension": term.vsize,
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut diagnostic = Diagnostic::new(
+            DiagnosticCode::InvalidAgqRequest,
+            DiagnosticSeverity::Error,
+            DiagnosticStage::Optimization,
+            format!(
+                "Invalid adaptive Gauss-Hermite quadrature request: n_agq = {n_agq} requires exactly one scalar random-effects term. Use n_agq = 1 for the Laplace approximation or simplify the random-effects structure."
+            ),
+        )
+        .with_affected_terms(affected_terms)
+        .with_suggested_actions(vec![
+            "use n_agq = 1 for Laplace approximation on this random-effects structure"
+                .to_string(),
+            "fit AGQ only for a model with exactly one scalar random-effects term".to_string(),
+        ]);
+        diagnostic
+            .payload
+            .insert("n_agq".to_string(), serde_json::json!(n_agq));
+        diagnostic
+            .payload
+            .insert("reason".to_string(), serde_json::json!(reason));
+        diagnostic.payload.insert(
+            "random_effect_term_count".to_string(),
+            serde_json::json!(self.lmm.reterms.len()),
+        );
+        diagnostic.payload.insert(
+            "random_effect_terms".to_string(),
+            serde_json::json!(term_summaries),
+        );
+        self.lmm.compiler_artifact.diagnostics.push(diagnostic);
+    }
+
     /// Log-determinant from the LMM's Cholesky factor.
     fn lmm_logdet(&self) -> f64 {
         // Delegate to the internal LMM's block structure
@@ -729,7 +784,10 @@ impl GeneralizedLinearMixedModel {
         n_agq: usize,
         verbose: bool,
     ) -> Result<&mut Self> {
-        self.validate_agq(n_agq)?;
+        if let Err(error) = self.validate_agq(n_agq) {
+            self.record_invalid_agq_diagnostic(n_agq, &error.to_string());
+            return Err(error);
+        }
         self.reset_for_refit(Some(new_y))?;
         self.fit_with_options(true, n_agq, verbose)
     }
@@ -769,7 +827,10 @@ impl GeneralizedLinearMixedModel {
                     .to_string(),
             ));
         }
-        self.validate_agq(n_agq)?;
+        if let Err(error) = self.validate_agq(n_agq) {
+            self.record_invalid_agq_diagnostic(n_agq, &error.to_string());
+            return Err(error);
+        }
         if self.lmm.optsum.feval > 0 {
             return Err(MixedModelError::AlreadyFitted);
         }
@@ -1555,6 +1616,22 @@ fn is_binary_response(value: f64) -> bool {
 
 fn is_intercept_column(name: &str) -> bool {
     matches!(name, "1" | "(Intercept)" | "Intercept" | "intercept")
+}
+
+fn random_effect_term_label(reterm: &ReMat) -> String {
+    let columns = reterm
+        .cnames
+        .iter()
+        .map(|name| {
+            if is_intercept_column(name) {
+                "1"
+            } else {
+                name.as_str()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" + ");
+    format!("({columns} | {})", reterm.grouping_name)
 }
 
 fn binary_column_split(values: impl Iterator<Item = f64>) -> Option<BinaryColumnSplit> {
