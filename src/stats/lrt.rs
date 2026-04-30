@@ -322,6 +322,44 @@ pub enum ModelComparisonRefitPolicy {
     Never,
 }
 
+/// Stable reason code for a model-comparison table row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelComparisonReasonCode {
+    InformationCriteriaRequested,
+    NonNestedModelsLrtInvalid,
+    MlRefitRequired,
+    LowerLoglikelihoodLrtInvalid,
+    SameModelSpaceLrtInvalid,
+    DifferentResponse,
+    DifferentFamily,
+    DifferentLink,
+    MixedFitCriterion,
+    InvalidModelOrder,
+    LrtUnavailable,
+}
+
+impl ModelComparisonReasonCode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ModelComparisonReasonCode::InformationCriteriaRequested => {
+                "information_criteria_requested"
+            }
+            ModelComparisonReasonCode::NonNestedModelsLrtInvalid => "non_nested_models_lrt_invalid",
+            ModelComparisonReasonCode::MlRefitRequired => "ml_refit_required",
+            ModelComparisonReasonCode::LowerLoglikelihoodLrtInvalid => {
+                "lower_loglikelihood_lrt_invalid"
+            }
+            ModelComparisonReasonCode::SameModelSpaceLrtInvalid => "same_model_space_lrt_invalid",
+            ModelComparisonReasonCode::DifferentResponse => "different_response",
+            ModelComparisonReasonCode::DifferentFamily => "different_family",
+            ModelComparisonReasonCode::DifferentLink => "different_link",
+            ModelComparisonReasonCode::MixedFitCriterion => "mixed_fit_criterion",
+            ModelComparisonReasonCode::InvalidModelOrder => "invalid_model_order",
+            ModelComparisonReasonCode::LrtUnavailable => "lrt_unavailable",
+        }
+    }
+}
+
 /// Options for building a [`ModelComparisonTable`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelComparisonOptions {
@@ -358,6 +396,7 @@ pub struct ModelComparisonRow {
     pub lrt_available: bool,
     pub information_criteria_available: bool,
     pub requires_ml_refit: bool,
+    pub reason_code: Option<String>,
     pub reason: Option<String>,
 }
 
@@ -421,6 +460,9 @@ impl ModelComparisonTable {
             };
 
             let reason = comparison_row_reason(assessment, options.method, lrt_reason);
+            let reason_code =
+                comparison_row_reason_code(assessment, options.method, reason.as_deref())
+                    .map(|code| code.as_str().to_string());
             let lrt_available = chisq.is_some();
             rows.push(ModelComparisonRow {
                 label: model
@@ -446,6 +488,7 @@ impl ModelComparisonTable {
                 requires_ml_refit: assessment
                     .map(|assessment| assessment.ml_refit_required)
                     .unwrap_or(false),
+                reason_code,
                 reason,
             });
         }
@@ -1276,6 +1319,40 @@ fn comparison_row_reason(
     None
 }
 
+fn comparison_row_reason_code(
+    assessment: Option<&ModelComparisonAssessment>,
+    method: ModelComparisonMethod,
+    reason: Option<&str>,
+) -> Option<ModelComparisonReasonCode> {
+    let assessment = assessment?;
+    if reason == Some("larger model has lower log-likelihood; likelihood-ratio columns omitted") {
+        return Some(ModelComparisonReasonCode::LowerLoglikelihoodLrtInvalid);
+    }
+    if assessment.ml_refit_required {
+        return Some(ModelComparisonReasonCode::MlRefitRequired);
+    }
+    if method == ModelComparisonMethod::InformationCriteria {
+        return Some(ModelComparisonReasonCode::InformationCriteriaRequested);
+    }
+    if assessment.lrt_available && reason.is_none() {
+        return None;
+    }
+
+    Some(match assessment.class {
+        ModelComparisonClass::NonNestedFixedEffects
+        | ModelComparisonClass::NonNestedRandomEffects => {
+            ModelComparisonReasonCode::NonNestedModelsLrtInvalid
+        }
+        ModelComparisonClass::SameModelSpace => ModelComparisonReasonCode::SameModelSpaceLrtInvalid,
+        ModelComparisonClass::DifferentResponse => ModelComparisonReasonCode::DifferentResponse,
+        ModelComparisonClass::DifferentFamily => ModelComparisonReasonCode::DifferentFamily,
+        ModelComparisonClass::DifferentLink => ModelComparisonReasonCode::DifferentLink,
+        ModelComparisonClass::MixedFitCriterion => ModelComparisonReasonCode::MixedFitCriterion,
+        ModelComparisonClass::InvalidModelOrder => ModelComparisonReasonCode::InvalidModelOrder,
+        _ => ModelComparisonReasonCode::LrtUnavailable,
+    })
+}
+
 fn finite_min(values: &[f64]) -> Option<f64> {
     values
         .iter()
@@ -1600,6 +1677,10 @@ mod tests {
             table.rows[1].reason.as_deref(),
             Some("fixed-effect column spaces are not nested")
         );
+        assert_eq!(
+            table.rows[1].reason_code.as_deref(),
+            Some("non_nested_models_lrt_invalid")
+        );
         assert!(table.rows[1].information_criteria_available);
     }
 
@@ -1624,6 +1705,10 @@ mod tests {
             Some(
                 "models differ in fixed effects but were fitted by REML; refit with ML for fixed-effect likelihood comparisons"
             )
+        );
+        assert_eq!(
+            table.rows[1].reason_code.as_deref(),
+            Some("ml_refit_required")
         );
 
         let err = ModelComparisonTable::compare_with_options(
@@ -1665,6 +1750,10 @@ mod tests {
         assert_eq!(
             table.rows[1].reason.as_deref(),
             Some("information-criteria comparison requested; likelihood-ratio columns omitted")
+        );
+        assert_eq!(
+            table.rows[1].reason_code.as_deref(),
+            Some("information_criteria_requested")
         );
     }
 
