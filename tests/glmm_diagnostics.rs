@@ -3,6 +3,7 @@
 use mixedmodels::compiler::{DiagnosticCode, DiagnosticSeverity, FitStatus};
 use mixedmodels::formula::parse_formula;
 use mixedmodels::model::{DataFrame, Family, GeneralizedLinearMixedModel, LinkFunction};
+use mixedmodels::types::Optimizer;
 
 fn gamma_diagnostic_fixture() -> DataFrame {
     let group_effects = [-0.2, 0.0, 0.25, -0.05];
@@ -113,4 +114,43 @@ fn glmm_invalid_agq_request_records_stable_artifact_diagnostic() {
         .get("reason")
         .and_then(|value| value.as_str())
         .is_some_and(|reason| reason.contains("requires exactly one scalar random-effects term")));
+}
+
+#[test]
+fn glmm_final_pirls_failure_records_stable_artifact_diagnostic() {
+    let data = gamma_diagnostic_fixture();
+    let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
+    let mut model =
+        GeneralizedLinearMixedModel::new(formula, &data, Family::Gamma, Some(LinkFunction::Log))
+            .unwrap();
+    model.lmm.optsum.optimizer = Optimizer::PatternSearch;
+    model.lmm.optsum.initial = vec![f64::NAN];
+    model.lmm.optsum.max_feval = 1;
+
+    let err = model
+        .fit_with_options(true, 1, false)
+        .expect_err("final PIRLS update should reject nonfinite theta");
+
+    assert!(err.to_string().contains("theta"));
+    let diagnostic = model
+        .compiler_artifact()
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == DiagnosticCode::PirlsFailure)
+        .expect("final PIRLS failure should be recorded on the artifact");
+    assert_eq!(diagnostic.severity, DiagnosticSeverity::Error);
+    assert!(diagnostic.message.contains("PIRLS failed"));
+    assert_eq!(
+        diagnostic.payload.get("theta_len"),
+        Some(&serde_json::json!(1))
+    );
+    assert_eq!(
+        diagnostic.payload.get("nonfinite_theta_indices"),
+        Some(&serde_json::json!([0]))
+    );
+    assert!(diagnostic
+        .payload
+        .get("reason")
+        .and_then(|value| value.as_str())
+        .is_some_and(|reason| reason.contains("theta")));
 }

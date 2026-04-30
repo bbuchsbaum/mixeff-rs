@@ -78,6 +78,7 @@ pub enum DiagnosticCode {
     BinomialSeparation,
     NotIdentifiable,
     InvalidAgqRequest,
+    PirlsFailure,
     OptimizerNotAssessed,
     OptimizerNonconvergence,
     InferenceUnavailable,
@@ -169,6 +170,7 @@ mod tests {
             ),
             (DiagnosticCode::StructuralRefusal, "\"structural_refusal\""),
             (DiagnosticCode::InvalidAgqRequest, "\"invalid_agq_request\""),
+            (DiagnosticCode::PirlsFailure, "\"pirls_failure\""),
             (
                 DiagnosticCode::OptimizerNonconvergence,
                 "\"optimizer_nonconvergence\"",

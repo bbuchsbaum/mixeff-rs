@@ -732,6 +732,48 @@ impl GeneralizedLinearMixedModel {
         self.lmm.compiler_artifact.diagnostics.push(diagnostic);
     }
 
+    fn record_pirls_failure_diagnostic(&mut self, theta: &[f64], reason: &str) {
+        self.lmm
+            .compiler_artifact
+            .diagnostics
+            .retain(|diagnostic| diagnostic.code != DiagnosticCode::PirlsFailure);
+
+        let affected_terms = self
+            .lmm
+            .reterms
+            .iter()
+            .map(random_effect_term_label)
+            .collect::<Vec<_>>();
+        let nonfinite_theta_indices = theta
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value)| (!value.is_finite()).then_some(index))
+            .collect::<Vec<_>>();
+        let mut diagnostic = Diagnostic::new(
+            DiagnosticCode::PirlsFailure,
+            DiagnosticSeverity::Error,
+            DiagnosticStage::Optimization,
+            "PIRLS failed while evaluating the final optimizer parameters for the GLMM; the fit was not completed.",
+        )
+        .with_affected_terms(affected_terms)
+        .with_suggested_actions(vec![
+            "inspect the optimizer return code and theta values before using this fit".to_string(),
+            "try a different starting value, a simpler random-effects structure, or a lower optimizer step budget to localize the failure".to_string(),
+            "check response domain, offsets, weights, and predictor scaling for invalid values".to_string(),
+        ]);
+        diagnostic
+            .payload
+            .insert("reason".to_string(), serde_json::json!(reason));
+        diagnostic
+            .payload
+            .insert("theta_len".to_string(), serde_json::json!(theta.len()));
+        diagnostic.payload.insert(
+            "nonfinite_theta_indices".to_string(),
+            serde_json::json!(nonfinite_theta_indices),
+        );
+        self.lmm.compiler_artifact.diagnostics.push(diagnostic);
+    }
+
     /// Log-determinant from the LMM's Cholesky factor.
     fn lmm_logdet(&self) -> f64 {
         // Delegate to the internal LMM's block structure
@@ -1270,7 +1312,10 @@ impl GeneralizedLinearMixedModel {
 
         // Final PIRLS at optimal θ, after matching MixedModels.jl's
         // post-optimizer sign convention for Cholesky columns.
-        self.update_pirls_at_theta(theta, true)?;
+        if let Err(error) = self.update_pirls_at_theta(theta, true) {
+            self.record_pirls_failure_diagnostic(theta, &error.to_string());
+            return Err(error);
+        }
         self.beta = self.lmm.beta();
         self.refresh_dispersion();
 
