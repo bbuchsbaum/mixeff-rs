@@ -3758,23 +3758,40 @@ impl OptimizerCertificate {
                 code: optsum.return_value.clone(),
                 message: "optimizer did not report an acceptable convergence stop".to_string(),
             });
-            diagnostics.push(
-                Diagnostic::new(
-                    DiagnosticCode::OptimizerNotAssessed,
-                    DiagnosticSeverity::Warning,
-                    DiagnosticStage::Certification,
-                    format!(
-                        "optimizer stopped with return code '{}'",
-                        optsum.return_value
-                    ),
-                )
-                .with_suggested_actions(vec![
-                    "increase the optimizer function-evaluation or time budget".to_string(),
-                    "try an alternate optimizer and compare the objective and theta".to_string(),
-                    "scale predictors or the response if finite-difference gradients look unstable"
-                        .to_string(),
-                ]),
+            let mut diagnostic = Diagnostic::new(
+                DiagnosticCode::OptimizerNonconvergence,
+                DiagnosticSeverity::Warning,
+                DiagnosticStage::Certification,
+                format!(
+                    "optimizer stopped before an acceptable convergence criterion with return code '{}'",
+                    optsum.return_value
+                ),
+            )
+            .with_suggested_actions(vec![
+                "increase the optimizer function-evaluation or time budget".to_string(),
+                "try an alternate optimizer and compare the objective and theta".to_string(),
+                "scale predictors or the response if finite-difference gradients look unstable"
+                    .to_string(),
+            ]);
+            diagnostic.payload.insert(
+                "return_code".to_string(),
+                serde_json::json!(optsum.return_value),
             );
+            diagnostic.payload.insert(
+                "budget_exhausted".to_string(),
+                serde_json::json!(optimizer_budget_exhausted(optsum)),
+            );
+            diagnostic.payload.insert(
+                "function_evaluations".to_string(),
+                serde_json::json!(optsum.feval.max(0) as usize),
+            );
+            if optsum.max_feval > 0 {
+                diagnostic.payload.insert(
+                    "max_function_evaluations".to_string(),
+                    serde_json::json!(optsum.max_feval as usize),
+                );
+            }
+            diagnostics.push(diagnostic);
         }
 
         for &index in &boundary_indices {

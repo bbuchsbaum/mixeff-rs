@@ -78,6 +78,7 @@ pub enum DiagnosticCode {
     BinomialSeparation,
     NotIdentifiable,
     OptimizerNotAssessed,
+    OptimizerNonconvergence,
     InferenceUnavailable,
     SerializationNotAssessed,
     Unsupported,
@@ -166,6 +167,10 @@ mod tests {
                 "\"covariance_assumption\"",
             ),
             (DiagnosticCode::StructuralRefusal, "\"structural_refusal\""),
+            (
+                DiagnosticCode::OptimizerNonconvergence,
+                "\"optimizer_nonconvergence\"",
+            ),
         ];
 
         for (code, expected) in cases {
