@@ -85,6 +85,101 @@ fn comparison_manifest_matches_registry_derived() {
     }
 }
 
+/// CSV header must declare every column in `meta.toml::[[columns]]`.
+/// (Extra CSV columns are tolerated — some upstreams emit indices we
+/// don't model. This catches the dropped-column case where meta.toml
+/// claims a column the CSV doesn't have.)
+#[test]
+fn csv_header_contains_every_declared_column() {
+    for meta in datasets::iter() {
+        let name = &meta.name;
+        let csv_path = datasets::datasets_root().join(name).join("data.csv");
+        let text = fs::read_to_string(&csv_path)
+            .unwrap_or_else(|e| panic!("{name}: read {csv_path:?}: {e}"));
+        let header_line = text
+            .lines()
+            .next()
+            .unwrap_or_else(|| panic!("{name}: empty data.csv"));
+        let headers: Vec<&str> = header_line
+            .split(',')
+            .map(|s| s.trim().trim_matches('"'))
+            .collect();
+        for col in &meta.columns {
+            assert!(
+                headers.iter().any(|h| *h == col.name),
+                "{name}: meta.toml declares column `{}` but CSV header is {:?}",
+                col.name,
+                headers
+            );
+        }
+    }
+}
+
+/// Cross-check `_levels.txt` against `meta.toml::[[columns]].levels`.
+/// `_levels.txt` is written by the dump scripts; meta.toml is hand-curated.
+/// They must agree level-for-level so any future re-dump that reorders
+/// factor levels surfaces in the diff rather than silently changing
+/// canonical contrast coding.
+#[test]
+fn levels_txt_matches_meta_levels() {
+    use mixedmodels::datasets::ColumnType;
+
+    for meta in datasets::iter() {
+        let name = &meta.name;
+        let levels_path = datasets::datasets_root().join(name).join("_levels.txt");
+        if !levels_path.is_file() {
+            // _levels.txt is optional per REGISTRY.md, but if absent the
+            // dataset must declare every categorical levels block in meta.
+            for col in &meta.columns {
+                if matches!(col.kind, ColumnType::Categorical) {
+                    assert!(
+                        col.levels.is_some(),
+                        "{name}: column `{}` is categorical, has no _levels.txt, and no `levels` declared in meta.toml",
+                        col.name
+                    );
+                }
+            }
+            continue;
+        }
+
+        let text = fs::read_to_string(&levels_path).unwrap();
+        let mut from_file: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        for line in text.lines() {
+            // Format: "<column>: <level1>,<level2>,..."
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some((col, rest)) = line.split_once(':') {
+                let levels: Vec<String> =
+                    rest.trim().split(',').map(|s| s.trim().to_string()).collect();
+                from_file.insert(col.trim().to_string(), levels);
+            }
+        }
+
+        for col in &meta.columns {
+            if !matches!(col.kind, ColumnType::Categorical) {
+                continue;
+            }
+            // meta.toml may deliberately omit `levels` for high-cardinality
+            // factors (e.g. per-observation IDs); that's a valid choice.
+            // We only assert here when both sides declare an order — that's
+            // where drift between dump scripts and hand-edited meta surfaces.
+            let Some(declared) = &col.levels else { continue };
+            let from_file_levels = match from_file.get(&col.name) {
+                Some(v) => v,
+                None => continue, // not in _levels.txt — skip (some upstream sources don't dump it)
+            };
+            assert_eq!(
+                declared, from_file_levels,
+                "{name}: column `{}` levels mismatch.\n  meta.toml:  {:?}\n  _levels.txt: {:?}",
+                col.name, declared, from_file_levels
+            );
+        }
+    }
+}
+
 /// Walk a `tests/fixtures/<dir>/` and collect every `*.json` that is *not*
 /// itself a `*.provenance.json` sibling.
 fn golden_jsons(dir: &Path) -> Vec<PathBuf> {
