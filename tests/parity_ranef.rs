@@ -24,6 +24,8 @@ fn fixture() -> RanefFixture {
     serde_json::from_str(include_str!("fixtures/parity/kb07_ranef.json")).unwrap()
 }
 
+// toy: 5 subjects × 4 items kb07-shaped data; paired with
+// `fixtures/parity/kb07_ranef.json` for the ranef-matrix parity test.
 fn kb07_style_data() -> DataFrame {
     let subj_effects = [-1.0, 0.5, 1.2, -0.4, -0.3];
     let subj_slopes = [-0.3, 0.2, 0.1, -0.2, 0.4];

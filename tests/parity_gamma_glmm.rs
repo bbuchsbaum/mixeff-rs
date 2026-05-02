@@ -68,6 +68,8 @@ fn fixture() -> GammaGlmmFixture {
     serde_json::from_str(include_str!("fixtures/parity/gamma_glmm_engines.json")).unwrap()
 }
 
+// toy: matches `fixtures/parity/gamma_glmm_engines.json`; row order is
+// part of the parity assertion (see `reversed_gamma_log_data` invariance test).
 fn gamma_log_data() -> DataFrame {
     let expected = fixture();
     let recipe = expected.data_recipe;
@@ -94,6 +96,7 @@ fn gamma_log_data() -> DataFrame {
     data
 }
 
+// toy: row-reversed `gamma_log_data`; tests fit-invariance to row order.
 fn reversed_gamma_log_data() -> DataFrame {
     let data = gamma_log_data();
     let mut indices = (0..data.nrow()).collect::<Vec<_>>();

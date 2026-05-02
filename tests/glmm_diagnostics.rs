@@ -5,6 +5,8 @@ use mixedmodels::formula::parse_formula;
 use mixedmodels::model::{DataFrame, Family, GeneralizedLinearMixedModel, LinkFunction};
 use mixedmodels::types::Optimizer;
 
+// toy: 5 groups × 5 obs of Gamma/Log; covers PIRLS, AGQ-refusal,
+// boundary-θ, and near-unity-correlation diagnostic paths.
 fn gamma_diagnostic_fixture() -> DataFrame {
     let group_effects = [-0.2, 0.0, 0.25, -0.05];
     let mut y = Vec::new();

@@ -2,10 +2,14 @@ use mixedmodels::compiler::{DiagnosticCode, DiagnosticSeverity};
 use mixedmodels::formula::parse_formula;
 use mixedmodels::model::{DataFrame, Family, GeneralizedLinearMixedModel, MixedModelFit};
 
+// toy: lme4 GH-124 reproducer with one `x2 = 1.0` outlier row.
 fn lme4_issue_124_complete_separation_data() -> DataFrame {
     lme4_issue_124_data(&[(999, 0.0)])
 }
 
+// toy helper for `lme4_issue_124_complete_separation_data`: 1000 rows,
+// 20 groups × 50 obs, deterministic Bernoulli-ish y; row count and
+// structure mirror the upstream lme4 issue (GH-124).
 fn lme4_issue_124_data(x2_rows: &[(usize, f64)]) -> DataFrame {
     let mut y = Vec::with_capacity(1000);
     let mut x = Vec::with_capacity(1000);

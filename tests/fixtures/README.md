@@ -67,3 +67,29 @@ upgrades will fill `source_case` and `reference_engine`.
    `schema_version`, `generated_at`, `regenerator`. Add `source_case` and
    `reference_engine` when the golden encodes a fit against an external engine.
 4. Verify `cargo test --test fixture_hygiene` passes.
+
+## Inline test data — when not to use a fixture
+
+Integration tests under `tests/*.rs` may build a `DataFrame` inline as long
+as the data is **toy**: small (≤30 rows), bespoke, deterministic, and
+intended to exercise a specific compiler/inference path rather than to
+benchmark numerics. Those tests should mark the builder function with a
+short justifying comment, e.g.:
+
+```rust
+// toy: 5 subjects × 4 items, parameterized to match the parmap structure
+// asserted by `fixtures/parity/parmap_vsize3.json`. Promoting to a
+// vendored fixture would only obscure the structural recipe.
+fn parmap_vsize3_data() -> DataFrame { … }
+```
+
+Promote inline data to `datasets/<name>/` only when:
+
+- the same shape is built in two test files with minor variations (deduplication win), **or**
+- it represents a real research design that would be useful to the wider catalog (parameterized tests, benches), **or**
+- a downstream R/parity workflow needs to consume the same data via a CSV.
+
+For everything else, inline is the right choice — the data construction
+*is* the documentation. Keeping it in the test file (rather than a CSV in
+`datasets/`) preserves the recipe (`subject_effects = [-1.0, 0.5, ...]`)
+in plain sight where the assertions can reference it.

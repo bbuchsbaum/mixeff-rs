@@ -6,6 +6,8 @@ use mixedmodels::compiler::{
 use mixedmodels::formula::parse_formula;
 use mixedmodels::model::{DataFrame, Family, GeneralizedLinearMixedModel, LinkFunction};
 
+// toy: 4 groups × 5 obs of Gamma/Log GLMM data; tests the artifact
+// metadata surface, not numerical fit accuracy.
 fn gamma_log_contract_data() -> DataFrame {
     let mut y = Vec::new();
     let mut x = Vec::new();

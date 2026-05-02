@@ -39,6 +39,8 @@ fn fixture() -> RankFixture {
     serde_json::from_str(include_str!("fixtures/parity/rank_deficient_metrics.json")).unwrap()
 }
 
+// toy: 24 rows with `x2 = 2 * x` (deliberately collinear); paired with
+// `fixtures/parity/rank_deficient_metrics.json` for the rank/dof/AIC test.
 fn rank_deficient_data() -> DataFrame {
     let n = 24;
     let x: Vec<f64> = (0..n).map(|i| (i % 4) as f64).collect();
@@ -60,6 +62,8 @@ fn rank_deficient_data() -> DataFrame {
     data
 }
 
+// toy: parameterized GH-809 reproducer; seeded with `StdRng(809)` so
+// different (n, p) shapes yield deterministic data the test sweeps over.
 fn issue_809_wide_fixed_effect_data(n: usize, p: usize) -> DataFrame {
     let mut rng = rand::rngs::StdRng::seed_from_u64(809);
     let mut y = Vec::with_capacity(n);

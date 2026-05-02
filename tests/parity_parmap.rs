@@ -28,6 +28,8 @@ fn fixture() -> ParmapFixture {
     serde_json::from_str(include_str!("fixtures/parity/parmap_vsize3.json")).unwrap()
 }
 
+// toy: 4 subjects × 5 obs of vsize=3 random-effects data; paired with
+// `fixtures/parity/parmap_vsize3.json` for the lower-triangular index test.
 fn parmap_vsize3_data() -> DataFrame {
     let subj_effects = [-0.8, 0.35, 0.6, -0.15];
     let mut y = Vec::with_capacity(20);

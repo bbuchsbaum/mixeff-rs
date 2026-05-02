@@ -67,6 +67,8 @@ fn weighted_cbpp_model(n_agq: usize) -> GeneralizedLinearMixedModel {
     model
 }
 
+// toy: 4 groups × Poisson with explicit `exposure` offset vector;
+// covers the offset-contract path of the native GLMM compiler.
 fn poisson_offset_data() -> (DataFrame, Vec<f64>) {
     let group_effects = [-0.25, 0.1, 0.35, -0.05];
     let mut y = Vec::new();
@@ -97,6 +99,8 @@ fn poisson_offset_data() -> (DataFrame, Vec<f64>) {
     (data, offset)
 }
 
+// toy: 5 groups Gamma/Log GLMM; covers the dispersion-contract path of
+// the native GLMM compiler.
 fn gamma_log_data() -> DataFrame {
     let group_effects = [-0.18, 0.0, 0.22, 0.08, -0.12];
     let mut y = Vec::new();
