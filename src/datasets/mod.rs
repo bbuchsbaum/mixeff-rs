@@ -622,7 +622,7 @@ mod tests {
         assert_eq!(names, sorted, "iter() must yield datasets in sorted order");
         assert!(names.contains(&"sleepstudy".to_string()));
         assert!(names.contains(&"kb07".to_string()));
-        assert!(names.len() >= 23);
+        assert!(names.len() >= 24);
     }
 
     #[test]
@@ -680,6 +680,33 @@ mod tests {
         assert!(expected_for("sleepstudy", "Reaction ~ 1", "REML")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn loads_mrk17_exp1_optimizer_stress() {
+        let (df, meta) = load("mrk17_exp1").unwrap();
+        assert_eq!(meta.name, "mrk17_exp1");
+        assert_eq!(df.nrow(), 16409);
+        assert_eq!(df.categorical("subj").unwrap().n_levels(), 73);
+        assert_eq!(df.categorical("item").unwrap().n_levels(), 240);
+        assert_eq!(df.categorical("F").unwrap().levels, vec!["LF".to_string(), "HF".to_string()]);
+        // Derived `speed = 1000 / rt` is the response in all three fits.
+        assert!(df.numeric("speed").is_some());
+        assert!(df.numeric("rt").is_some());
+
+        // Three pinned fits matching kb07's structure: scalar baseline,
+        // zerocorr maximal, full maximal. The zerocorr fit goes singular
+        // on this design — useful for testing how the diagnostic surface
+        // distinguishes "expected boundary on diagonal RE" from drift.
+        assert_eq!(meta.fits.len(), 3);
+        let scalar = meta.fits[0].expected.as_ref().unwrap();
+        let zerocorr = meta.fits[1].expected.as_ref().unwrap();
+        let maximal = meta.fits[2].expected.as_ref().unwrap();
+        assert_eq!(zerocorr.is_singular, Some(true));
+        // Objectives strictly improve scalar → zerocorr → maximal.
+        assert!(scalar.objective.unwrap() > zerocorr.objective.unwrap());
+        assert!(zerocorr.objective.unwrap() > maximal.objective.unwrap());
+        assert_eq!(meta.tags.difficulty.as_deref(), Some("stress"));
     }
 
     #[test]
@@ -802,7 +829,7 @@ mod tests {
             );
             checked += 1;
         }
-        assert!(checked >= 23, "expected at least 23 shipped datasets, saw {checked}");
+        assert!(checked >= 24, "expected at least 24 shipped datasets, saw {checked}");
     }
 
     /// Sanity-check every Tier-1 + Tier-2 dataset that lives in the repo.
@@ -834,6 +861,7 @@ mod tests {
             "gopherdat2",
             "culcitalogreg",
             "contraception",
+            "mrk17_exp1",
         ];
         for name in names {
             let dir = datasets_root().join(name);

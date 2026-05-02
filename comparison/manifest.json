@@ -145,6 +145,30 @@
       "weights": null
     },
     {
+      "dataset": "mrk17_exp1",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "speed ~ 1 + F * P * Q + (1 | subj) + (1 | item)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "mrk17_exp1",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "speed ~ 1 + F * P * Q + (1 + F * P * Q || subj) + (1 + F * P * Q || item)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "mrk17_exp1",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "speed ~ 1 + F * P * Q + (1 + F * P * Q | subj) + (1 + F * P * Q | item)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
       "dataset": "nested_constant_response",
       "estimator": "REML",
       "family": "Gaussian",

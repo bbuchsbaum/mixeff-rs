@@ -155,16 +155,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut manifest = Vec::new();
     let mut results = Vec::new();
 
+    // Stress-tier datasets (kb07, mrk17_exp1, future InstEval) have maximal-RE
+    // fits that take many minutes through the in-crate engine. Skip the fit
+    // step (but still emit them in the manifest) unless the caller explicitly
+    // opts in. The manifest derivation is independent of fit success, so
+    // fixture_hygiene::comparison_manifest_matches_registry_derived stays green.
+    let include_stress = std::env::var("MIXEDMODELS_INCLUDE_STRESS").is_ok();
+
     // Drive every (dataset, fit) pair from the catalog. comparison/manifest.json
     // is now a *derived* view of datasets/REGISTRY.md rather than a hand-edited
     // file; the fixture_hygiene test guards against drift.
     for case in datasets::iter_cases() {
         let mixedmodels::datasets::Case {
             name,
-            meta: _,
+            meta,
             fit,
             fit_index: _,
         } = case;
+        let is_stress = meta.tags.difficulty.as_deref() == Some("stress");
 
         let (df, _) = match datasets::load(&name) {
             Ok(loaded) => loaded,
@@ -207,6 +215,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 fit_time_ms_min: None,
                 fit_time_ms_repeats: None,
             };
+
+            // Skip stress-tier fits unless explicitly opted in. The maximal RE
+            // models on kb07 / mrk17_exp1 / InstEval can take 10+ minutes per
+            // fit through the in-crate engine — too slow for routine regen.
+            // Set MIXEDMODELS_INCLUDE_STRESS=1 to fit them anyway.
+            if is_stress && !include_stress {
+                rec.status = "skipped_stress".into();
+                rec.error = Some(
+                    "stress fixture; set MIXEDMODELS_INCLUDE_STRESS=1 to fit".into(),
+                );
+                results.push(rec);
+                continue;
+            }
 
             // Only fit Gaussian/Identity LMMs in v1 — GLMMs require additional plumbing.
             let is_gaussian_identity = fit.family.eq_ignore_ascii_case("Gaussian")

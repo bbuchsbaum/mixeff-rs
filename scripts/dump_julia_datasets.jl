@@ -338,4 +338,13 @@ dump_one(kb07, "kb07", root; pin_only=pin_only)
 oxide = DataFrame(MixedModels.dataset(:oxide))
 dump_one(oxide, "oxide", root; pin_only=pin_only)
 
+# mrk17_exp1 — Masson, Rabe & Kliegl (2017) lexical decision experiment.
+# 16409 rows, 73 subjects × 240 items, 3 within-subject factors (F, P, Q).
+# Adds a derived `speed = 1000.0/rt` numeric column so the recommended
+# formulas can fit through engines that don't support division-in-formula.
+# Stress fixture #2 alongside kb07 — maximal model is expected singular.
+mrk17 = DataFrame(MixedModels.dataset(:mrk17_exp1))
+mrk17.speed = 1000.0 ./ mrk17.rt
+dump_one(mrk17, "mrk17_exp1", root; pin_only=pin_only)
+
 @info "done."

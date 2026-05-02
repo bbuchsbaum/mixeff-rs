@@ -1,0 +1,108 @@
+name = "mrk17_exp1"
+source = "MixedModels.jl :mrk17_exp1"
+license = "Per MixedModels.jl test data — see https://github.com/JuliaStats/MixedModels.jl"
+n_rows = 16409
+description = """
+Masson, Rabe & Kliegl (2017) lexical-decision experiment — the second
+optimizer-stress fixture alongside kb07. 73 subjects × 240 items, 3
+within-subject factors (F = word frequency, P = prime relatedness,
+Q = target quality), with derived `speed = 1000 / rt` as the standard
+psycholinguistic response variable.
+
+Why this fixture matters: kb07 and mrk17_exp1 stress different corners
+of the optimizer landscape. kb07 has 56 subjects × 32 items with 4
+fixed effects; mrk17_exp1 has 73 × 240 with the full F × P × Q
+interaction (8 fixed effects in the maximal model). A regression that
+slips past kb07 may still surface here.
+
+Item levels are recorded in `_levels.txt` (240 stimulus words) but not
+duplicated in this meta.toml — `[[columns]] item` declares the column
+without an explicit `levels` list, so the loader uses CSV first-appearance
+order, which matches the upstream MixedModels.jl ordering.
+"""
+
+[[columns]]
+name = "subj"
+type = "categorical"
+levels = ["S01","S02","S03","S04","S05","S06","S07","S08","S09","S10",
+          "S11","S12","S13","S14","S15","S16","S17","S18","S19","S20",
+          "S21","S22","S23","S24","S25","S26","S27","S28","S29","S30",
+          "S31","S32","S33","S34","S35","S36","S37","S38","S39","S40",
+          "S41","S42","S43","S44","S45","S46","S47","S48","S49","S50",
+          "S51","S52","S53","S54","S55","S56","S57","S58","S59","S60",
+          "S61","S62","S63","S64","S65","S66","S67","S68","S69","S70",
+          "S71","S72","S73"]
+
+[[columns]]
+# 240 stimulus words; canonical order recorded in _levels.txt.
+name = "item"
+type = "categorical"
+
+[[columns]]
+name = "trial"
+type = "numeric"          # within-session trial index
+
+[[columns]]
+name = "F"
+type = "categorical"
+levels = ["LF", "HF"]      # word frequency: low / high
+
+[[columns]]
+name = "P"
+type = "categorical"
+levels = ["unr", "rel"]    # prime relatedness: unrelated / related
+
+[[columns]]
+name = "Q"
+type = "categorical"
+levels = ["deg", "clr"]    # target quality: degraded / clear
+
+[[columns]]
+name = "lQ"
+type = "categorical"
+levels = ["deg", "clr"]    # within-list quality manipulation
+
+[[columns]]
+name = "lT"
+type = "categorical"
+levels = ["NW", "WD"]      # target type: nonword / word
+
+[[columns]]
+name = "rt"
+type = "numeric"
+unit = "ms"
+
+[[columns]]
+# Derived `1000 / rt` — the standard speed-of-response transform used
+# by Masson 2017 and most psycholinguistic LMM literature.
+name = "speed"
+type = "numeric"
+
+[[fits]]
+# Scalar-RE baseline — the quick guard.
+formula = "speed ~ 1 + F * P * Q + (1 | subj) + (1 | item)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+
+[[fits]]
+# Zero-correlation maximal — the recommended diagnostic when the full
+# maximal model is singular. Random slopes for every fixed-effect term
+# but with diagonal covariance per grouping factor.
+formula = "speed ~ 1 + F * P * Q + (1 + F * P * Q || subj) + (1 + F * P * Q || item)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+
+[[fits]]
+# Maximal model — the optimizer-stress trigger. Likely singular; pinned
+# for parity with kb07's maximal-model treatment.
+formula = "speed ~ 1 + F * P * Q + (1 + F * P * Q | subj) + (1 + F * P * Q | item)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+
+[tags]
+structure = ["random_intercept", "random_slope", "crossed", "psycholinguistic"]
+difficulty = "stress"
+notes = "Masson, Rabe & Kliegl 2017 lexical decision; F×P×Q interaction maximal model is the second optimizer stress fixture (kb07 is the first)."

@@ -120,6 +120,7 @@ near-singular covariance. Sourced from `MixedModels.jl` rather than `lme4`.
 | --------- | ---- | -------------------------------- | --------------------------------- | ---------- | ----- |
 | `kb07`    | 1789 | `MixedModels.jl :kb07`           | crossed (subj × item), 6 fixed effects | **stress** | Kliegl & Bates (2007); maximal RE model often singular |
 | `oxide`   |   72 | `MixedModels.jl :oxide`          | 3-level nested (Lot → Wafer → Site) | easy     | Pinheiro & Bates (2000); canonical 3-level reference |
+| `mrk17_exp1` | 16409 | `MixedModels.jl :mrk17_exp1`  | crossed (73 subj × 240 items), F×P×Q maximal RE | **stress** | Masson, Rabe & Kliegl (2017) lexical decision; second optimizer-stress fixture alongside kb07 |
 | `singular`|  150 | Cross Validated / GitHub mirror  | 8-D random coefficient covariance | **boundary** | Maximal model is singular without obvious VarCorr symptoms; rePCA/effective-rank story |
 | `tungara_single_caller`| 2955 | Dryad doi:10.5061/dryad.3n5tb2rrz | binomial GLMM with cell-level random slope | **stress** | Public fallback found while investigating lme4 GH720; exact GH720 data is unavailable |
 | `station_season_duration`| 54 | Cross Validated forum example | balanced site × season × duration cells | **boundary** | Forum-suggested `(1 + duration | sites) + (1 + duration | season)` over-requests covariance from three-level grouping factors |
