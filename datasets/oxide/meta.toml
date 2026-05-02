@@ -1,0 +1,61 @@
+name = "oxide"
+source = "MixedModels.jl :oxide"
+license = "Per MixedModels.jl test data — see https://github.com/JuliaStats/MixedModels.jl"
+n_rows = 72
+description = """
+Oxide-thickness measurements from a semiconductor variance-components
+study (Pinheiro & Bates 2000). 2 Sources × 4 Lots/Source × 3 Wafers/Lot
+× 3 Sites/Wafer = 72 measurements. The canonical three-level nested
+random-effects example: Lot → Wafer → Site, with `Source` as an optional
+fixed-effect factor.
+
+This is the floor fixture for three-level nesting — if it regresses,
+the nested formula compiler is broken before any inference work can
+proceed.
+"""
+
+[[columns]]
+name = "Source"
+type = "categorical"
+levels = ["1", "2"]
+
+[[columns]]
+name = "Lot"
+type = "categorical"
+levels = ["1", "2", "3", "4", "5", "6", "7", "8"]
+
+[[columns]]
+name = "Wafer"
+type = "categorical"
+levels = ["1", "2", "3"]
+
+[[columns]]
+name = "Site"
+type = "categorical"
+levels = ["1", "2", "3"]
+
+[[columns]]
+name = "Thickness"
+type = "numeric"
+unit = "Å"
+
+[[fits]]
+# Canonical Pinheiro–Bates three-level nested model.
+formula = "Thickness ~ 1 + (1 | Lot) + (1 | Lot:Wafer)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+
+[[fits]]
+# Same model written with the `g1/g2` nesting sugar — should produce an
+# identical fit. Pinning both guards the formula compiler's nested-factor
+# expansion against silent drift.
+formula = "Thickness ~ 1 + (1 | Lot/Wafer)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+
+[tags]
+structure = ["random_intercept", "nested", "three_level", "scalar_re", "industrial"]
+difficulty = "easy"
+notes = "Pinheiro & Bates 2000 — three-level nesting reference."

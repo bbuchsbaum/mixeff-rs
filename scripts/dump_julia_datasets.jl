@@ -13,7 +13,7 @@
 # `[fits.expected]` blocks in meta.toml always win — sibling expected.toml
 # only fills slots that meta.toml leaves empty.
 
-using MixedModels, DataFrames, StatsModels, Dates, Printf
+using MixedModels, DataFrames, StatsModels, CategoricalArrays, Dates, Printf
 using TOML
 
 # ---- Repo location ------------------------------------------------------
@@ -129,6 +129,19 @@ function parse_formula(text::AbstractString)
     Core.eval(@__MODULE__, expr)
 end
 
+# MixedModels.jl needs grouping factors as CategoricalArrays for `:`
+# interaction terms to type-check. Some `:dataset(...)` returns Strings
+# (oxide does); promote in place before fitting so the dataset-loader
+# user doesn't have to think about it.
+function categoricalize_strings!(df::DataFrame)
+    for col in propertynames(df)
+        if eltype(df[!, col]) <: AbstractString
+            df[!, col] = CategoricalArray(df[!, col])
+        end
+    end
+    df
+end
+
 function fit_one(formula_text::String, family_text::String, link_text::String,
                  estimator_text::String, weights_text::Union{Nothing,String},
                  df::DataFrame)
@@ -138,7 +151,7 @@ function fit_one(formula_text::String, family_text::String, link_text::String,
         reml = est == "reml"
         try
             form = parse_formula(formula_text)
-            return fit(MixedModel, form, df; REML = reml, progress = false)
+            return fit(MixedModel, form, categoricalize_strings!(copy(df)); REML = reml, progress = false)
         catch e
             @warn "lmm fit failed" formula=formula_text exception=e
             return nothing
@@ -318,5 +331,11 @@ root = repo_root()
 # Frequently produces a singular RE covariance with the maximal model.
 kb07 = DataFrame(MixedModels.dataset(:kb07))
 dump_one(kb07, "kb07", root; pin_only=pin_only)
+
+# oxide — Pinheiro & Bates (2000) three-level nested variance-components.
+# 72 rows, 2 Sources × 4 Lots/Source × 3 Wafers/Lot × 3 Sites/Wafer.
+# The canonical 3-level nesting reference.
+oxide = DataFrame(MixedModels.dataset(:oxide))
+dump_one(oxide, "oxide", root; pin_only=pin_only)
 
 @info "done."

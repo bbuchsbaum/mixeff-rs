@@ -145,6 +145,22 @@
       "weights": null
     },
     {
+      "dataset": "oxide",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "Thickness ~ 1 + (1 | Lot) + (1 | Lot:Wafer)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "oxide",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "Thickness ~ 1 + (1 | Lot/Wafer)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
       "dataset": "pastes",
       "estimator": "REML",
       "family": "Gaussian",

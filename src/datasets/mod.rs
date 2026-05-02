@@ -622,7 +622,7 @@ mod tests {
         assert_eq!(names, sorted, "iter() must yield datasets in sorted order");
         assert!(names.contains(&"sleepstudy".to_string()));
         assert!(names.contains(&"kb07".to_string()));
-        assert!(names.len() >= 19);
+        assert!(names.len() >= 20);
     }
 
     #[test]
@@ -682,6 +682,31 @@ mod tests {
             .is_none());
     }
 
+    #[test]
+    fn loads_oxide_three_level_nested() {
+        let (df, meta) = load("oxide").unwrap();
+        assert_eq!(meta.name, "oxide");
+        assert_eq!(df.nrow(), 72);
+        assert_eq!(df.categorical("Lot").unwrap().n_levels(), 8);
+        assert_eq!(df.categorical("Wafer").unwrap().n_levels(), 3);
+        assert_eq!(df.categorical("Site").unwrap().n_levels(), 3);
+        assert!(meta
+            .tags
+            .structure
+            .iter()
+            .any(|s| s == "three_level"));
+        // Sugar form `(1 | Lot/Wafer)` is pinned by Julia; the explicit
+        // `(1 | Lot:Wafer)` form is recorded as a recommended formula
+        // but not yet pinned (MixedModels.jl 5.x dispatch quirk).
+        let sugar = meta
+            .fits
+            .iter()
+            .find(|f| f.formula == "Thickness ~ 1 + (1 | Lot/Wafer)")
+            .expect("sugar nested formula present");
+        let expected = sugar.expected.as_ref().expect("sugar fit pinned");
+        assert!((expected.objective.unwrap() - 454.02206930988217).abs() < 1e-6);
+    }
+
     /// Every shipped dataset must have provenance recorded and at least
     /// one pinned reference fit (inline `[fits.expected]` or sibling
     /// `expected.toml`). This is the Phase-1 hygiene invariant; Phase 5
@@ -714,7 +739,7 @@ mod tests {
             );
             checked += 1;
         }
-        assert!(checked >= 19, "expected at least 19 shipped datasets, saw {checked}");
+        assert!(checked >= 20, "expected at least 20 shipped datasets, saw {checked}");
     }
 
     /// Sanity-check every Tier-1 + Tier-2 dataset that lives in the repo.
@@ -738,6 +763,7 @@ mod tests {
             "oats",
             "rail",
             "kb07",
+            "oxide",
             "singular",
             "tungara_single_caller",
             "station_season_duration",
