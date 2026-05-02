@@ -1,0 +1,7 @@
+reg: NL,SP,SW
+popu: 1.SP,1.SW,2.SW,3.NL,5.NL,5.SP,6.SP,7.SW,8.SP
+amd: clipped,unclipped
+status: Normal,Petri.Plate,Transplant
+gen: 4,5,6,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,27,28,30,34,35,36
+rack: 1,2
+nutrient: 1,8

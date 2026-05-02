@@ -103,6 +103,7 @@ just verifies row counts and column types.
 | `gopherdat2` |   30 | Bolker mixedmodels-misc | scalar RE + Poisson with `offset(log(Area))` | poisson | moderate |
 | `culcitalogreg`| 80 | Bolker mixedmodels-misc | scalar RE + Bernoulli, 4-level treatment | binomial | moderate |
 | `contraception`| 1934 | `MixedModels.jl :contra` | scalar + random-slope binomial GLMM, 60 districts | binomial | moderate |
+| `arabidopsis` |  625 | `lme4::Arabidopsis` | nested + scalar RE, overdispersed Poisson (var/mean ≈ 56) | poisson | moderate |
 | `verbagg`    | 7584 | `lme4::VerbAgg`   | crossed (id × item), 316 subjects   | binomial   | moderate   |
 | `grouseticks`|  403 | `lme4::grouseticks`| nested + observation-level RE      | poisson    | moderate   |
 | `ergostool`  |   36 | `nlme::ergoStool` | scalar RE on subject                | gaussian   | easy       |
@@ -133,10 +134,9 @@ The previous future-additions list (InstEval, Contraception, Oxide,
 mrk17_exp1) has all shipped. Remaining open dataset-coverage issues
 (see mote umbrella `bd-01KQN3TVKHKFS5NTD5PXK6998C`):
 
-- **Arabidopsis** — overdispersed Poisson / negative-binomial; gates on
-  NB family support in the engine.
 - **RIKZ** — Zuur (2009) intertidal teaching example; needs source/license
-  verification.
+  verification (highstat.com requires registration; AED package was
+  removed from CRAN).
 - **nwl** — Edinburgh open word-learning data; needs source verification.
 
 Add by extending `scripts/dump_datasets.R` (lme4 / nlme upstream),

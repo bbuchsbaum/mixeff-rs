@@ -1,6 +1,14 @@
 {
   "fits": [
     {
+      "dataset": "arabidopsis",
+      "estimator": "Laplace",
+      "family": "Poisson",
+      "formula": "total.fruits ~ amd * nutrient + (1 | reg/popu) + (1 | gen)",
+      "link": "Log",
+      "weights": null
+    },
+    {
       "dataset": "cake",
       "estimator": "REML",
       "family": "Gaussian",

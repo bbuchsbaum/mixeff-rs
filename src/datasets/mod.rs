@@ -622,7 +622,7 @@ mod tests {
         assert_eq!(names, sorted, "iter() must yield datasets in sorted order");
         assert!(names.contains(&"sleepstudy".to_string()));
         assert!(names.contains(&"kb07".to_string()));
-        assert!(names.len() >= 25);
+        assert!(names.len() >= 26);
     }
 
     #[test]
@@ -680,6 +680,31 @@ mod tests {
         assert!(expected_for("sleepstudy", "Reaction ~ 1", "REML")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn loads_arabidopsis_overdispersed_poisson() {
+        let (df, meta) = load("arabidopsis").unwrap();
+        assert_eq!(meta.name, "arabidopsis");
+        assert_eq!(df.nrow(), 625);
+        assert_eq!(df.categorical("reg").unwrap().n_levels(), 3);
+        assert_eq!(df.categorical("popu").unwrap().n_levels(), 9);
+        assert_eq!(df.categorical("gen").unwrap().n_levels(), 24);
+        assert_eq!(df.categorical("nutrient").unwrap().levels, vec!["1".to_string(), "8".to_string()]);
+        // Check the overdispersion: var/mean ratio of total.fruits should be ≫ 1.
+        let y = df.numeric("total.fruits").unwrap();
+        let mean = y.iter().sum::<f64>() / y.len() as f64;
+        let var = y.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (y.len() - 1) as f64;
+        assert!(
+            var / mean > 30.0,
+            "Arabidopsis fruit counts should be wildly overdispersed (var/mean = {:.2})",
+            var / mean
+        );
+        // Poisson Laplace fit pinned via lme4.
+        let fit = &meta.fits[0];
+        assert_eq!(fit.family, "Poisson");
+        assert!(fit.expected.is_some());
+        assert!(meta.tags.structure.iter().any(|s| s == "overdispersed"));
     }
 
     #[test]
@@ -851,7 +876,7 @@ mod tests {
             );
             checked += 1;
         }
-        assert!(checked >= 25, "expected at least 25 shipped datasets, saw {checked}");
+        assert!(checked >= 26, "expected at least 26 shipped datasets, saw {checked}");
     }
 
     /// Sanity-check every Tier-1 + Tier-2 dataset that lives in the repo.
@@ -885,6 +910,7 @@ mod tests {
             "contraception",
             "mrk17_exp1",
             "insteval",
+            "arabidopsis",
         ];
         for name in names {
             let dir = datasets_root().join(name);

@@ -1,0 +1,75 @@
+name = "arabidopsis"
+source = "lme4::Arabidopsis"
+license = "GPL (>= 2) — see lme4 DESCRIPTION"
+n_rows = 625
+description = """
+Banta et al. (2010) Arabidopsis thaliana fruit-production experiment as
+distributed by lme4 v2.x. 625 plants from 9 populations across 3 regions
+(NL/SP/SW), with 24 distinct genotypes, 2 nutrient levels, 2 racks, and a
+binary herbivory simulation (`amd`: clipped vs unclipped). The response
+`total.fruits` is severely overdispersed (var/mean ≈ 56), making this
+the project's reference fixture for **diagnostic surfaces around
+overdispersed Poisson GLMMs**.
+
+The recommended fit is the plain Poisson — it converges and produces
+sensible β estimates, but the residuals exhibit the overdispersion that
+the in-crate `compiler::audit` is supposed to flag. Once a
+negative-binomial family lands in the engine, an additional `[[fits]]`
+entry will be added here as the canonical NB regression-net.
+
+`reg`, `popu`, `amd`, `status` are factors in the upstream data; `gen`,
+`rack`, and `nutrient` are integers but are used categorically in the
+recommended formula and are recorded as such in this meta.toml.
+"""
+
+[[columns]]
+name = "reg"
+type = "categorical"
+levels = ["NL", "SP", "SW"]
+
+[[columns]]
+name = "popu"
+type = "categorical"
+levels = ["1.SP", "1.SW", "2.SW", "3.NL", "5.NL", "5.SP", "6.SP", "7.SW", "8.SP"]
+
+[[columns]]
+name = "gen"
+type = "categorical"
+levels = ["4","5","6","11","12","13","14","15","16","17","18","19","20","21","22","23","24","25","27","28","30","34","35","36"]
+
+[[columns]]
+name = "rack"
+type = "categorical"
+levels = ["1", "2"]
+
+[[columns]]
+name = "nutrient"
+type = "categorical"
+levels = ["1", "8"]
+
+[[columns]]
+name = "amd"
+type = "categorical"
+levels = ["clipped", "unclipped"]
+
+[[columns]]
+name = "status"
+type = "categorical"
+levels = ["Normal", "Petri.Plate", "Transplant"]
+
+[[columns]]
+name = "total.fruits"
+type = "numeric"          # integer count; loader treats as f64
+
+[[fits]]
+# Plain Poisson. Expected to converge; expected to be overdispersed.
+formula = "total.fruits ~ amd * nutrient + (1 | reg/popu) + (1 | gen)"
+family = "Poisson"
+link = "Log"
+estimator = "Laplace"
+
+[tags]
+structure = ["random_intercept", "nested", "scalar_re", "glmm", "poisson_glmm", "overdispersed", "ecological"]
+family = "poisson"
+difficulty = "moderate"
+notes = "Banta et al. 2010; var/mean ≈ 56 — the reference overdispersion fixture. NB fit recommended once the engine has the family."

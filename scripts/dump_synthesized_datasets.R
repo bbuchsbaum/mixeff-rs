@@ -66,6 +66,10 @@ DATASETS <- list(
   list(
     name  = "insteval",
     notes = "lme4::InstEval; 73421 obs course evaluations (2972 students × 1128 lecturers); large-N crossed-RE benchmark fixture."
+  ),
+  list(
+    name  = "arabidopsis",
+    notes = "lme4::Arabidopsis (Banta et al. 2010); 625 obs Poisson GLMM with severe overdispersion (var/mean ≈ 56)."
   )
 )
 
