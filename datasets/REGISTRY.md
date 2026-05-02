@@ -121,6 +121,7 @@ near-singular covariance. Sourced from `MixedModels.jl` rather than `lme4`.
 | `kb07`    | 1789 | `MixedModels.jl :kb07`           | crossed (subj × item), 6 fixed effects | **stress** | Kliegl & Bates (2007); maximal RE model often singular |
 | `oxide`   |   72 | `MixedModels.jl :oxide`          | 3-level nested (Lot → Wafer → Site) | easy     | Pinheiro & Bates (2000); canonical 3-level reference |
 | `mrk17_exp1` | 16409 | `MixedModels.jl :mrk17_exp1`  | crossed (73 subj × 240 items), F×P×Q maximal RE | **stress** | Masson, Rabe & Kliegl (2017) lexical decision; second optimizer-stress fixture alongside kb07 |
+| `insteval`| 73421 | `lme4::InstEval`                 | crossed (2972 students × 1128 lecturers) | **stress** | Bates 2010 lme4 user guide; large-N crossed-RE benchmark fixture |
 | `singular`|  150 | Cross Validated / GitHub mirror  | 8-D random coefficient covariance | **boundary** | Maximal model is singular without obvious VarCorr symptoms; rePCA/effective-rank story |
 | `tungara_single_caller`| 2955 | Dryad doi:10.5061/dryad.3n5tb2rrz | binomial GLMM with cell-level random slope | **stress** | Public fallback found while investigating lme4 GH720; exact GH720 data is unavailable |
 | `station_season_duration`| 54 | Cross Validated forum example | balanced site × season × duration cells | **boundary** | Forum-suggested `(1 + duration | sites) + (1 + duration | season)` over-requests covariance from three-level grouping factors |
@@ -128,17 +129,19 @@ near-singular covariance. Sourced from `MixedModels.jl` rather than `lme4`.
 
 ### Future additions (not yet vendored)
 
-- **InstEval** (`MixedModels.jl :insteval`, ~73k rows) — large crossed-RE
-  scaling fixture. Too big to commit; fetch lazily and store outside the
-  repo, or subset.
-- **Contraception** (`MixedModels.jl :contra`) — Bangladesh contraceptive-use
-  data, hierarchical binomial GLMM.
-- **Oxide** (`MixedModels.jl :oxide`) — semiconductor variance components,
-  highly nested (lot/wafer/site).
-- **mrk17_exp1** (`MixedModels.jl :mrk17_exp1`) — Masson, Rabe & Kliegl (2017)
-  lexical-decision data; another optimizer stress fixture.
+The previous future-additions list (InstEval, Contraception, Oxide,
+mrk17_exp1) has all shipped. Remaining open dataset-coverage issues
+(see mote umbrella `bd-01KQN3TVKHKFS5NTD5PXK6998C`):
 
-Add these by extending `scripts/dump_julia_datasets.jl` and writing a
+- **Arabidopsis** — overdispersed Poisson / negative-binomial; gates on
+  NB family support in the engine.
+- **RIKZ** — Zuur (2009) intertidal teaching example; needs source/license
+  verification.
+- **nwl** — Edinburgh open word-learning data; needs source verification.
+
+Add by extending `scripts/dump_datasets.R` (lme4 / nlme upstream),
+`scripts/dump_julia_datasets.jl` (MixedModels.jl), or
+`scripts/dump_synthesized_datasets.R` (everything else) and writing a
 matching `meta.toml`.
 
 ---

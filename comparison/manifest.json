@@ -105,6 +105,22 @@
       "weights": null
     },
     {
+      "dataset": "insteval",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "y ~ 1 + (1 | d) + (1 | s)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "insteval",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "y ~ 1 + service + dept + (1 | d) + (1 | s)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
       "dataset": "kb07",
       "estimator": "REML",
       "family": "Gaussian",

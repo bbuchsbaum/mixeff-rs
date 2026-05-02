@@ -62,6 +62,10 @@ DATASETS <- list(
   list(
     name  = "contraception",
     notes = "MixedModels.jl :contra; 1934 obs Bangladesh BDHS contraceptive use; CSV authored from Julia with use Y/N → 0/1."
+  ),
+  list(
+    name  = "insteval",
+    notes = "lme4::InstEval; 73421 obs course evaluations (2972 students × 1128 lecturers); large-N crossed-RE benchmark fixture."
   )
 )
 

@@ -622,7 +622,7 @@ mod tests {
         assert_eq!(names, sorted, "iter() must yield datasets in sorted order");
         assert!(names.contains(&"sleepstudy".to_string()));
         assert!(names.contains(&"kb07".to_string()));
-        assert!(names.len() >= 24);
+        assert!(names.len() >= 25);
     }
 
     #[test]
@@ -680,6 +680,28 @@ mod tests {
         assert!(expected_for("sleepstudy", "Reaction ~ 1", "REML")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn loads_insteval_large_n_crossed() {
+        let (df, meta) = load("insteval").unwrap();
+        assert_eq!(meta.name, "insteval");
+        assert_eq!(df.nrow(), 73421);
+        assert_eq!(df.categorical("s").unwrap().n_levels(), 2972);
+        assert_eq!(df.categorical("d").unwrap().n_levels(), 1128);
+        assert_eq!(df.categorical("dept").unwrap().n_levels(), 14);
+        assert_eq!(meta.tags.difficulty.as_deref(), Some("stress"));
+
+        // Both fits pinned via lme4. Adding service + dept reduces the
+        // objective slightly — sanity-check that the expected blocks are
+        // distinct and ordered correctly.
+        assert_eq!(meta.fits.len(), 2);
+        let scalar = meta.fits[0].expected.as_ref().unwrap();
+        let with_fe = meta.fits[1].expected.as_ref().unwrap();
+        assert!(with_fe.objective.unwrap() < scalar.objective.unwrap());
+        // Single intercept in the scalar fit; 15 betas with service + dept.
+        assert_eq!(scalar.beta.as_ref().unwrap().len(), 1);
+        assert_eq!(with_fe.beta.as_ref().unwrap().len(), 15);
     }
 
     #[test]
@@ -829,7 +851,7 @@ mod tests {
             );
             checked += 1;
         }
-        assert!(checked >= 24, "expected at least 24 shipped datasets, saw {checked}");
+        assert!(checked >= 25, "expected at least 25 shipped datasets, saw {checked}");
     }
 
     /// Sanity-check every Tier-1 + Tier-2 dataset that lives in the repo.
@@ -862,6 +884,7 @@ mod tests {
             "culcitalogreg",
             "contraception",
             "mrk17_exp1",
+            "insteval",
         ];
         for name in names {
             let dir = datasets_root().join(name);

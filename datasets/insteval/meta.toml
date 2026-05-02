@@ -1,0 +1,75 @@
+name = "insteval"
+source = "lme4::InstEval"
+license = "GPL (>= 2) — see lme4 DESCRIPTION"
+n_rows = 73421
+description = """
+University course evaluations (Bates 2010 lme4 user guide / lme4 vignette).
+73 421 evaluation scores from 2972 students across 1128 lecturers, with
+ordered student/lecturer age factors, a binary service indicator, and 14
+departments. The canonical large-N crossed-RE LMM benchmark fixture.
+
+The data is faithful to the upstream `lme4::InstEval` (~2.2 MB CSV);
+storing the full data rather than a stratified subset keeps the fixture
+useful for performance benchmarking and large-cardinality random-effect
+testing. The `s` and `d` grouping factors have 2972 and 1128 levels
+respectively — explicit `levels` lists are omitted from meta.toml (use
+`_levels.txt` for the canonical order).
+
+Tagged `stress` so `cargo run --release --example compare_rust` skips
+the in-crate fit attempts by default. Set `MIXEDMODELS_INCLUDE_STRESS=1`
+to fit through the in-crate engine; otherwise rely on the lme4 reference
+fits pinned in `expected.toml`.
+"""
+
+[[columns]]
+# 2972 student IDs; canonical order in _levels.txt.
+name = "s"
+type = "categorical"
+
+[[columns]]
+# 1128 lecturer IDs; canonical order in _levels.txt.
+name = "d"
+type = "categorical"
+
+[[columns]]
+name = "studage"
+type = "categorical"
+levels = ["2", "4", "6", "8"]
+
+[[columns]]
+name = "lectage"
+type = "categorical"
+levels = ["1", "2", "3", "4", "5", "6"]
+
+[[columns]]
+name = "service"
+type = "categorical"
+levels = ["0", "1"]
+
+[[columns]]
+name = "dept"
+type = "categorical"
+levels = ["15", "5", "10", "12", "6", "7", "4", "8", "9", "14", "1", "3", "11", "2"]
+
+[[columns]]
+name = "y"
+type = "numeric"          # 1..5 evaluation score; treated as continuous
+
+[[fits]]
+# Minimal crossed-RE baseline.
+formula = "y ~ 1 + (1 | d) + (1 | s)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+
+[[fits]]
+# With fixed effects for service and department.
+formula = "y ~ 1 + service + dept + (1 | d) + (1 | s)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+
+[tags]
+structure = ["random_intercept", "crossed", "scalar_re", "large_n", "psycho_educational"]
+difficulty = "stress"
+notes = "73k rows, 2972 students × 1128 lecturers; large-N crossed-RE benchmark fixture."
