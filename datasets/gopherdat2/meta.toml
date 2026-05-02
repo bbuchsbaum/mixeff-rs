@@ -1,0 +1,52 @@
+name = "gopherdat2"
+source = "Bolker mixedmodels-misc / glmmADMB tutorial"
+license = "Per Bolker mixedmodels-misc — see https://github.com/bbolker/mixedmodels-misc"
+n_rows = 30
+description = """
+Counts of gopher tortoise shell remains (`shells`) at 10 sites across 3
+years (Ozgul et al. 2009 / Bolker 2014 GLMM examples). Each site is
+sampled three times (2004-2006); the counts are modelled as Poisson with
+a per-site random intercept and `log(Area)` as an offset to convert from
+counts to density-corrected rates. Previous-year shell count (`prev`) is
+included as a continuous covariate.
+
+This is the floor fixture for `offset()` parsing in the formula compiler
+— no other dataset currently exercises that path. The recommended fit
+will not yet succeed on the in-crate engine until offset() support lands;
+meanwhile lme4 pins the reference fit so the regression net is in place.
+"""
+
+[[columns]]
+name = "Site"
+type = "categorical"
+levels = ["BS", "CB", "Cent", "CF", "FC", "FE", "GH", "Old", "Ord", "TE"]
+
+[[columns]]
+name = "year"
+type = "categorical"
+levels = ["2004", "2005", "2006"]
+
+[[columns]]
+name = "shells"
+type = "numeric"
+
+[[columns]]
+name = "Area"
+type = "numeric"
+unit = "ha"
+
+[[columns]]
+name = "prev"
+type = "numeric"
+
+[[fits]]
+formula = "shells ~ year + prev + offset(log(Area)) + (1 | Site)"
+family = "Poisson"
+link = "Log"
+estimator = "Laplace"
+
+[tags]
+structure = ["random_intercept", "scalar_re", "glmm", "offset", "poisson_glmm", "ecological"]
+family = "poisson"
+difficulty = "moderate"
+notes = "Bolker GLMM tutorial; first fixture exercising offset() in formula AST."

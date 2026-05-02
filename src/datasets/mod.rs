@@ -622,7 +622,7 @@ mod tests {
         assert_eq!(names, sorted, "iter() must yield datasets in sorted order");
         assert!(names.contains(&"sleepstudy".to_string()));
         assert!(names.contains(&"kb07".to_string()));
-        assert!(names.len() >= 20);
+        assert!(names.len() >= 22);
     }
 
     #[test]
@@ -683,6 +683,48 @@ mod tests {
     }
 
     #[test]
+    fn loads_gopherdat2_offset_glmm() {
+        let (df, meta) = load("gopherdat2").unwrap();
+        assert_eq!(meta.name, "gopherdat2");
+        assert_eq!(df.nrow(), 30);
+        assert_eq!(df.categorical("Site").unwrap().n_levels(), 10);
+        assert_eq!(df.categorical("year").unwrap().n_levels(), 3);
+        assert!(df.numeric("Area").is_some());
+        let fit = &meta.fits[0];
+        assert!(fit.formula.contains("offset(log(Area))"));
+        assert_eq!(fit.family, "Poisson");
+        assert!(meta.tags.structure.iter().any(|s| s == "offset"));
+        // lme4 pins the singular Site-level random intercept (σ → 0).
+        let exp = fit.expected.as_ref().expect("Laplace fit pinned");
+        assert_eq!(exp.is_singular, Some(true));
+    }
+
+    #[test]
+    fn loads_culcitalogreg_block_design_glmm() {
+        let (df, meta) = load("culcitalogreg").unwrap();
+        assert_eq!(meta.name, "culcitalogreg");
+        assert_eq!(df.nrow(), 80);
+        assert_eq!(df.categorical("block").unwrap().n_levels(), 10);
+        assert_eq!(df.categorical("ttt").unwrap().levels, vec![
+            "none".to_string(),
+            "crabs".to_string(),
+            "shrimp".to_string(),
+            "both".to_string(),
+        ]);
+        // Both Laplace and AGQ are pinned; their objectives differ
+        // meaningfully (small-N AGQ correction).
+        assert_eq!(meta.fits.len(), 2);
+        let laplace_obj = meta.fits[0].expected.as_ref().unwrap().objective.unwrap();
+        let agq_obj = meta.fits[1].expected.as_ref().unwrap().objective.unwrap();
+        assert!(meta.fits[0].estimator == "Laplace");
+        assert!(meta.fits[1].estimator == "AGQ");
+        assert!(
+            (laplace_obj - agq_obj).abs() > 0.1,
+            "Laplace ({laplace_obj}) and AGQ ({agq_obj}) should differ on small-N binomial"
+        );
+    }
+
+    #[test]
     fn loads_oxide_three_level_nested() {
         let (df, meta) = load("oxide").unwrap();
         assert_eq!(meta.name, "oxide");
@@ -739,7 +781,7 @@ mod tests {
             );
             checked += 1;
         }
-        assert!(checked >= 20, "expected at least 20 shipped datasets, saw {checked}");
+        assert!(checked >= 22, "expected at least 22 shipped datasets, saw {checked}");
     }
 
     /// Sanity-check every Tier-1 + Tier-2 dataset that lives in the repo.
@@ -768,6 +810,8 @@ mod tests {
             "tungara_single_caller",
             "station_season_duration",
             "nested_constant_response",
+            "gopherdat2",
+            "culcitalogreg",
         ];
         for name in names {
             let dir = datasets_root().join(name);

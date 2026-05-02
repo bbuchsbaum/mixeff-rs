@@ -50,6 +50,14 @@ DATASETS <- list(
   list(
     name  = "nested_constant_response",
     notes = "Synthetic lme4 issue 489 repro; nested lower-level random intercept with constant-response duplicates."
+  ),
+  list(
+    name  = "gopherdat2",
+    notes = "Bolker mixedmodels-misc/data/gopherdat2.RData; canonical Poisson-GLMM-with-offset fixture (Ozgul et al. 2009)."
+  ),
+  list(
+    name  = "culcitalogreg",
+    notes = "Bolker mixedmodels-misc/data/culcita.RData; small-N binomial GLMM block design (Schmitt et al. 2009)."
   )
 )
 

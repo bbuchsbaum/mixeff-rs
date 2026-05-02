@@ -1,0 +1,52 @@
+name = "culcitalogreg"
+source = "Bolker mixedmodels-misc / glmmADMB tutorial"
+license = "Per Bolker mixedmodels-misc — see https://github.com/bbolker/mixedmodels-misc"
+n_rows = 80
+description = """
+Coral-eating starfish (Culcita) predation experiment (Schmitt, Holbrook
+& Brooks 2009; Bolker 2014 GLMM examples). 10 blocks × 4 treatment
+combinations (none / crabs / shrimp / both) × 2 replicates = 80
+observations. Each row is a per-coral predation outcome (0/1).
+
+The canonical small-N AGQ stress fixture: per-block sample size is only
+8 observations, the response is binary, and the four-level treatment
+factor encodes a 2 × 2 crossed crab × shrimp design without a
+crab:shrimp interaction term. Both Laplace (nAGQ=1) and AGQ (nAGQ>1)
+fits are recommended so future work can compare the two on a small
+binomial GLMM where Laplace is known to be biased.
+"""
+
+[[columns]]
+name = "block"
+type = "categorical"
+levels = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"]
+
+[[columns]]
+name = "predation"
+type = "numeric"          # binary 0/1; loader treats as f64
+
+[[columns]]
+name = "ttt"
+type = "categorical"
+levels = ["none", "crabs", "shrimp", "both"]
+
+[[fits]]
+# Laplace baseline (lme4 default).
+formula = "predation ~ ttt + (1 | block)"
+family = "Binomial"
+link = "Logit"
+estimator = "Laplace"
+
+[[fits]]
+# AGQ variant — informative on this fixture because per-block n=8 is
+# small enough that the Laplace approximation is biased.
+formula = "predation ~ ttt + (1 | block)"
+family = "Binomial"
+link = "Logit"
+estimator = "AGQ"
+
+[tags]
+structure = ["random_intercept", "scalar_re", "glmm", "block_design", "binomial_glmm"]
+family = "binomial"
+difficulty = "moderate"
+notes = "Bolker GLMM tutorial; small-N AGQ stress fixture (per-block n=8)."

@@ -17,6 +17,22 @@
       "weights": "size"
     },
     {
+      "dataset": "culcitalogreg",
+      "estimator": "Laplace",
+      "family": "Binomial",
+      "formula": "predation ~ ttt + (1 | block)",
+      "link": "Logit",
+      "weights": null
+    },
+    {
+      "dataset": "culcitalogreg",
+      "estimator": "AGQ",
+      "family": "Binomial",
+      "formula": "predation ~ ttt + (1 | block)",
+      "link": "Logit",
+      "weights": null
+    },
+    {
       "dataset": "dyestuff",
       "estimator": "REML",
       "family": "Gaussian",
@@ -54,6 +70,14 @@
       "family": "Gaussian",
       "formula": "effort ~ 1 + Type + (1 | Subject)",
       "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "gopherdat2",
+      "estimator": "Laplace",
+      "family": "Poisson",
+      "formula": "shells ~ year + prev + offset(log(Area)) + (1 | Site)",
+      "link": "Log",
       "weights": null
     },
     {
