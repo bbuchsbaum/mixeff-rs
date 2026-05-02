@@ -1,0 +1,9 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-05-02T20:00:35Z",
+  "crate_commit": "f1acf78a9eb0be46a9f1ae1785187c4fe683054f",
+  "regenerator": "MIXEDMODELS_UPDATE_FIXTURES=1 cargo test --test compiler_contract_snapshots",
+  "source_case": null,
+  "reference_engine": null,
+  "notes": "Backfilled by examples/backfill_fixture_provenance — original generation context lost. Refresh by running the regenerator command above."
+}

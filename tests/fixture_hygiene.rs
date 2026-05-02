@@ -1,24 +1,29 @@
 //! Hygiene checks across the fixture / dataset catalog.
 //!
-//! Phase 2 starting set: assert that `comparison/manifest.json` is byte-equal
-//! to the manifest derived from `datasets::iter_cases()`. Phase 5 will extend
-//! this file with re-fit tolerance checks, golden provenance assertions, and
-//! the levels.txt ↔ meta.toml schema lint.
+//! Phase 2: comparison/manifest.json must equal the registry-derived view.
+//! Phase 4: every JSON golden under tests/fixtures/{compiler_contract,parity}/
+//!          must have a sibling `<stem>.provenance.json`.
+//! Phase 5 (future) will add re-fit tolerance checks and the
+//! levels.txt ↔ meta.toml schema lint.
 //!
-//! When this test fails, the fix is almost always:
+//! When the manifest test fails, regenerate via:
+//!     cargo run --release --example compare_rust
 //!
-//!   cargo run --release --example compare_rust
-//!
-//! which regenerates `comparison/manifest.json` from the registry.
+//! When the provenance test fails on a fresh checkout (no goldens regenerated yet):
+//!     cargo run --example backfill_fixture_provenance
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use mixedmodels::datasets;
 use serde_json::{json, Value};
 
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
 fn comparison_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("comparison")
+    repo_root().join("comparison")
 }
 
 /// Build the manifest JSON exactly as `examples/compare_rust.rs` writes it.
@@ -76,6 +81,94 @@ fn comparison_manifest_matches_registry_derived() {
             serde_json::to_string_pretty(&only_in_disk).unwrap_or_default(),
             only_in_derived.len(),
             serde_json::to_string_pretty(&only_in_derived).unwrap_or_default(),
+        );
+    }
+}
+
+/// Walk a `tests/fixtures/<dir>/` and collect every `*.json` that is *not*
+/// itself a `*.provenance.json` sibling.
+fn golden_jsons(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if !dir.is_dir() {
+        return out;
+    }
+    for entry in fs::read_dir(dir).expect("read fixture dir").flatten() {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        if !name.ends_with(".json") || name.ends_with(".provenance.json") {
+            continue;
+        }
+        out.push(path);
+    }
+    out.sort();
+    out
+}
+
+/// Every JSON golden under `tests/fixtures/{compiler_contract,parity}/`
+/// must have a sibling `<stem>.provenance.json`. Phase 4 of the
+/// fixture-unification plan: regeneration provenance is required for
+/// every checked-in fixture.
+///
+/// To fix on a fresh checkout: run
+/// `cargo run --example backfill_fixture_provenance`. To refresh a
+/// specific golden: delete its provenance file and re-run the
+/// regenerator command recorded in the *other* siblings provenance.
+#[test]
+fn every_golden_has_provenance_sibling() {
+    let dirs = [
+        repo_root().join("tests/fixtures/compiler_contract"),
+        repo_root().join("tests/fixtures/parity"),
+    ];
+
+    let mut missing: Vec<PathBuf> = Vec::new();
+    let mut malformed: Vec<(PathBuf, String)> = Vec::new();
+    for dir in &dirs {
+        for golden in golden_jsons(dir) {
+            let stem = golden
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .expect("UTF-8 stem");
+            let prov = golden.with_file_name(format!("{stem}.provenance.json"));
+            if !prov.is_file() {
+                missing.push(golden);
+                continue;
+            }
+            // Cheap shape check — must parse and carry schema_version.
+            match fs::read_to_string(&prov)
+                .ok()
+                .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            {
+                Some(v) if v.get("schema_version").is_some() => {}
+                Some(_) => malformed.push((prov, "missing `schema_version`".into())),
+                None => malformed.push((prov, "not valid JSON".into())),
+            }
+        }
+    }
+
+    if !missing.is_empty() || !malformed.is_empty() {
+        let missing_list = missing
+            .iter()
+            .map(|p| format!("  - {}", p.display()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let malformed_list = malformed
+            .iter()
+            .map(|(p, why)| format!("  - {} ({why})", p.display()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        panic!(
+            "fixture provenance hygiene failed.\n\n\
+             missing provenance siblings ({}):\n{}\n\n\
+             malformed provenance files ({}):\n{}\n\n\
+             To fix: cargo run --example backfill_fixture_provenance",
+            missing.len(),
+            missing_list,
+            malformed.len(),
+            malformed_list,
         );
     }
 }
