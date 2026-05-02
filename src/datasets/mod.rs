@@ -55,7 +55,7 @@ pub struct ColumnSpec {
     pub unit: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct ExpectedFit {
     #[serde(default)]
     pub beta: Option<Vec<f64>>,
@@ -73,7 +73,7 @@ pub struct ExpectedFit {
     pub is_singular: Option<bool>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct FitSpec {
     pub formula: String,
     pub family: String,
@@ -178,11 +178,143 @@ pub struct Meta {
 /// Locate the `datasets/` directory. Resolution order:
 /// 1. `MIXEDMODELS_DATASETS_DIR` env var, if set.
 /// 2. `<CARGO_MANIFEST_DIR>/datasets/`.
-fn datasets_root() -> PathBuf {
+pub fn datasets_root() -> PathBuf {
     if let Ok(p) = std::env::var("MIXEDMODELS_DATASETS_DIR") {
         return PathBuf::from(p);
     }
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("datasets")
+}
+
+/// One concrete fit case — a dataset paired with one of its recommended
+/// formulas. Yielded by [`iter_cases`]. Owned so callers don't need to
+/// juggle lifetimes against the on-disk catalog scan.
+#[derive(Debug, Clone)]
+pub struct Case {
+    /// Dataset directory name (also `meta.name`).
+    pub name: String,
+    pub meta: Meta,
+    pub fit: FitSpec,
+    /// Index of `fit` within `meta.fits` — useful when callers want to
+    /// preserve canonical ordering.
+    pub fit_index: usize,
+}
+
+/// Iterate every shipped dataset's [`Meta`].
+///
+/// Result order is dataset-name-sorted, so iteration is deterministic
+/// across machines. Datasets with malformed `meta.toml` are skipped with
+/// a stderr warning rather than panicking — the catalog should remain
+/// usable even when one dataset is in a transient bad state.
+pub fn iter() -> impl Iterator<Item = Meta> {
+    let mut out: Vec<Meta> = Vec::new();
+    if let Ok(entries) = fs::read_dir(datasets_root()) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() || !path.join("meta.toml").is_file() {
+                continue;
+            }
+            let name = match path.file_name().and_then(|s| s.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            match load_meta(&name) {
+                Ok(m) => out.push(m),
+                Err(e) => eprintln!("datasets::iter: skipping {name}: {e}"),
+            }
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out.into_iter()
+}
+
+/// Iterate every (dataset, fit) pair flattened across the catalog.
+///
+/// Order: dataset-name-sorted, then by `fit_index` within each dataset.
+/// This is the function `comparison/manifest.json` is derived from.
+pub fn iter_cases() -> impl Iterator<Item = Case> {
+    let mut out: Vec<Case> = Vec::new();
+    for meta in iter() {
+        let name = meta.name.clone();
+        for (idx, fit) in meta.fits.iter().enumerate() {
+            out.push(Case {
+                name: name.clone(),
+                meta: meta.clone(),
+                fit: fit.clone(),
+                fit_index: idx,
+            });
+        }
+    }
+    out.into_iter()
+}
+
+/// Iterate datasets matching a predicate. Convenience over
+/// [`iter`] + filter for the common parameterized-test pattern.
+pub fn iter_where<F>(predicate: F) -> impl Iterator<Item = Meta>
+where
+    F: FnMut(&Meta) -> bool,
+{
+    iter().filter(predicate)
+}
+
+/// Datasets carrying a given structure tag (e.g. `"crossed"`,
+/// `"random_slope"`, `"nested"`).
+pub fn iter_with_tag(tag: &str) -> impl Iterator<Item = Meta> {
+    let tag = tag.to_string();
+    iter_where(move |m| m.tags.structure.iter().any(|s| s == &tag))
+}
+
+/// Datasets at a given difficulty level (`"easy"`, `"moderate"`,
+/// `"boundary"`, `"stress"`).
+pub fn iter_difficulty(level: &str) -> impl Iterator<Item = Meta> {
+    let level = level.to_string();
+    iter_where(move |m| m.tags.difficulty.as_deref() == Some(level.as_str()))
+}
+
+/// Datasets whose top-level family tag matches (e.g. `"binomial"`,
+/// `"poisson"`). Datasets without a `tags.family` declaration are
+/// skipped — declare the tag on every GLMM fixture to keep this
+/// selector reliable.
+pub fn iter_family(family: &str) -> impl Iterator<Item = Meta> {
+    let family = family.to_string();
+    iter_where(move |m| m.tags.family.as_deref() == Some(family.as_str()))
+}
+
+/// Load a dataset by name and return one specific fit case.
+///
+/// Convenience over [`load`] + index, used when a test wants the fit's
+/// formula/estimator/expected without rebuilding them from `Meta`.
+pub fn case(name: &str, fit_index: usize) -> Result<(DataFrame, Meta, FitSpec), DatasetError> {
+    let (df, meta) = load(name)?;
+    let fit = meta
+        .fits
+        .get(fit_index)
+        .ok_or_else(|| {
+            DatasetError::Schema(
+                name.to_string(),
+                format!(
+                    "fit_index {fit_index} out of range (have {} fits)",
+                    meta.fits.len()
+                ),
+            )
+        })?
+        .clone();
+    Ok((df, meta, fit))
+}
+
+/// Look up the pinned reference fit for a (dataset, formula, estimator)
+/// triple. Returns `None` if the dataset has no matching fit or no
+/// pinned `[fits.expected]` (inline or sibling).
+pub fn expected_for(
+    name: &str,
+    formula: &str,
+    estimator: &str,
+) -> Result<Option<ExpectedFit>, DatasetError> {
+    let meta = load_meta(name)?;
+    Ok(meta
+        .fits
+        .into_iter()
+        .find(|f| f.formula == formula && f.estimator == estimator)
+        .and_then(|f| f.expected))
 }
 
 /// Read just the metadata for a dataset (no CSV parse).
@@ -480,6 +612,74 @@ mod tests {
             .structure
             .iter()
             .any(|tag| tag == "duplicated_response"));
+    }
+
+    #[test]
+    fn iter_returns_every_shipped_dataset_in_sorted_order() {
+        let names: Vec<String> = iter().map(|m| m.name).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "iter() must yield datasets in sorted order");
+        assert!(names.contains(&"sleepstudy".to_string()));
+        assert!(names.contains(&"kb07".to_string()));
+        assert!(names.len() >= 19);
+    }
+
+    #[test]
+    fn iter_cases_flattens_all_recommended_fits() {
+        let cases: Vec<Case> = iter_cases().collect();
+        assert!(cases.len() >= iter().count());
+        // Sleepstudy has two fits (REML + ML); kb07 has three.
+        let sleep_count = cases.iter().filter(|c| c.name == "sleepstudy").count();
+        assert!(sleep_count >= 2, "sleepstudy should yield ≥2 cases");
+        let kb07_count = cases.iter().filter(|c| c.name == "kb07").count();
+        assert_eq!(kb07_count, 3, "kb07 has three recommended formulas");
+        // fit_index must align with meta.fits ordering.
+        for case in cases.iter().filter(|c| c.name == "kb07") {
+            assert_eq!(case.fit, case.meta.fits[case.fit_index]);
+        }
+    }
+
+    #[test]
+    fn iter_with_tag_and_difficulty_select_correctly() {
+        let crossed: Vec<String> = iter_with_tag("crossed").map(|m| m.name).collect();
+        assert!(crossed.contains(&"penicillin".to_string()));
+        assert!(crossed.contains(&"kb07".to_string()));
+
+        let stress: Vec<String> = iter_difficulty("stress").map(|m| m.name).collect();
+        assert!(stress.contains(&"kb07".to_string()));
+
+        let binomial: Vec<String> = iter_family("binomial").map(|m| m.name).collect();
+        assert!(binomial.contains(&"cbpp".to_string()));
+        assert!(binomial.contains(&"verbagg".to_string()));
+    }
+
+    #[test]
+    fn case_returns_owned_fit_and_dataframe() {
+        let (df, meta, fit) = case("sleepstudy", 0).unwrap();
+        assert_eq!(meta.name, "sleepstudy");
+        assert_eq!(df.nrow(), 180);
+        assert!(fit.formula.contains("Reaction"));
+        assert!(case("sleepstudy", 99).is_err());
+    }
+
+    #[test]
+    fn expected_for_finds_pinned_value() {
+        // sleepstudy carries a hand-pinned [fits.expected] block in meta.toml.
+        let exp = expected_for(
+            "sleepstudy",
+            "Reaction ~ 1 + Days + (1 + Days | Subject)",
+            "REML",
+        )
+        .unwrap()
+        .expect("sleepstudy REML should be pinned");
+        let beta = exp.beta.expect("β pinned");
+        assert!((beta[0] - 251.40510).abs() < 1e-3);
+
+        // Unknown formula → None, not Err.
+        assert!(expected_for("sleepstudy", "Reaction ~ 1", "REML")
+            .unwrap()
+            .is_none());
     }
 
     /// Every shipped dataset must have provenance recorded and at least

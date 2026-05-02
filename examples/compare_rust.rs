@@ -62,31 +62,8 @@ struct ResultRecord {
     fit_time_ms_repeats: Option<usize>,
 }
 
-fn datasets_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("datasets")
-}
-
 fn comparison_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("comparison")
-}
-
-fn discover_datasets() -> Vec<String> {
-    let mut names: Vec<String> = fs::read_dir(datasets_root())
-        .expect("read datasets/")
-        .filter_map(|e| {
-            let e = e.ok()?;
-            let path = e.path();
-            if !path.is_dir() {
-                return None;
-            }
-            if !path.join("meta.toml").is_file() {
-                return None;
-            }
-            path.file_name()?.to_str().map(|s| s.to_string())
-        })
-        .collect();
-    names.sort();
-    names
 }
 
 /// Outcome of attempting to fit a single model. We separate the genuine
@@ -178,17 +155,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut manifest = Vec::new();
     let mut results = Vec::new();
 
-    for name in discover_datasets() {
-        let (df, meta) = match datasets::load(&name) {
-            Ok(x) => x,
+    // Drive every (dataset, fit) pair from the catalog. comparison/manifest.json
+    // is now a *derived* view of datasets/REGISTRY.md rather than a hand-edited
+    // file; the fixture_hygiene test guards against drift.
+    for case in datasets::iter_cases() {
+        let mixedmodels::datasets::Case {
+            name,
+            meta: _,
+            fit,
+            fit_index: _,
+        } = case;
+
+        let (df, _) = match datasets::load(&name) {
+            Ok(loaded) => loaded,
             Err(e) => {
                 eprintln!("skip {name}: {e}");
                 continue;
             }
         };
         let n_obs = df.nrow();
-
-        for fit in &meta.fits {
+        {
             let entry = ManifestEntry {
                 dataset: name.clone(),
                 formula: fit.formula.clone(),

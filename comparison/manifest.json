@@ -105,6 +105,30 @@
       "weights": null
     },
     {
+      "dataset": "nested_constant_response",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "logterrisize ~ 1 + spm + (1 | studyarea) + (1 | studyarea:teriid)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "nested_constant_response",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "logterrisize ~ 1 + spm + (1 | studyarea/teriid)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "nested_constant_response",
+      "estimator": "REML",
+      "family": "Gaussian",
+      "formula": "logterrisize ~ 1 + spm + (1 | studyarea)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
       "dataset": "oats",
       "estimator": "REML",
       "family": "Gaussian",
@@ -189,6 +213,30 @@
       "estimator": "ML",
       "family": "Gaussian",
       "formula": "Reaction ~ 1 + Days + (1 + Days | Subject)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "station_season_duration",
+      "estimator": "ML",
+      "family": "Gaussian",
+      "formula": "effect ~ 1 + duration + (1 + duration | sites) + (1 + duration | season)",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "station_season_duration",
+      "estimator": "ML",
+      "family": "Gaussian",
+      "formula": "effect ~ 1 + duration * season * sites",
+      "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "station_season_duration",
+      "estimator": "ML",
+      "family": "Gaussian",
+      "formula": "effect ~ 1 + duration + (1 | sites) + (1 | season)",
       "link": "Identity",
       "weights": null
     },
