@@ -622,7 +622,7 @@ mod tests {
         assert_eq!(names, sorted, "iter() must yield datasets in sorted order");
         assert!(names.contains(&"sleepstudy".to_string()));
         assert!(names.contains(&"kb07".to_string()));
-        assert!(names.len() >= 22);
+        assert!(names.len() >= 23);
     }
 
     #[test]
@@ -680,6 +680,27 @@ mod tests {
         assert!(expected_for("sleepstudy", "Reaction ~ 1", "REML")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn loads_contraception_hierarchical_binomial() {
+        let (df, meta) = load("contraception").unwrap();
+        assert_eq!(meta.name, "contraception");
+        assert_eq!(df.nrow(), 1934);
+        assert_eq!(df.categorical("dist").unwrap().n_levels(), 60);
+        assert_eq!(df.categorical("urban").unwrap().levels, vec!["Y".to_string(), "N".to_string()]);
+        // `use` is numeric 0/1 (converted from Y/N during dump).
+        let use_col = df.numeric("use").expect("use is numeric 0/1");
+        assert!(use_col.iter().all(|v| *v == 0.0 || *v == 1.0));
+
+        // Both fits pinned. Random-slope variant strictly improves
+        // objective and surfaces a non-trivial intercept/urban correlation.
+        assert_eq!(meta.fits.len(), 2);
+        let scalar = meta.fits[0].expected.as_ref().expect("scalar fit pinned");
+        let slope = meta.fits[1].expected.as_ref().expect("random-slope fit pinned");
+        assert!(slope.objective.unwrap() < scalar.objective.unwrap());
+        // Strong negative re_corr (intercept ↑ ⇒ urban-effect ↓ within district).
+        assert!(slope.re_corr.unwrap() < -0.5);
     }
 
     #[test]
@@ -781,7 +802,7 @@ mod tests {
             );
             checked += 1;
         }
-        assert!(checked >= 22, "expected at least 22 shipped datasets, saw {checked}");
+        assert!(checked >= 23, "expected at least 23 shipped datasets, saw {checked}");
     }
 
     /// Sanity-check every Tier-1 + Tier-2 dataset that lives in the repo.
@@ -812,6 +833,7 @@ mod tests {
             "nested_constant_response",
             "gopherdat2",
             "culcitalogreg",
+            "contraception",
         ];
         for name in names {
             let dir = datasets_root().join(name);

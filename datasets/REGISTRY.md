@@ -102,6 +102,7 @@ just verifies row counts and column types.
 | `cake`       |  270 | `lme4::cake`      | split-plot (recipe × temperature)   | gaussian   | easy       |
 | `gopherdat2` |   30 | Bolker mixedmodels-misc | scalar RE + Poisson with `offset(log(Area))` | poisson | moderate |
 | `culcitalogreg`| 80 | Bolker mixedmodels-misc | scalar RE + Bernoulli, 4-level treatment | binomial | moderate |
+| `contraception`| 1934 | `MixedModels.jl :contra` | scalar + random-slope binomial GLMM, 60 districts | binomial | moderate |
 | `verbagg`    | 7584 | `lme4::VerbAgg`   | crossed (id × item), 316 subjects   | binomial   | moderate   |
 | `grouseticks`|  403 | `lme4::grouseticks`| nested + observation-level RE      | poisson    | moderate   |
 | `ergostool`  |   36 | `nlme::ergoStool` | scalar RE on subject                | gaussian   | easy       |

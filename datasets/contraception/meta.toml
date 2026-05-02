@@ -1,0 +1,70 @@
+name = "contraception"
+source = "MixedModels.jl :contra"
+license = "Per MixedModels.jl test data — see https://github.com/JuliaStats/MixedModels.jl"
+n_rows = 1934
+description = """
+Bangladesh Demographic and Health Survey (1988-1989) contraceptive-use
+data, as distributed by MixedModels.jl. 1934 women across 60 districts;
+binary outcome `use` (1 = currently using contraception, 0 = not). The
+data is the canonical medium-N hierarchical binomial GLMM fixture: bigger
+than cbpp/verbagg, smaller than InstEval, with a real-world urban/rural
+covariate that motivates a random-slope `(1 + urban | dist)` variant.
+
+The CSV stores `use` as 0/1 numeric (converted from the upstream "Y"/"N"
+factor) so it can be used directly as a binomial response without further
+preprocessing. Note `livch` is recorded in MixedModels.jl's level order
+(3+, 0, 2, 1), not natural numeric order — preserved here for parity
+with upstream contrasts.
+
+District D54 is missing from the data (60 distinct districts D01..D53,
+D55..D61). Two of D55..D61 contain only 1 woman each; small per-cluster
+sample sizes make this a realistic bias-of-Laplace stress fixture.
+"""
+
+[[columns]]
+name = "dist"
+type = "categorical"
+levels = ["D01","D02","D03","D04","D05","D06","D07","D08","D09","D10",
+          "D11","D12","D13","D14","D15","D16","D17","D18","D19","D20",
+          "D21","D22","D23","D24","D25","D26","D27","D28","D29","D30",
+          "D31","D32","D33","D34","D35","D36","D37","D38","D39","D40",
+          "D41","D42","D43","D44","D45","D46","D47","D48","D49","D50",
+          "D51","D52","D53","D55","D56","D57","D58","D59","D60","D61"]
+
+[[columns]]
+name = "urban"
+type = "categorical"
+levels = ["Y", "N"]
+
+[[columns]]
+name = "livch"
+type = "categorical"
+levels = ["3+", "0", "2", "1"]
+
+[[columns]]
+name = "age"
+type = "numeric"
+
+[[columns]]
+name = "use"
+type = "numeric"          # binary 0/1; loader treats as f64
+
+[[fits]]
+# Random-intercept baseline.
+formula = "use ~ 1 + age + livch + urban + (1 | dist)"
+family = "Binomial"
+link = "Logit"
+estimator = "Laplace"
+
+[[fits]]
+# Random-slope variant — random intercept + random urban effect by district.
+formula = "use ~ 1 + age + livch + urban + (1 + urban | dist)"
+family = "Binomial"
+link = "Logit"
+estimator = "Laplace"
+
+[tags]
+structure = ["random_intercept", "random_slope", "scalar_re", "glmm", "binomial_glmm", "demographic"]
+family = "binomial"
+difficulty = "moderate"
+notes = "Huq & Cleland 1988-89 BDHS; medium-N hierarchical binomial GLMM."

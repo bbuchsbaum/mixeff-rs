@@ -17,6 +17,22 @@
       "weights": "size"
     },
     {
+      "dataset": "contraception",
+      "estimator": "Laplace",
+      "family": "Binomial",
+      "formula": "use ~ 1 + age + livch + urban + (1 | dist)",
+      "link": "Logit",
+      "weights": null
+    },
+    {
+      "dataset": "contraception",
+      "estimator": "Laplace",
+      "family": "Binomial",
+      "formula": "use ~ 1 + age + livch + urban + (1 + urban | dist)",
+      "link": "Logit",
+      "weights": null
+    },
+    {
       "dataset": "culcitalogreg",
       "estimator": "Laplace",
       "family": "Binomial",

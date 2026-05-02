@@ -58,6 +58,10 @@ DATASETS <- list(
   list(
     name  = "culcitalogreg",
     notes = "Bolker mixedmodels-misc/data/culcita.RData; small-N binomial GLMM block design (Schmitt et al. 2009)."
+  ),
+  list(
+    name  = "contraception",
+    notes = "MixedModels.jl :contra; 1934 obs Bangladesh BDHS contraceptive use; CSV authored from Julia with use Y/N → 0/1."
   )
 )
 
