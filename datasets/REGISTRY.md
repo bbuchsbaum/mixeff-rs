@@ -6,11 +6,20 @@ ships as a directory under `datasets/<name>/` containing:
 
 - `data.csv` — observations, with factor columns written as their character
   labels (no row names, UTF-8, `\n` line endings).
-- `meta.toml` — schema, recommended formula(s), and (where known) reference
-  fit values.
+- `meta.toml` — schema, recommended formula(s), and (when hand-pinned)
+  reference fit values inline under `[fits.expected]`. Hand-authored.
 - `_levels.txt` *(optional)* — factor level order as recorded by the dump
   script. Useful for cross-checking `meta.toml` after re-dumping; not
   consumed by the loader.
+- `expected.toml` *(auto-managed)* — pinned reference fits for any
+  recommended formula whose `[fits.expected]` is missing from `meta.toml`.
+  Produced by the dump scripts; merged into `Meta.fits[i].expected` by the
+  loader. Hand-authored inline `[fits.expected]` always wins.
+- `provenance.toml` *(auto-managed)* — regeneration metadata: tool
+  (`lme4 X.Y.Z` / `MixedModels.jl X.Y.Z`), language version, date, host,
+  optimizer, regenerator script, optional notes. Required for every
+  shipped dataset (enforced by the `every_dataset_has_provenance_and_pinned_fit`
+  hygiene test).
 
 Load from Rust:
 
@@ -22,10 +31,16 @@ let (df, meta) = load("sleepstudy")?;
 Re-dump from source (R + lme4/nlme, optionally Julia + MixedModels.jl):
 
 ```bash
-Rscript scripts/dump_datasets.R              # tier 1
-Rscript scripts/dump_datasets.R --tier2      # tier 1 + tier 2
-julia --project=MixedModels.jl scripts/dump_julia_datasets.jl   # tier 3 (kb07)
+Rscript scripts/dump_datasets.R                       # tier 1 (csv + pin)
+Rscript scripts/dump_datasets.R --tier2               # tier 1 + tier 2
+Rscript scripts/dump_datasets.R --tier2 --pin-only    # skip csv, just refit
+Rscript scripts/dump_synthesized_datasets.R           # pin tier-3 vendored
+julia --project=MixedModels.jl scripts/dump_julia_datasets.jl  # kb07 (tier-3)
 ```
+
+The `--pin-only` flag re-fits each recommended formula and rewrites the
+sibling `expected.toml` + `provenance.toml` without touching `data.csv`.
+Use it when bumping `lme4` / `MixedModels.jl` to refresh pinned numbers.
 
 Run the lme4 vs Rust comparison harness:
 

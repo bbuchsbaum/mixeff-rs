@@ -97,7 +97,64 @@ pub struct Tags {
     pub notes: Option<String>,
 }
 
-/// Parsed `meta.toml` describing one dataset.
+/// Regeneration provenance for a dataset's pinned reference values.
+///
+/// Auto-managed by the dump scripts (R / Julia / synthesized). Lives in a
+/// sibling `provenance.toml` so the hand-authored `meta.toml` stays stable.
+/// All fields are optional so older datasets without a provenance file
+/// still parse — they just deserialize to `Provenance::default()`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Provenance {
+    /// Display string, e.g. `"lme4 2.0.1"`.
+    #[serde(default)]
+    pub tool: Option<String>,
+    #[serde(default)]
+    pub tool_name: Option<String>,
+    #[serde(default)]
+    pub tool_version: Option<String>,
+    /// Underlying language runtime (e.g. R 4.5.1, Julia 1.12.4).
+    #[serde(default)]
+    pub r_version: Option<String>,
+    #[serde(default)]
+    pub julia_version: Option<String>,
+    /// ISO-8601 timestamp of last regeneration.
+    #[serde(default)]
+    pub date: Option<String>,
+    /// `uname -srm` of the regenerating host.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Path to the script that produced this file (relative to repo root).
+    #[serde(default)]
+    pub regenerator: Option<String>,
+    /// Optimizer used for the reference fit (e.g. `"bobyqa"`, `"nlopt"`).
+    #[serde(default)]
+    pub optimizer: Option<String>,
+    /// Free-form notes (e.g. seed for synthesized datasets).
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+/// One pinned reference fit emitted by the auto-managed `expected.toml`.
+///
+/// Matches an entry in `meta.fits[]` by `(formula, estimator)`. When loaded,
+/// merged into the corresponding `FitSpec.expected` if that field is `None`.
+/// Hand-authored `[fits.expected]` in `meta.toml` always wins (no clobber).
+#[derive(Debug, Clone, Deserialize)]
+struct ExpectedEntry {
+    formula: String,
+    estimator: String,
+    #[serde(flatten)]
+    expected: ExpectedFit,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ExpectedFile {
+    #[serde(default, rename = "expected")]
+    entries: Vec<ExpectedEntry>,
+}
+
+/// Parsed `meta.toml` describing one dataset, plus any auto-managed
+/// sibling files (`provenance.toml`, `expected.toml`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct Meta {
     pub name: String,
@@ -111,6 +168,11 @@ pub struct Meta {
     pub fits: Vec<FitSpec>,
     #[serde(default)]
     pub tags: Tags,
+    /// Regeneration metadata loaded from sibling `provenance.toml`.
+    /// `None` for datasets that have not yet been touched by the dump
+    /// scripts; populated by the loader after Phase 1.
+    #[serde(skip)]
+    pub provenance: Option<Provenance>,
 }
 
 /// Locate the `datasets/` directory. Resolution order:
@@ -124,6 +186,10 @@ fn datasets_root() -> PathBuf {
 }
 
 /// Read just the metadata for a dataset (no CSV parse).
+///
+/// Loads `meta.toml` and merges in any sibling `provenance.toml` and
+/// `expected.toml` produced by the dump scripts. Hand-authored
+/// `[fits.expected]` blocks in `meta.toml` are never overwritten.
 pub fn load_meta(name: &str) -> Result<Meta, DatasetError> {
     let dir = datasets_root().join(name);
     if !dir.is_dir() {
@@ -131,7 +197,43 @@ pub fn load_meta(name: &str) -> Result<Meta, DatasetError> {
     }
     let meta_path = dir.join("meta.toml");
     let text = fs::read_to_string(&meta_path)?;
-    Ok(toml::from_str(&text)?)
+    let mut meta: Meta = toml::from_str(&text)?;
+
+    // Sibling provenance.toml — auto-managed by the dump scripts.
+    let prov_path = dir.join("provenance.toml");
+    if prov_path.is_file() {
+        let prov_text = fs::read_to_string(&prov_path)?;
+        meta.provenance = Some(toml::from_str(&prov_text)?);
+    }
+
+    // Sibling expected.toml — auto-managed pinned reference fits.
+    // Merged into meta.fits[i].expected when the inline field is None.
+    let exp_path = dir.join("expected.toml");
+    if exp_path.is_file() {
+        let exp_text = fs::read_to_string(&exp_path)?;
+        let exp_file: ExpectedFile = toml::from_str(&exp_text)?;
+        for entry in exp_file.entries {
+            if let Some(slot) = meta
+                .fits
+                .iter_mut()
+                .find(|f| f.formula == entry.formula && f.estimator == entry.estimator)
+            {
+                if slot.expected.is_none() {
+                    slot.expected = Some(entry.expected);
+                }
+            } else {
+                return Err(DatasetError::Schema(
+                    name.to_string(),
+                    format!(
+                        "expected.toml entry (formula=`{}`, estimator=`{}`) does not match any meta.toml [[fits]] row",
+                        entry.formula, entry.estimator
+                    ),
+                ));
+            }
+        }
+    }
+
+    Ok(meta)
 }
 
 /// Load a named dataset and return `(DataFrame, Meta)`.
@@ -378,6 +480,41 @@ mod tests {
             .structure
             .iter()
             .any(|tag| tag == "duplicated_response"));
+    }
+
+    /// Every shipped dataset must have provenance recorded and at least
+    /// one pinned reference fit (inline `[fits.expected]` or sibling
+    /// `expected.toml`). This is the Phase-1 hygiene invariant; Phase 5
+    /// will add stricter re-fit tolerance checks on top.
+    #[test]
+    fn every_dataset_has_provenance_and_pinned_fit() {
+        let root = datasets_root();
+        let entries = std::fs::read_dir(&root).expect("read datasets/");
+        let mut checked = 0usize;
+        for entry in entries {
+            let entry = entry.unwrap();
+            if !entry.file_type().unwrap().is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // Skip non-dataset directories (e.g. README, future synthetic/ tier).
+            if !entry.path().join("meta.toml").is_file() {
+                continue;
+            }
+            let meta = load_meta(&name).unwrap_or_else(|e| panic!("load_meta {name}: {e}"));
+            assert!(
+                meta.provenance.is_some(),
+                "{name}: missing provenance.toml — re-run scripts/dump_datasets.R \
+                 (or scripts/dump_julia_datasets.jl / dump_synthesized_datasets.R)"
+            );
+            let n_pinned = meta.fits.iter().filter(|f| f.expected.is_some()).count();
+            assert!(
+                n_pinned > 0,
+                "{name}: no pinned reference fits in meta.toml or expected.toml"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 19, "expected at least 19 shipped datasets, saw {checked}");
     }
 
     /// Sanity-check every Tier-1 + Tier-2 dataset that lives in the repo.
