@@ -2,6 +2,7 @@
 
 using CategoricalArrays
 using DataFrames
+using Dates
 using LinearAlgebra
 using MixedModels
 using Printf
@@ -136,6 +137,33 @@ function fit_mmjl(spec)
     println("}")
 end
 
+function write_provenance_sibling(out_path)
+    stem, _ = splitext(basename(out_path))
+    prov_path = joinpath(dirname(out_path), stem * ".provenance.json")
+    timestamp = string(Dates.now(Dates.UTC)) * "Z"
+    mm_ver = string(pkgversion(MixedModels))
+    julia_ver = string(VERSION)
+    commit = try
+        chomp(read(`git rev-parse HEAD`, String))
+    catch
+        "unknown"
+    end
+    body = """
+    {
+      "schema_version": "1.0",
+      "generated_at": "$timestamp",
+      "crate_commit": "$commit",
+      "regenerator": "scripts/parity_pathologies.jl",
+      "source_case": null,
+      "reference_engine": "MixedModels.jl $mm_ver",
+      "notes": "Julia $julia_ver"
+    }
+    """
+    open(prov_path, "w") do io
+        write(io, body)
+    end
+end
+
 function main()
     root = repo_root()
     fixture = flag("fixture", joinpath(root, "tests/fixtures/pathology_corpus/easy.toml"))
@@ -151,6 +179,10 @@ function main()
                 fit_mmjl(spec)
             end
         end
+        # Pair JSON output with a sibling provenance.json so the
+        # fixture_hygiene every_golden_has_provenance_sibling test stays
+        # green when this script writes a fresh fixture.
+        write_provenance_sibling(out_path)
     end
 end
 

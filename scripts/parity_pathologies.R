@@ -164,6 +164,31 @@ fit_lme4 <- function(spec) {
   )
 }
 
+write_provenance_sibling <- function(out_path) {
+  stem <- tools::file_path_sans_ext(basename(out_path))
+  prov_path <- file.path(dirname(out_path), paste0(stem, ".provenance.json"))
+  lme4_ver <- as.character(utils::packageVersion("lme4"))
+  r_ver <- paste(R.Version()[c("major", "minor")], collapse = ".")
+  timestamp <- format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
+  commit <- tryCatch(
+    system2("git", c("rev-parse", "HEAD"), stdout = TRUE),
+    error = function(e) "unknown"
+  )
+  body <- sprintf(
+    '{
+  "schema_version": "1.0",
+  "generated_at": "%s",
+  "crate_commit": "%s",
+  "regenerator": "scripts/parity_pathologies.R",
+  "source_case": null,
+  "reference_engine": "lme4 %s",
+  "notes": "R %s"
+}',
+    timestamp, commit, lme4_ver, r_ver
+  )
+  writeLines(body, prov_path)
+}
+
 main <- function() {
   repo <- find_repo_root()
   fixture <- flag("fixture", file.path(repo, "tests/fixtures/pathology_corpus/easy.toml"))
@@ -174,7 +199,11 @@ main <- function() {
   if (is.null(out)) {
     cat(json, "\n")
   } else {
-    writeLines(json, if (grepl("^/", out)) out else file.path(repo, out))
+    out_abs <- if (grepl("^/", out)) out else file.path(repo, out)
+    writeLines(json, out_abs)
+    # Pair JSON output with a sibling provenance.json so the
+    # fixture_hygiene every_golden_has_provenance_sibling test stays green.
+    write_provenance_sibling(out_abs)
   }
 }
 

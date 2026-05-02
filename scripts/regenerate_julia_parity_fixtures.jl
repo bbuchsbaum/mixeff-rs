@@ -2,6 +2,7 @@
 
 using CategoricalArrays
 using DataFrames
+using Dates
 using MixedModels
 using Printf
 
@@ -71,6 +72,37 @@ function write_json(root, relative_path, value)
     open(path, "w") do io
         write(io, render_json(value))
         write(io, "\n")
+    end
+    write_provenance_sibling(path)
+end
+
+# Write a sibling `<stem>.provenance.json` next to a freshly-emitted
+# parity golden, matching the schema enforced by
+# `tests/fixture_hygiene::every_golden_has_provenance_sibling`.
+function write_provenance_sibling(json_path)
+    stem = first(splitext(basename(json_path)))
+    prov_path = joinpath(dirname(json_path), stem * ".provenance.json")
+    mm_ver = module_version("MixedModels")
+    julia_ver = string(VERSION)
+    timestamp = string(Dates.now(Dates.UTC)) * "Z"
+    commit = try
+        chomp(read(`git rev-parse HEAD`, String))
+    catch
+        "unknown"
+    end
+    body = """
+    {
+      "schema_version": "1.0",
+      "generated_at": "$timestamp",
+      "crate_commit": "$commit",
+      "regenerator": "scripts/regenerate_julia_parity_fixtures.jl",
+      "source_case": null,
+      "reference_engine": "MixedModels.jl $mm_ver",
+      "notes": "Julia $julia_ver"
+    }
+    """
+    open(prov_path, "w") do io
+        write(io, body)
     end
 end
 

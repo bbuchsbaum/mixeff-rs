@@ -8,12 +8,36 @@
   "cnames": ["(Intercept)", "x", "z"],
   "linear_indices_column_major": [0, 1, 2, 4, 5, 8],
   "parmap_zero_based": [
-    { "term": 0, "row": 0, "col": 0 },
-    { "term": 0, "row": 1, "col": 0 },
-    { "term": 0, "row": 2, "col": 0 },
-    { "term": 0, "row": 1, "col": 1 },
-    { "term": 0, "row": 2, "col": 1 },
-    { "term": 0, "row": 2, "col": 2 }
+    {
+      "term": 0,
+      "row": 0,
+      "col": 0
+    },
+    {
+      "term": 0,
+      "row": 1,
+      "col": 0
+    },
+    {
+      "term": 0,
+      "row": 2,
+      "col": 0
+    },
+    {
+      "term": 0,
+      "row": 1,
+      "col": 1
+    },
+    {
+      "term": 0,
+      "row": 2,
+      "col": 1
+    },
+    {
+      "term": 0,
+      "row": 2,
+      "col": 2
+    }
   ],
   "julia_parmap_one_based": [
     [1, 1, 1],
