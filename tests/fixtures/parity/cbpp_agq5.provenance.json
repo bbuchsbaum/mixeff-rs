@@ -1,7 +1,7 @@
 {
   "schema_version": "1.0",
-  "generated_at": "2026-05-02T22:35:41.754Z",
-  "crate_commit": "2c7164db9e42574cf99682d6eef567ba9554829e",
+  "generated_at": "2026-05-03T00:42:25.807Z",
+  "crate_commit": "6b0e89d5a1702046ff2efcd50904bd3d517357ac",
   "regenerator": "scripts/regenerate_julia_parity_fixtures.jl",
   "source_case": null,
   "reference_engine": "MixedModels.jl 5.3.0",

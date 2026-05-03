@@ -86,19 +86,14 @@ else
     skip "cargo not found — comparison/manifest.json regeneration skipped"
 fi
 
-# ---- 5. Pathology + parity JSON fixtures (R + Julia) ------------------
-#       Re-run only the existing scripts. Each writes its own JSON; once
-#       Phase 4-followup extends them to also write provenance siblings,
-#       this step also handles tests/fixtures/parity/*.provenance.json.
+# ---- 5. Bulk parity JSON fixtures (Julia + provenance siblings) -------
+#       parity_pathologies.{R,jl} are per-fixture diagnostic comparators
+#       (one --fixture / one --out per call) and are NOT bulk regens —
+#       run them manually for ad-hoc inspection. Only the bulk emitter
+#       belongs here.
 
-if have Rscript && [[ -f scripts/parity_pathologies.R ]]; then
-    run Rscript scripts/parity_pathologies.R
-fi
-if have julia && [[ -f scripts/parity_pathologies.jl ]]; then
-    run julia --project=MixedModels.jl scripts/parity_pathologies.jl
-fi
 if have julia && [[ -f scripts/regenerate_julia_parity_fixtures.jl ]]; then
-    run julia --project=MixedModels.jl scripts/regenerate_julia_parity_fixtures.jl
+    run julia --project=MixedModels.jl scripts/regenerate_julia_parity_fixtures.jl --out-dir="$REPO_ROOT"
 fi
 
 # ---- 6. Backfill any provenance siblings that are missing -------------
