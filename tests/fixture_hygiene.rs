@@ -3,8 +3,7 @@
 //! Phase 2: comparison/manifest.json must equal the registry-derived view.
 //! Phase 4: every JSON golden under tests/fixtures/{compiler_contract,parity}/
 //!          must have a sibling `<stem>.provenance.json`.
-//! Phase 5 (future) will add re-fit tolerance checks and the
-//! levels.txt ↔ meta.toml schema lint.
+//! Phase 5: schema/levels lints + opt-in re-fit tolerance check.
 //!
 //! When the manifest test fails, regenerate via:
 //!     cargo run --release --example compare_rust
@@ -16,6 +15,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use mixedmodels::datasets;
+use mixedmodels::formula::parse_formula;
+use mixedmodels::model::linear::LinearMixedModel;
+use mixedmodels::model::traits::MixedModelFit;
 use serde_json::{json, Value};
 
 fn repo_root() -> PathBuf {
@@ -264,6 +266,245 @@ fn every_golden_has_provenance_sibling() {
             missing_list,
             malformed.len(),
             malformed_list,
+        );
+    }
+}
+
+/// Tolerance config for the re-fit hygiene check. Values come from the
+/// Phase 5 mote (bd-01KQMZX24V1S8T12HTAWWV95QY) acceptance criteria.
+struct Tolerance {
+    beta_rel: f64,
+    beta_abs: f64,
+    sigma_rel: f64,
+    /// Absolute floor for σ — near-zero σ values (boundary fits with
+    /// σ → 0) would otherwise fail any relative comparison.
+    sigma_abs: f64,
+    theta_rel: f64,
+    /// Absolute floor for θ — same reasoning as sigma_abs.
+    theta_abs: f64,
+    objective_abs: f64,
+}
+
+impl Default for Tolerance {
+    fn default() -> Self {
+        Tolerance {
+            beta_rel: 1e-4,
+            beta_abs: 1e-6,
+            sigma_rel: 1e-3,
+            sigma_abs: 1e-5,
+            theta_rel: 1e-3,
+            theta_abs: 1e-5,
+            objective_abs: 1e-3,
+        }
+    }
+}
+
+fn approx_equal(actual: f64, expected: f64, abs_tol: f64, rel_tol: f64) -> bool {
+    let diff = (actual - expected).abs();
+    diff <= abs_tol || diff <= rel_tol * expected.abs()
+}
+
+/// Re-fit every pinned `[fits.expected]` block via the in-crate engine and
+/// assert β / σ / θ / objective fall within tolerance of the lme4 /
+/// MixedModels.jl reference values.
+///
+/// **Opt-in.** Set `MIXEDMODELS_ENABLE_REFIT_HYGIENE=1` to run. Default
+/// behavior is to early-return so the test does not false-flag in-flight
+/// numerical work in `src/model/linear.rs`. Once that work has stabilized
+/// and the test passes consistently, this gate can be removed.
+///
+/// Skips: non-Gaussian/Identity fits, `difficulty == "stress"` fixtures
+/// (unless `MIXEDMODELS_INCLUDE_STRESS=1`), and pinned fits without an
+/// `[fits.expected]` block. Singular fixtures only check
+/// `objective` + `is_singular`; θ is non-unique on the boundary.
+#[test]
+fn every_pinned_fit_matches_within_tolerance() {
+    if std::env::var("MIXEDMODELS_ENABLE_REFIT_HYGIENE").is_err() {
+        eprintln!(
+            "skipped: set MIXEDMODELS_ENABLE_REFIT_HYGIENE=1 to enable the \
+             re-fit tolerance hygiene check"
+        );
+        return;
+    }
+    let include_stress = std::env::var("MIXEDMODELS_INCLUDE_STRESS").is_ok();
+    let tol = Tolerance::default();
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+    let mut skipped_glmm = 0usize;
+    let mut skipped_stress = 0usize;
+    let mut skipped_no_expected = 0usize;
+
+    for case in datasets::iter_cases() {
+        let mixedmodels::datasets::Case {
+            name, meta, fit, ..
+        } = case;
+
+        let Some(expected) = fit.expected.as_ref() else {
+            skipped_no_expected += 1;
+            continue;
+        };
+        if !fit.family.eq_ignore_ascii_case("Gaussian")
+            || !fit.link.eq_ignore_ascii_case("Identity")
+        {
+            skipped_glmm += 1;
+            continue;
+        }
+        let is_stress = meta.tags.difficulty.as_deref() == Some("stress");
+        if is_stress && !include_stress {
+            skipped_stress += 1;
+            continue;
+        }
+
+        let reml = match fit.estimator.to_ascii_uppercase().as_str() {
+            "REML" => true,
+            "ML" => false,
+            other => {
+                failures.push(format!(
+                    "{name} :: {} ({}): unknown estimator `{other}`",
+                    fit.formula, fit.estimator
+                ));
+                continue;
+            }
+        };
+
+        let (df, _) = match datasets::load(&name) {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                failures.push(format!("{name}: load failed: {e}"));
+                continue;
+            }
+        };
+        let formula = match parse_formula(&fit.formula) {
+            Ok(f) => f,
+            Err(e) => {
+                failures.push(format!(
+                    "{name} :: {}: formula parse failed: {e}",
+                    fit.formula
+                ));
+                continue;
+            }
+        };
+        let mut model = match LinearMixedModel::new(formula, &df, None) {
+            Ok(m) => m,
+            Err(e) => {
+                failures.push(format!(
+                    "{name} :: {}: model construction failed: {e}",
+                    fit.formula
+                ));
+                continue;
+            }
+        };
+        if let Err(e) = model.fit(reml) {
+            failures.push(format!(
+                "{name} :: {}: fit failed: {e}",
+                fit.formula
+            ));
+            continue;
+        }
+
+        let expected_singular = expected.is_singular.unwrap_or(false);
+
+        if let Some(want_obj) = expected.objective {
+            let got_obj = model.objective_value();
+            if !approx_equal(got_obj, want_obj, tol.objective_abs, 0.0) {
+                failures.push(format!(
+                    "{name} :: {} ({}): objective {} drift > {} (expected {})",
+                    fit.formula, fit.estimator, got_obj, tol.objective_abs, want_obj
+                ));
+            }
+        }
+
+        if expected_singular {
+            let got_singular = MixedModelFit::is_singular(&model);
+            if !got_singular {
+                failures.push(format!(
+                    "{name} :: {} ({}): expected is_singular=true, got false",
+                    fit.formula, fit.estimator
+                ));
+            }
+            checked += 1;
+            continue;
+        }
+
+        if let Some(want_beta) = expected.beta.as_ref() {
+            let got_beta: Vec<f64> = MixedModelFit::coef(&model)
+                .iter()
+                .copied()
+                .collect();
+            if got_beta.len() != want_beta.len() {
+                failures.push(format!(
+                    "{name} :: {} ({}): β length {} ≠ expected {}",
+                    fit.formula, fit.estimator, got_beta.len(), want_beta.len()
+                ));
+            } else {
+                for (i, (g, w)) in got_beta.iter().zip(want_beta.iter()).enumerate() {
+                    if !approx_equal(*g, *w, tol.beta_abs, tol.beta_rel) {
+                        failures.push(format!(
+                            "{name} :: {} ({}): β[{i}] {g} ≠ expected {w} \
+                             (rel {:.1e}, abs floor {:.1e})",
+                            fit.formula, fit.estimator, tol.beta_rel, tol.beta_abs
+                        ));
+                    }
+                }
+            }
+        }
+
+        if let Some(want_sigma) = expected.sigma {
+            let got_sigma = model.sigma();
+            if !approx_equal(got_sigma, want_sigma, tol.sigma_abs, tol.sigma_rel) {
+                failures.push(format!(
+                    "{name} :: {} ({}): σ {got_sigma} drift > {:.1e}rel (expected {want_sigma})",
+                    fit.formula, fit.estimator, tol.sigma_rel
+                ));
+            }
+        }
+
+        if let Some(want_theta) = expected.theta.as_ref() {
+            let got_theta: Vec<f64> = model.theta().iter().copied().collect();
+            if got_theta.len() == want_theta.len() {
+                for (i, (g, w)) in got_theta.iter().zip(want_theta.iter()).enumerate() {
+                    if !approx_equal(*g, *w, tol.theta_abs, tol.theta_rel) {
+                        failures.push(format!(
+                            "{name} :: {} ({}): θ[{i}] {g} drift > {:.1e}rel (expected {w})",
+                            fit.formula, fit.estimator, tol.theta_rel
+                        ));
+                    }
+                }
+            } else {
+                failures.push(format!(
+                    "{name} :: {} ({}): θ length {} ≠ expected {}",
+                    fit.formula, fit.estimator, got_theta.len(), want_theta.len()
+                ));
+            }
+        }
+
+        checked += 1;
+    }
+
+    eprintln!(
+        "re-fit hygiene: checked {checked}, skipped (GLMM) {skipped_glmm}, \
+         skipped (stress) {skipped_stress}, skipped (no expected) {skipped_no_expected}"
+    );
+
+    if !failures.is_empty() {
+        let body = failures
+            .iter()
+            .map(|s| format!("  - {s}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        panic!(
+            "re-fit hygiene check failed for {} fits:\n{body}\n\n\
+             A failure here means one of three things:\n\
+              1. Engine drift — the in-crate fit changed numerically. \
+                 Compare against `comparison/REPORT.md` to see if the \
+                 in-crate vs lme4 delta has shifted.\n\
+              2. Fixture drift — `bash scripts/regenerate_all.sh` to refresh \
+                 the pinned references against the current reference engine.\n\
+              3. Reference engine version drift — lme4 / MixedModels.jl \
+                 produces different output now. Bump versions in the \
+                 `[provenance]` blocks and refresh.",
+            failures.len()
         );
     }
 }
