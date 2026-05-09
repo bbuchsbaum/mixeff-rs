@@ -125,11 +125,11 @@ pub struct ResponseMatrixProfile {
 }
 
 #[derive(Debug)]
-struct PatternSearchOutcome {
-    best_theta: Vec<f64>,
-    best_fmin: f64,
-    feval_count: i64,
-    fit_log: Vec<FitLogEntry>,
+pub(crate) struct PatternSearchOutcome {
+    pub(crate) best_theta: Vec<f64>,
+    pub(crate) best_fmin: f64,
+    pub(crate) feval_count: i64,
+    pub(crate) fit_log: Vec<FitLogEntry>,
 }
 
 fn record_pattern_eval<F>(
@@ -431,7 +431,7 @@ fn solve_scaled_vsize2_row(
     (solved0, solved1)
 }
 
-fn update_l_from_parts(
+pub(crate) fn update_l_from_parts(
     a_blocks: &[MatrixBlock],
     l_blocks: &mut [MatrixBlock],
     reterms: &[ReMat],
@@ -3487,7 +3487,7 @@ impl LinearMixedModel {
         )
     }
 
-    fn run_multivariate_pattern_search<F>(
+    pub(crate) fn run_multivariate_pattern_search<F>(
         initial: Vec<f64>,
         finitial: f64,
         lower_bounds: &[f64],
@@ -8350,7 +8350,7 @@ fn create_al_single_vsize2(re: &ReMat, xy: &FeMat) -> (Vec<MatrixBlock>, Vec<Mat
 }
 
 /// Create the structural A and L block arrays for `[Z X]' [Z X]`.
-fn create_structural_al(
+pub(crate) fn create_structural_al(
     reterms: &[ReMat],
     x: &DMatrix<f64>,
 ) -> Result<(Vec<MatrixBlock>, Vec<MatrixBlock>)> {
@@ -8877,7 +8877,7 @@ fn response_column_sums_of_squares(y: &DMatrix<f64>) -> DVector<f64> {
     sums
 }
 
-fn profile_response_matrix_with_l_blocks(
+pub(crate) fn profile_response_matrix_with_l_blocks(
     reterms: &[ReMat],
     x: &DMatrix<f64>,
     responses: &DMatrix<f64>,

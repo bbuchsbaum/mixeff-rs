@@ -1,11 +1,17 @@
 //! Mixed model types and fitting algorithms.
 
+pub mod batch;
 pub mod data;
 pub mod fixed_design;
 pub mod generalized;
 pub mod linear;
 pub mod traits;
 
+pub use batch::{
+    BatchOptimizerControl, BatchOptions, BatchThetaGrouping, BatchWarmStart, LinearMixedModelBatch,
+    ResponseBatchFit, ResponseBatchMode, ResponseColumnDiagnostic, ResponseDiagnosticReason,
+    ResponseFitStatus, ThetaBatch,
+};
 pub use data::{
     CategoricalCoding, CategoricalColumn, CategoricalContrast, Column, ContrastSource, DataFrame,
     EncodedCategoricalColumn,

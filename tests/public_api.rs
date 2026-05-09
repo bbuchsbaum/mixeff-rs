@@ -3,14 +3,15 @@ use std::path::Path;
 use std::process::Command;
 
 use mixedmodels::model::{
-    parametricbootstrap, BootstrapFailedRefitPolicy, BootstrapInterval, BootstrapIntervalMethod,
+    parametricbootstrap, BatchOptimizerControl, BatchOptions, BatchThetaGrouping, BatchWarmStart, BootstrapFailedRefitPolicy, BootstrapInterval, BootstrapIntervalMethod,
     BootstrapQuantile, BootstrapRefitOptions, BootstrapReplicate, BootstrapRunMetadata,
     BootstrapRunPayload, BootstrapSeedRecord, BootstrapTarget, BootstrapTargetKind,
     CategoricalColumn, Column, ConvergenceVerificationOptions, DataFrame, Family,
     FixedEffectNullBootstrapTarget, FixedEffectNullCovariancePolicy, GeneralizedLinearMixedModel,
-    KenwardRogerAdjustedVcov, KenwardRogerLbDdf, KenwardRogerSigmaG, LinearMixedModel,
-    LinkFunction, MixedModelBootstrap, MixedModelFit, ModelDims, NewReLevels, RandomEffectTermInfo,
-    ResponseMatrixProfile, VcovVarparEstimate, BOOTSTRAP_RUN_SCHEMA, BOOTSTRAP_RUN_SCHEMA_VERSION,
+    KenwardRogerAdjustedVcov, KenwardRogerLbDdf, KenwardRogerSigmaG, LinearMixedModel, LinearMixedModelBatch,
+    LinkFunction, MixedModelBootstrap, MixedModelFit, ModelDims, NewReLevels, RandomEffectTermInfo, ResponseBatchFit, ResponseBatchMode,
+    ResponseColumnDiagnostic, ResponseDiagnosticReason, ResponseFitStatus, ResponseMatrixProfile,
+    ThetaBatch, VcovVarparEstimate, BOOTSTRAP_RUN_SCHEMA, BOOTSTRAP_RUN_SCHEMA_VERSION,
 };
 use mixedmodels::stats::{
     assess_model_comparison_sequence, coeftable_to_markdown, profile, profile_beta, profile_betas,
@@ -125,9 +126,20 @@ fn intended_model_barrel_exports_compile_for_downstream_users() {
     assert_type::<DataFrame>();
     assert_type::<GeneralizedLinearMixedModel>();
     assert_type::<LinearMixedModel>();
+    assert_type::<LinearMixedModelBatch>();
     assert_type::<ModelDims>();
     assert_type::<NewReLevels>();
     assert_type::<ResponseMatrixProfile>();
+    assert_type::<BatchOptions>();
+    assert_type::<BatchOptimizerControl>();
+    assert_type::<BatchThetaGrouping>();
+    assert_type::<BatchWarmStart>();
+    assert_type::<ResponseBatchFit>();
+    assert_type::<ResponseBatchMode>();
+    assert_type::<ResponseColumnDiagnostic>();
+    assert_type::<ResponseDiagnosticReason>();
+    assert_type::<ResponseFitStatus>();
+    assert_type::<ThetaBatch>();
     assert_type::<VcovVarparEstimate>();
     assert_type::<KenwardRogerSigmaG>();
     assert_type::<KenwardRogerAdjustedVcov>();
