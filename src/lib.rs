@@ -7,8 +7,8 @@
 //! # Quick start
 //!
 //! ```no_run
-//! use mixedmodels::formula::parse_formula;
-//! use mixedmodels::model::{DataFrame, LinearMixedModel};
+//! use mixeff_rs::formula::parse_formula;
+//! use mixeff_rs::model::{DataFrame, LinearMixedModel};
 //!
 //! let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
 //! // ... build DataFrame, construct model, fit ...

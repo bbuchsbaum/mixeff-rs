@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
-use mixedmodels::compiler::{
+use mixeff_rs::compiler::{
     DiagnosticCode, EffectiveRankStatus, FitStatus, InformationBudgetStatus,
 };
-use mixedmodels::datasets;
-use mixedmodels::formula::parse_formula;
-use mixedmodels::model::LinearMixedModel;
+use mixeff_rs::datasets;
+use mixeff_rs::formula::parse_formula;
+use mixeff_rs::model::LinearMixedModel;
 
 fn forum_formula() -> &'static str {
     "effect ~ 1 + duration + (1 + duration | sites) + (1 + duration | season)"

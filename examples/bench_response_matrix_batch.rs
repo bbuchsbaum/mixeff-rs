@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 
 use nalgebra::DMatrix;
 
-use mixedmodels::datasets;
-use mixedmodels::formula::parse_formula;
-use mixedmodels::model::{
+use mixeff_rs::datasets;
+use mixeff_rs::formula::parse_formula;
+use mixeff_rs::model::{
     BatchOptimizerControl, BatchOptions, BatchWarmStart, LinearMixedModel, LinearMixedModelBatch,
     ResponseBatchMode,
 };
@@ -179,7 +179,7 @@ fn time_it<T, E>(f: impl FnOnce() -> Result<T, E>) -> Result<Timed<T>, E> {
 fn scalar_refit_loop(
     template: &LinearMixedModel,
     responses: &DMatrix<f64>,
-) -> mixedmodels::error::Result<usize> {
+) -> mixeff_rs::error::Result<usize> {
     let mut successes = 0usize;
     for col in 0..responses.ncols() {
         let mut model = template.clone();

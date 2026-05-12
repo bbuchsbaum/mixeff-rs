@@ -20,11 +20,11 @@ use std::time::Instant;
 use serde::Serialize;
 use serde_json::json;
 
-use mixedmodels::datasets;
-use mixedmodels::formula::parse_formula;
-use mixedmodels::model::data::DataFrame;
-use mixedmodels::model::linear::LinearMixedModel;
-use mixedmodels::model::traits::MixedModelFit;
+use mixeff_rs::datasets;
+use mixeff_rs::formula::parse_formula;
+use mixeff_rs::model::data::DataFrame;
+use mixeff_rs::model::linear::LinearMixedModel;
+use mixeff_rs::model::traits::MixedModelFit;
 
 const TIMING_REPEATS: usize = 3;
 
@@ -166,7 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // is now a *derived* view of datasets/REGISTRY.md rather than a hand-edited
     // file; the fixture_hygiene test guards against drift.
     for case in datasets::iter_cases() {
-        let mixedmodels::datasets::Case {
+        let mixeff_rs::datasets::Case {
             name,
             meta,
             fit,
@@ -300,7 +300,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(
         &results_path,
         serde_json::to_string_pretty(&json!({
-            "tool": "mixedmodels (rust)",
+            "tool": "mixeff-rs",
             "version": env!("CARGO_PKG_VERSION"),
             "results": results,
         }))?,

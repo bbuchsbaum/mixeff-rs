@@ -25,14 +25,14 @@ use rand_distr::{Distribution, Normal};
 use serde::Serialize;
 use serde_json::json;
 
-use mixedmodels::compiler::{
+use mixeff_rs::compiler::{
     ConvergenceVerificationStatus, EvidenceMethod, EvidenceQuality, FitStatus,
 };
-use mixedmodels::datasets;
-use mixedmodels::formula::parse_formula;
-use mixedmodels::model::linear::{ConvergenceVerificationOptions, LinearMixedModel};
-use mixedmodels::model::traits::MixedModelFit;
-use mixedmodels::model::DataFrame;
+use mixeff_rs::datasets;
+use mixeff_rs::formula::parse_formula;
+use mixeff_rs::model::linear::{ConvergenceVerificationOptions, LinearMixedModel};
+use mixeff_rs::model::traits::MixedModelFit;
+use mixeff_rs::model::DataFrame;
 
 const FORMULA: &str = "diameter ~ 1 + (1 | plate) + (1 | sample)";
 
@@ -595,7 +595,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(
         &outpath,
         serde_json::to_string_pretty(&json!({
-            "tool": "mixedmodels (rust)",
+            "tool": "mixeff-rs",
             "version": env!("CARGO_PKG_VERSION"),
             "formula": FORMULA,
             "benchmark": "penicillin_convergence",

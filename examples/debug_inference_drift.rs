@@ -1,9 +1,9 @@
 //! Diagnostic for the two failing inference parity cases.
 
-use mixedmodels::formula::parse_formula;
-use mixedmodels::model::data::DataFrame;
-use mixedmodels::model::linear::LinearMixedModel;
-use mixedmodels::model::traits::MixedModelFit;
+use mixeff_rs::formula::parse_formula;
+use mixeff_rs::model::data::DataFrame;
+use mixeff_rs::model::linear::LinearMixedModel;
+use mixeff_rs::model::traits::MixedModelFit;
 use nalgebra::DMatrix;
 
 fn main() {

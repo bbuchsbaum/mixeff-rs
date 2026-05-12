@@ -1,10 +1,10 @@
 #![cfg(not(feature = "nlopt"))]
 
-use mixedmodels::compiler::{
+use mixeff_rs::compiler::{
     DiagnosticCode, InferenceAvailability, ModelKind, ObjectiveApproximation,
 };
-use mixedmodels::formula::parse_formula;
-use mixedmodels::model::{DataFrame, Family, GeneralizedLinearMixedModel, LinkFunction};
+use mixeff_rs::formula::parse_formula;
+use mixeff_rs::model::{DataFrame, Family, GeneralizedLinearMixedModel, LinkFunction};
 
 // toy: 4 groups × 5 obs of Gamma/Log GLMM data; tests the artifact
 // metadata surface, not numerical fit accuracy.

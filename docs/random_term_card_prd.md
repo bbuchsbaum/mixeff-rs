@@ -3,7 +3,7 @@
 ## State
 
 Status: Proposed by downstream R wrapper (`mixeff`)
-Owner: `mixedmodels` Rust crate maintainers
+Owner: `mixeff-rs` Rust crate maintainers
 Last updated: 2026-04-28
 Related design notes:
 - `docs/compiler_contract_v0_prd.md` (the v0 contract this PRD extends)
@@ -41,7 +41,7 @@ upstream-authored data.
 
 ## Description
 
-`mixedmodels` already authors per-term English in `CovarianceStory`
+`mixeff-rs` already authors per-term English in `CovarianceStory`
 (`src/compiler/ir.rs:138`) and exposes an unstructured audit-report
 text rendering through `ModelAuditReport::Display` (`src/compiler/report.rs:79`).
 That is the right shape for human-readable summary text but is the

@@ -3,10 +3,10 @@
 
 use std::time::Instant;
 
-use mixedmodels::formula::parse_formula;
-use mixedmodels::model::data::DataFrame;
-use mixedmodels::model::linear::LinearMixedModel;
-use mixedmodels::model::traits::MixedModelFit;
+use mixeff_rs::formula::parse_formula;
+use mixeff_rs::model::data::DataFrame;
+use mixeff_rs::model::linear::LinearMixedModel;
+use mixeff_rs::model::traits::MixedModelFit;
 
 /// Simulate sleepstudy-like data:
 ///   y = β₀ + β₁*x + b₀ᵢ + b₁ᵢ*x + ε

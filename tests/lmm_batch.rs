@@ -1,8 +1,8 @@
 use approx::assert_relative_eq;
 use nalgebra::DMatrix;
 
-use mixedmodels::formula::parse_formula;
-use mixedmodels::model::{
+use mixeff_rs::formula::parse_formula;
+use mixeff_rs::model::{
     BatchOptimizerControl, BatchOptions, BatchThetaGrouping, BatchWarmStart, DataFrame,
     LinearMixedModel, LinearMixedModelBatch, MixedModelFit, ResponseBatchMode, ResponseFitStatus,
     ThetaBatch,

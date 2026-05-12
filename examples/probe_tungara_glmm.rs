@@ -3,10 +3,10 @@
 //! This is intentionally separate from `compare_rust`, whose current manifest
 //! runner reports GLMMs as not wired yet.
 
-use mixedmodels::datasets;
-use mixedmodels::formula::parse_formula;
-use mixedmodels::model::traits::MixedModelFit;
-use mixedmodels::model::{Family, GeneralizedLinearMixedModel, LinkFunction};
+use mixeff_rs::datasets;
+use mixeff_rs::formula::parse_formula;
+use mixeff_rs::model::traits::MixedModelFit;
+use mixeff_rs::model::{Family, GeneralizedLinearMixedModel, LinkFunction};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (df, meta) = datasets::load("tungara_single_caller")?;

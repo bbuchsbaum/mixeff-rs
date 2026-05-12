@@ -1,8 +1,8 @@
-use mixedmodels::compiler::{ConvergenceLevel, ConvergenceSource, ConvergenceVerdict};
-use mixedmodels::compiler::{DiagnosticCode, DiagnosticSeverity};
-use mixedmodels::datasets;
-use mixedmodels::formula::parse_formula;
-use mixedmodels::model::LinearMixedModel;
+use mixeff_rs::compiler::{ConvergenceLevel, ConvergenceSource, ConvergenceVerdict};
+use mixeff_rs::compiler::{DiagnosticCode, DiagnosticSeverity};
+use mixeff_rs::datasets;
+use mixeff_rs::formula::parse_formula;
+use mixeff_rs::model::LinearMixedModel;
 
 fn nested_formula() -> &'static str {
     "logterrisize ~ 1 + spm + (1 | studyarea) + (1 | studyarea:teriid)"

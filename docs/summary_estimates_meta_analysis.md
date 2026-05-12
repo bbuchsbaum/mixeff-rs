@@ -157,7 +157,6 @@ impl LinearMixedModel {
 
 pub struct SummaryEstimateOptions {
     pub variance_scale: SamplingVarianceScale,  // default Absolute
-    pub reml: bool,                             // default true
     pub policy: CompilerPolicy,                 // default CompilerPolicy::default()
 }
 
@@ -260,10 +259,12 @@ may be rewritten without changing the contract.
 ## Acceptance Criteria
 
 - New constructor compiles, validates inputs, and produces a fittable model.
-- `cargo test summary_estimate_parity` recovers `metafor::rma.mv` `beta_hat`
-  to within `1e-6` and `tau^2` to within `1e-4` on the BCG vaccine fixture
-  (or comparable fixed-seed simulation if licensing of `dat.bcg` is
-  unclear).
+- `Rscript scripts/compare_metafor.R` followed by
+  `cargo run --release --example compare_metafor` recovers
+  `metafor::rma.mv` `beta_hat` to within `1e-6` and `tau^2` to within
+  `1e-4` on the BCG vaccine fixture. The Rust example treats REML
+  log-likelihood as informational because metafor and lme4-style PLS use
+  different normalization constants.
 - `varcorr()` on a summary-estimate fit does not contain a "Residual" row.
 - Satterthwaite on a summary-estimate fit returns `Unavailable` with the
   documented reason.
@@ -276,15 +277,14 @@ may be rewritten without changing the contract.
 ## Worked Example (sketch)
 
 ```rust
-use mixedmodels::model::{
+use mixeff_rs::model::{
     LinearMixedModel, SummaryEstimateOptions, SamplingVarianceScale,
 };
-use mixedmodels::formula::Formula;
+use mixeff_rs::formula::Formula;
 
 let formula = Formula::parse("logrr ~ 1 + (1 | study)")?;
 let opts = SummaryEstimateOptions {
     variance_scale: SamplingVarianceScale::Absolute,
-    reml: true,
     ..Default::default()
 };
 

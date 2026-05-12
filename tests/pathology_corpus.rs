@@ -23,11 +23,11 @@
 
 use nalgebra::dmatrix;
 
-use mixedmodels::compiler::FitStatus;
-use mixedmodels::error::MixedModelError;
-use mixedmodels::formula::parse_formula;
-use mixedmodels::model::{Family, GeneralizedLinearMixedModel, LinearMixedModel, LinkFunction};
-use mixedmodels::pathology::{
+use mixeff_rs::compiler::FitStatus;
+use mixeff_rs::error::MixedModelError;
+use mixeff_rs::formula::parse_formula;
+use mixeff_rs::model::{Family, GeneralizedLinearMixedModel, LinearMixedModel, LinkFunction};
+use mixeff_rs::pathology::{
     block_diagonal_crossings, certify, collinear_fe, detect_separation, effective_status,
     effective_status_from_artifact, empty_crossings, expected_statuses, extreme_prevalence,
     generate, inferred_axes, lint_single_axis, map_error_to_status, near_singular_re, pareto_sizes,
@@ -465,7 +465,7 @@ fn boundary_stratum_lands_on_or_near_zero_variance() {
     assert!(cert
         .boundary_directions
         .iter()
-        .any(|b| matches!(b, mixedmodels::pathology::BoundaryKind::ZeroVariance { .. })));
+        .any(|b| matches!(b, mixeff_rs::pathology::BoundaryKind::ZeroVariance { .. })));
     assert!(expected.contains(FitStatus::ConvergedBoundary));
 }
 

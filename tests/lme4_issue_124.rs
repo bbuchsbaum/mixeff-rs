@@ -1,6 +1,6 @@
-use mixedmodels::compiler::{DiagnosticCode, DiagnosticSeverity};
-use mixedmodels::formula::parse_formula;
-use mixedmodels::model::{DataFrame, Family, GeneralizedLinearMixedModel, MixedModelFit};
+use mixeff_rs::compiler::{DiagnosticCode, DiagnosticSeverity};
+use mixeff_rs::formula::parse_formula;
+use mixeff_rs::model::{DataFrame, Family, GeneralizedLinearMixedModel, MixedModelFit};
 
 // toy: lme4 GH-124 reproducer with one `x2 = 1.0` outlier row.
 fn lme4_issue_124_complete_separation_data() -> DataFrame {

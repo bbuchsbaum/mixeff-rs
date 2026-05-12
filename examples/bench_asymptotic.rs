@@ -23,10 +23,10 @@ use rand_distr::{Distribution, Normal};
 use serde::Serialize;
 use serde_json::json;
 
-use mixedmodels::formula::parse_formula;
-use mixedmodels::model::data::DataFrame;
-use mixedmodels::model::linear::LinearMixedModel;
-use mixedmodels::model::traits::MixedModelFit;
+use mixeff_rs::formula::parse_formula;
+use mixeff_rs::model::data::DataFrame;
+use mixeff_rs::model::linear::LinearMixedModel;
+use mixeff_rs::model::traits::MixedModelFit;
 
 const FORMULA: &str = "reaction ~ 1 + days + (1 + days | subj)";
 const WARMUP_RUNS: usize = 3;
@@ -223,7 +223,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(
         &outpath,
         serde_json::to_string_pretty(&json!({
-            "tool": "mixedmodels (rust)",
+            "tool": "mixeff-rs",
             "version": env!("CARGO_PKG_VERSION"),
             "results": results,
         }))?,

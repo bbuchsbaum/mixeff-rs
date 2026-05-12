@@ -1,6 +1,6 @@
-use mixedmodels::compiler::{DiagnosticCode, VarCorrEntryKind};
-use mixedmodels::formula::parse_formula;
-use mixedmodels::model::{DataFrame, LinearMixedModel};
+use mixeff_rs::compiler::{DiagnosticCode, VarCorrEntryKind};
+use mixeff_rs::formula::parse_formula;
+use mixeff_rs::model::{DataFrame, LinearMixedModel};
 
 // toy: 8 rows of crossed person × firm earnings; tests the
 // crossed-correlation diagnostic path, not numerical fit accuracy.

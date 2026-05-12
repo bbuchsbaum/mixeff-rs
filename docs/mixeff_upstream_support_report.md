@@ -7,7 +7,7 @@ Downstream: `/Users/bbuchsbaum/code/mixeff`
 
 ## Executive Summary
 
-Recent `mixedmodels` work materially changes what `mixeff` can expose. The R
+Recent `mixeff-rs` work materially changes what `mixeff` can expose. The R
 wrapper no longer has to treat p-values and random-effect explanation as future
 or unavailable surfaces in all cases. Rust now owns a row-level fixed-effect
 inference table, populated on fitted LMM artifacts, plus a structured
@@ -518,7 +518,7 @@ Avoid:
 ## Concrete Migration Checklist
 
 1. Re-vendor or path-update `mixeff` against the current upstream
-   `mixedmodels`.
+   `mixeff-rs`.
 2. Add schema negotiation for `mixedmodels.fixed_effect_inference_table`
    `1.0.0`.
 3. Update `mm_formula_manifest()` capabilities to distinguish:

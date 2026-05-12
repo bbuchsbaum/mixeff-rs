@@ -6,7 +6,7 @@
 //! # Quick start
 //!
 //! ```
-//! use mixedmodels::formula::{parse_formula, Formula, FixedTerm, RandomTerm, GroupingFactor};
+//! use mixeff_rs::formula::{parse_formula, Formula, FixedTerm, RandomTerm, GroupingFactor};
 //!
 //! let f = parse_formula("y ~ x1 + (1 | group)").unwrap();
 //! assert_eq!(f.response, "y");

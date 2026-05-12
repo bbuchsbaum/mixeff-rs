@@ -2234,7 +2234,7 @@ impl LinearMixedModel {
     /// VarCorr covariance entries (`sigma^2 * Lambda Lambda'`); the final
     /// component is the residual variance multiplying the identity matrix.
     pub fn kenward_roger_sigma_g(&self) -> Result<KenwardRogerSigmaG> {
-        if self.optsum.feval == 0 {
+        if self.optsum.feval <= 0 {
             return Err(MixedModelError::NotFitted);
         }
         if !self.sqrtwts.is_empty() {

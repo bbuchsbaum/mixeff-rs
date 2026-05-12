@@ -1,8 +1,8 @@
 [package]
-name = "mixedmodels"
+name = "mixeff-rs"
 version = "0.1.0"
 edition = "2021"
-description = "Mixed-effects models in Rust — port of MixedModels.jl"
+description = "Mixed-effects models in Rust — engine for the mixeff R package, port of MixedModels.jl"
 license = "MIT"
 
 [dependencies]

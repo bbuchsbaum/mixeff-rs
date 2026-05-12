@@ -14,10 +14,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use mixedmodels::datasets;
-use mixedmodels::formula::parse_formula;
-use mixedmodels::model::linear::LinearMixedModel;
-use mixedmodels::model::traits::MixedModelFit;
+use mixeff_rs::datasets;
+use mixeff_rs::formula::parse_formula;
+use mixeff_rs::model::linear::LinearMixedModel;
+use mixeff_rs::model::traits::MixedModelFit;
 use serde_json::{json, Value};
 
 fn repo_root() -> PathBuf {
@@ -124,7 +124,7 @@ fn csv_header_contains_every_declared_column() {
 /// canonical contrast coding.
 #[test]
 fn levels_txt_matches_meta_levels() {
-    use mixedmodels::datasets::ColumnType;
+    use mixeff_rs::datasets::ColumnType;
 
     for meta in datasets::iter() {
         let name = &meta.name;
@@ -336,7 +336,7 @@ fn every_pinned_fit_matches_within_tolerance() {
     let mut skipped_no_expected = 0usize;
 
     for case in datasets::iter_cases() {
-        let mixedmodels::datasets::Case {
+        let mixeff_rs::datasets::Case {
             name, meta, fit, ..
         } = case;
 

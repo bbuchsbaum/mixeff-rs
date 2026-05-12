@@ -1,13 +1,13 @@
 use approx::assert_relative_eq;
 use serde::Deserialize;
 
-use mixedmodels::datasets;
-use mixedmodels::formula::parse_formula;
-use mixedmodels::model::generalized::GeneralizedLinearMixedModel;
-use mixedmodels::model::traits::{Family, MixedModelFit};
-use mixedmodels::types::gh_norm;
+use mixeff_rs::datasets;
+use mixeff_rs::formula::parse_formula;
+use mixeff_rs::model::generalized::GeneralizedLinearMixedModel;
+use mixeff_rs::model::traits::{Family, MixedModelFit};
+use mixeff_rs::types::gh_norm;
 #[cfg(not(feature = "nlopt"))]
-use mixedmodels::types::Optimizer;
+use mixeff_rs::types::Optimizer;
 
 #[allow(dead_code)]
 #[derive(Deserialize)]

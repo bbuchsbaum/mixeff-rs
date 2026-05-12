@@ -9,10 +9,10 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rand_distr::{Distribution, Normal};
 
-use mixedmodels::formula::parse_formula;
-use mixedmodels::model::data::DataFrame;
-use mixedmodels::model::linear::LinearMixedModel;
-use mixedmodels::model::traits::MixedModelFit;
+use mixeff_rs::formula::parse_formula;
+use mixeff_rs::model::data::DataFrame;
+use mixeff_rs::model::linear::LinearMixedModel;
+use mixeff_rs::model::traits::MixedModelFit;
 
 const FORMULA: &str = "reaction ~ 1 + days + (1 + days | subj)";
 const DEFAULT_N_SUBJECTS: usize = 10_000;
@@ -105,7 +105,7 @@ fn configure(model: &mut LinearMixedModel, variant: Variant) {
 
 fn run_variant(
     df: &DataFrame,
-    formula: &mixedmodels::formula::Formula,
+    formula: &mixeff_rs::formula::Formula,
     variant: Variant,
     measured_runs: usize,
 ) -> VariantResult {

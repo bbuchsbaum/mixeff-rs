@@ -4,7 +4,7 @@
 
 use nalgebra::dmatrix;
 
-use mixedmodels::pathology::{
+use mixeff_rs::pathology::{
     block_diagonal_crossings, certify, collinear_fe, empty_crossings, extreme_prevalence,
     near_singular_re, pareto_sizes, scale_mismatch, singletons_with_slope, GeneratorSpec,
     WEAK_ID_THRESHOLD,

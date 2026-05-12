@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use mixedmodels::model::{
+use mixeff_rs::model::{
     parametricbootstrap, BatchOptimizerControl, BatchOptions, BatchThetaGrouping, BatchWarmStart, BootstrapFailedRefitPolicy, BootstrapInterval, BootstrapIntervalMethod,
     BootstrapQuantile, BootstrapRefitOptions, BootstrapReplicate, BootstrapRunMetadata,
     BootstrapRunPayload, BootstrapSeedRecord, BootstrapTarget, BootstrapTargetKind,
@@ -13,7 +13,7 @@ use mixedmodels::model::{
     ResponseColumnDiagnostic, ResponseDiagnosticReason, ResponseFitStatus, ResponseMatrixProfile,
     ThetaBatch, VcovVarparEstimate, BOOTSTRAP_RUN_SCHEMA, BOOTSTRAP_RUN_SCHEMA_VERSION,
 };
-use mixedmodels::stats::{
+use mixeff_rs::stats::{
     assess_model_comparison_sequence, coeftable_to_markdown, profile, profile_beta, profile_betas,
     profile_sigma, profile_theta, profile_theta_scalar, restore_replicates, restorereplicates,
     save_replicates, savereplicates, shortest_cov_int, BlockDescription, CoefTable,
@@ -21,7 +21,7 @@ use mixedmodels::stats::{
     MixedModelProfile, ModelComparisonAlternative, ModelComparisonAssessment, ModelComparisonClass,
     ModelSummary, ModelSummaryRow, ProfileRow, RandomEffectComparison, VarCorr, VarCorrComponent,
 };
-use mixedmodels::types::MatrixBlock;
+use mixeff_rs::types::MatrixBlock;
 
 fn source(relative: &str) -> String {
     fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join(relative))
@@ -58,7 +58,7 @@ fn unstable_storage_helpers_are_not_top_level_reexports() {
 fn downstream_crate_cannot_import_internal_barrel_items() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
     let temp_root = std::env::temp_dir().join(format!(
-        "mixedmodels-public-api-negative-{}",
+        "mixeff-rs-public-api-negative-{}",
         std::process::id()
     ));
     let _ = fs::remove_dir_all(&temp_root);
@@ -67,12 +67,12 @@ fn downstream_crate_cannot_import_internal_barrel_items() {
         temp_root.join("Cargo.toml"),
         format!(
             r#"[package]
-name = "mixedmodels_public_api_negative"
+name = "mixeff_rs_public_api_negative"
 version = "0.0.0"
 edition = "2021"
 
 [dependencies]
-mixedmodels = {{ path = "{}" }}
+mixeff-rs = {{ path = "{}" }}
 "#,
             manifest_dir.display()
         ),
@@ -80,8 +80,8 @@ mixedmodels = {{ path = "{}" }}
     .unwrap();
     fs::write(
         temp_root.join("src/lib.rs"),
-        r#"use mixedmodels::model::MatrixBlock;
-use mixedmodels::stats::NaturalCubicSpline;
+        r#"use mixeff_rs::model::MatrixBlock;
+use mixeff_rs::stats::NaturalCubicSpline;
 
 pub fn touch_internal_api() {
     let _ = core::mem::size_of::<MatrixBlock>();

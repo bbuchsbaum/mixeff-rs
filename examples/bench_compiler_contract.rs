@@ -23,13 +23,13 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use serde_json::json;
 
-use mixedmodels::compiler::{
+use mixeff_rs::compiler::{
     audit_design, compile_formula_ir, explain_model, recommend_policy, CompilerPolicy, Diagnostic,
 };
-use mixedmodels::datasets;
-use mixedmodels::formula::parse_formula;
-use mixedmodels::model::data::DataFrame;
-use mixedmodels::model::linear::LinearMixedModel;
+use mixeff_rs::datasets;
+use mixeff_rs::formula::parse_formula;
+use mixeff_rs::model::data::DataFrame;
+use mixeff_rs::model::linear::LinearMixedModel;
 
 const SLEEPSTUDY_FORMULA: &str = "Reaction ~ 1 + Days + (1 + Days | Subject)";
 const CROSSED_FORMULA: &str = "y ~ 1 + x + (1 | subject) + (1 | item)";
@@ -414,7 +414,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ];
 
     let output = json!({
-        "tool": "mixedmodels compiler contract benchmark",
+        "tool": "mixeff-rs compiler contract benchmark",
         "version": env!("CARGO_PKG_VERSION"),
         "warmup_runs": warmup_runs,
         "measured_runs": measured_runs,

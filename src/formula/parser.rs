@@ -784,7 +784,7 @@ fn append_combinations(
 /// # Examples
 ///
 /// ```
-/// use mixedmodels::formula::parser::parse_formula;
+/// use mixeff_rs::formula::parser::parse_formula;
 ///
 /// let f = parse_formula("y ~ x1 + (1 | group)").unwrap();
 /// assert_eq!(f.response, "y");

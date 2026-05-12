@@ -1,11 +1,11 @@
 #![cfg(not(feature = "nlopt"))]
 
-use mixedmodels::datasets;
-use mixedmodels::formula::parse_formula;
-use mixedmodels::model::{
+use mixeff_rs::datasets;
+use mixeff_rs::formula::parse_formula;
+use mixeff_rs::model::{
     DataFrame, Family, GeneralizedLinearMixedModel, LinkFunction, MixedModelFit,
 };
-use mixedmodels::types::Optimizer;
+use mixeff_rs::types::Optimizer;
 
 fn assert_native_glmm_fit(
     model: &GeneralizedLinearMixedModel,

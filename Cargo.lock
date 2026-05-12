@@ -177,7 +177,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mixedmodels"
+name = "mixeff-rs"
 version = "0.1.0"
 dependencies = [
  "approx",

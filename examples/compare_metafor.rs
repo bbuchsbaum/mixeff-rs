@@ -20,11 +20,11 @@ use std::path::PathBuf;
 
 use serde_json::json;
 
-use mixedmodels::formula::parse_formula;
-use mixedmodels::model::data::DataFrame;
-use mixedmodels::model::linear::LinearMixedModel;
-use mixedmodels::model::summary_estimates::SummaryEstimateOptions;
-use mixedmodels::model::traits::MixedModelFit;
+use mixeff_rs::formula::parse_formula;
+use mixeff_rs::model::data::DataFrame;
+use mixeff_rs::model::linear::LinearMixedModel;
+use mixeff_rs::model::summary_estimates::SummaryEstimateOptions;
+use mixeff_rs::model::traits::MixedModelFit;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let repo_root = find_repo_root()?;
@@ -73,7 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let payload = json!({
         "schema_version": 1,
-        "source": "mixedmodels::LinearMixedModel::from_summary_estimates",
+        "source": "mixeff_rs::LinearMixedModel::from_summary_estimates",
         "method": "REML",
         "fixture": "Berkey 1995 BCG vaccine (n=13)",
         "formula": "yi ~ 1 + (1 | trial)",

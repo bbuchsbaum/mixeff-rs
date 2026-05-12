@@ -1,8 +1,8 @@
 use serde::Deserialize;
 use std::collections::BTreeSet;
 
-use mixedmodels::types::opt_summary::OptimizerBackend;
-use mixedmodels::types::{OptSummary, Optimizer};
+use mixeff_rs::types::opt_summary::OptimizerBackend;
+use mixeff_rs::types::{OptSummary, Optimizer};
 
 #[derive(Debug, Deserialize)]
 struct PrimaBackendMatrix {

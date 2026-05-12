@@ -1,4 +1,4 @@
-//! Error types for the mixedmodels crate.
+//! Error types for the mixeff-rs crate.
 
 use thiserror::Error;
 

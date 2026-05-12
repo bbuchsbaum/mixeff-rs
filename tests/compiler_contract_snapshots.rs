@@ -1,17 +1,17 @@
 use std::fs;
 use std::path::Path;
 
-use mixedmodels::compiler::{
+use mixeff_rs::compiler::{
     compile_formula_ir, CompiledModelArtifact, CompilerPolicy, EstimabilityAssessment,
     FixedContrastEstimability, FixedEffectInferenceMethod, FixedEffectInferenceRow,
     FixedEffectInferenceRowKind, FixedEffectInferenceStatus, FixedEffectInferenceTable,
     FixedEffectStatisticName, ModelAuditReport, ReductionRecord, ReductionTrigger,
     ReliabilityGrade,
 };
-use mixedmodels::datasets;
-use mixedmodels::formula::parse_formula;
-use mixedmodels::model::{DataFrame, GeneralizedLinearMixedModel, LinearMixedModel};
-use mixedmodels::model::{Family, LinkFunction};
+use mixeff_rs::datasets;
+use mixeff_rs::formula::parse_formula;
+use mixeff_rs::model::{DataFrame, GeneralizedLinearMixedModel, LinearMixedModel};
+use mixeff_rs::model::{Family, LinkFunction};
 use serde::Serialize;
 
 const UPDATE_ENV: &str = "MIXEDMODELS_UPDATE_WIRE_FIXTURES";
@@ -126,7 +126,7 @@ fn regularized_fixed_effect_inference_table() -> FixedEffectInferenceTable {
     let (data, _meta) = datasets::load("sleepstudy").unwrap();
     let formula = parse_formula("Reaction ~ 1 + Days + (1 | Subject)").unwrap();
     let mut policy = CompilerPolicy::default();
-    policy.random_strategy = mixedmodels::compiler::RandomStrategy::Regularized;
+    policy.random_strategy = mixeff_rs::compiler::RandomStrategy::Regularized;
     let mut model = LinearMixedModel::new_with_compiler_policy(formula, &data, None, policy)
         .expect("regularized-policy sleepstudy model should construct");
     model.fit(true).unwrap();
@@ -478,11 +478,11 @@ fn assert_wire_fixture(relative_path: &str, actual: &str) {
 fn assert_fixed_effect_table_round_trips(table: &FixedEffectInferenceTable) {
     assert_eq!(
         table.schema_name,
-        mixedmodels::compiler::FIXED_EFFECT_INFERENCE_TABLE_SCHEMA
+        mixeff_rs::compiler::FIXED_EFFECT_INFERENCE_TABLE_SCHEMA
     );
     assert_eq!(
         table.schema_version,
-        mixedmodels::compiler::FIXED_EFFECT_INFERENCE_TABLE_SCHEMA_VERSION
+        mixeff_rs::compiler::FIXED_EFFECT_INFERENCE_TABLE_SCHEMA_VERSION
     );
     let json = pretty_json(table);
     let decoded: FixedEffectInferenceTable = serde_json::from_str(&json).unwrap();

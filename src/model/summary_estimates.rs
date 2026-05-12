@@ -44,8 +44,6 @@ impl Default for SamplingVarianceScale {
 pub struct SummaryEstimateOptions {
     /// How the caller's `V_i` is scaled. Default: `Absolute`.
     pub variance_scale: SamplingVarianceScale,
-    /// Whether to fit by REML (default) or ML.
-    pub reml: bool,
     /// Compiler policy applied during model construction.
     pub policy: CompilerPolicy,
 }
@@ -54,7 +52,6 @@ impl Default for SummaryEstimateOptions {
     fn default() -> Self {
         SummaryEstimateOptions {
             variance_scale: SamplingVarianceScale::Absolute,
-            reml: true,
             policy: CompilerPolicy::default(),
         }
     }
@@ -128,7 +125,14 @@ impl LinearMixedModel {
                          finite positive sigma; got {sigma}"
                     )));
                 }
-                sigma * sigma
+                let scale_factor_sq = sigma * sigma;
+                if !scale_factor_sq.is_finite() || scale_factor_sq <= 0.0 {
+                    return Err(MixedModelError::InvalidArgument(format!(
+                        "from_summary_estimates: Relative variance scale produced a \
+                         non-finite squared sigma; got sigma={sigma}"
+                    )));
+                }
+                scale_factor_sq
             }
         };
 
@@ -176,8 +180,21 @@ impl LinearMixedModel {
                      '{sampling_variance_column}' contains a non-positive value at row {i}"
                 )));
             }
-            let absolute_v = scale_factor_sq * v;
-            weights.push(1.0 / absolute_v);
+            let absolute_v = scale_factor_sq * *v;
+            if !absolute_v.is_finite() || absolute_v <= 0.0 {
+                return Err(MixedModelError::InvalidArgument(format!(
+                    "from_summary_estimates: normalized sampling variance for column \
+                     '{sampling_variance_column}' is not finite and positive at row {i}"
+                )));
+            }
+            let weight = 1.0 / absolute_v;
+            if !weight.is_finite() || weight <= 0.0 {
+                return Err(MixedModelError::InvalidArgument(format!(
+                    "from_summary_estimates: derived weight from sampling variance column \
+                     '{sampling_variance_column}' is not finite and positive at row {i}"
+                )));
+            }
+            weights.push(weight);
         }
 
         let mut model = LinearMixedModel::new_with_compiler_policy(
@@ -188,7 +205,6 @@ impl LinearMixedModel {
         )?;
 
         model.optsum.sigma = Some(1.0);
-        model.optsum.reml = options.reml;
         model.residual_source = ResidualSource::FixedSamplingVariance;
 
         Ok(model)
@@ -217,7 +233,6 @@ mod tests {
     fn defaults_match_contract() {
         let opts = SummaryEstimateOptions::default();
         assert_eq!(opts.variance_scale, SamplingVarianceScale::Absolute);
-        assert!(opts.reml);
         assert_eq!(ResidualSource::default(), ResidualSource::EstimatedSigma);
         assert_eq!(
             SamplingVarianceScale::default(),
@@ -247,7 +262,6 @@ mod tests {
         .expect("constructor should succeed");
         assert_eq!(model.residual_source, ResidualSource::FixedSamplingVariance);
         assert_eq!(model.optsum.sigma, Some(1.0));
-        assert!(model.optsum.reml);
         assert_eq!(model.optsum.feval, -1, "model must be unfitted");
         assert_eq!(model.dims.n, 3);
     }
@@ -395,6 +409,88 @@ mod tests {
     }
 
     #[test]
+    fn rejects_relative_with_overflowing_sigma_square() {
+        let formula = parse_formula("logrr ~ 1 + (1 | study)").unwrap();
+        let err = LinearMixedModel::from_summary_estimates(
+            formula,
+            &three_study_frame(),
+            "logrr",
+            "v_logrr",
+            SummaryEstimateOptions {
+                variance_scale: SamplingVarianceScale::Relative { sigma: f64::MAX },
+                ..SummaryEstimateOptions::default()
+            },
+        )
+        .unwrap_err();
+        match err {
+            MixedModelError::InvalidArgument(msg) => {
+                assert!(msg.contains("squared sigma"), "got: {msg}");
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_normalized_variance_overflow() {
+        let mut df = DataFrame::new();
+        df.add_numeric("logrr", vec![0.1, 0.2, 0.3]).unwrap();
+        df.add_numeric("v_logrr", vec![2.0, 1.0, 1.0]).unwrap();
+        df.add_categorical(
+            "study",
+            vec!["A".to_string(), "B".to_string(), "C".to_string()],
+        )
+        .unwrap();
+        let formula = parse_formula("logrr ~ 1 + (1 | study)").unwrap();
+        let err = LinearMixedModel::from_summary_estimates(
+            formula,
+            &df,
+            "logrr",
+            "v_logrr",
+            SummaryEstimateOptions {
+                variance_scale: SamplingVarianceScale::Relative { sigma: 1e154 },
+                ..SummaryEstimateOptions::default()
+            },
+        )
+        .unwrap_err();
+        match err {
+            MixedModelError::InvalidArgument(msg) => {
+                assert!(msg.contains("normalized sampling variance"), "got: {msg}");
+                assert!(msg.contains("row 0"), "got: {msg}");
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_weight_overflow_from_tiny_variance() {
+        let mut df = DataFrame::new();
+        df.add_numeric("logrr", vec![0.1, 0.2, 0.3]).unwrap();
+        df.add_numeric("v_logrr", vec![f64::MIN_POSITIVE / 8.0, 0.09, 0.01])
+            .unwrap();
+        df.add_categorical(
+            "study",
+            vec!["A".to_string(), "B".to_string(), "C".to_string()],
+        )
+        .unwrap();
+        let formula = parse_formula("logrr ~ 1 + (1 | study)").unwrap();
+        let err = LinearMixedModel::from_summary_estimates(
+            formula,
+            &df,
+            "logrr",
+            "v_logrr",
+            SummaryEstimateOptions::default(),
+        )
+        .unwrap_err();
+        match err {
+            MixedModelError::InvalidArgument(msg) => {
+                assert!(msg.contains("derived weight"), "got: {msg}");
+                assert!(msg.contains("row 0"), "got: {msg}");
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn rejects_formula_response_mismatch() {
         let formula = parse_formula("v_logrr ~ 1 + (1 | study)").unwrap();
         let err = LinearMixedModel::from_summary_estimates(
@@ -437,7 +533,8 @@ mod tests {
         // when fit unweighted — used for gate tests that need a successful
         // fit to traverse test_contrast_with_method.
         let mut df = DataFrame::new();
-        df.add_numeric("y", vec![1.0, 1.5, 2.0, 0.8, 1.4, 2.1]).unwrap();
+        df.add_numeric("y", vec![1.0, 1.5, 2.0, 0.8, 1.4, 2.1])
+            .unwrap();
         df.add_categorical(
             "study",
             vec![
@@ -470,7 +567,7 @@ mod tests {
     #[test]
     fn kenward_roger_inherits_weighted_model_refusal() {
         let formula = parse_formula("logrr ~ 1 + (1 | study)").unwrap();
-        let model = LinearMixedModel::from_summary_estimates(
+        let mut model = LinearMixedModel::from_summary_estimates(
             formula,
             &three_study_frame(),
             "logrr",
@@ -478,9 +575,11 @@ mod tests {
             SummaryEstimateOptions::default(),
         )
         .unwrap();
+        model
+            .fit(true)
+            .expect("summary-estimate fit should complete before KR refusal");
         // Summary-estimate fits always carry weights, so the existing
-        // weighted-model gate at the entry of kenward_roger_sigma_g fires
-        // regardless of fit state. Test the refusal directly.
+        // weighted-model gate at the entry of kenward_roger_sigma_g fires.
         let err = model.kenward_roger_sigma_g().unwrap_err();
         match err {
             MixedModelError::InvalidArgument(msg) => {
@@ -513,7 +612,8 @@ mod tests {
         let n_coef = model.coef_names().len();
         let hypothesis =
             FixedEffectHypothesis::single_coefficient("(Intercept) = 0", 0, n_coef).unwrap();
-        let test = model.test_contrast_with_method(hypothesis, FixedEffectTestMethod::Satterthwaite);
+        let test =
+            model.test_contrast_with_method(hypothesis, FixedEffectTestMethod::Satterthwaite);
         match test.status {
             InferenceStatus::NotAssessed { reason } => {
                 assert!(
@@ -543,7 +643,10 @@ mod tests {
         let vc = model.varcorr();
         assert_eq!(vc.residual_source, ResidualSource::FixedSamplingVariance);
         let md = vc.to_markdown();
-        assert!(!md.contains("Residual"), "markdown should omit residual: {md}");
+        assert!(
+            !md.contains("Residual"),
+            "markdown should omit residual: {md}"
+        );
         let display = format!("{vc}");
         assert!(
             !display.contains("Residual"),

@@ -14,9 +14,9 @@
 //! cargo run --example lmm_lme4_comparison
 //! ```
 
-use mixedmodels::datasets;
-use mixedmodels::formula::parse_formula;
-use mixedmodels::model::{LinearMixedModel, MixedModelFit};
+use mixeff_rs::datasets;
+use mixeff_rs::formula::parse_formula;
+use mixeff_rs::model::{LinearMixedModel, MixedModelFit};
 
 const TOL: f64 = 5.0e-3;
 

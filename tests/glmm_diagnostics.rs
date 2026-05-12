@@ -1,9 +1,9 @@
 #![cfg(not(feature = "nlopt"))]
 
-use mixedmodels::compiler::{DiagnosticCode, DiagnosticSeverity, FitStatus};
-use mixedmodels::formula::parse_formula;
-use mixedmodels::model::{DataFrame, Family, GeneralizedLinearMixedModel, LinkFunction};
-use mixedmodels::types::Optimizer;
+use mixeff_rs::compiler::{DiagnosticCode, DiagnosticSeverity, FitStatus};
+use mixeff_rs::formula::parse_formula;
+use mixeff_rs::model::{DataFrame, Family, GeneralizedLinearMixedModel, LinkFunction};
+use mixeff_rs::types::Optimizer;
 
 // toy: 5 groups × 5 obs of Gamma/Log; covers PIRLS, AGQ-refusal,
 // boundary-θ, and near-unity-correlation diagnostic paths.

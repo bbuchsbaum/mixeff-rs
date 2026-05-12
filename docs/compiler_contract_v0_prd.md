@@ -3,7 +3,7 @@
 ## State
 
 Status: Implementation in progress  
-Owner: mixedmodels Rust crate  
+Owner: mixeff-rs Rust crate  
 Last updated: 2026-04-27  
 Related design note: `docs/mixed_model_compiler_inference_contract.md`  
 Formula-layer slice: `docs/random_effects_formulas.md`  
