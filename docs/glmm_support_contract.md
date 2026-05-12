@@ -13,7 +13,8 @@ system optimizer dependency. Supported families and links are:
 - Bernoulli with logit link.
 - Binomial with logit link, including case weights for grouped-binomial
   proportions.
-- Poisson with log link.
+- Bernoulli and Binomial with probit and complementary log-log links.
+- Poisson with log and square-root links.
 - Gamma with log link.
 
 Offsets are fixed linear-predictor offsets. Observation weights are supported

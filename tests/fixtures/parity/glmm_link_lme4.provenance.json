@@ -1,0 +1,9 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-05-12T15:10:50Z",
+  "crate_commit": "8840fe4f5dc8637d1452b35f45b6fbbca33faf9b",
+  "regenerator": "scripts/regenerate_lme4_glmm_link_fixtures.R",
+  "source_case": null,
+  "reference_engine": "lme4 2.0.1",
+  "notes": "R 4.5.1; deterministic binomial-probit, binomial-cloglog, and poisson-sqrt GLMM fixtures"
+}

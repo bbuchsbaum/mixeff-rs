@@ -110,6 +110,7 @@ impl GeneralizedLinearMixedModel {
             Self::new_with_policy_internal(formula, data, family, link, CompilerPolicy::default())?;
         validate_case_weights(&weights, model.y.len())?;
         model.wt = weights;
+        model.initialize_beta_from_response();
         Ok(model)
     }
 
@@ -143,6 +144,7 @@ impl GeneralizedLinearMixedModel {
         let mut model = Self::new_with_offset(formula, data, family, link, offset)?;
         validate_case_weights(&weights, model.y.len())?;
         model.wt = weights;
+        model.initialize_beta_from_response();
         Ok(model)
     }
 
@@ -161,6 +163,7 @@ impl GeneralizedLinearMixedModel {
                 "Use LinearMixedModel for Normal distribution with IdentityLink".to_string(),
             ));
         }
+        validate_supported_glmm_family_link(family, link)?;
         if let Some(y) = data.numeric(&formula.response) {
             validate_glmm_response_domain(family, link, y)?;
             if let Some(&first) = y.first() {
@@ -214,7 +217,7 @@ impl GeneralizedLinearMixedModel {
             0
         };
 
-        Ok(GeneralizedLinearMixedModel {
+        let mut model = GeneralizedLinearMixedModel {
             lmm,
             beta: beta.clone(),
             beta0: beta,
@@ -234,7 +237,9 @@ impl GeneralizedLinearMixedModel {
             devc0: vec![0.0; agq_len],
             sd: vec![0.0; agq_len],
             mult: vec![0.0; agq_len],
-        })
+        };
+        model.initialize_beta_from_response();
+        Ok(model)
     }
 
     /// Construct a GLMM and apply a compiler policy to the internal compiled
@@ -295,6 +300,36 @@ impl GeneralizedLinearMixedModel {
         self.offset = DVector::from_vec(offset);
         self.update_eta();
         Ok(self)
+    }
+
+    fn initialize_beta_from_response(&mut self) {
+        self.beta.fill(0.0);
+        let Some(intercept_index) = self
+            .lmm
+            .feterm
+            .cnames
+            .iter()
+            .take(self.lmm.feterm.rank)
+            .position(|name| is_intercept_column(name))
+        else {
+            self.beta0 = self.beta.clone();
+            self.update_eta();
+            return;
+        };
+        let Some(mean) = initial_response_mean(self.family, &self.y, &self.wt) else {
+            self.beta0 = self.beta.clone();
+            self.update_eta();
+            return;
+        };
+        let eta = self.link.link(initial_mean_for_link(self.family, mean));
+        let offset_mean = if self.offset.is_empty() {
+            0.0
+        } else {
+            self.offset.iter().sum::<f64>() / self.offset.len() as f64
+        };
+        self.beta[intercept_index] = eta - offset_mean;
+        self.beta0 = self.beta.clone();
+        self.update_eta();
     }
 
     /// Update the linear predictor η and conditional mean μ.
@@ -1481,7 +1516,6 @@ impl GeneralizedLinearMixedModel {
 
     fn conservative_binomial_separation_diagnostics(&self) -> Vec<Diagnostic> {
         if !matches!(self.family, Family::Bernoulli | Family::Binomial)
-            || self.link != LinkFunction::Logit
             || !self.y.iter().all(|value| is_binary_response(*value))
         {
             return Vec::new();
@@ -1658,6 +1692,10 @@ struct OutcomeCounts {
 
 fn is_binary_response(value: f64) -> bool {
     (value - 0.0).abs() < 1e-12 || (value - 1.0).abs() < 1e-12
+}
+
+fn is_nonnegative_integer_response(value: f64) -> bool {
+    value >= 0.0 && (value - value.round()).abs() < 1e-12
 }
 
 fn is_intercept_column(name: &str) -> bool {
@@ -1861,9 +1899,28 @@ fn bounded_pirls_mean_and_eta(family: Family, link: LinkFunction, mu: f64, eta: 
     if matches!(family, Family::Bernoulli | Family::Binomial) {
         let bounded_mu = mu.clamp(BOUNDED_MEAN_EPS, 1.0 - BOUNDED_MEAN_EPS);
         (bounded_mu, link.link(bounded_mu))
-    } else if family == Family::Poisson && link == LinkFunction::Log {
-        let bounded_eta = eta.clamp(-LOG_LINK_ETA_BOUND, LOG_LINK_ETA_BOUND);
-        (bounded_eta.exp(), bounded_eta)
+    } else if family == Family::Poisson {
+        match link {
+            LinkFunction::Log => {
+                let bounded_eta = eta.clamp(-LOG_LINK_ETA_BOUND, LOG_LINK_ETA_BOUND);
+                (bounded_eta.exp(), bounded_eta)
+            }
+            LinkFunction::Sqrt => {
+                let bounded_mu = mu.max(BOUNDED_MEAN_EPS);
+                let min_eta = bounded_mu.sqrt();
+                let bounded_eta = if eta.abs() < min_eta {
+                    if eta.is_sign_negative() {
+                        -min_eta
+                    } else {
+                        min_eta
+                    }
+                } else {
+                    eta
+                };
+                (bounded_eta * bounded_eta, bounded_eta)
+            }
+            _ => (mu, eta),
+        }
     } else {
         (mu, eta)
     }
@@ -1907,11 +1964,59 @@ fn validate_offset(offset: &[f64], n_obs: usize) -> Result<()> {
     Ok(())
 }
 
+fn validate_supported_glmm_family_link(family: Family, link: LinkFunction) -> Result<()> {
+    let supported = match family {
+        Family::Bernoulli | Family::Binomial => {
+            matches!(
+                link,
+                LinkFunction::Logit | LinkFunction::Probit | LinkFunction::Cloglog
+            )
+        }
+        Family::Poisson => matches!(link, LinkFunction::Log | LinkFunction::Sqrt),
+        // Dispersion-family GLMMs predate this explicit binary/Poisson support
+        // matrix; keep their existing sensible links while preserving the
+        // Normal+Identity LMM redirect above.
+        Family::Gamma | Family::InverseGaussian => {
+            matches!(link, LinkFunction::Log | LinkFunction::Inverse)
+        }
+        Family::Normal => matches!(
+            link,
+            LinkFunction::Log | LinkFunction::Inverse | LinkFunction::Sqrt
+        ),
+    };
+    if supported {
+        Ok(())
+    } else {
+        Err(MixedModelError::UnsupportedFamilyLink {
+            family: family_label(family).to_string(),
+            link: link_label(link).to_string(),
+        })
+    }
+}
+
 fn validate_glmm_response_domain(family: Family, link: LinkFunction, y: &[f64]) -> Result<()> {
     for (idx, &value) in y.iter().enumerate() {
         if !value.is_finite() {
             return Err(MixedModelError::InvalidArgument(format!(
                 "response at index {idx} must be finite for GLMM construction (got {value})"
+            )));
+        }
+        if family == Family::Bernoulli && !is_binary_response(value) {
+            return Err(MixedModelError::InvalidArgument(format!(
+                "bernoulli GLMM response must be exactly 0 or 1; index {idx} has {value}"
+            )));
+        }
+        if family == Family::Binomial
+            && !(0.0..=1.0).contains(&value)
+            && !is_nonnegative_integer_response(value)
+        {
+            return Err(MixedModelError::InvalidArgument(format!(
+                "binomial GLMM response must be a proportion in [0, 1] or a non-negative integer count; index {idx} has {value}"
+            )));
+        }
+        if family == Family::Poisson && value < 0.0 {
+            return Err(MixedModelError::InvalidArgument(format!(
+                "poisson GLMM response must be non-negative; index {idx} has {value}"
             )));
         }
         if matches!(family, Family::Gamma | Family::InverseGaussian) && value <= 0.0 {
@@ -1927,6 +2032,36 @@ fn validate_glmm_response_domain(family: Family, link: LinkFunction, y: &[f64]) 
         }
     }
     Ok(())
+}
+
+fn initial_response_mean(family: Family, y: &DVector<f64>, weights: &[f64]) -> Option<f64> {
+    if y.len() == 0 {
+        return None;
+    }
+    let mut weighted_sum = 0.0;
+    let mut weight_sum = 0.0;
+    for (idx, value) in y.iter().enumerate() {
+        let weight = weights.get(idx).copied().unwrap_or(1.0);
+        weighted_sum += weight * value;
+        weight_sum += weight;
+    }
+    if weight_sum <= 0.0 {
+        return None;
+    }
+    let mean = weighted_sum / weight_sum;
+    Some(match family {
+        Family::Bernoulli | Family::Binomial => mean.clamp(1e-6, 1.0 - 1e-6),
+        Family::Poisson | Family::Gamma | Family::InverseGaussian => mean.max(1e-6),
+        Family::Normal => mean.max(0.0),
+    })
+}
+
+fn initial_mean_for_link(family: Family, mean: f64) -> f64 {
+    match family {
+        Family::Bernoulli | Family::Binomial => mean.clamp(1e-6, 1.0 - 1e-6),
+        Family::Poisson | Family::Gamma | Family::InverseGaussian => mean.max(1e-6),
+        Family::Normal => mean.max(0.0),
+    }
 }
 
 fn family_label(family: Family) -> &'static str {
@@ -1946,6 +2081,7 @@ fn link_label(link: LinkFunction) -> &'static str {
         LinkFunction::Log => "log",
         LinkFunction::Logit => "logit",
         LinkFunction::Probit => "probit",
+        LinkFunction::Cloglog => "cloglog",
         LinkFunction::Inverse => "inverse",
         LinkFunction::Sqrt => "sqrt",
     }
@@ -2226,6 +2362,18 @@ mod tests {
     }
 
     #[test]
+    fn test_pirls_no_inf_weight_under_binary_noncanonical_links() {
+        for link in [LinkFunction::Probit, LinkFunction::Cloglog] {
+            for (y, eta, mu) in [(0.0, -1000.0, 0.0), (1.0, 1000.0, 1.0)] {
+                let (sqrtw, z) =
+                    pirls_working_observation(Family::Binomial, link, y, eta, mu, 25.0);
+                assert!(sqrtw.is_finite(), "{link:?} sqrt weight was {sqrtw}");
+                assert!(z.is_finite(), "{link:?} working response was {z}");
+            }
+        }
+    }
+
+    #[test]
     fn test_glmm_offset_enters_linear_predictor() {
         let data = constant_response_fixture(vec![0.0, 1.0, 0.0, 1.0]);
         let formula = parse_formula("y ~ 1 + (1 | g)").unwrap();
@@ -2305,6 +2453,17 @@ mod tests {
             assert!(sqrtw.is_finite(), "sqrt weight was {sqrtw}");
             assert!(sqrtw > 0.0, "sqrt weight should stay positive");
             assert!(sqrtw < 4.0e6, "sqrt weight was {sqrtw}");
+            assert!(z.is_finite(), "working response was {z}");
+        }
+    }
+
+    #[test]
+    fn test_pirls_handles_poisson_sqrt_zero_mean_start() {
+        for (y, eta, mu) in [(0.0, 0.0, 0.0), (3.0, 0.0, 0.0), (3.0, -0.1, 0.01)] {
+            let (sqrtw, z) =
+                pirls_working_observation(Family::Poisson, LinkFunction::Sqrt, y, eta, mu, 1.0);
+            assert!(sqrtw.is_finite(), "sqrt weight was {sqrtw}");
+            assert!(sqrtw > 0.0, "sqrt weight should stay positive");
             assert!(z.is_finite(), "working response was {z}");
         }
     }
@@ -2605,6 +2764,65 @@ mod tests {
         let formula = parse_formula("y ~ 1 + (1 | g)").unwrap();
 
         GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+    }
+
+    #[test]
+    fn test_glmm_constructor_supports_requested_family_link_pairs() {
+        let mut binomial_data = constant_response_fixture(vec![0.0, 0.25, 0.75, 1.0]);
+        binomial_data
+            .add_numeric("x", vec![-1.0, -0.5, 0.5, 1.0])
+            .unwrap();
+        let binomial_formula = parse_formula("y ~ 1 + x + (1 | g)").unwrap();
+        for link in [LinkFunction::Probit, LinkFunction::Cloglog] {
+            let model = GeneralizedLinearMixedModel::new(
+                binomial_formula.clone(),
+                &binomial_data,
+                Family::Binomial,
+                Some(link),
+            )
+            .unwrap();
+            assert_eq!(model.link, link);
+            assert!(model.mu.iter().all(|mu| *mu > 0.0 && *mu < 1.0));
+        }
+
+        let mut poisson_data = constant_response_fixture(vec![0.0, 1.0, 2.0, 4.0]);
+        poisson_data
+            .add_numeric("x", vec![-1.0, -0.5, 0.5, 1.0])
+            .unwrap();
+        let poisson_formula = parse_formula("y ~ 1 + x + (1 | g)").unwrap();
+        let model = GeneralizedLinearMixedModel::new(
+            poisson_formula,
+            &poisson_data,
+            Family::Poisson,
+            Some(LinkFunction::Sqrt),
+        )
+        .unwrap();
+        assert_eq!(model.link, LinkFunction::Sqrt);
+        assert!(model.mu.iter().all(|mu| *mu >= 0.0));
+    }
+
+    #[test]
+    fn test_glmm_constructor_rejects_unsupported_family_link_pairs() {
+        let data = constant_response_fixture(vec![0.0, 0.0, 0.0, 1.0]);
+        let formula = parse_formula("y ~ 1 + (1 | g)").unwrap();
+
+        for (family, link) in [
+            (Family::Binomial, LinkFunction::Sqrt),
+            (Family::Poisson, LinkFunction::Probit),
+        ] {
+            let err = GeneralizedLinearMixedModel::new(formula.clone(), &data, family, Some(link))
+                .unwrap_err();
+            match err {
+                MixedModelError::UnsupportedFamilyLink {
+                    family: got_family,
+                    link: got_link,
+                } => {
+                    assert_eq!(got_family, family_label(family));
+                    assert_eq!(got_link, link_label(link));
+                }
+                other => panic!("expected UnsupportedFamilyLink error, got {other:?}"),
+            }
+        }
     }
 
     /// Build a DataFrame from the embedded contra.csv.

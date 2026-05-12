@@ -31,6 +31,7 @@ pub enum LinkFunction {
     Log,
     Logit,
     Probit,
+    Cloglog,
     Inverse,
     Sqrt,
 }
@@ -80,6 +81,7 @@ impl LinkFunction {
                 let n = Normal::new(0.0, 1.0).unwrap();
                 n.inverse_cdf(mu)
             }
+            LinkFunction::Cloglog => (-(-mu).ln_1p()).ln(),
             LinkFunction::Inverse => 1.0 / mu,
             LinkFunction::Sqrt => mu.sqrt(),
         }
@@ -99,6 +101,7 @@ impl LinkFunction {
                 let n = Normal::new(0.0, 1.0).unwrap();
                 n.cdf(eta)
             }
+            LinkFunction::Cloglog => -(-eta.exp()).exp_m1(),
             LinkFunction::Inverse => 1.0 / eta,
             LinkFunction::Sqrt => eta * eta,
         }
@@ -117,6 +120,13 @@ impl LinkFunction {
                 use statrs::distribution::{Continuous, Normal};
                 let n = Normal::new(0.0, 1.0).unwrap();
                 n.pdf(eta)
+            }
+            LinkFunction::Cloglog => {
+                if eta == f64::INFINITY {
+                    return 0.0;
+                }
+                let exp_eta = eta.exp();
+                (eta - exp_eta).exp()
             }
             LinkFunction::Inverse => -1.0 / (eta * eta),
             LinkFunction::Sqrt => 2.0 * eta,
@@ -246,5 +256,20 @@ mod tests {
     fn test_inverse_link_mu_eta_preserves_sign() {
         assert_eq!(LinkFunction::Inverse.mu_eta(0.5), -4.0);
         assert_eq!(LinkFunction::Log.mu_eta(0.5), 0.5_f64.exp());
+    }
+
+    #[test]
+    fn test_cloglog_link_round_trips_and_handles_extremes() {
+        for mu in [1e-12, 0.01, 0.25, 0.75, 1.0 - 1e-12] {
+            let eta = LinkFunction::Cloglog.link(mu);
+            let roundtrip = LinkFunction::Cloglog.linkinv(eta);
+            assert!((roundtrip - mu).abs() <= 2e-15_f64.max(1e-12 * mu.abs()));
+            assert!(LinkFunction::Cloglog.mu_eta(eta).is_finite());
+            assert!(LinkFunction::Cloglog.mu_eta(eta) >= 0.0);
+        }
+
+        assert_eq!(LinkFunction::Cloglog.linkinv(f64::NEG_INFINITY), 0.0);
+        assert_eq!(LinkFunction::Cloglog.linkinv(f64::INFINITY), 1.0);
+        assert_eq!(LinkFunction::Cloglog.mu_eta(f64::INFINITY), 0.0);
     }
 }
