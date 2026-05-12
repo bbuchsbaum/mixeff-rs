@@ -5,6 +5,7 @@ pub mod data;
 pub mod fixed_design;
 pub mod generalized;
 pub mod linear;
+pub mod summary_estimates;
 pub mod traits;
 
 pub use batch::{
@@ -22,6 +23,7 @@ pub use fixed_design::{
     StreamedFixedDesign,
 };
 pub use generalized::GeneralizedLinearMixedModel;
+pub use summary_estimates::{ResidualSource, SamplingVarianceScale, SummaryEstimateOptions};
 pub use linear::{
     parametricbootstrap, BootstrapFailedRefitPolicy, BootstrapInterval, BootstrapIntervalMethod,
     BootstrapQuantile, BootstrapRefitOptions, BootstrapReplicate, BootstrapRunMetadata,

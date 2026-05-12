@@ -1,0 +1,22 @@
+{
+  "beta": [
+    -0.7145314133675891
+  ],
+  "fixture": "Berkey 1995 BCG vaccine (n=13)",
+  "formula": "yi ~ 1 + (1 | trial)",
+  "log_likelihood": -13.484846096053793,
+  "method": "REML",
+  "n_studies": 13,
+  "schema_version": 1,
+  "se": [
+    0.1797791705689623
+  ],
+  "source": "mixedmodels::LinearMixedModel::from_summary_estimates",
+  "tau_sd": 0.5596723205469541,
+  "tau_sq": 0.3132331063864126,
+  "vcov_beta": [
+    [
+      0.03232055017046404
+    ]
+  ]
+}

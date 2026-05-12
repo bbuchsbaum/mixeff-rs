@@ -68,6 +68,10 @@ use crate::types::{FeMat, FeTerm, FitLogEntry, OptSummary, Optimizer, ReMat};
 /// - `l_blocks`: blocked lower Cholesky factor of Λ'AΛ + I
 /// - `optsum`: optimization summary
 /// - `compiler_artifact`: semantic compiler/audit metadata for the requested model
+/// - `residual_source`: whether `sigma` is estimated (default) or fixed by
+///   user-supplied sampling variances (set only by
+///   `LinearMixedModel::from_summary_estimates`). See
+///   `docs/summary_estimates_meta_analysis.md`.
 #[derive(Debug, Clone)]
 pub struct LinearMixedModel {
     pub formula: Formula,
@@ -83,6 +87,7 @@ pub struct LinearMixedModel {
     pub l_blocks: Vec<MatrixBlock>,
     pub optsum: OptSummary,
     pub compiler_artifact: CompiledModelArtifact,
+    pub residual_source: crate::model::summary_estimates::ResidualSource,
 }
 
 /// Model dimensions.
@@ -705,6 +710,7 @@ impl LinearMixedModel {
             l_blocks,
             optsum,
             compiler_artifact,
+            residual_source: crate::model::summary_estimates::ResidualSource::EstimatedSigma,
         };
         debug_assert_eq!(
             model.dims.p, model.feterm.rank,
@@ -4158,11 +4164,40 @@ impl LinearMixedModel {
             return Err(MixedModelError::AlreadyFitted);
         }
 
-        // Check for constant response
-        let y = self.y();
-        let y0 = y[0];
-        if y.iter().all(|&yi| (yi - y0).abs() < f64::EPSILON) {
+        // Check for constant response. Skipped for summary-estimate fits:
+        // identical first-stage point estimates with different sampling
+        // variances are a well-defined meta-analysis case (tau -> 0,
+        // beta_hat = common value, weights set the residual variance per
+        // study). See docs/summary_estimates_meta_analysis.md.
+        let summary_estimate_fit = self.residual_source
+            == crate::model::summary_estimates::ResidualSource::FixedSamplingVariance;
+        let y_is_constant = {
+            let y = self.y();
+            let y0 = y[0];
+            y.iter().all(|&yi| (yi - y0).abs() < f64::EPSILON)
+        };
+        if y_is_constant && !summary_estimate_fit {
             return Err(MixedModelError::ConstantResponse);
+        }
+        if y_is_constant && summary_estimate_fit {
+            // Analytical short-circuit: with identical first-stage
+            // estimates the meta-analysis fit collapses to tau -> 0 and
+            // beta = common value. Running the optimizer here hits a
+            // degenerate Cholesky boundary and surfaces as
+            // PosDefException, so fix theta at the lower bound directly
+            // and finalize.
+            self.optsum.reml = reml;
+            let theta_zero = vec![0.0_f64; self.optsum.initial.len()];
+            let obj_zero = self.objective_at(&theta_zero)?;
+            self.optsum.finitial = obj_zero;
+            return self.finalize_fit_result(
+                theta_zero,
+                obj_zero,
+                1,
+                Vec::new(),
+                Optimizer::PatternSearch,
+                Some("CONSTANT_RESPONSE_SHORTCIRCUIT".to_string()),
+            );
         }
 
         if self.feterm.rank >= self.dims.n {
@@ -4465,7 +4500,7 @@ impl LinearMixedModel {
 
     /// Variance-covariance summary for the fitted random effects.
     pub fn varcorr(&self) -> VarCorr {
-        VarCorr::from_model(&self.reterms, self.sigma())
+        VarCorr::from_model(&self.reterms, self.sigma()).with_residual_source(self.residual_source)
     }
 
     /// Condition number of each RE Lambda factor.
@@ -4506,6 +4541,13 @@ impl LinearMixedModel {
     ///
     /// For estimated-σ fits this is σ². For fixed-σ fits, MixedModels.jl
     /// reports the fixed σ itself, not σ².
+    ///
+    /// For summary-estimate fits constructed via
+    /// [`LinearMixedModel::from_summary_estimates`] this returns `1.0` —
+    /// σ is fixed at 1, so the Julia-parity convention reports the SD,
+    /// not σ². The "residual variance" of a summary-estimate fit is the
+    /// user-supplied sampling variance `V_i`, not an estimated quantity.
+    /// See `docs/summary_estimates_meta_analysis.md`.
     pub fn varest(&self) -> f64 {
         if let Some(sigma) = self.optsum.sigma {
             return sigma;
@@ -5514,6 +5556,21 @@ impl LinearMixedModel {
         use statrs::distribution::{ContinuousCDF, StudentsT};
 
         let method = InferenceMethod::Satterthwaite;
+        if self.residual_source
+            == crate::model::summary_estimates::ResidualSource::FixedSamplingVariance
+        {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                method,
+                estimability,
+                "summary-estimate fit (residual sampling variances fixed); \
+                 finite-sample methods are undefined when sigma is not estimated"
+                    .to_string(),
+            );
+        }
         if hypothesis.n_contrasts() != 1 {
             return fixed_effect_test_not_assessed_with_method(
                 hypothesis,

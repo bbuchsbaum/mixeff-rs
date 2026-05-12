@@ -334,6 +334,7 @@ impl GeneralizedLinearMixedModel {
             None
         };
         VarCorr::from_reterms(&self.lmm.reterms, scale, residual_sd)
+            .with_residual_source(self.lmm.residual_source)
     }
 
     /// Structural summary of the blocked `A`/`L` system.

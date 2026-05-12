@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use crate::model::summary_estimates::ResidualSource;
 use crate::types::ReMat;
 
 /// Variance and correlation of random effects.
@@ -11,6 +12,12 @@ pub struct VarCorr {
     pub components: Vec<VarCorrComponent>,
     /// Residual standard deviation.
     pub residual_sd: Option<f64>,
+    /// Whether `residual_sd` is an estimated quantity (the usual case) or a
+    /// fixed sampling scale supplied through
+    /// `LinearMixedModel::from_summary_estimates`. Renderers may use this
+    /// to omit or relabel the residual row. Defaults to
+    /// `ResidualSource::EstimatedSigma` for compatibility.
+    pub residual_source: ResidualSource,
 }
 
 /// Variance components for a single random-effects grouping factor.
@@ -76,12 +83,37 @@ impl VarCorr {
         VarCorr {
             components,
             residual_sd,
+            residual_source: ResidualSource::EstimatedSigma,
         }
     }
 
     /// Extract VarCorr from a fitted mixed model.
     pub fn from_model(reterms: &[ReMat], sigma: f64) -> Self {
         Self::from_reterms(reterms, sigma, Some(sigma))
+    }
+
+    /// Set the residual-source marker on this `VarCorr`. Builder used by the
+    /// summary-estimate front door so renderers can decide whether to show a
+    /// residual row.
+    #[must_use]
+    pub fn with_residual_source(mut self, source: ResidualSource) -> Self {
+        self.residual_source = source;
+        self
+    }
+
+    /// Effective residual SD to display, taking the residual-source marker
+    /// into account.
+    ///
+    /// Returns `Some(sigma)` only when `residual_sd.is_some()` and the
+    /// residual is an estimated quantity. For
+    /// [`ResidualSource::FixedSamplingVariance`] fits the residual is a
+    /// user-supplied sampling scale rather than an estimated parameter, so
+    /// renderers omit it to avoid the "Residual 1.0" misread.
+    fn displayed_residual_sd(&self) -> Option<f64> {
+        match self.residual_source {
+            ResidualSource::EstimatedSigma => self.residual_sd,
+            ResidualSource::FixedSamplingVariance => None,
+        }
     }
 
     /// Render a markdown summary table.
@@ -127,7 +159,7 @@ impl VarCorr {
             }
         }
 
-        if let Some(sigma) = self.residual_sd {
+        if let Some(sigma) = self.displayed_residual_sd() {
             if has_corr {
                 out.push_str(&format!(
                     "| {:<8} | {:<11} | {:>9.6} | {:>8.6} |  |\n",
@@ -241,7 +273,7 @@ impl VarCorr {
             }
         }
 
-        if let Some(sigma) = self.residual_sd {
+        if let Some(sigma) = self.displayed_residual_sd() {
             let mut row = vec![
                 "Residual".to_string(),
                 String::new(),
@@ -294,7 +326,7 @@ impl fmt::Display for VarCorr {
             }
         }
 
-        if let Some(sigma) = self.residual_sd {
+        if let Some(sigma) = self.displayed_residual_sd() {
             writeln!(
                 f,
                 "{:<12} {:<16} {:>12.4} {:>10.4}",
@@ -462,5 +494,39 @@ mod tests {
         )));
         assert!(!out.contains("Corr."));
         assert!(!out.contains("Residual"));
+    }
+
+    #[test]
+    fn fixed_sampling_variance_omits_residual_in_all_renderers() {
+        let vc = VarCorr::from_reterms(&[scalar_reterm()], 1.0, Some(1.0))
+            .with_residual_source(ResidualSource::FixedSamplingVariance);
+        assert_eq!(vc.residual_source, ResidualSource::FixedSamplingVariance);
+        assert!(vc.residual_sd.is_some(), "field is preserved as metadata");
+
+        let md = vc.to_markdown();
+        assert!(!md.contains("Residual"), "markdown: {md}");
+
+        let html = vc.to_html();
+        assert!(!html.contains("Residual"), "html: {html}");
+
+        let latex = vc.to_latex();
+        assert!(!latex.contains("Residual"), "latex: {latex}");
+
+        let display = format!("{vc}");
+        assert!(!display.contains("Residual"), "display: {display}");
+    }
+
+    #[test]
+    fn estimated_sigma_default_renders_residual_unchanged() {
+        // Regression check: the default residual-source path is
+        // byte-identical to the historical behavior.
+        let vc_default = VarCorr::from_reterms(&[scalar_reterm()], 2.0, Some(2.0));
+        let vc_explicit = VarCorr::from_reterms(&[scalar_reterm()], 2.0, Some(2.0))
+            .with_residual_source(ResidualSource::EstimatedSigma);
+        assert_eq!(vc_default.to_markdown(), vc_explicit.to_markdown());
+        assert_eq!(vc_default.to_html(), vc_explicit.to_html());
+        assert_eq!(vc_default.to_latex(), vc_explicit.to_latex());
+        assert_eq!(format!("{vc_default}"), format!("{vc_explicit}"));
+        assert!(vc_default.to_markdown().contains("Residual"));
     }
 }

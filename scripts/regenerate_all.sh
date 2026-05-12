@@ -86,6 +86,24 @@ else
     skip "cargo not found — comparison/manifest.json regeneration skipped"
 fi
 
+# ---- 4b. Summary-estimate (meta-analysis) parity vs metafor::rma.mv ---
+#         Self-contained pair: scripts/compare_metafor.R writes the CSV
+#         input fixture and (if metafor is installed) metafor_results.json;
+#         examples/compare_metafor.rs writes rust_results.json and prints
+#         a parity verdict when both JSONs exist.
+
+if have Rscript; then
+    run Rscript scripts/compare_metafor.R
+else
+    skip "Rscript not found — metafor parity skipped"
+fi
+
+if have cargo; then
+    run cargo run --release --example compare_metafor
+else
+    skip "cargo not found — Rust-side metafor parity skipped"
+fi
+
 # ---- 5. Bulk parity JSON fixtures (Julia + provenance siblings) -------
 #       parity_pathologies.{R,jl} are per-fixture diagnostic comparators
 #       (one --fixture / one --out per call) and are NOT bulk regens —
