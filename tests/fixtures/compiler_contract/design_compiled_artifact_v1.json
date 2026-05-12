@@ -22,6 +22,7 @@
     }
   },
   "fixed_effect_inference_table": null,
+  "fixed_effect_covariance_matrix": null,
   "requested_formula": "y ~ 1 + x + (1 + x | group)",
   "semantic_model": {
     "schema_name": "mixedmodels.semantic_model",
@@ -336,6 +337,73 @@
           "status": "estimable",
           "aliased_columns": [],
           "diagnostics": []
+        }
+      ],
+      "contrast_bases": [
+        {
+          "variable": "group",
+          "levels": [
+            "g1",
+            "g2",
+            "g3",
+            "g4",
+            "g5",
+            "g6"
+          ],
+          "column_names": [
+            "group: g2",
+            "group: g3",
+            "group: g4",
+            "group: g5",
+            "group: g6"
+          ],
+          "source": "treatment",
+          "ordered": false,
+          "explicit": false,
+          "contrast_matrix": [
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              1.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              1.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              1.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ]
+          ]
         }
       ],
       "aliased_columns": [],

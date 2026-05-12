@@ -22,6 +22,7 @@
     }
   },
   "fixed_effect_inference_table": null,
+  "fixed_effect_covariance_matrix": null,
   "requested_formula": "y ~ 1 + x + x2 + (1 + x | subject)",
   "semantic_model": {
     "schema_name": "mixedmodels.semantic_model",
@@ -235,6 +236,37 @@
           "diagnostics": []
         }
       ],
+      "contrast_bases": [
+        {
+          "variable": "subject",
+          "levels": [
+            "s1",
+            "s2",
+            "s3"
+          ],
+          "column_names": [
+            "subject: s2",
+            "subject: s3"
+          ],
+          "source": "treatment",
+          "ordered": false,
+          "explicit": false,
+          "contrast_matrix": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              1.0,
+              0.0
+            ],
+            [
+              0.0,
+              1.0
+            ]
+          ]
+        }
+      ],
       "aliased_columns": [
         "x"
       ],
@@ -244,11 +276,20 @@
           "code": "fixed_effect_rank_deficient",
           "severity": "warning",
           "stage": "design_audit",
-          "message": "fixed-effect design matrix has rank 2 but 3 columns",
+          "message": "fixed-effect formula is rank-deficient (rank 2 of 3); some requested coefficients are not separately estimable from the observed data",
           "affected_terms": [
             "x"
           ],
-          "suggested_actions": []
+          "suggested_actions": [
+            "drop redundant fixed-effect terms, combine sparse factor levels, or test only estimable contrasts"
+          ],
+          "payload": {
+            "aliased_columns": [
+              "x"
+            ],
+            "rank": 2,
+            "requested_columns": 3
+          }
         }
       ]
     },
@@ -393,11 +434,20 @@
         "code": "fixed_effect_rank_deficient",
         "severity": "warning",
         "stage": "design_audit",
-        "message": "fixed-effect design matrix has rank 2 but 3 columns",
+        "message": "fixed-effect formula is rank-deficient (rank 2 of 3); some requested coefficients are not separately estimable from the observed data",
         "affected_terms": [
           "x"
         ],
-        "suggested_actions": []
+        "suggested_actions": [
+          "drop redundant fixed-effect terms, combine sparse factor levels, or test only estimable contrasts"
+        ],
+        "payload": {
+          "aliased_columns": [
+            "x"
+          ],
+          "rank": 2,
+          "requested_columns": 3
+        }
       },
       {
         "code": "covariance_too_rich",
@@ -698,11 +748,20 @@
       "code": "fixed_effect_rank_deficient",
       "severity": "warning",
       "stage": "design_audit",
-      "message": "fixed-effect design matrix has rank 2 but 3 columns",
+      "message": "fixed-effect formula is rank-deficient (rank 2 of 3); some requested coefficients are not separately estimable from the observed data",
       "affected_terms": [
         "x"
       ],
-      "suggested_actions": []
+      "suggested_actions": [
+        "drop redundant fixed-effect terms, combine sparse factor levels, or test only estimable contrasts"
+      ],
+      "payload": {
+        "aliased_columns": [
+          "x"
+        ],
+        "rank": 2,
+        "requested_columns": 3
+      }
     },
     {
       "code": "covariance_too_rich",

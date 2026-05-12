@@ -100,6 +100,23 @@ A separate fixed-effect inference payload reports coefficient and contrast
 rows. It may contain asymptotic Wald, Satterthwaite, explicit Kenward-Roger,
 and later bootstrap results when each row's prerequisites are satisfied.
 
+### Fixed-Effect Covariance Geometry
+
+Fitted artifacts may also carry `fixed_effect_covariance_matrix` with schema
+name `mixedmodels.fixed_effect_covariance_matrix` and schema version `1.0.0`.
+This payload is reusable covariance geometry for `vcov()`, `emmeans`, marginal
+quantities, and other downstream consumers. It is not an inference certificate.
+P-values, degrees of freedom, method labels, reliability grades, estimability,
+and reasons remain owned by `fixed_effect_inference_table` rows.
+
+For full-rank LMM fits, the covariance payload stores the model-based
+fixed-effect covariance matrix in coefficient order. When the covariance is not
+usable, the payload uses `status = unavailable`, `matrix = null`, and a stable
+reason such as `rank_deficient_fixed_effects` or
+`fixed_effect_covariance_nonfinite`. R wrappers should prefer this artifact for
+fixed-effect covariance consumers, and fall back to diagonal matrices from
+stored standard errors only as an explicitly unavailable legacy/degraded path.
+
 ## Wire Location and Schema Negotiation
 
 The durable source of truth is a top-level optional field on fitted compiler
@@ -440,8 +457,9 @@ notes = ["asymptotic Wald z is a labeled fallback, not a finite-sample correctio
     failed-refit policy, Monte Carlo error where available, boundary-rate
     summary, and reproducibility state. Explicit bootstrap rows are wired from
     certified `fixed_effect_null` payloads. `auto` does not select bootstrap in
-    schema `1.0.0`; general scalar contrasts require payload-supplied
-    replicate statistics unless the row is a single coefficient.
+    schema `1.0.0`; scalar rows use an absolute studentized statistic, and
+    multi-df term/contrast rows use a certified joint Wald/F statistic with
+    numerator df equal to the effective restriction rank.
 12. [x] Add bridgeable Rust-owned fixed-effect null bootstrap table APIs for R
     callers. The table rows include structured `details.bootstrap` metadata so
     R does not parse prose notes for MCSE, replicate accounting, failed-refit

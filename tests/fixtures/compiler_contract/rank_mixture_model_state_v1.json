@@ -135,27 +135,7 @@
       "reason": "effective covariance rank 1 is below requested rank 2",
       "replacement_term": "reduced_rank(group, basis = intercept + x, rank = 1)",
       "inference_consequence": "fixed-effect inference is conditional on a certificate-time reduced-rank covariance summary; unsupported directions are not evidence of zero population variance",
-      "diagnostics": [
-        {
-          "code": "covariance_reduced",
-          "severity": "info",
-          "stage": "certification",
-          "message": "fitted covariance for r0 has effective rank 1 of requested rank 2",
-          "affected_terms": [
-            "r0"
-          ],
-          "suggested_actions": [
-            "treat unsupported covariance directions as unsupported by this fit, not as proof of zero population variance"
-          ],
-          "payload": {
-            "effective_rank_absolute_tolerance": 1e-10,
-            "effective_rank_relative_tolerance": 1e-6,
-            "rank_tolerance": 4.014407594579746e-8,
-            "requested_rank": 2,
-            "supported_rank": 1
-          }
-        }
-      ]
+      "diagnostics": []
     }
   ]
 }

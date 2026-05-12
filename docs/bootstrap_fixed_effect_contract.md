@@ -174,6 +174,19 @@ t_b   = abs((L beta_b   - rhs) / se_b)
 where the bootstrap samples are generated from the certified
 `fixed_effect_null` target.
 
+For a multi-df fixed-effect term or contrast with effective rank `q > 1`, the
+bootstrap statistic is a joint Wald/F statistic:
+
+```text
+Q = (L beta - rhs)' [L V_beta L']^+ (L beta - rhs)
+F = Q / q
+```
+
+The same statistic is computed for each bootstrap refit. Rows are available
+only when Rust can compute a finite observed statistic and at least the minimum
+number of finite replicate statistics. Multi-df rows report
+`statistic_name = f`, `numerator_df = q`, and `denominator_df = null`.
+
 The p-value is:
 
 ```text
@@ -208,6 +221,18 @@ method = bootstrap
 kind = contrast or coefficient
 statistic_name = t
 numerator_df = null
+denominator_df = null
+status = available
+reliability = low or moderate
+```
+
+Available multi-df rows use:
+
+```text
+method = bootstrap
+kind = term or contrast
+statistic_name = f
+numerator_df = effective restriction rank
 denominator_df = null
 status = available
 reliability = low or moderate
@@ -252,7 +277,6 @@ Bootstrap-specific reasons should distinguish at least:
 - `bootstrap_failed_refit_policy_unavailable`
 - `bootstrap_mcse_unavailable`
 - `bootstrap_boundary_rate_too_high`
-- `bootstrap_not_default_auto_method`
 
 ## Work Breakdown
 

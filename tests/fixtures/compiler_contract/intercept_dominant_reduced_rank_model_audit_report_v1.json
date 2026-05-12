@@ -279,7 +279,7 @@
         {
           "label": "covariance_reduced",
           "status": "info",
-          "detail": "fitted covariance for r0 has effective rank 1 of requested rank 2; affected=r0; suggested=treat unsupported covariance directions as unsupported by this fit, not as proof of zero population variance | consider refitting the simpler random-effect term (1 | group); this fitted model was not silently refit"
+          "detail": "fitted covariance for (1 + x | group) has effective rank 1 of requested rank 2; affected=(1 + x | group); suggested=treat unsupported covariance directions as unsupported by this fit, not as proof of zero population variance | consider refitting the simpler random-effect term (1 | group); this fitted model was not silently refit"
         }
       ]
     }
@@ -335,9 +335,9 @@
       "code": "covariance_reduced",
       "severity": "info",
       "stage": "certification",
-      "message": "fitted covariance for r0 has effective rank 1 of requested rank 2",
+      "message": "fitted covariance for (1 + x | group) has effective rank 1 of requested rank 2",
       "affected_terms": [
-        "r0"
+        "(1 + x | group)"
       ],
       "suggested_actions": [
         "treat unsupported covariance directions as unsupported by this fit, not as proof of zero population variance",
@@ -363,7 +363,9 @@
         },
         "rank_tolerance": 2.0404208990918134e-6,
         "requested_rank": 2,
-        "supported_rank": 1
+        "source_syntax": "(1 + x | group)",
+        "supported_rank": 1,
+        "term_id": "r0"
       }
     }
   ]

@@ -23,6 +23,10 @@ pub const MODEL_STATE_SUMMARY_SCHEMA_VERSION: u32 = 1;
 pub const FIXED_EFFECT_INFERENCE_TABLE_SCHEMA: &str = "mixedmodels.fixed_effect_inference_table";
 pub const FIXED_EFFECT_INFERENCE_TABLE_SCHEMA_VERSION: &str = "1.0.0";
 pub const FIXED_EFFECT_INFERENCE_TABLE_NAME: &str = "fixed_effect_inference";
+pub const FIXED_EFFECT_COVARIANCE_MATRIX_SCHEMA: &str =
+    "mixedmodels.fixed_effect_covariance_matrix";
+pub const FIXED_EFFECT_COVARIANCE_MATRIX_SCHEMA_VERSION: &str = "1.0.0";
+pub const FIXED_EFFECT_COVARIANCE_MATRIX_NAME: &str = "fixed_effect_covariance_matrix";
 
 /// Threshold above which a single basis column is treated as carrying the
 /// full mass of a reduced-rank covariance direction. A direction with one
@@ -221,6 +225,96 @@ impl FixedEffectInferenceTable {
     }
 }
 
+/// Versioned fixed-effect covariance matrix stored on fitted artifacts.
+///
+/// This payload is reusable covariance geometry for consumers such as `vcov()`,
+/// `emmeans`, and marginal-quantity tools. It is deliberately not the
+/// inferential claim surface: p-values, degrees of freedom, method labels, and
+/// reliability reasons live on [`FixedEffectInferenceTable`] rows.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FixedEffectCovarianceMatrix {
+    pub schema_name: String,
+    pub schema_version: String,
+    pub crate_version: Option<String>,
+    pub coef_names: Vec<String>,
+    pub matrix: Option<Vec<Vec<f64>>>,
+    pub method: FixedEffectCovarianceMethod,
+    pub status: FixedEffectCovarianceStatus,
+    pub reliability: ReliabilityGrade,
+    pub reason: Option<String>,
+    pub details: FixedEffectCovarianceDetails,
+    pub notes: Vec<String>,
+}
+
+impl FixedEffectCovarianceMatrix {
+    pub fn model_based(
+        coef_names: Vec<String>,
+        matrix: Vec<Vec<f64>>,
+        details: FixedEffectCovarianceDetails,
+        notes: Vec<String>,
+    ) -> Self {
+        Self {
+            schema_name: FIXED_EFFECT_COVARIANCE_MATRIX_SCHEMA.to_string(),
+            schema_version: FIXED_EFFECT_COVARIANCE_MATRIX_SCHEMA_VERSION.to_string(),
+            crate_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            coef_names,
+            matrix: Some(matrix),
+            method: FixedEffectCovarianceMethod::ModelBased,
+            status: FixedEffectCovarianceStatus::Available,
+            reliability: ReliabilityGrade::High,
+            reason: None,
+            details,
+            notes,
+        }
+    }
+
+    pub fn unavailable(
+        coef_names: Vec<String>,
+        reason: impl Into<String>,
+        details: FixedEffectCovarianceDetails,
+        notes: Vec<String>,
+    ) -> Self {
+        Self {
+            schema_name: FIXED_EFFECT_COVARIANCE_MATRIX_SCHEMA.to_string(),
+            schema_version: FIXED_EFFECT_COVARIANCE_MATRIX_SCHEMA_VERSION.to_string(),
+            crate_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            coef_names,
+            matrix: None,
+            method: FixedEffectCovarianceMethod::Unavailable,
+            status: FixedEffectCovarianceStatus::Unavailable,
+            reliability: ReliabilityGrade::NotAvailable,
+            reason: Some(reason.into()),
+            details,
+            notes,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FixedEffectCovarianceMethod {
+    ModelBased,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FixedEffectCovarianceStatus {
+    Available,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FixedEffectCovarianceDetails {
+    pub rank: Option<usize>,
+    pub expected_rank: Option<usize>,
+    pub aliased: Vec<String>,
+    pub matrix_rows: usize,
+    pub matrix_cols: usize,
+    pub finite: Option<bool>,
+    pub symmetric: Option<bool>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FixedEffectInferenceRow {
     pub label: String,
@@ -347,12 +441,14 @@ pub enum FixedEffectInferenceStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactTable {
     FixedEffectInference,
+    FixedEffectCovariance,
 }
 
 impl ArtifactTable {
     pub fn as_str(self) -> &'static str {
         match self {
             ArtifactTable::FixedEffectInference => FIXED_EFFECT_INFERENCE_TABLE_NAME,
+            ArtifactTable::FixedEffectCovariance => FIXED_EFFECT_COVARIANCE_MATRIX_NAME,
         }
     }
 }
@@ -365,8 +461,9 @@ impl std::str::FromStr for ArtifactTable {
             FIXED_EFFECT_INFERENCE_TABLE_NAME | "fixed_effect_inference_table" => {
                 Ok(ArtifactTable::FixedEffectInference)
             }
+            FIXED_EFFECT_COVARIANCE_MATRIX_NAME => Ok(ArtifactTable::FixedEffectCovariance),
             other => Err(format!(
-                "unsupported artifact table `{other}`; supported tables: {FIXED_EFFECT_INFERENCE_TABLE_NAME}"
+                "unsupported artifact table `{other}`; supported tables: {FIXED_EFFECT_INFERENCE_TABLE_NAME}, {FIXED_EFFECT_COVARIANCE_MATRIX_NAME}"
             )),
         }
     }
@@ -697,6 +794,8 @@ pub struct CompiledModelArtifact {
     pub model_boundary: ModelBoundary,
     #[serde(default)]
     pub fixed_effect_inference_table: Option<FixedEffectInferenceTable>,
+    #[serde(default)]
+    pub fixed_effect_covariance_matrix: Option<FixedEffectCovarianceMatrix>,
     pub requested_formula: String,
     pub semantic_model: SemanticModel,
     pub effective_formula: Option<String>,
@@ -738,6 +837,7 @@ impl CompiledModelArtifact {
             schema: SchemaMetadata::compiled_model_artifact(),
             model_boundary: ModelBoundary::lmm(),
             fixed_effect_inference_table: None,
+            fixed_effect_covariance_matrix: None,
             requested_formula: requested_formula.into(),
             diagnostics: semantic_model.diagnostics.clone(),
             semantic_model,
@@ -834,6 +934,10 @@ impl CompiledModelArtifact {
                 .fixed_effect_inference_table
                 .as_ref()
                 .map(|table| serde_json::to_value(table).expect("inference table serializes")),
+            ArtifactTable::FixedEffectCovariance => self
+                .fixed_effect_covariance_matrix
+                .as_ref()
+                .map(|matrix| serde_json::to_value(matrix).expect("covariance matrix serializes")),
         }
     }
 
@@ -1608,11 +1712,19 @@ mod tests {
         let value = serde_json::to_value(&artifact).unwrap();
 
         assert!(value["fixed_effect_inference_table"].is_null());
+        assert!(value["fixed_effect_covariance_matrix"].is_null());
         assert!(artifact
             .table(ArtifactTable::FixedEffectInference)
             .is_none());
         assert!(artifact
+            .table(ArtifactTable::FixedEffectCovariance)
+            .is_none());
+        assert!(artifact
             .table_by_name(FIXED_EFFECT_INFERENCE_TABLE_NAME)
+            .unwrap()
+            .is_none());
+        assert!(artifact
+            .table_by_name(FIXED_EFFECT_COVARIANCE_MATRIX_NAME)
             .unwrap()
             .is_none());
     }
@@ -1627,10 +1739,15 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("fixed_effect_inference_table");
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("fixed_effect_covariance_matrix");
 
         let decoded: CompiledModelArtifact = serde_json::from_value(value).unwrap();
 
         assert!(decoded.fixed_effect_inference_table.is_none());
+        assert!(decoded.fixed_effect_covariance_matrix.is_none());
     }
 
     #[test]
@@ -1707,6 +1824,66 @@ mod tests {
         assert_eq!(alias, table_value);
         let err = artifact.table_by_name("coeftable").unwrap_err();
         assert!(err.contains("unsupported artifact table"));
+    }
+
+    #[test]
+    fn fixed_effect_covariance_matrix_round_trips_on_artifact() {
+        let formula = parse_formula("y ~ x + (1 | subject)").unwrap();
+        let semantic = compile_formula_ir(&formula);
+        let mut artifact = CompiledModelArtifact::new(formula.to_string(), semantic);
+        let details = FixedEffectCovarianceDetails {
+            rank: Some(2),
+            expected_rank: Some(2),
+            aliased: Vec::new(),
+            matrix_rows: 2,
+            matrix_cols: 2,
+            finite: Some(true),
+            symmetric: Some(true),
+        };
+        artifact.fixed_effect_covariance_matrix = Some(FixedEffectCovarianceMatrix::model_based(
+            vec!["(Intercept)".to_string(), "x".to_string()],
+            vec![vec![4.0, 0.25], vec![0.25, 1.0]],
+            details,
+            vec![
+                "model-based fixed-effect covariance geometry; inference claims remain on fixed_effect_inference_table rows"
+                    .to_string(),
+            ],
+        ));
+
+        let json = serde_json::to_string(&artifact).unwrap();
+        let decoded: CompiledModelArtifact = serde_json::from_str(&json).unwrap();
+        let covariance = decoded
+            .fixed_effect_covariance_matrix
+            .as_ref()
+            .expect("covariance matrix should round-trip");
+
+        assert_eq!(
+            covariance.schema_name,
+            FIXED_EFFECT_COVARIANCE_MATRIX_SCHEMA
+        );
+        assert_eq!(
+            covariance.schema_version,
+            FIXED_EFFECT_COVARIANCE_MATRIX_SCHEMA_VERSION
+        );
+        assert_eq!(covariance.status, FixedEffectCovarianceStatus::Available);
+        assert_eq!(covariance.method, FixedEffectCovarianceMethod::ModelBased);
+        assert_eq!(covariance.matrix.as_ref().unwrap()[1][1], 1.0);
+        assert_eq!(decoded, artifact);
+
+        let table_value = artifact
+            .table(ArtifactTable::FixedEffectCovariance)
+            .expect("bridge table accessor should expose fitted covariance matrix");
+        assert_eq!(
+            table_value["schema_name"],
+            FIXED_EFFECT_COVARIANCE_MATRIX_SCHEMA
+        );
+        assert_eq!(table_value["matrix"][0][1], 0.25);
+
+        let named = artifact
+            .table_by_name(FIXED_EFFECT_COVARIANCE_MATRIX_NAME)
+            .unwrap()
+            .expect("named bridge table accessor should expose covariance matrix");
+        assert_eq!(named, table_value);
     }
 
     #[test]

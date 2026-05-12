@@ -165,7 +165,7 @@
     "crate_version": "0.1.0",
     "rows": [
       {
-        "denominator_df": 130.83561018561446,
+        "denominator_df": null,
         "estimability": {
           "assessment": {
             "diagnostics": [],
@@ -176,26 +176,25 @@
           },
           "estimand": "fixed_contrast"
         },
-        "estimate": 10.000000083827498,
+        "estimate": 10.000000561654563,
         "kind": "coefficient",
         "label": "(Intercept)",
-        "method": "satterthwaite",
+        "method": "asymptotic_wald_z",
         "notes": [
-          "Satterthwaite denominator df computed from finite-difference vcov_beta Jacobian and deviance Hessian over varpar",
-          "deviance Hessian has 2 near-zero eigenvalue(s)",
-          "vcov_varpar used the positive-eigenvalue subspace of the Hessian"
+          "asymptotic Wald z is a labeled fallback, not a finite-sample correction",
+          "auto Satterthwaite unavailable: Satterthwaite fixed-effect inference could not compute vcov_beta derivatives: Invalid argument: cannot compute central finite-difference derivative for varpar[2]: value is at or too near lower bound 0"
         ],
         "numerator_df": null,
         "p_value": 0.0,
         "reason": null,
         "reliability": "low",
-        "statistic": 230.3781904716021,
-        "statistic_name": "t",
+        "statistic": 230.38364488014884,
+        "statistic_name": "z",
         "status": "available",
-        "std_error": 0.0434068870119898
+        "std_error": 0.04340586141371627
       },
       {
-        "denominator_df": 130.8356101871162,
+        "denominator_df": null,
         "estimability": {
           "assessment": {
             "diagnostics": [],
@@ -206,23 +205,22 @@
           },
           "estimand": "fixed_contrast"
         },
-        "estimate": 2.0000000359260164,
+        "estimate": 2.0000002407090767,
         "kind": "coefficient",
         "label": "x",
-        "method": "satterthwaite",
+        "method": "asymptotic_wald_z",
         "notes": [
-          "Satterthwaite denominator df computed from finite-difference vcov_beta Jacobian and deviance Hessian over varpar",
-          "deviance Hessian has 2 near-zero eigenvalue(s)",
-          "vcov_varpar used the positive-eigenvalue subspace of the Hessian"
+          "asymptotic Wald z is a labeled fallback, not a finite-sample correction",
+          "auto Satterthwaite unavailable: Satterthwaite fixed-effect inference could not compute vcov_beta derivatives: Invalid argument: cannot compute central finite-difference derivative for varpar[2]: value is at or too near lower bound 0"
         ],
         "numerator_df": null,
         "p_value": 0.0,
         "reason": null,
         "reliability": "low",
-        "statistic": 107.5099623421262,
-        "statistic_name": "t",
+        "statistic": 107.51237367434608,
+        "statistic_name": "z",
         "status": "available",
-        "std_error": 0.018602927508815113
+        "std_error": 0.0186025121793614
       }
     ],
     "schema_name": "mixedmodels.fixed_effect_inference_table",
@@ -252,10 +250,10 @@
         "p_value": null,
         "reason": "ordinary fixed-effect p-values are unavailable for exploratory fit intent",
         "reliability": "not_available",
-        "statistic": 25.793809277001287,
+        "statistic": 25.79380927700157,
         "statistic_name": null,
         "status": "p_value_unavailable",
-        "std_error": 9.746722639864002
+        "std_error": 9.746722639863895
       },
       {
         "denominator_df": null,
@@ -278,10 +276,10 @@
         "p_value": null,
         "reason": "ordinary fixed-effect p-values are unavailable for exploratory fit intent",
         "reliability": "not_available",
-        "statistic": 13.015428879637998,
+        "statistic": 13.01542887963814,
         "statistic_name": null,
         "status": "p_value_unavailable",
-        "std_error": 0.8042213634597587
+        "std_error": 0.8042213634597499
       }
     ],
     "schema_name": "mixedmodels.fixed_effect_inference_table",
@@ -311,10 +309,10 @@
         "p_value": null,
         "reason": "ordinary fixed-effect p-values are unavailable after selection-time model changes",
         "reliability": "not_available",
-        "statistic": 25.793809277001287,
+        "statistic": 25.79380927700157,
         "statistic_name": null,
         "status": "p_value_unavailable",
-        "std_error": 9.746722639864002
+        "std_error": 9.746722639863895
       },
       {
         "denominator_df": null,
@@ -337,10 +335,10 @@
         "p_value": null,
         "reason": "ordinary fixed-effect p-values are unavailable after selection-time model changes",
         "reliability": "not_available",
-        "statistic": 13.015428879637998,
+        "statistic": 13.01542887963814,
         "statistic_name": null,
         "status": "p_value_unavailable",
-        "std_error": 0.8042213634597587
+        "std_error": 0.8042213634597499
       }
     ],
     "schema_name": "mixedmodels.fixed_effect_inference_table",
@@ -350,7 +348,7 @@
     "crate_version": "0.1.0",
     "rows": [
       {
-        "denominator_df": 22.80954908426727,
+        "denominator_df": 22.809473375115296,
         "estimability": {
           "assessment": {
             "diagnostics": [],
@@ -372,13 +370,13 @@
         "p_value": 0.0,
         "reason": null,
         "reliability": "low",
-        "statistic": 25.793809277001287,
+        "statistic": 25.79380927700157,
         "statistic_name": "t",
         "status": "available",
-        "std_error": 9.746722639864002
+        "std_error": 9.746722639863895
       },
       {
-        "denominator_df": 160.9995547831258,
+        "denominator_df": 160.99950192591783,
         "estimability": {
           "assessment": {
             "diagnostics": [],
@@ -400,10 +398,10 @@
         "p_value": 0.0,
         "reason": null,
         "reliability": "low",
-        "statistic": 13.015428879637998,
+        "statistic": 13.01542887963814,
         "statistic_name": "t",
         "status": "available",
-        "std_error": 0.8042213634597587
+        "std_error": 0.8042213634597499
       }
     ],
     "schema_name": "mixedmodels.fixed_effect_inference_table",

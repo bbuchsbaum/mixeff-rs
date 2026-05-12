@@ -22,6 +22,7 @@
     }
   },
   "fixed_effect_inference_table": null,
+  "fixed_effect_covariance_matrix": null,
   "requested_formula": "y ~ 1 + x + (1 | subject) + (1 + x | school) + (1 + x | school:class) + (1 + x || batch) + (1 | item) + (0 + x | item)",
   "semantic_model": {
     "schema_name": "mixedmodels.semantic_model",
@@ -826,6 +827,131 @@
           "status": "estimable",
           "aliased_columns": [],
           "diagnostics": []
+        }
+      ],
+      "contrast_bases": [
+        {
+          "variable": "subject",
+          "levels": [
+            "s1",
+            "s2"
+          ],
+          "column_names": [
+            "subject: s2"
+          ],
+          "source": "treatment",
+          "ordered": false,
+          "explicit": false,
+          "contrast_matrix": [
+            [
+              0.0
+            ],
+            [
+              1.0
+            ]
+          ]
+        },
+        {
+          "variable": "school",
+          "levels": [
+            "A",
+            "B"
+          ],
+          "column_names": [
+            "school: B"
+          ],
+          "source": "treatment",
+          "ordered": false,
+          "explicit": false,
+          "contrast_matrix": [
+            [
+              0.0
+            ],
+            [
+              1.0
+            ]
+          ]
+        },
+        {
+          "variable": "class",
+          "levels": [
+            "c1",
+            "c2"
+          ],
+          "column_names": [
+            "class: c2"
+          ],
+          "source": "treatment",
+          "ordered": false,
+          "explicit": false,
+          "contrast_matrix": [
+            [
+              0.0
+            ],
+            [
+              1.0
+            ]
+          ]
+        },
+        {
+          "variable": "batch",
+          "levels": [
+            "b1",
+            "b2"
+          ],
+          "column_names": [
+            "batch: b2"
+          ],
+          "source": "treatment",
+          "ordered": false,
+          "explicit": false,
+          "contrast_matrix": [
+            [
+              0.0
+            ],
+            [
+              1.0
+            ]
+          ]
+        },
+        {
+          "variable": "item",
+          "levels": [
+            "i1",
+            "i2",
+            "i3",
+            "i4"
+          ],
+          "column_names": [
+            "item: i2",
+            "item: i3",
+            "item: i4"
+          ],
+          "source": "treatment",
+          "ordered": false,
+          "explicit": false,
+          "contrast_matrix": [
+            [
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              1.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              1.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              1.0
+            ]
+          ]
         }
       ],
       "aliased_columns": [],

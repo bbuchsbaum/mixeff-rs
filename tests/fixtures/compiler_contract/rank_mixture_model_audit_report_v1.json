@@ -198,8 +198,8 @@
         },
         {
           "label": "convergence interpretation",
-          "status": "error",
-          "detail": "optimizer reported an acceptable stop; effective covariance is reduced rank; unsupported directions are weakly identified, not proof of zero population variance; stationarity checked by finite_difference; Hessian evidence is approximate (finite-difference active-subspace Hessian is positive semidefinite); bounded verification did not reproduce the fitted optimum"
+          "status": "warning",
+          "detail": "optimizer reported an acceptable stop; effective covariance is reduced rank; unsupported directions are weakly identified, not proof of zero population variance; stationarity is not certified: one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged; Hessian weak-identification check is unavailable: one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged; bounded verification is fragile; compare objectives and theta before routine inference"
         },
         {
           "label": "optimizer",
@@ -209,17 +209,17 @@
         {
           "label": "objective",
           "status": "info",
-          "detail": "-818.115658"
+          "detail": "-875.734619"
         },
         {
           "label": "optimizer stop",
           "status": "ok",
-          "detail": "return_code=SUCCESS; acceptable=true; budget_exhausted=false; fevals=369; objective_delta=829.08"
+          "detail": "return_code=SUCCESS; acceptable=true; budget_exhausted=false; fevals=407; objective_delta=886.70"
         },
         {
           "label": "parameter space",
-          "status": "ok",
-          "detail": "theta=3, free=3, boundary=0, boundary_indices=none"
+          "status": "info",
+          "detail": "theta=3, free=2, boundary=1, boundary_indices=2"
         },
         {
           "label": "sample-size context",
@@ -228,33 +228,33 @@
         },
         {
           "label": "gradient evidence",
-          "status": "ok",
-          "detail": "method=finite_difference; raw=26.11; scaled=0.03; free=26.11; projected=26.11; kkt_boundary=0.00"
+          "status": "not_assessed",
+          "detail": "method=not_assessed (one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged); raw=unknown; scaled=unknown; free=unknown; projected=unknown; kkt_boundary=unknown"
         },
         {
           "label": "hessian evidence",
-          "status": "info",
-          "detail": "method=finite_difference; quality=approximate (finite-difference active-subspace Hessian is positive semidefinite); min_eigen=2.00; condition=37687.43; rank=3"
+          "status": "not_assessed",
+          "detail": "method=not_assessed (one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged); quality=not_assessed (one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged); min_eigen=unknown; condition=unknown; rank=unknown"
         },
         {
           "label": "certification quality",
           "status": "info",
-          "detail": "approximate (free-gradient norm 2.611324e1 exceeds tolerance 2.860272e-3)"
+          "detail": "approximate (optimizer stop accepted; derivative KKT/Hessian inspection skipped: one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged)"
         },
         {
           "label": "convergence next steps",
-          "status": "error",
-          "detail": "compare objectives, theta, and beta across verification runs | inspect Effective Covariance and consider diagonal covariance, a simpler random-effect term, or design_compiled policy | scale predictors, simplify the random-effects structure, or collect more grouping levels"
+          "status": "warning",
+          "detail": "compare objectives, theta, and beta across verification runs | gate weak-identification claims until Hessian evidence is available | inspect Effective Covariance and consider diagonal covariance, a simpler random-effect term, or design_compiled policy"
         },
         {
           "label": "derivative checks",
-          "status": "info",
-          "detail": "0 failed; 1 mismatch; 0 not assessed"
+          "status": "not_assessed",
+          "detail": "0 failed; 0 mismatch; 3 not assessed"
         },
         {
           "label": "convergence verification",
-          "status": "error",
-          "detail": "status=unstable; runs=3; agreeing=0; objective_tol=1.000e-5; theta_tol=1.000e-3; beta_tol=1.000e-4; restart from fitted theta did not reproduce the recorded optimum"
+          "status": "warning",
+          "detail": "status=fragile; runs=3; agreeing=1; objective_tol=1.000e-5; theta_tol=1.000e-3; beta_tol=1.000e-4; objective, fixed effects, and rank are stable, but parameterization checks are fragile: jitter_restart_1, optimizer_consensus_pattern_search"
         }
       ]
     },
@@ -277,9 +277,14 @@
       "title": "Diagnostics",
       "lines": [
         {
+          "label": "boundary_parameter",
+          "status": "info",
+          "detail": "standard deviation for x in (1 + x | group) is on its lower bound; affected=(1 + x | group); suggested=treat a boundary covariance estimate as a valid fitted boundary, not by itself an optimizer failure | inspect the Effective Covariance section for unsupported random-effect directions | consider diagonal covariance, a simpler random-effect term, or design_compiled policy if the boundary direction is not scientifically central"
+        },
+        {
           "label": "covariance_reduced",
           "status": "info",
-          "detail": "fitted covariance for r0 has effective rank 1 of requested rank 2; affected=r0; suggested=treat unsupported covariance directions as unsupported by this fit, not as proof of zero population variance"
+          "detail": "fitted covariance for (1 + x | group) has effective rank 1 of requested rank 2; affected=(1 + x | group); suggested=treat unsupported covariance directions as unsupported by this fit, not as proof of zero population variance"
         }
       ]
     }
@@ -332,12 +337,34 @@
   "cross_card_constraints": [],
   "diagnostics": [
     {
+      "code": "boundary_parameter",
+      "severity": "info",
+      "stage": "certification",
+      "message": "standard deviation for x in (1 + x | group) is on its lower bound",
+      "affected_terms": [
+        "(1 + x | group)"
+      ],
+      "suggested_actions": [
+        "treat a boundary covariance estimate as a valid fitted boundary, not by itself an optimizer failure",
+        "inspect the Effective Covariance section for unsupported random-effect directions",
+        "consider diagonal covariance, a simpler random-effect term, or design_compiled policy if the boundary direction is not scientifically central"
+      ],
+      "payload": {
+        "lower_bound": 0.0,
+        "parameter_role": "standard deviation for x",
+        "source_syntax": "(1 + x | group)",
+        "term_id": "r0",
+        "theta_index": 2,
+        "value": 0.0
+      }
+    },
+    {
       "code": "covariance_reduced",
       "severity": "info",
       "stage": "certification",
-      "message": "fitted covariance for r0 has effective rank 1 of requested rank 2",
+      "message": "fitted covariance for (1 + x | group) has effective rank 1 of requested rank 2",
       "affected_terms": [
-        "r0"
+        "(1 + x | group)"
       ],
       "suggested_actions": [
         "treat unsupported covariance directions as unsupported by this fit, not as proof of zero population variance"
@@ -345,9 +372,11 @@
       "payload": {
         "effective_rank_absolute_tolerance": 1e-10,
         "effective_rank_relative_tolerance": 1e-6,
-        "rank_tolerance": 4.014407594579746e-8,
+        "rank_tolerance": 4.0142197693418304e-8,
         "requested_rank": 2,
-        "supported_rank": 1
+        "source_syntax": "(1 + x | group)",
+        "supported_rank": 1,
+        "term_id": "r0"
       }
     }
   ]

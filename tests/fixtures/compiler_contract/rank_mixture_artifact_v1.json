@@ -29,14 +29,14 @@
       {
         "label": "(Intercept)",
         "kind": "coefficient",
-        "estimate": 10.000000083827498,
-        "std_error": 0.0434068870119898,
+        "estimate": 10.000000561654563,
+        "std_error": 0.04340586141371627,
         "numerator_df": null,
-        "denominator_df": 130.83561018561446,
-        "statistic": 230.3781904716021,
-        "statistic_name": "t",
+        "denominator_df": null,
+        "statistic": 230.38364488014884,
+        "statistic_name": "z",
         "p_value": 0.0,
-        "method": "satterthwaite",
+        "method": "asymptotic_wald_z",
         "status": "available",
         "reliability": "low",
         "estimability": {
@@ -51,22 +51,21 @@
         },
         "reason": null,
         "notes": [
-          "Satterthwaite denominator df computed from finite-difference vcov_beta Jacobian and deviance Hessian over varpar",
-          "deviance Hessian has 2 near-zero eigenvalue(s)",
-          "vcov_varpar used the positive-eigenvalue subspace of the Hessian"
+          "asymptotic Wald z is a labeled fallback, not a finite-sample correction",
+          "auto Satterthwaite unavailable: Satterthwaite fixed-effect inference could not compute vcov_beta derivatives: Invalid argument: cannot compute central finite-difference derivative for varpar[2]: value is at or too near lower bound 0"
         ]
       },
       {
         "label": "x",
         "kind": "coefficient",
-        "estimate": 2.0000000359260164,
-        "std_error": 0.018602927508815113,
+        "estimate": 2.0000002407090767,
+        "std_error": 0.0186025121793614,
         "numerator_df": null,
-        "denominator_df": 130.8356101871162,
-        "statistic": 107.5099623421262,
-        "statistic_name": "t",
+        "denominator_df": null,
+        "statistic": 107.51237367434608,
+        "statistic_name": "z",
         "p_value": 0.0,
-        "method": "satterthwaite",
+        "method": "asymptotic_wald_z",
         "status": "available",
         "reliability": "low",
         "estimability": {
@@ -81,11 +80,45 @@
         },
         "reason": null,
         "notes": [
-          "Satterthwaite denominator df computed from finite-difference vcov_beta Jacobian and deviance Hessian over varpar",
-          "deviance Hessian has 2 near-zero eigenvalue(s)",
-          "vcov_varpar used the positive-eigenvalue subspace of the Hessian"
+          "asymptotic Wald z is a labeled fallback, not a finite-sample correction",
+          "auto Satterthwaite unavailable: Satterthwaite fixed-effect inference could not compute vcov_beta derivatives: Invalid argument: cannot compute central finite-difference derivative for varpar[2]: value is at or too near lower bound 0"
         ]
       }
+    ]
+  },
+  "fixed_effect_covariance_matrix": {
+    "schema_name": "mixedmodels.fixed_effect_covariance_matrix",
+    "schema_version": "1.0.0",
+    "crate_version": "0.1.0",
+    "coef_names": [
+      "(Intercept)",
+      "x"
+    ],
+    "matrix": [
+      [
+        0.001884068805066743,
+        0.0008074579821630547
+      ],
+      [
+        0.0008074579821630547,
+        0.0003460534593832892
+      ]
+    ],
+    "method": "model_based",
+    "status": "available",
+    "reliability": "high",
+    "reason": null,
+    "details": {
+      "rank": 2,
+      "expected_rank": 2,
+      "aliased": [],
+      "matrix_rows": 2,
+      "matrix_cols": 2,
+      "finite": true,
+      "symmetric": true
+    },
+    "notes": [
+      "model-based fixed-effect covariance geometry; inference claims remain on fixed_effect_inference_table rows"
     ]
   },
   "requested_formula": "y ~ 1 + x + (1 + x | group)",
@@ -275,6 +308,397 @@
           "diagnostics": []
         }
       ],
+      "contrast_bases": [
+        {
+          "variable": "group",
+          "levels": [
+            "g1",
+            "g2",
+            "g3",
+            "g4",
+            "g5",
+            "g6",
+            "g7",
+            "g8",
+            "g9",
+            "g10",
+            "g11",
+            "g12",
+            "g13",
+            "g14",
+            "g15",
+            "g16",
+            "g17",
+            "g18"
+          ],
+          "column_names": [
+            "group: g2",
+            "group: g3",
+            "group: g4",
+            "group: g5",
+            "group: g6",
+            "group: g7",
+            "group: g8",
+            "group: g9",
+            "group: g10",
+            "group: g11",
+            "group: g12",
+            "group: g13",
+            "group: g14",
+            "group: g15",
+            "group: g16",
+            "group: g17",
+            "group: g18"
+          ],
+          "source": "treatment",
+          "ordered": false,
+          "explicit": false,
+          "contrast_matrix": [
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              1.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              1.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              1.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              1.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              1.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              1.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              1.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              1.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              1.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              1.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              1.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              1.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              1.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              1.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              1.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ]
+          ]
+        }
+      ],
       "aliased_columns": [],
       "empty_cells": [],
       "diagnostics": []
@@ -411,15 +835,15 @@
           "loadings": [
             {
               "basis": "intercept",
-              "loading": 0.9191452504795582
+              "loading": 0.9191450410251325
             },
             {
               "basis": "x",
-              "loading": 0.39391878416860254
+              "loading": 0.39391927289599254
             }
           ],
-          "eigenvalue": 0.04014407594579746,
-          "variance_explained": 0.9999999999999637,
+          "eigenvalue": 0.040142197693418306,
+          "variance_explained": 1.0,
           "user_scale_summary": "0.919*intercept + 0.394*x"
         }
       ],
@@ -429,15 +853,15 @@
           "loadings": [
             {
               "basis": "intercept",
-              "loading": -0.39391878416860254
+              "loading": -0.39391927289599254
             },
             {
               "basis": "x",
-              "loading": 0.9191452504795582
+              "loading": 0.9191450410251325
             }
           ],
           "eigenvalue": 0.0,
-          "variance_explained": 3.6298567785132805e-14,
+          "variance_explained": 0.0,
           "user_scale_summary": "-0.394*intercept + 0.919*x"
         }
       ],
@@ -495,14 +919,14 @@
           }
         },
         "status": "free",
-        "value": 2141.958932197339
+        "value": 3688.6652309298024
       },
       "lambda": {
         "row": 0,
         "col": 0,
         "row_basis": "intercept",
         "col_basis": "intercept",
-        "value": 2141.958932197339
+        "value": 3688.6652309298024
       },
       "parmap_entry": {
         "theta_index": 0,
@@ -518,7 +942,7 @@
           "basis": [
             "intercept"
           ],
-          "value": 0.18415981931755349
+          "value": 0.18415546908689878
         }
       ]
     },
@@ -543,14 +967,14 @@
         "name": "theta[0:x,intercept]",
         "constraint": "unconstrained",
         "status": "free",
-        "value": 917.9809805577436
+        "value": 1580.8564055396623
       },
       "lambda": {
         "row": 1,
         "col": 0,
         "row_basis": "x",
         "col_basis": "intercept",
-        "value": 917.9809805577436
+        "value": 1580.8564055396623
       },
       "parmap_entry": {
         "theta_index": 1,
@@ -566,7 +990,7 @@
           "basis": [
             "x"
           ],
-          "value": 0.0789255148524542
+          "value": 0.07892376637491759
         },
         {
           "kind": "correlation",
@@ -575,7 +999,7 @@
             "x",
             "intercept"
           ],
-          "value": 0.9999999999998617
+          "value": 1.0
         }
       ]
     },
@@ -604,14 +1028,14 @@
           }
         },
         "status": "free",
-        "value": 0.0004829450377138618
+        "value": 0.0
       },
       "lambda": {
         "row": 1,
         "col": 1,
         "row_basis": "x",
         "col_basis": "x",
-        "value": 0.0004829450377138618
+        "value": 0.0
       },
       "parmap_entry": {
         "theta_index": 2,
@@ -627,7 +1051,7 @@
           "basis": [
             "x"
           ],
-          "value": 0.0789255148524542
+          "value": 0.07892376637491759
         },
         {
           "kind": "correlation",
@@ -636,7 +1060,7 @@
             "x",
             "intercept"
           ],
-          "value": 0.9999999999998617
+          "value": 1.0
         }
       ]
     }
@@ -699,25 +1123,27 @@
   "optimizer_certificate": {
     "status": "converged_reduced_rank",
     "optimizer_name": "bobyqa",
-    "objective_value": -818.1156579758102,
-    "iterations": 369,
+    "objective_value": -875.7346188649542,
+    "iterations": 407,
     "evidence": {
       "optimizer_stop": {
         "return_code": "SUCCESS",
         "acceptable_stop": true,
         "budget_exhausted": false,
-        "function_evaluations": 369,
+        "function_evaluations": 407,
         "max_function_evaluations": null,
         "max_time_seconds": null,
         "initial_objective": 10.965149395969206,
-        "final_objective": -818.1156579758102,
-        "objective_delta": 829.0808073717794
+        "final_objective": -875.7346188649542,
+        "objective_delta": 886.6997682609234
       },
       "parameter_space": {
         "n_theta": 3,
-        "n_free": 3,
-        "n_boundary": 0,
-        "boundary_indices": []
+        "n_free": 2,
+        "n_boundary": 1,
+        "boundary_indices": [
+          2
+        ]
       },
       "sample_size": {
         "n_observations": 72,
@@ -725,44 +1151,52 @@
         "observations_per_theta": 24.0
       },
       "gradient": {
-        "method": "finite_difference",
-        "raw_gradient_norm": 26.113242847713988,
-        "scaled_gradient_norm": 0.03191876673320693,
-        "free_gradient_norm": 26.113242847713988,
-        "projected_gradient_norm": 26.113242847713988,
-        "kkt_boundary_gradient_max": 0.0
-      },
-      "hessian": {
-        "method": "finite_difference",
-        "quality": {
-          "approximate": {
-            "reason": "finite-difference active-subspace Hessian is positive semidefinite"
+        "method": {
+          "not_assessed": {
+            "reason": "one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged"
           }
         },
-        "min_eigenvalue": 2.0013444588651352,
-        "condition_number": 37687.4281430723,
-        "rank": 3
+        "raw_gradient_norm": null,
+        "scaled_gradient_norm": null,
+        "free_gradient_norm": null,
+        "projected_gradient_norm": null,
+        "kkt_boundary_gradient_max": null
+      },
+      "hessian": {
+        "method": {
+          "not_assessed": {
+            "reason": "one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged"
+          }
+        },
+        "quality": {
+          "not_assessed": {
+            "reason": "one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged"
+          }
+        },
+        "min_eigenvalue": null,
+        "condition_number": null,
+        "rank": null
       },
       "certification_quality": {
         "approximate": {
-          "reason": "free-gradient norm 2.611324e1 exceeds tolerance 2.860272e-3"
+          "reason": "optimizer stop accepted; derivative KKT/Hessian inspection skipped: one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged"
         }
       }
     },
     "verification": {
-      "status": "unstable",
+      "status": "fragile",
       "objective_tolerance": 0.00001,
       "theta_tolerance": 0.001,
       "beta_tolerance": 0.0001,
-      "reference_objective": -818.1156579758102,
+      "reference_objective": -875.7346188649542,
       "reference_theta": [
-        2141.958932197339,
-        917.9809805577436,
-        0.0004829450377138618
+        3688.6652309298024,
+        1580.8564055396623,
+        0.0
       ],
       "reference_beta": [
-        10.000000083827498,
-        2.0000000359260164
+        10.000000561654563,
+        2.0000002407090767
       ],
       "reference_effective_ranks": [
         1
@@ -772,27 +1206,24 @@
           "label": "restart_from_optimum",
           "optimizer_name": "bobyqa",
           "return_code": "SUCCESS",
-          "objective_value": -818.1161531385513,
-          "objective_delta": 0.0004951627411173831,
-          "max_abs_theta_delta": 0.0016802994048248365,
-          "max_abs_beta_delta": 2.4837934375909754e-8,
+          "objective_value": -875.7346188649542,
+          "objective_delta": 0.0,
+          "max_abs_theta_delta": 0.0,
+          "max_abs_beta_delta": 0.0,
           "effective_ranks": [
             1
           ],
-          "agrees": false,
-          "diagnostics": [
-            "objective changed beyond tolerance",
-            "theta parameterization changed beyond tolerance"
-          ]
+          "agrees": true,
+          "diagnostics": []
         },
         {
           "label": "jitter_restart_1",
           "optimizer_name": "bobyqa",
-          "return_code": "SUCCESS",
-          "objective_value": -879.835290341028,
-          "objective_delta": 61.71963236521776,
-          "max_abs_theta_delta": 1692.290487825685,
-          "max_abs_beta_delta": 4.086269083103389e-7,
+          "return_code": "XTOL_REACHED",
+          "objective_value": -875.7515082721438,
+          "objective_delta": 0.016889407189637495,
+          "max_abs_theta_delta": 0.6100629984794068,
+          "max_abs_beta_delta": 3.175763012563948e-7,
           "effective_ranks": [
             1
           ],
@@ -806,10 +1237,10 @@
           "label": "optimizer_consensus_pattern_search",
           "optimizer_name": "pattern_search",
           "return_code": "SUCCESS",
-          "objective_value": -818.1164144013298,
-          "objective_delta": 0.0007564255196257363,
-          "max_abs_theta_delta": 0.002567138671565772,
-          "max_abs_beta_delta": 7.296076631746473e-8,
+          "objective_value": -875.7355689029962,
+          "objective_delta": 0.0009500380419922294,
+          "max_abs_theta_delta": 0.005511932373046875,
+          "max_abs_beta_delta": 2.8082730274547885e-7,
           "effective_ranks": [
             1
           ],
@@ -820,42 +1251,53 @@
           ]
         }
       ],
-      "message": "restart from fitted theta did not reproduce the recorded optimum"
+      "message": "objective, fixed effects, and rank are stable, but parameterization checks are fragile: jitter_restart_1, optimizer_consensus_pattern_search"
     },
-    "free_gradient_norm": 26.113242847713988,
-    "projected_gradient_norm": 26.113242847713988,
-    "hessian_eigen_min": 2.0013444588651352,
-    "hessian_rank": 3,
-    "information_rank": 3,
+    "free_gradient_norm": null,
+    "projected_gradient_norm": null,
+    "hessian_eigen_min": null,
+    "hessian_rank": null,
+    "information_rank": null,
     "checks": [
       {
-        "derivative_mismatch": {
-          "kind": "free_gradient_kkt_mismatch",
-          "observed": 26.113242847713988,
-          "tolerance": 0.002860272116383003,
-          "regime": "interior_theta",
-          "message": "free-gradient norm 2.611324e1 exceeds tolerance 2.860272e-3"
+        "not_assessed": {
+          "reason": "free-gradient KKT check skipped: one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged"
         }
       },
       {
-        "boundary_gradient_ok": {
-          "tolerance": 0.002860272116383003,
-          "value": 0.0
+        "not_assessed": {
+          "reason": "projected boundary-gradient KKT check skipped: one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged"
         }
       },
       {
-        "hessian_psd_on_active_subspace": {
-          "min_eigenvalue": 2.0013444588651352
-        }
-      },
-      {
-        "rank_ok": {
-          "rank": 3,
-          "expected": 3
+        "not_assessed": {
+          "reason": "active-subspace Hessian check skipped: one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged"
         }
       }
     ],
     "diagnostics": [
+      {
+        "code": "boundary_parameter",
+        "severity": "info",
+        "stage": "certification",
+        "message": "standard deviation for x in (1 + x | group) is on its lower bound",
+        "affected_terms": [
+          "(1 + x | group)"
+        ],
+        "suggested_actions": [
+          "treat a boundary covariance estimate as a valid fitted boundary, not by itself an optimizer failure",
+          "inspect the Effective Covariance section for unsupported random-effect directions",
+          "consider diagonal covariance, a simpler random-effect term, or design_compiled policy if the boundary direction is not scientifically central"
+        ],
+        "payload": {
+          "lower_bound": 0.0,
+          "parameter_role": "standard deviation for x",
+          "source_syntax": "(1 + x | group)",
+          "term_id": "r0",
+          "theta_index": 2,
+          "value": 0.0
+        }
+      },
       {
         "code": "covariance_reduced",
         "severity": "info",
@@ -870,7 +1312,7 @@
         "payload": {
           "effective_rank_absolute_tolerance": 1e-10,
           "effective_rank_relative_tolerance": 1e-6,
-          "rank_tolerance": 4.014407594579746e-8,
+          "rank_tolerance": 4.0142197693418304e-8,
           "requested_rank": 2,
           "source_syntax": "(1 + x | group)",
           "supported_rank": 1,

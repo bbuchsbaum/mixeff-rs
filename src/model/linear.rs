@@ -25,7 +25,8 @@ use crate::compiler::{
     ConvergenceVerificationStatus, CovarianceFamily, CovarianceFamilyTransition, DesignAudit,
     Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticStage, DominantLoading,
     EffectiveCovarianceSummary, EffectiveRankStatus, EstimabilityAssessment, EstimabilityStatus,
-    EvidenceMethod, FixedContrastEstimability, FixedEffectHypothesis, FixedEffectInferenceDetails,
+    EvidenceMethod, FixedContrastEstimability, FixedEffectCovarianceDetails,
+    FixedEffectCovarianceMatrix, FixedEffectHypothesis, FixedEffectInferenceDetails,
     FixedEffectInferenceMethod, FixedEffectInferenceRow, FixedEffectInferenceRowKind,
     FixedEffectInferenceStatus, FixedEffectInferenceTable, FixedEffectNullTargetSummary,
     FixedEffectStatisticName, FixedEffectTest, FixedEffectTestMethod, InferenceMethod,
@@ -1141,6 +1142,7 @@ impl LinearMixedModel {
         self.refresh_optimizer_certificate();
         self.refresh_effective_covariance_summaries();
         self.refresh_covariance_parameter_traces();
+        self.refresh_fixed_effect_covariance_matrix();
         self.refresh_fixed_effect_inference_table();
         Ok(())
     }
@@ -3751,6 +3753,29 @@ impl LinearMixedModel {
             xtol_abs: self.optsum.xtol_abs.clone(),
             ..cobyla::StopTols::default()
         };
+        let rhobeg = match self.optsum.initial_step.len() {
+            0 => cobyla::RhoBeg::All(0.75),
+            len if len == self.n_theta() => {
+                if self
+                    .optsum
+                    .initial_step
+                    .iter()
+                    .all(|step| step.is_finite() && *step > 0.0)
+                {
+                    cobyla::RhoBeg::Set(self.optsum.initial_step.clone())
+                } else {
+                    return Err(MixedModelError::Optimization(
+                        "COBYLA initial_step values must be finite and positive".to_string(),
+                    ));
+                }
+            }
+            len => {
+                return Err(MixedModelError::Optimization(format!(
+                    "COBYLA initial_step length {len} does not match theta length {}",
+                    self.n_theta()
+                )));
+            }
+        };
 
         let result = cobyla::minimize(
             objective_fn,
@@ -3759,7 +3784,7 @@ impl LinearMixedModel {
             &cons_refs,
             (),
             maxeval,
-            cobyla::RhoBeg::All(0.75),
+            rhobeg,
             Some(stop_tol),
         );
 
@@ -4241,6 +4266,7 @@ impl LinearMixedModel {
         self.refresh_optimizer_certificate();
         self.refresh_effective_covariance_summaries();
         self.refresh_covariance_parameter_traces();
+        self.refresh_fixed_effect_covariance_matrix();
         self.refresh_fixed_effect_inference_table();
         Ok(self)
     }
@@ -5439,7 +5465,9 @@ impl LinearMixedModel {
             match work.refit(y_sim.as_slice()) {
                 Ok(()) => {
                     statistics.push(
-                        scalar_contrast_abs_studentized(&work, hypothesis).unwrap_or(f64::NAN),
+                        fixed_effect_bootstrap_statistic(&work, hypothesis)
+                            .map(|statistic| statistic.value)
+                            .unwrap_or(f64::NAN),
                     );
                     fits.push(BootstrapReplicate {
                         objective: work.objective(),
@@ -5467,14 +5495,17 @@ impl LinearMixedModel {
         }
 
         let bootstrap = MixedModelBootstrap { fits };
-        let p_value = scalar_contrast_abs_studentized(self, hypothesis).and_then(|observed| {
+        let p_value = fixed_effect_bootstrap_statistic(self, hypothesis).and_then(|observed| {
             let finite = statistics
                 .iter()
                 .copied()
                 .filter(|value| value.is_finite())
                 .collect::<Vec<_>>();
             (!finite.is_empty()).then(|| {
-                let extreme = finite.iter().filter(|&&value| value >= observed).count();
+                let extreme = finite
+                    .iter()
+                    .filter(|&&value| value >= observed.value)
+                    .count();
                 (extreme as f64 + 1.0) / (finite.len() as f64 + 1.0)
             })
         });
@@ -5951,18 +5982,6 @@ impl LinearMixedModel {
         const CONTINUITY_CORRECTION: f64 = 1.0;
 
         let method = InferenceMethod::ParametricBootstrap;
-        if hypothesis.n_contrasts() != 1 {
-            return fixed_effect_test_not_assessed_with_method(
-                hypothesis,
-                estimates,
-                standard_errors,
-                statistics,
-                method,
-                estimability,
-                "bootstrap_not_default_auto_method: bootstrap fixed-effect inference is currently certified only for scalar contrasts"
-                    .to_string(),
-            );
-        }
 
         if payload.metadata.schema_name != BOOTSTRAP_RUN_SCHEMA
             || payload.metadata.schema_version != BOOTSTRAP_RUN_SCHEMA_VERSION
@@ -6064,7 +6083,7 @@ impl LinearMixedModel {
             );
         }
 
-        let Some(observed_statistic) = statistics.first().copied().flatten().map(f64::abs) else {
+        let Some(observed) = fixed_effect_bootstrap_statistic(self, &hypothesis) else {
             return fixed_effect_test_not_assessed_with_method(
                 hypothesis,
                 estimates,
@@ -6076,6 +6095,7 @@ impl LinearMixedModel {
                     .to_string(),
             );
         };
+        let observed_statistic = observed.value;
 
         let replicate_statistics = match payload.replicate_statistics.as_deref() {
             Some(values) => {
@@ -6187,6 +6207,7 @@ impl LinearMixedModel {
                 "bootstrap fixed-effect row computed from fixed_effect_null target `{}`",
                 payload.metadata.target.label
             ),
+            format!("bootstrap fixed-effect statistic={}", observed.label),
             format!(
                 "requested_replicates={}, completed_replicates={}, successful_replicates={}, finite_statistics={}",
                 payload.metadata.requested_replicates,
@@ -6209,7 +6230,7 @@ impl LinearMixedModel {
             estimates,
             standard_errors,
             statistics: vec![Some(observed_statistic)],
-            numerator_df: None,
+            numerator_df: observed.numerator_df,
             denominator_df: None,
             p_values: vec![Some(p_value)],
             method,
@@ -6266,6 +6287,70 @@ impl LinearMixedModel {
             })
             .collect();
         FixedEffectInferenceTable::new(rows)
+    }
+
+    pub fn fixed_effect_covariance_matrix(&self) -> FixedEffectCovarianceMatrix {
+        let coef_names = self.coef_names();
+        let vcov = self.vcov();
+        let expected_rank = coef_names.len();
+        let rank = self.feterm.rank;
+        let aliased = aliased_fixed_effect_names(&coef_names, &self.feterm.piv, rank);
+        let finite = matrix_is_finite(&vcov);
+        let symmetric = finite && matrix_max_asymmetry(&vcov) <= 1e-8;
+        let details = FixedEffectCovarianceDetails {
+            rank: Some(rank),
+            expected_rank: Some(expected_rank),
+            aliased,
+            matrix_rows: vcov.nrows(),
+            matrix_cols: vcov.ncols(),
+            finite: Some(finite),
+            symmetric: Some(symmetric),
+        };
+
+        if rank < expected_rank {
+            return FixedEffectCovarianceMatrix::unavailable(
+                coef_names,
+                "rank_deficient_fixed_effects",
+                details,
+                vec![
+                    "fixed-effect covariance matrix is unavailable because the fixed-effect design is rank deficient"
+                        .to_string(),
+                ],
+            );
+        }
+
+        if !finite {
+            return FixedEffectCovarianceMatrix::unavailable(
+                coef_names,
+                "fixed_effect_covariance_nonfinite",
+                details,
+                vec!["fixed-effect covariance matrix contains non-finite entries".to_string()],
+            );
+        }
+
+        if !symmetric {
+            return FixedEffectCovarianceMatrix::unavailable(
+                coef_names,
+                "fixed_effect_covariance_not_symmetric",
+                details,
+                vec!["fixed-effect covariance matrix failed symmetry validation".to_string()],
+            );
+        }
+
+        FixedEffectCovarianceMatrix::model_based(
+            coef_names,
+            matrix_rows(&vcov),
+            details,
+            vec![
+                "model-based fixed-effect covariance geometry; inference claims remain on fixed_effect_inference_table rows"
+                    .to_string(),
+            ],
+        )
+    }
+
+    fn refresh_fixed_effect_covariance_matrix(&mut self) {
+        self.compiler_artifact.fixed_effect_covariance_matrix =
+            Some(self.fixed_effect_covariance_matrix());
     }
 
     fn refresh_fixed_effect_inference_table(&mut self) {
@@ -7052,6 +7137,14 @@ fn matrix_rows(matrix: &DMatrix<f64>) -> Vec<Vec<f64>> {
         .collect()
 }
 
+fn aliased_fixed_effect_names(coef_names: &[String], pivot: &[usize], rank: usize) -> Vec<String> {
+    pivot
+        .iter()
+        .skip(rank)
+        .filter_map(|&index| coef_names.get(index).cloned())
+        .collect()
+}
+
 fn max_abs_delta(left: &[f64], right: &[f64]) -> Option<f64> {
     if left.len() != right.len() {
         return None;
@@ -7388,6 +7481,91 @@ fn scalar_contrast_abs_studentized(
         .next()
         .flatten()?;
     (estimate.is_finite() && se.is_finite() && se > 0.0).then_some((estimate / se).abs())
+}
+
+struct FixedEffectBootstrapStatistic {
+    value: f64,
+    numerator_df: Option<f64>,
+    label: &'static str,
+}
+
+fn fixed_effect_bootstrap_statistic(
+    model: &LinearMixedModel,
+    hypothesis: &FixedEffectHypothesis,
+) -> Option<FixedEffectBootstrapStatistic> {
+    if hypothesis.n_contrasts() == 1 {
+        return scalar_contrast_abs_studentized(model, hypothesis).map(|value| {
+            FixedEffectBootstrapStatistic {
+                value,
+                numerator_df: None,
+                label: "studentized_scalar_t",
+            }
+        });
+    }
+
+    if hypothesis.n_coefficients() != model.coef_names().len() || hypothesis.n_contrasts() == 0 {
+        return None;
+    }
+
+    let beta = model.coef();
+    let vcov = model.vcov();
+    if !matrix_is_finite(&vcov) {
+        return None;
+    }
+
+    let delta = &hypothesis.l.values * beta - &hypothesis.rhs.values;
+    if !delta.iter().all(|value| value.is_finite()) {
+        return None;
+    }
+
+    let middle =
+        symmetrize_matrix(&(&hypothesis.l.values * vcov * hypothesis.l.values.transpose()));
+    if !matrix_is_finite(&middle) {
+        return None;
+    }
+
+    let eig = SymmetricEigen::new(middle.clone());
+    let max_abs = eig
+        .eigenvalues
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0, f64::max);
+    let tolerance = (1e-10 * max_abs.max(1.0)).max(1e-12);
+    let min_eigen = eig
+        .eigenvalues
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min);
+    if min_eigen < -tolerance {
+        return None;
+    }
+
+    let effective_rank = eig
+        .eigenvalues
+        .iter()
+        .filter(|value| value.abs() > tolerance)
+        .count();
+    if effective_rank == 0 {
+        return None;
+    }
+
+    let min_abs = eig
+        .eigenvalues
+        .iter()
+        .map(|value| value.abs())
+        .fold(f64::INFINITY, f64::min);
+    let middle_inverse = if min_abs <= tolerance {
+        symmetric_pseudoinverse(&middle, tolerance)
+    } else {
+        invert_spd_matrix(&middle, "fixed-effect bootstrap L V L' matrix").ok()?
+    };
+    let quadratic = (delta.transpose() * middle_inverse * delta)[(0, 0)];
+    let statistic = quadratic / effective_rank as f64;
+    (statistic.is_finite() && statistic >= 0.0).then_some(FixedEffectBootstrapStatistic {
+        value: statistic,
+        numerator_df: Some(effective_rank as f64),
+        label: "joint_wald_f",
+    })
 }
 
 fn fixed_effect_test_to_inference_row(
@@ -10905,10 +11083,11 @@ mod tests {
     use rand_distr::{Distribution, Normal};
 
     use crate::compiler::{
-        CertificateCheck, CompilerPolicy, ContrastMatrix, ContrastRhs, DiagnosticCode,
-        EffectiveRankStatus, EvidenceMethod, EvidenceQuality, FitIntent, FitStatus,
-        FixedEffectHypothesis, InferenceStatus, InformationBudgetStatus, ModelChangeStatus,
-        ModelStateStatus, RandomStrategy, RankStatus, ReductionRecord, ReductionTrigger, ThetaMap,
+        CertificateCheck, CompiledModelArtifact, CompilerPolicy, ContrastMatrix, ContrastRhs,
+        DiagnosticCode, EffectiveRankStatus, EvidenceMethod, EvidenceQuality, FitIntent, FitStatus,
+        FixedEffectCovarianceMethod, FixedEffectCovarianceStatus, FixedEffectHypothesis,
+        InferenceStatus, InformationBudgetStatus, ModelChangeStatus, ModelStateStatus,
+        RandomStrategy, RankStatus, ReductionRecord, ReductionTrigger, ThetaMap,
     };
     use crate::formula::parse_formula;
     use crate::model::data::{Column, DataFrame};
@@ -10977,6 +11156,97 @@ mod tests {
         data
     }
 
+    fn three_level_condition_fixture() -> (LinearMixedModel, FixedEffectHypothesis) {
+        let n_subj = 10usize;
+        let n_per = 6usize;
+        let mut subj = Vec::new();
+        let mut cond = Vec::new();
+        let mut y = Vec::new();
+        let levels = ["A", "B", "C"];
+        for subject in 0..n_subj {
+            let subject_offset = subject as f64 * 0.03;
+            for obs in 0..n_per {
+                let level = levels[obs % levels.len()];
+                subj.push(format!("s{subject}"));
+                cond.push(level.to_string());
+                let treatment = match level {
+                    "B" => 0.6,
+                    "C" => 0.3,
+                    _ => 0.0,
+                };
+                let noise = ((subject * 13 + obs * 7) % 11) as f64 * 0.01;
+                y.push(2.0 + treatment + subject_offset + noise);
+            }
+        }
+
+        let mut data = DataFrame::new();
+        data.add_numeric("y", y).unwrap();
+        data.add_categorical("cond", cond).unwrap();
+        data.add_categorical("subj", subj).unwrap();
+
+        let formula = parse_formula("y ~ 1 + cond + (1 | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(true).unwrap();
+
+        let names = model.coef_names();
+        let cond_b = names.iter().position(|name| name == "cond: B").unwrap();
+        let cond_c = names.iter().position(|name| name == "cond: C").unwrap();
+        let mut l = DMatrix::zeros(2, names.len());
+        l[(0, cond_b)] = 1.0;
+        l[(1, cond_c)] = 1.0;
+        let hypothesis = FixedEffectHypothesis::zero_rhs("cond", ContrastMatrix::new(l).unwrap());
+        (model, hypothesis)
+    }
+
+    fn joint_wald_f_direct_inverse_oracle(
+        model: &LinearMixedModel,
+        hypothesis: &FixedEffectHypothesis,
+    ) -> f64 {
+        let beta = model.coef();
+        let vcov = model.vcov();
+        let delta = &hypothesis.l.values * beta - &hypothesis.rhs.values;
+        let middle =
+            symmetrize_matrix(&(&hypothesis.l.values * vcov * hypothesis.l.values.transpose()));
+        let inverse = middle
+            .try_inverse()
+            .expect("condition fixture should yield full-rank L V L'");
+        let quadratic = (delta.transpose() * inverse * delta)[(0, 0)];
+        quadratic / hypothesis.n_contrasts() as f64
+    }
+
+    fn successful_bootstrap_payload_with_statistics(
+        model: &LinearMixedModel,
+        hypothesis_label: &str,
+        replicate_statistics: Vec<f64>,
+        statistic_label: &str,
+    ) -> BootstrapRunPayload {
+        let fits = replicate_statistics
+            .iter()
+            .enumerate()
+            .map(|(i, _)| BootstrapReplicate {
+                objective: i as f64 + 1.0,
+                sigma: model.sigma(),
+                beta: model.beta(),
+                se: model.stderror(),
+                theta: model.theta(),
+            })
+            .collect::<Vec<_>>();
+        let bsamp = MixedModelBootstrap { fits };
+        let metadata = bsamp.run_metadata_for_model(
+            model,
+            BootstrapTarget::fixed_effect_null("fixed-effect null", hypothesis_label),
+            replicate_statistics.len(),
+            BootstrapFailedRefitPolicy::Exclude,
+            BootstrapSeedRecord::std_rng(20260513),
+            BootstrapRefitOptions::from_model(model),
+            Some(statistic_label.to_string()),
+            Some(&replicate_statistics),
+            None,
+        );
+        bsamp.into_run_payload_with_statistics(metadata, replicate_statistics)
+    }
+
+    #[cfg(feature = "nlopt")]
     fn correlated_crossed_slope_data() -> DataFrame {
         fn centered_mod(value: usize, modulus: usize, center: f64, scale: f64) -> f64 {
             ((value % modulus) as f64 - center) * scale
@@ -11865,6 +12135,56 @@ mod tests {
             model.optimizer_certificate().unwrap().status,
             FitStatus::ConvergedReducedRank
         );
+    }
+
+    #[cfg(not(feature = "nlopt"))]
+    #[test]
+    fn test_cobyla_default_singular_zcp_fit_keeps_certificate_state_observable() {
+        let (data, _) = crate::datasets::load("singular").unwrap();
+        let formula = parse_formula("y ~ 1 + A * B * C + (A * B * C || group)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+
+        let fit_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            model.fit(false).map(|_| ())
+        }));
+        assert!(
+            fit_result.is_ok(),
+            "COBYLA singular ZCP fit should not panic"
+        );
+        fit_result.unwrap().unwrap();
+
+        assert_eq!(model.optsum.optimizer, Optimizer::Cobyla);
+        assert!(model.objective_value().is_finite());
+        assert!(model.sigma().is_finite() && model.sigma() > 0.0);
+        assert!(model.theta().iter().all(|value| value.is_finite()));
+
+        let certificate = model
+            .optimizer_certificate()
+            .expect("singular COBYLA fit should attach optimizer certificate");
+        assert_eq!(certificate.optimizer_name.as_deref(), Some("cobyla"));
+        assert!(
+            certificate
+                .objective_value
+                .is_some_and(|value| value.is_finite()),
+            "singular COBYLA certificate should carry finite objective"
+        );
+        assert!(
+            certificate
+                .evidence
+                .optimizer_stop
+                .function_evaluations
+                .is_some_and(|feval| feval > 0),
+            "singular COBYLA certificate should record function evaluations"
+        );
+
+        for summary in &model.compiler_artifact().effective_covariance {
+            assert_eq!(summary.requested_rank, 8);
+            assert!(summary.supported_rank <= summary.requested_rank);
+            assert!(matches!(
+                summary.status,
+                EffectiveRankStatus::FullRank | EffectiveRankStatus::ReducedRank
+            ));
+        }
     }
 
     #[test]
@@ -13505,6 +13825,28 @@ mod tests {
     }
 
     #[test]
+    fn test_cobyla_validates_configured_initial_step() {
+        let data = simulate_sleepstudy_like(12, 8, 17);
+        let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.optsum.initial_step = vec![0.5];
+
+        let err = model
+            .fit_with_forced_optimizer(true, Optimizer::Cobyla)
+            .expect_err("COBYLA should reject wrong-length initial_step");
+        assert!(err.to_string().contains("initial_step length"));
+
+        let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.optsum.initial_step = vec![0.5, 0.0, 0.5];
+
+        let err = model
+            .fit_with_forced_optimizer(true, Optimizer::Cobyla)
+            .expect_err("COBYLA should reject non-positive initial_step values");
+        assert!(err.to_string().contains("finite and positive"));
+    }
+
+    #[test]
     fn test_optimizer_return_values_consistent_across_backends() {
         assert_eq!(
             LinearMixedModel::cobyla_success_status_label(cobyla::SuccessStatus::MaxEvalReached),
@@ -14380,6 +14722,7 @@ mod tests {
         cases: Vec<SatterthwaiteParityCase>,
     }
 
+    #[allow(dead_code)]
     #[derive(Debug, Deserialize)]
     struct SatterthwaiteParityCase {
         name: String,
@@ -14398,6 +14741,7 @@ mod tests {
         multi_df_cases: Vec<KenwardRogerMultiDfParityCase>,
     }
 
+    #[allow(dead_code)]
     #[derive(Debug, Deserialize)]
     struct KenwardRogerScalarParityCase {
         name: String,
@@ -14412,6 +14756,7 @@ mod tests {
         p_value: f64,
     }
 
+    #[allow(dead_code)]
     #[derive(Debug, Deserialize)]
     struct KenwardRogerMultiDfParityCase {
         name: String,
@@ -14501,6 +14846,152 @@ mod tests {
             "penicillin_crossed_intercept" => penicillin_fixture(),
             other => panic!("unknown Satterthwaite parity case {other}"),
         }
+    }
+
+    fn assert_available_finite_fixed_effect_test(test: &FixedEffectTest, label: &str) {
+        assert_eq!(
+            test.status,
+            InferenceStatus::Available,
+            "{label}: inference should be available"
+        );
+        assert!(
+            test.estimates.iter().all(|value| value.is_finite()),
+            "{label}: estimates should be finite: {:?}",
+            test.estimates
+        );
+        assert!(
+            test.standard_errors
+                .iter()
+                .flatten()
+                .all(|value| value.is_finite() && *value > 0.0),
+            "{label}: standard errors should be finite and positive: {:?}",
+            test.standard_errors
+        );
+        assert!(
+            test.statistics
+                .iter()
+                .flatten()
+                .all(|value| value.is_finite()),
+            "{label}: statistics should be finite: {:?}",
+            test.statistics
+        );
+        assert!(
+            test.denominator_df
+                .map_or(true, |value| value.is_finite() && value > 0.0),
+            "{label}: denominator df should be finite and positive when present: {:?}",
+            test.denominator_df
+        );
+        assert!(
+            test.p_values
+                .iter()
+                .flatten()
+                .all(|value| value.is_finite() && (0.0..=1.0).contains(value)),
+            "{label}: p-values should be finite probabilities: {:?}",
+            test.p_values
+        );
+    }
+
+    #[cfg(not(feature = "nlopt"))]
+    fn assert_default_cobyla_certificate(model: &LinearMixedModel, label: &str) {
+        assert_eq!(
+            model.optsum.optimizer,
+            Optimizer::Cobyla,
+            "{label}: default no-NLopt path should use COBYLA"
+        );
+        let certificate = model
+            .optimizer_certificate()
+            .expect("fitted model should attach optimizer certificate");
+        assert_eq!(
+            certificate.optimizer_name.as_deref(),
+            Some("cobyla"),
+            "{label}: certificate should identify COBYLA"
+        );
+        assert!(
+            matches!(
+                certificate.status,
+                FitStatus::ConvergedInterior
+                    | FitStatus::ConvergedBoundary
+                    | FitStatus::ConvergedReducedRank
+            ),
+            "{label}: unexpected certificate status {:?}",
+            certificate.status
+        );
+        assert!(
+            certificate.evidence.optimizer_stop.acceptable_stop,
+            "{label}: COBYLA stop should be accepted: {:?}",
+            certificate.evidence.optimizer_stop
+        );
+        assert!(
+            certificate
+                .evidence
+                .optimizer_stop
+                .function_evaluations
+                .is_some_and(|feval| feval > 0),
+            "{label}: certificate should record positive function evaluations"
+        );
+        assert!(
+            certificate
+                .objective_value
+                .is_some_and(|value| value.is_finite()),
+            "{label}: certificate should record finite objective"
+        );
+    }
+
+    #[cfg(feature = "nlopt")]
+    fn max_abs_delta(left: &[f64], right: &[f64]) -> f64 {
+        assert_eq!(left.len(), right.len());
+        left.iter()
+            .zip(right.iter())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max)
+    }
+
+    #[cfg(feature = "nlopt")]
+    fn max_varcorr_std_dev_delta(left: &LinearMixedModel, right: &LinearMixedModel) -> f64 {
+        let left = left.varcorr();
+        let right = right.varcorr();
+        assert_eq!(left.components.len(), right.components.len());
+        left.components
+            .iter()
+            .zip(right.components.iter())
+            .flat_map(|(left, right)| {
+                assert_eq!(left.group, right.group);
+                assert_eq!(left.names, right.names);
+                left.std_dev
+                    .iter()
+                    .zip(right.std_dev.iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .collect::<Vec<_>>()
+            })
+            .fold(0.0, f64::max)
+    }
+
+    #[cfg(feature = "nlopt")]
+    fn fit_default_nlopt_reference(
+        data: &DataFrame,
+        formula: &str,
+        reml: bool,
+    ) -> LinearMixedModel {
+        let formula = parse_formula(formula).unwrap();
+        let mut model = LinearMixedModel::new(formula, data, None).unwrap();
+        model.fit(reml).unwrap();
+        model
+    }
+
+    #[cfg(feature = "nlopt")]
+    fn fit_forced_cobyla_with(
+        data: &DataFrame,
+        formula: &str,
+        reml: bool,
+        configure: impl FnOnce(&mut LinearMixedModel),
+    ) -> LinearMixedModel {
+        let formula = parse_formula(formula).unwrap();
+        let mut model = LinearMixedModel::new(formula, data, None).unwrap();
+        configure(&mut model);
+        model
+            .fit_with_forced_optimizer(reml, Optimizer::Cobyla)
+            .unwrap();
+        model
     }
 
     // ── Parity tests against Julia MixedModels.jl ──────────────────────────
@@ -15045,6 +15536,77 @@ mod tests {
         assert!(fixed_effect_inference_reason(&test)
             .unwrap()
             .contains("REML"));
+    }
+
+    #[cfg(not(feature = "nlopt"))]
+    #[test]
+    fn test_cobyla_default_kenward_roger_rows_are_finite_with_realistic_tolerances() {
+        let fixture = kenward_roger_pbkrtest_parity_fixture();
+
+        for case in fixture
+            .scalar_cases
+            .iter()
+            .filter(|case| case.name.contains("random_slope"))
+        {
+            let data = sleepstudy_fixture();
+            let formula = parse_formula(&case.formula).unwrap();
+            let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+            model.fit(true).unwrap();
+            assert_default_cobyla_certificate(&model, &case.name);
+
+            let hypothesis = fixed_effect_hypothesis_from_fixture(&case.label, &case.l, &case.rhs);
+            let test =
+                model.test_contrast_with_method(hypothesis, FixedEffectTestMethod::KenwardRoger);
+            assert_available_finite_fixed_effect_test(&test, &case.name);
+            assert!(
+                (test.standard_errors[0].unwrap() - case.std_error).abs() <= 5e-4,
+                "{}: COBYLA KR SE drift too large: rust={} ref={}",
+                case.name,
+                test.standard_errors[0].unwrap(),
+                case.std_error
+            );
+            assert!(
+                (test.statistics[0].unwrap() - case.statistic).abs() <= 5e-3,
+                "{}: COBYLA KR statistic drift too large: rust={} ref={}",
+                case.name,
+                test.statistics[0].unwrap(),
+                case.statistic
+            );
+            assert!(
+                (test.denominator_df.unwrap() - case.denominator_df).abs() <= 1e-2,
+                "{}: COBYLA KR denominator df drift too large: rust={} ref={}",
+                case.name,
+                test.denominator_df.unwrap(),
+                case.denominator_df
+            );
+        }
+
+        for case in &fixture.multi_df_cases {
+            let data = sleepstudy_fixture();
+            let formula = parse_formula(&case.formula).unwrap();
+            let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+            model.fit(true).unwrap();
+            assert_default_cobyla_certificate(&model, &case.name);
+
+            let hypothesis = fixed_effect_hypothesis_from_fixture(&case.label, &case.l, &case.rhs);
+            let test =
+                model.test_contrast_with_method(hypothesis, FixedEffectTestMethod::KenwardRoger);
+            assert_available_finite_fixed_effect_test(&test, &case.name);
+            assert!(
+                (test.statistics[0].unwrap() - case.unscaled_statistic).abs() <= 1.0,
+                "{}: COBYLA KR unscaled F drift too large: rust={} ref={}",
+                case.name,
+                test.statistics[0].unwrap(),
+                case.unscaled_statistic
+            );
+            assert!(
+                (test.denominator_df.unwrap() - case.denominator_df).abs() <= 5e-2,
+                "{}: COBYLA KR denominator df drift too large: rust={} ref={}",
+                case.name,
+                test.denominator_df.unwrap(),
+                case.denominator_df
+            );
+        }
     }
 
     // Parity against pbkrtest reference fits (computed under NLopt-equivalent
@@ -15987,6 +16549,57 @@ mod tests {
                 .unwrap();
         assert_eq!(lrt.pvalues.len(), 1);
         assert_relative_eq!(lrt.pvalues[0], 0.5233767965780878, epsilon = 0.01);
+    }
+
+    #[cfg(not(feature = "nlopt"))]
+    #[test]
+    fn test_cobyla_default_pastes_varcorr_contract_and_certificate_are_stable() {
+        let data = pastes_fixture();
+        let formula = parse_formula("strength ~ 1 + (1 | batch) + (1 | batch_cask)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+        assert_default_cobyla_certificate(&model, "pastes");
+
+        let sigma = model.sigma();
+        assert!(sigma.is_finite() && sigma > 0.0);
+        assert_relative_eq!(
+            sigma * sigma,
+            0.677999727889528,
+            epsilon = 5e-4,
+            max_relative = 1e-3
+        );
+        assert_relative_eq!(
+            model.logdet_re(),
+            101.03834542101686,
+            epsilon = 0.2,
+            max_relative = 1e-3
+        );
+
+        let vc = model.varcorr();
+        assert_eq!(vc.components.len(), 2);
+        for component in &vc.components {
+            assert!(
+                component
+                    .std_dev
+                    .iter()
+                    .all(|value| value.is_finite() && *value >= 0.0),
+                "pastes COBYLA VarCorr standard deviations should be finite: {:?}",
+                component.std_dev
+            );
+        }
+        let batch_comp = vc
+            .components
+            .iter()
+            .find(|c| c.group == "batch")
+            .expect("batch component");
+        let cask_comp = vc
+            .components
+            .iter()
+            .find(|c| c.group == "batch_cask")
+            .expect("batch_cask component");
+        assert_relative_eq!(cask_comp.std_dev[0], 2.90407793598792, epsilon = 5e-3);
+        assert_relative_eq!(batch_comp.std_dev[0], 1.0950608007768226, epsilon = 5e-3);
+        assert_relative_eq!(vc.residual_sd.unwrap(), sigma, epsilon = 1e-12);
     }
 
     // Parity against MixedModels.jl reference fit (NLopt BOBYQA); the COBYLA
@@ -17130,6 +17743,76 @@ mod tests {
             .any(|note| note.contains("Satterthwaite denominator df computed")));
     }
 
+    #[cfg(not(feature = "nlopt"))]
+    #[test]
+    fn test_cobyla_default_satterthwaite_rows_are_finite_with_realistic_tolerances() {
+        let fixture = satterthwaite_lmer_test_parity_fixture();
+
+        for case in fixture
+            .cases
+            .iter()
+            .filter(|case| case.name != "sleepstudy_random_intercept_days")
+        {
+            let data = satterthwaite_parity_data(&case.name);
+            let formula = parse_formula(&case.formula).unwrap();
+            let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+            model.fit(true).unwrap();
+            assert_default_cobyla_certificate(&model, &case.name);
+
+            let coefficient_index = model
+                .coef_names()
+                .iter()
+                .position(|name| name == &case.coefficient)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "coefficient {} not found in {:?}",
+                        case.coefficient,
+                        model.coef_names()
+                    )
+                });
+            let hypothesis = FixedEffectHypothesis::single_coefficient(
+                format!("{} = 0", case.coefficient),
+                coefficient_index,
+                model.coef_names().len(),
+            )
+            .unwrap();
+
+            let test =
+                model.test_contrast_with_method(hypothesis, FixedEffectTestMethod::Satterthwaite);
+            assert_available_finite_fixed_effect_test(&test, &case.name);
+            assert!(
+                (test.estimates[0] - case.estimate).abs() <= 1e-3 + 1e-5 * case.estimate.abs(),
+                "{}: COBYLA Satterthwaite beta drift too large: rust={} ref={}",
+                case.name,
+                test.estimates[0],
+                case.estimate
+            );
+            assert!(
+                (test.standard_errors[0].unwrap() - case.std_error).abs()
+                    <= 1e-3 + 1e-3 * case.std_error.abs(),
+                "{}: COBYLA Satterthwaite SE drift too large: rust={} ref={}",
+                case.name,
+                test.standard_errors[0].unwrap(),
+                case.std_error
+            );
+            assert!(
+                (test.statistics[0].unwrap() - case.statistic).abs()
+                    <= 1e-2 + 1e-3 * case.statistic.abs(),
+                "{}: COBYLA Satterthwaite statistic drift too large: rust={} ref={}",
+                case.name,
+                test.statistics[0].unwrap(),
+                case.statistic
+            );
+            assert!(
+                (test.denominator_df.unwrap() - case.df).abs() <= 0.25 + 1e-2 * case.df.abs(),
+                "{}: COBYLA Satterthwaite df drift too large: rust={} ref={}",
+                case.name,
+                test.denominator_df.unwrap(),
+                case.df
+            );
+        }
+    }
+
     // Parity against lmerTest reference fits (NLopt-equivalent BOBYQA); the
     // COBYLA default-features path drifts in β/SE outside the parity tolerance.
     #[cfg(feature = "nlopt")]
@@ -17212,6 +17895,197 @@ mod tests {
                 max_relative = 2e-3,
             );
         }
+    }
+
+    #[cfg(feature = "nlopt")]
+    #[test]
+    fn test_cobyla_nlopt_delta_audit_stays_within_documented_envelope() {
+        let pastes_data = pastes_fixture();
+        let pastes_formula = "strength ~ 1 + (1 | batch) + (1 | batch_cask)";
+        let pastes_nlopt = fit_default_nlopt_reference(&pastes_data, pastes_formula, false);
+        let pastes_cobyla = fit_forced_cobyla_with(&pastes_data, pastes_formula, false, |_| {});
+        let pastes_objective_delta =
+            pastes_cobyla.objective_value() - pastes_nlopt.objective_value();
+        let pastes_theta_delta = max_abs_delta(&pastes_cobyla.theta(), &pastes_nlopt.theta());
+        let pastes_beta_delta = max_abs_delta(
+            pastes_cobyla.beta().as_slice(),
+            pastes_nlopt.beta().as_slice(),
+        );
+        let pastes_varcorr_delta = max_varcorr_std_dev_delta(&pastes_cobyla, &pastes_nlopt);
+        println!(
+            "COBYLA_AUDIT pastes objective_delta={:.6e} theta_delta={:.6e} beta_delta={:.6e} varcorr_sd_delta={:.6e} sigma2_delta={:.6e}",
+            pastes_objective_delta,
+            pastes_theta_delta,
+            pastes_beta_delta,
+            pastes_varcorr_delta,
+            pastes_cobyla.sigma().powi(2) - pastes_nlopt.sigma().powi(2)
+        );
+        assert!(pastes_objective_delta.abs() <= 1e-3);
+        assert!(pastes_theta_delta <= 5e-3);
+        assert!(pastes_beta_delta <= 1e-10);
+        assert!(pastes_varcorr_delta <= 5e-3);
+
+        let sleepstudy_data = sleepstudy_fixture();
+        let sleepstudy_formula = "reaction ~ days + (days | subj)";
+        let sleepstudy_nlopt =
+            fit_default_nlopt_reference(&sleepstudy_data, sleepstudy_formula, true);
+        let sleepstudy_cobyla =
+            fit_forced_cobyla_with(&sleepstudy_data, sleepstudy_formula, true, |_| {});
+        let kr_fixture = kenward_roger_pbkrtest_parity_fixture();
+        let kr_scalar_case = kr_fixture
+            .scalar_cases
+            .iter()
+            .find(|case| case.name == "sleepstudy_random_slope_days")
+            .unwrap();
+        let kr_scalar_hypothesis = fixed_effect_hypothesis_from_fixture(
+            &kr_scalar_case.label,
+            &kr_scalar_case.l,
+            &kr_scalar_case.rhs,
+        );
+        let kr_scalar_nlopt = sleepstudy_nlopt.test_contrast_with_method(
+            kr_scalar_hypothesis.clone(),
+            FixedEffectTestMethod::KenwardRoger,
+        );
+        let kr_scalar_cobyla = sleepstudy_cobyla
+            .test_contrast_with_method(kr_scalar_hypothesis, FixedEffectTestMethod::KenwardRoger);
+        assert_available_finite_fixed_effect_test(&kr_scalar_cobyla, "KR scalar COBYLA");
+        let kr_se_delta = kr_scalar_cobyla.standard_errors[0].unwrap()
+            - kr_scalar_nlopt.standard_errors[0].unwrap();
+        let kr_df_delta =
+            kr_scalar_cobyla.denominator_df.unwrap() - kr_scalar_nlopt.denominator_df.unwrap();
+        println!(
+            "COBYLA_AUDIT kr_scalar se_delta={:.6e} df_delta={:.6e} stat_delta={:.6e}",
+            kr_se_delta,
+            kr_df_delta,
+            kr_scalar_cobyla.statistics[0].unwrap() - kr_scalar_nlopt.statistics[0].unwrap()
+        );
+        assert!(kr_se_delta.abs() <= 5e-4);
+        assert!(kr_df_delta.abs() <= 1e-2);
+
+        let kr_multi_case = kr_fixture
+            .multi_df_cases
+            .iter()
+            .find(|case| case.name == "sleepstudy_intercept_and_days_joint")
+            .unwrap();
+        let kr_multi_hypothesis = fixed_effect_hypothesis_from_fixture(
+            &kr_multi_case.label,
+            &kr_multi_case.l,
+            &kr_multi_case.rhs,
+        );
+        let kr_multi_nlopt = sleepstudy_nlopt.test_contrast_with_method(
+            kr_multi_hypothesis.clone(),
+            FixedEffectTestMethod::KenwardRoger,
+        );
+        let kr_multi_cobyla = sleepstudy_cobyla
+            .test_contrast_with_method(kr_multi_hypothesis, FixedEffectTestMethod::KenwardRoger);
+        assert_available_finite_fixed_effect_test(&kr_multi_cobyla, "KR multi-df COBYLA");
+        let kr_f_delta =
+            kr_multi_cobyla.statistics[0].unwrap() - kr_multi_nlopt.statistics[0].unwrap();
+        println!(
+            "COBYLA_AUDIT kr_multi f_delta={:.6e} df_delta={:.6e} p_delta={:.6e}",
+            kr_f_delta,
+            kr_multi_cobyla.denominator_df.unwrap() - kr_multi_nlopt.denominator_df.unwrap(),
+            kr_multi_cobyla.p_values[0].unwrap() - kr_multi_nlopt.p_values[0].unwrap()
+        );
+        assert!(kr_f_delta.abs() <= 1.0);
+
+        let satt_fixture = satterthwaite_lmer_test_parity_fixture();
+        let satt_case = satt_fixture
+            .cases
+            .iter()
+            .find(|case| case.name == "sleepstudy_random_slope_days")
+            .unwrap();
+        let coefficient_index = sleepstudy_nlopt
+            .coef_names()
+            .iter()
+            .position(|name| name == &satt_case.coefficient)
+            .unwrap();
+        let satt_hypothesis = FixedEffectHypothesis::single_coefficient(
+            format!("{} = 0", satt_case.coefficient),
+            coefficient_index,
+            sleepstudy_nlopt.coef_names().len(),
+        )
+        .unwrap();
+        let satt_nlopt = sleepstudy_nlopt.test_contrast_with_method(
+            satt_hypothesis.clone(),
+            FixedEffectTestMethod::Satterthwaite,
+        );
+        let satt_cobyla = sleepstudy_cobyla
+            .test_contrast_with_method(satt_hypothesis, FixedEffectTestMethod::Satterthwaite);
+        assert_available_finite_fixed_effect_test(&satt_cobyla, "Satterthwaite COBYLA");
+        println!(
+            "COBYLA_AUDIT satt beta_delta={:.6e} se_delta={:.6e} df_delta={:.6e} stat_delta={:.6e}",
+            satt_cobyla.estimates[0] - satt_nlopt.estimates[0],
+            satt_cobyla.standard_errors[0].unwrap() - satt_nlopt.standard_errors[0].unwrap(),
+            satt_cobyla.denominator_df.unwrap() - satt_nlopt.denominator_df.unwrap(),
+            satt_cobyla.statistics[0].unwrap() - satt_nlopt.statistics[0].unwrap()
+        );
+        assert!((satt_cobyla.estimates[0] - satt_nlopt.estimates[0]).abs() <= 1e-3);
+        assert!(
+            (satt_cobyla.standard_errors[0].unwrap() - satt_nlopt.standard_errors[0].unwrap())
+                .abs()
+                <= 5e-4
+        );
+
+        let tuning_runs: Vec<(&str, Box<dyn Fn(&mut LinearMixedModel) + '_>)> = vec![
+            (
+                "default",
+                Box::new(|_: &mut LinearMixedModel| {}) as Box<dyn Fn(&mut LinearMixedModel)>,
+            ),
+            (
+                "budget_50000",
+                Box::new(|model: &mut LinearMixedModel| model.optsum.max_feval = 50_000),
+            ),
+            (
+                "initial_step_0.25",
+                Box::new(|model: &mut LinearMixedModel| {
+                    model.optsum.initial_step = vec![0.25; model.n_theta()]
+                }),
+            ),
+            (
+                "xtol_abs_1e-6",
+                Box::new(|model: &mut LinearMixedModel| {
+                    model.optsum.xtol_abs = vec![1e-6; model.n_theta()]
+                }),
+            ),
+            (
+                "nlopt_theta_start",
+                Box::new(|model: &mut LinearMixedModel| {
+                    model.optsum.initial = sleepstudy_nlopt.theta()
+                }),
+            ),
+        ];
+        for (label, configure) in tuning_runs {
+            let model =
+                fit_forced_cobyla_with(&sleepstudy_data, sleepstudy_formula, true, |model| {
+                    configure(model)
+                });
+            println!(
+                "COBYLA_TUNING {label} objective_delta={:.6e} theta_delta={:.6e} feval={} return={}",
+                model.objective_value() - sleepstudy_nlopt.objective_value(),
+                max_abs_delta(&model.theta(), &sleepstudy_nlopt.theta()),
+                model.optsum.feval,
+                model.optsum.return_value
+            );
+            assert!(model.objective_value().is_finite());
+            assert!(model.theta().iter().all(|value| value.is_finite()));
+        }
+
+        let (singular_data, _) = crate::datasets::load("singular").unwrap();
+        let singular_formula = "y ~ 1 + A * B * C + (A * B * C || group)";
+        let singular_nlopt = fit_default_nlopt_reference(&singular_data, singular_formula, false);
+        let singular_cobyla =
+            fit_forced_cobyla_with(&singular_data, singular_formula, false, |_| {});
+        println!(
+            "COBYLA_AUDIT singular objective_delta={:.6e} nlopt_status={:?} cobyla_status={:?} nlopt_effective_cov={} cobyla_effective_cov={}",
+            singular_cobyla.objective_value() - singular_nlopt.objective_value(),
+            singular_nlopt.optimizer_certificate().unwrap().status,
+            singular_cobyla.optimizer_certificate().unwrap().status,
+            singular_nlopt.compiler_artifact().effective_covariance.len(),
+            singular_cobyla.compiler_artifact().effective_covariance.len()
+        );
+        assert!(singular_cobyla.objective_value().is_finite());
+        assert!(singular_cobyla.optimizer_certificate().is_some());
     }
 
     #[test]
@@ -17326,6 +18200,86 @@ mod tests {
                 .fixed_effect_inference_table
                 .as_ref(),
             Some(&table)
+        );
+    }
+
+    #[test]
+    fn test_lmm_fixed_effect_covariance_matrix_available_for_full_rank_fit() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let payload = model.fixed_effect_covariance_matrix();
+        let vcov = model.vcov();
+
+        assert_eq!(payload.status, FixedEffectCovarianceStatus::Available);
+        assert_eq!(payload.method, FixedEffectCovarianceMethod::ModelBased);
+        assert_eq!(payload.reliability, ReliabilityGrade::High);
+        assert_eq!(payload.coef_names, model.coef_names());
+        assert_eq!(payload.details.rank, Some(model.feterm.rank));
+        assert_eq!(
+            payload.details.expected_rank,
+            Some(model.coef_names().len())
+        );
+        assert!(payload.details.aliased.is_empty());
+        assert_eq!(payload.details.matrix_rows, vcov.nrows());
+        assert_eq!(payload.details.matrix_cols, vcov.ncols());
+        assert_eq!(payload.details.finite, Some(true));
+        assert_eq!(payload.details.symmetric, Some(true));
+        assert_eq!(payload.matrix.as_ref().unwrap(), &matrix_rows(&vcov));
+        assert!(payload
+            .notes
+            .iter()
+            .any(|note| note.contains("inference claims remain")));
+        assert_eq!(
+            model
+                .compiler_artifact()
+                .fixed_effect_covariance_matrix
+                .as_ref(),
+            Some(&payload)
+        );
+    }
+
+    #[test]
+    fn test_lmm_fixed_effect_covariance_matrix_unavailable_for_rank_deficient_fit() {
+        let n = 30usize;
+        let x: Vec<f64> = (0..n).map(|i| (i % 5) as f64).collect();
+        let x2: Vec<f64> = x.iter().map(|&v| 2.0 * v).collect();
+        let y: Vec<f64> = (0..n).map(|i| (i % 7) as f64 + 1.0).collect();
+        let z: Vec<String> = (0..n).map(|i| format!("G{}", i % 6)).collect();
+
+        let mut df = DataFrame::new();
+        df.add_numeric("y", y).unwrap();
+        df.add_numeric("x", x).unwrap();
+        df.add_numeric("x2", x2).unwrap();
+        df.add_categorical("z", z).unwrap();
+
+        let formula = parse_formula("y ~ 1 + x + x2 + (1 | z)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &df, None).unwrap();
+        model.fit(false).unwrap();
+
+        let payload = model.fixed_effect_covariance_matrix();
+
+        assert_eq!(payload.status, FixedEffectCovarianceStatus::Unavailable);
+        assert_eq!(payload.method, FixedEffectCovarianceMethod::Unavailable);
+        assert_eq!(payload.reliability, ReliabilityGrade::NotAvailable);
+        assert_eq!(
+            payload.reason.as_deref(),
+            Some("rank_deficient_fixed_effects")
+        );
+        assert_eq!(payload.matrix, None);
+        assert_eq!(payload.details.rank, Some(2));
+        assert_eq!(payload.details.expected_rank, Some(3));
+        assert_eq!(payload.details.aliased.len(), 1);
+        assert!(payload.details.aliased[0] == "x" || payload.details.aliased[0] == "x2");
+        assert_eq!(payload.details.finite, Some(false));
+        assert_eq!(
+            model
+                .compiler_artifact()
+                .fixed_effect_covariance_matrix
+                .as_ref(),
+            Some(&payload)
         );
     }
 
@@ -18263,6 +19217,210 @@ mod tests {
         assert_eq!(bootstrap.requested_replicates, 2);
         assert_eq!(bootstrap.seed, Some(20260503));
         assert!(bootstrap.null_target.is_some());
+    }
+
+    #[test]
+    fn test_bootstrap_multi_df_payload_matches_joint_f_oracle_and_p_value_accounting() {
+        let (model, hypothesis) = three_level_condition_fixture();
+        let observed = joint_wald_f_direct_inverse_oracle(&model, &hypothesis);
+        assert!(observed.is_finite());
+
+        let mut replicate_statistics = vec![observed + 0.25; 9];
+        replicate_statistics.extend(vec![observed - 0.25; 31]);
+        let payload = successful_bootstrap_payload_with_statistics(
+            &model,
+            &hypothesis.label,
+            replicate_statistics,
+            "joint_wald_f",
+        );
+
+        let row = model.fixed_effect_bootstrap_inference_row(
+            FixedEffectInferenceRowKind::Term,
+            hypothesis,
+            &payload,
+        );
+
+        assert_eq!(row.kind, FixedEffectInferenceRowKind::Term);
+        assert_eq!(row.method, FixedEffectInferenceMethod::Bootstrap);
+        assert_eq!(row.status, FixedEffectInferenceStatus::Available, "{row:?}");
+        assert_eq!(row.statistic_name, Some(FixedEffectStatisticName::F));
+        assert_eq!(row.numerator_df, Some(2.0));
+        assert_relative_eq!(row.statistic.unwrap(), observed, epsilon = 1e-10);
+        assert_relative_eq!(row.p_value.unwrap(), 10.0 / 41.0, epsilon = 1e-12);
+        assert!(row.denominator_df.is_none());
+        assert!(row
+            .notes
+            .iter()
+            .any(|note| note.contains("statistic=joint_wald_f")));
+        assert!(row
+            .notes
+            .iter()
+            .any(|note| note.contains("finite_statistics=40")));
+    }
+
+    #[test]
+    fn test_fixed_effect_joint_f_is_invariant_to_restriction_row_order_and_scaling() {
+        let (model, hypothesis) = three_level_condition_fixture();
+        let baseline = fixed_effect_bootstrap_statistic(&model, &hypothesis)
+            .expect("baseline joint-F statistic should be available");
+
+        let mut swapped_l = DMatrix::zeros(2, hypothesis.n_coefficients());
+        swapped_l.row_mut(0).copy_from(&hypothesis.l.values.row(1));
+        swapped_l.row_mut(1).copy_from(&hypothesis.l.values.row(0));
+        let swapped_rhs =
+            DVector::from_vec(vec![hypothesis.rhs.values[1], hypothesis.rhs.values[0]]);
+        let swapped = FixedEffectHypothesis {
+            label: "cond_swapped".to_string(),
+            l: ContrastMatrix::new(swapped_l).unwrap(),
+            rhs: ContrastRhs {
+                values: swapped_rhs,
+            },
+        };
+        let swapped_stat = fixed_effect_bootstrap_statistic(&model, &swapped)
+            .expect("row-permuted joint-F statistic should be available");
+
+        let mut scaled_l = hypothesis.l.values.clone();
+        scaled_l.row_mut(0).scale_mut(2.0);
+        scaled_l.row_mut(1).scale_mut(-0.5);
+        let mut scaled_rhs = hypothesis.rhs.values.clone();
+        scaled_rhs[0] *= 2.0;
+        scaled_rhs[1] *= -0.5;
+        let scaled = FixedEffectHypothesis {
+            label: "cond_scaled".to_string(),
+            l: ContrastMatrix::new(scaled_l).unwrap(),
+            rhs: ContrastRhs { values: scaled_rhs },
+        };
+        let scaled_stat = fixed_effect_bootstrap_statistic(&model, &scaled)
+            .expect("scaled joint-F statistic should be available");
+
+        assert_eq!(baseline.label, "joint_wald_f");
+        assert_eq!(baseline.numerator_df, Some(2.0));
+        assert_relative_eq!(swapped_stat.value, baseline.value, epsilon = 1e-10);
+        assert_relative_eq!(scaled_stat.value, baseline.value, epsilon = 1e-10);
+        assert_eq!(swapped_stat.numerator_df, Some(2.0));
+        assert_eq!(scaled_stat.numerator_df, Some(2.0));
+    }
+
+    #[test]
+    fn test_fixed_effect_joint_f_uses_effective_rank_for_redundant_restrictions() {
+        let (model, hypothesis) = three_level_condition_fixture();
+        let mut l = DMatrix::zeros(2, hypothesis.n_coefficients());
+        l.row_mut(0).copy_from(&hypothesis.l.values.row(0));
+        l.row_mut(1).copy_from(&hypothesis.l.values.row(0));
+        l.row_mut(1).scale_mut(2.0);
+        let redundant = FixedEffectHypothesis {
+            label: "redundant_cond_b".to_string(),
+            l: ContrastMatrix::new(l).unwrap(),
+            rhs: ContrastRhs::zeros(2),
+        };
+
+        let statistic = fixed_effect_bootstrap_statistic(&model, &redundant)
+            .expect("redundant but estimable restrictions should use a pseudo-inverse");
+        assert_eq!(statistic.label, "joint_wald_f");
+        assert_eq!(statistic.numerator_df, Some(1.0));
+        assert!(statistic.value.is_finite());
+        assert!(statistic.value >= 0.0);
+    }
+
+    #[test]
+    fn test_fixed_effect_covariance_artifact_round_trips_from_fitted_models() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let json = serde_json::to_string(model.compiler_artifact()).unwrap();
+        let decoded: CompiledModelArtifact = serde_json::from_str(&json).unwrap();
+        let covariance = decoded
+            .fixed_effect_covariance_matrix
+            .expect("fitted full-rank artifact should carry fixed-effect covariance");
+        assert_eq!(covariance.status, FixedEffectCovarianceStatus::Available);
+        assert_eq!(covariance.method, FixedEffectCovarianceMethod::ModelBased);
+        assert_eq!(covariance.coef_names, model.coef_names());
+        assert_eq!(
+            covariance.matrix.as_ref().map(|matrix| matrix.len()),
+            Some(model.coef_names().len())
+        );
+        assert_eq!(covariance.details.rank, Some(model.feterm.rank));
+        assert_eq!(
+            covariance.details.expected_rank,
+            Some(model.coef_names().len())
+        );
+
+        let mut data = DataFrame::new();
+        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        data.add_numeric("x", vec![0.0, 1.0, 0.0, 1.0]).unwrap();
+        data.add_numeric("x_dup", vec![0.0, 1.0, 0.0, 1.0]).unwrap();
+        data.add_categorical(
+            "group",
+            vec![
+                "a".to_string(),
+                "a".to_string(),
+                "b".to_string(),
+                "b".to_string(),
+            ],
+        )
+        .unwrap();
+        let formula = parse_formula("y ~ 1 + x + x_dup + (1 | group)").unwrap();
+        let mut rank_deficient = LinearMixedModel::new(formula, &data, None).unwrap();
+        rank_deficient.fit(false).unwrap();
+
+        let json = serde_json::to_string(rank_deficient.compiler_artifact()).unwrap();
+        let decoded: CompiledModelArtifact = serde_json::from_str(&json).unwrap();
+        let covariance = decoded
+            .fixed_effect_covariance_matrix
+            .expect("fitted rank-deficient artifact should carry unavailable covariance status");
+        assert_eq!(covariance.status, FixedEffectCovarianceStatus::Unavailable);
+        assert_eq!(covariance.method, FixedEffectCovarianceMethod::Unavailable);
+        assert!(covariance.matrix.is_none());
+        assert_eq!(
+            covariance.reason.as_deref(),
+            Some("rank_deficient_fixed_effects")
+        );
+        assert_eq!(
+            covariance.details.expected_rank,
+            Some(rank_deficient.coef_names().len())
+        );
+        assert!(covariance.details.rank.unwrap() < covariance.details.expected_rank.unwrap());
+    }
+
+    #[test]
+    fn test_fixed_effect_null_bootstrap_multi_df_term_returns_joint_f_row() {
+        let (model, hypothesis) = three_level_condition_fixture();
+
+        let row = model.fixed_effect_null_bootstrap_inference_row(
+            FixedEffectInferenceRowKind::Term,
+            hypothesis,
+            &FixedEffectBootstrapOptions {
+                requested_replicates: 35,
+                failed_refit_policy: BootstrapFailedRefitPolicy::Exclude,
+                seed: Some(20260512),
+            },
+        );
+
+        assert_eq!(row.kind, FixedEffectInferenceRowKind::Term);
+        assert_eq!(row.method, FixedEffectInferenceMethod::Bootstrap);
+        assert_eq!(row.status, FixedEffectInferenceStatus::Available);
+        assert_eq!(row.statistic_name, Some(FixedEffectStatisticName::F));
+        assert_eq!(row.numerator_df, Some(2.0));
+        assert!(row.denominator_df.is_none());
+        assert!(row.statistic.unwrap().is_finite());
+        assert!(row.p_value.unwrap().is_finite());
+        assert!(row
+            .notes
+            .iter()
+            .any(|note| note.contains("statistic=joint_wald_f")));
+
+        let details = row.details.expect("term row should carry details");
+        let bootstrap = details.bootstrap.expect("bootstrap metadata");
+        assert_eq!(bootstrap.target_kind, "fixed_effect_null");
+        assert_eq!(bootstrap.requested_replicates, 35);
+        assert_eq!(bootstrap.finite_statistic_count, Some(35));
+        let family = details.contrast_family.expect("contrast-family metadata");
+        assert_eq!(family.restriction_rows, 2);
+        assert_eq!(family.effective_rank, Some(2));
+        assert_eq!(family.numerator_df, Some(2.0));
+        assert_eq!(family.numerator_df_semantics, "effective_restriction_rank");
     }
 
     #[test]
