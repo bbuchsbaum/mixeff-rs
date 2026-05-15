@@ -15,6 +15,7 @@ use crate::model::linear::LinearMixedModel;
 /// `LinearMixedModel` always carries `optsum.sigma == Some(1.0)` for
 /// summary-estimate fits.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum SamplingVarianceScale {
     /// `V_i` is on the absolute scale. The implied residual variance for
     /// observation `i` is exactly `V_i`. This is the typical case for
@@ -62,6 +63,7 @@ impl Default for SummaryEstimateOptions {
 /// Carried on `LinearMixedModel` and propagated to `VarCorr` so renderers can
 /// decide whether to display a "Residual" row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ResidualSource {
     /// `sigma` is estimated from the data (the usual LMM case) or pinned
     /// for parity testing without changing model class semantics. Default.

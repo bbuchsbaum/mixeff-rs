@@ -9,6 +9,7 @@ use std::fmt;
 
 /// Choice of optimizer algorithm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Optimizer {
     /// COBYLA — Constrained Optimization By Linear Approximations.
     /// A derivative-free optimizer that handles bound constraints
@@ -39,6 +40,7 @@ pub enum Optimizer {
 /// PRIMA derivative-free family; `Optimizer::PrimaBobyqa` is wired for LMMs
 /// when the non-default `prima` Cargo feature is enabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OptimizerBackend {
     /// In-tree Rust optimizers (COBYLA crate, pattern search).
     Native,

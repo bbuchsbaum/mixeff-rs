@@ -3,12 +3,15 @@
 use std::fmt;
 
 use nalgebra::{DMatrix, DVector};
+use serde::{Deserialize, Serialize};
 
 use crate::linalg::stats_rank;
 use crate::model::traits::{MixedModelFit, RandomEffectTermInfo};
 use crate::types::OptSummary;
 
 const LOG_LIK_TOL: f64 = 1.0e-10;
+pub const BOUNDARY_LRT_SCHEMA: &str = "mixedmodels.boundary_lrt";
+pub const BOUNDARY_LRT_SCHEMA_VERSION: &str = "1.0.0";
 
 /// Ordinary Gaussian linear-model fit for comparison with mixed models.
 ///
@@ -196,7 +199,7 @@ impl MixedModelFit for LinearModelFit {
 }
 
 /// Result of a likelihood ratio test comparing nested models.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LikelihoodRatioTest {
     /// Number of observations (must be equal across models).
     pub nobs: usize,
@@ -219,7 +222,9 @@ pub struct LikelihoodRatioTest {
 }
 
 /// High-level structural class for comparing two fitted model objects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ModelComparisonClass {
     /// Same response, family/link, fit criterion, fixed-effect space, random
     /// terms, and model degrees of freedom.
@@ -252,7 +257,9 @@ pub enum ModelComparisonClass {
 }
 
 /// Coarse fixed-effect relation used by [`ModelComparisonAssessment`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum FixedEffectComparison {
     Same,
     Nested,
@@ -261,7 +268,9 @@ pub enum FixedEffectComparison {
 }
 
 /// Coarse random-effect relation used by [`ModelComparisonAssessment`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum RandomEffectComparison {
     Same,
     Nested,
@@ -271,7 +280,9 @@ pub enum RandomEffectComparison {
 
 /// Suggested valid comparison route when the requested LRT is unavailable or
 /// not the best default.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ModelComparisonAlternative {
     MlRefitLikelihoodRatio,
     RemlLikelihoodRatio,
@@ -284,7 +295,7 @@ pub enum ModelComparisonAlternative {
 }
 
 /// Structured preflight assessment for comparing two fitted models.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelComparisonAssessment {
     pub class: ModelComparisonClass,
     pub fixed_effects: FixedEffectComparison,
@@ -299,7 +310,9 @@ pub struct ModelComparisonAssessment {
 }
 
 /// Requested comparison mode for [`ModelComparisonTable`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ModelComparisonMethod {
     /// Use likelihood-ratio columns for adjacent comparisons where they are
     /// valid; otherwise leave them empty and report the reason.
@@ -312,7 +325,9 @@ pub enum ModelComparisonMethod {
 }
 
 /// Policy for comparisons that would require ML refits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ModelComparisonRefitPolicy {
     /// Return an error when a requested comparison would require ML refits.
     Error,
@@ -323,7 +338,9 @@ pub enum ModelComparisonRefitPolicy {
 }
 
 /// Stable reason code for a model-comparison table row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ModelComparisonReasonCode {
     InformationCriteriaRequested,
     NonNestedModelsLrtInvalid,
@@ -377,7 +394,7 @@ impl Default for ModelComparisonOptions {
 }
 
 /// One display row in a model comparison table.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelComparisonRow {
     pub label: String,
     pub nobs: usize,
@@ -401,7 +418,7 @@ pub struct ModelComparisonRow {
 }
 
 /// Information-criteria table with optional valid LRT columns.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelComparisonTable {
     pub method: ModelComparisonMethod,
     pub refit_policy: ModelComparisonRefitPolicy,
@@ -409,6 +426,164 @@ pub struct ModelComparisonTable {
     pub assessments: Vec<ModelComparisonAssessment>,
     /// Present for API honesty: automatic refitting is not performed here.
     pub refit_performed: bool,
+}
+
+/// Status for a boundary-aware variance-component LRT route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum BoundaryLrtStatus {
+    Available,
+    NotAssessed,
+    Unsupported,
+}
+
+/// One component of a chi-square mixture reference distribution.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoundaryLrtMixtureComponent {
+    pub weight: f64,
+    pub chisq_df: Option<usize>,
+    pub point_mass_at: Option<f64>,
+}
+
+/// Boundary-aware LRT payload for variance-component comparisons.
+///
+/// This deliberately does not represent a fixed-effect p-value route. The
+/// certified v1 route is the classic one-added-boundary-parameter comparison
+/// with the 50:50 mixture of a point mass at zero and chi-square(1).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BoundaryLikelihoodRatioTest {
+    pub schema_name: String,
+    pub schema_version: String,
+    pub status: BoundaryLrtStatus,
+    pub reason_code: Option<String>,
+    pub reason: Option<String>,
+    pub comparison_class: Option<ModelComparisonClass>,
+    pub statistic: Option<f64>,
+    pub ordinary_chisq_dof: Option<usize>,
+    pub pvalue: Option<f64>,
+    pub loglik_within_optimizer_tol: Option<bool>,
+    pub mixture: Vec<BoundaryLrtMixtureComponent>,
+    pub references: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+impl BoundaryLikelihoodRatioTest {
+    /// Assess and, when certified, compute a boundary-aware variance-component LRT.
+    pub fn variance_component(smaller: &dyn MixedModelFit, larger: &dyn MixedModelFit) -> Self {
+        let assessment = ModelComparisonAssessment::assess(smaller, larger);
+        let comparison_class = Some(assessment.class);
+        let references = vec![
+            "Self and Liang (1987), JASA 82:605-610".to_string(),
+            "Stram and Lee (1994), Biometrics 50:1171-1177".to_string(),
+        ];
+
+        if !matches!(
+            assessment.class,
+            ModelComparisonClass::NestedRandomEffects
+                | ModelComparisonClass::SameFixedEffectsCovarianceDifference
+        ) {
+            return Self::refusal(
+                BoundaryLrtStatus::Unsupported,
+                "boundary_lrt_requires_variance_component_comparison",
+                "boundary_lrt is only certified for nested random-effect or covariance-parameter comparisons with identical fixed effects",
+                comparison_class,
+                references,
+            );
+        }
+
+        if assessment.fixed_effects != FixedEffectComparison::Same {
+            return Self::refusal(
+                BoundaryLrtStatus::Unsupported,
+                "boundary_lrt_not_fixed_effect_method",
+                "boundary_lrt is a variance-component route, not a fixed-effect p-value method",
+                comparison_class,
+                references,
+            );
+        }
+
+        if !assessment.lrt_available {
+            return Self::refusal(
+                BoundaryLrtStatus::NotAssessed,
+                "boundary_lrt_likelihood_comparison_unavailable",
+                assessment
+                    .lrt_reason
+                    .as_deref()
+                    .unwrap_or("ordinary likelihood comparison is unavailable for this model pair"),
+                comparison_class,
+                references,
+            );
+        }
+
+        let values = match likelihood_ratio_values(smaller, larger) {
+            Ok(values) => values,
+            Err(reason) => {
+                return Self::refusal(
+                    BoundaryLrtStatus::NotAssessed,
+                    "boundary_lrt_likelihood_comparison_unavailable",
+                    &reason,
+                    comparison_class,
+                    references,
+                );
+            }
+        };
+
+        if values.chisq_dof != 1 {
+            return Self::refusal(
+                BoundaryLrtStatus::NotAssessed,
+                "boundary_lrt_mixture_weights_not_certified",
+                "boundary_lrt v1 certifies only one added boundary variance/covariance parameter; use bootstrap or a simulation-calibrated mixture for higher-dimensional boundaries",
+                comparison_class,
+                references,
+            );
+        }
+
+        let pvalue = self_liang_one_parameter_pvalue(values.chisq);
+        Self {
+            schema_name: BOUNDARY_LRT_SCHEMA.to_string(),
+            schema_version: BOUNDARY_LRT_SCHEMA_VERSION.to_string(),
+            status: BoundaryLrtStatus::Available,
+            reason_code: None,
+            reason: None,
+            comparison_class,
+            statistic: Some(values.chisq),
+            ordinary_chisq_dof: Some(values.chisq_dof),
+            pvalue: Some(pvalue),
+            loglik_within_optimizer_tol: Some(values.loglik_within_optimizer_tol),
+            mixture: self_liang_one_parameter_mixture(),
+            references,
+            notes: vec![
+                "p-value uses a 50:50 mixture of point mass at zero and chi-square(1) for a single boundary variance/covariance parameter".to_string(),
+                "this route is for variance-component comparisons and must not be surfaced as fixed-effect inference".to_string(),
+            ],
+        }
+    }
+
+    fn refusal(
+        status: BoundaryLrtStatus,
+        reason_code: &str,
+        reason: &str,
+        comparison_class: Option<ModelComparisonClass>,
+        references: Vec<String>,
+    ) -> Self {
+        Self {
+            schema_name: BOUNDARY_LRT_SCHEMA.to_string(),
+            schema_version: BOUNDARY_LRT_SCHEMA_VERSION.to_string(),
+            status,
+            reason_code: Some(reason_code.to_string()),
+            reason: Some(reason.to_string()),
+            comparison_class,
+            statistic: None,
+            ordinary_chisq_dof: None,
+            pvalue: None,
+            loglik_within_optimizer_tol: None,
+            mixture: Vec::new(),
+            references,
+            notes: vec![
+                "boundary_lrt is intentionally restricted until the comparison geometry certifies the reference distribution".to_string(),
+            ],
+        }
+    }
 }
 
 impl ModelComparisonTable {
@@ -1292,6 +1467,30 @@ fn likelihood_ratio_values(
         pvalue,
         loglik_within_optimizer_tol,
     })
+}
+
+fn self_liang_one_parameter_mixture() -> Vec<BoundaryLrtMixtureComponent> {
+    vec![
+        BoundaryLrtMixtureComponent {
+            weight: 0.5,
+            chisq_df: None,
+            point_mass_at: Some(0.0),
+        },
+        BoundaryLrtMixtureComponent {
+            weight: 0.5,
+            chisq_df: Some(1),
+            point_mass_at: None,
+        },
+    ]
+}
+
+fn self_liang_one_parameter_pvalue(chisq: f64) -> f64 {
+    if chisq <= 0.0 {
+        return 1.0;
+    }
+    use statrs::distribution::{ChiSquared, ContinuousCDF};
+    let dist = ChiSquared::new(1.0).unwrap();
+    0.5 * (1.0 - dist.cdf(chisq))
 }
 
 fn comparison_row_reason(

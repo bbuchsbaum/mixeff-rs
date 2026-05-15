@@ -15,6 +15,7 @@ pub struct RandomEffectTermInfo {
 
 /// Distribution families for GLMMs.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum Family {
     Normal,
     Bernoulli,
@@ -26,6 +27,7 @@ pub enum Family {
 
 /// Link functions for GLMMs.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub enum LinkFunction {
     Identity,
     Log,

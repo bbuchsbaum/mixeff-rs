@@ -30,6 +30,7 @@ pub struct Formula {
 
 /// A single fixed-effect term.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum FixedTerm {
     /// Explicit intercept (`1`).
     Intercept,
@@ -61,6 +62,7 @@ pub struct RandomTerm {
 
 /// The grouping factor for a random-effect term.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum GroupingFactor {
     /// A single grouping variable, e.g. `subject`.
     Single(String),
@@ -82,6 +84,7 @@ pub struct RandomTermSource {
 
 /// Parser-level canonicalization applied to a random-effect grouping form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RandomTermExpansion {
     /// `(b | a/b)` expanded to `(b | a) + (b | a:b)`.
     NestedGrouping,

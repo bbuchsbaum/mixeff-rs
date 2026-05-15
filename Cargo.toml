@@ -2,8 +2,27 @@
 name = "mixeff-rs"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.74"
 description = "Mixed-effects models in Rust — engine for the mixeff R package, port of MixedModels.jl"
 license = "MIT"
+authors = ["Bradley Buchsbaum <brad.buchsbaum@gmail.com>"]
+repository = "https://github.com/bbuchsbaum/mixeff-rs"
+documentation = "https://docs.rs/mixeff-rs"
+readme = "README.md"
+keywords = ["statistics", "mixed-models", "lme4", "regression", "glmm"]
+categories = ["science", "mathematics", "algorithms"]
+exclude = [
+    "MixedModels.jl/",
+    "comparison/",
+    "scripts/",
+    "docs/",
+    ".github/",
+    ".mote/",
+    ".omc/",
+    "tests/fixtures/",
+    "progress.txt",
+    "prd.json",
+]
 
 [dependencies]
 nalgebra = { version = "0.33", features = ["serde-serialize"] }

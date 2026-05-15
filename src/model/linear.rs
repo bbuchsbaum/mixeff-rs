@@ -101,6 +101,7 @@ pub struct ModelDims {
 
 /// How to handle random-effects levels not seen during training.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum NewReLevels {
     /// Return an error if any unseen levels are encountered.
     Error,
@@ -10285,6 +10286,7 @@ pub struct MixedModelBootstrap {
 /// Confidence-interval construction method for bootstrap summaries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum BootstrapIntervalMethod {
     /// Equal-tail percentile interval.
     Percentile,
@@ -10327,6 +10329,7 @@ pub const BOOTSTRAP_RUN_SCHEMA_VERSION: &str = "1.0.0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum BootstrapTargetKind {
     FullModelDistribution,
     FixedEffectNull,
@@ -10359,6 +10362,7 @@ impl BootstrapTarget {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum BootstrapFailedRefitPolicy {
     Exclude,
     CountExtreme,
@@ -10455,6 +10459,7 @@ pub struct BootstrapRunPayload {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum FixedEffectNullCovariancePolicy {
     ReuseFittedCovariance,
 }

@@ -4,6 +4,7 @@ use thiserror::Error;
 
 /// Top-level error type for all mixed model operations.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum MixedModelError {
     #[error("Formula error: {0}")]
     Formula(#[from] crate::formula::FormulaError),
@@ -53,6 +54,7 @@ pub enum MixedModelError {
 
 /// Error type for linear algebra operations.
 #[derive(Error, Debug)]
+#[non_exhaustive]
 pub enum LinAlgError {
     #[error("Matrix is not positive definite")]
     NotPositiveDefinite,

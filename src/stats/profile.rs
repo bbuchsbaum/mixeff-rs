@@ -22,18 +22,22 @@
 use std::collections::BTreeMap;
 
 use nalgebra::DMatrix;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{MixedModelError, Result};
 use crate::model::traits::MixedModelFit;
 use crate::model::LinearMixedModel;
 use crate::stats::spline::NaturalCubicSpline;
 
+pub const PROFILE_LIKELIHOOD_CI_SCHEMA: &str = "mixedmodels.profile_likelihood_ci";
+pub const PROFILE_LIKELIHOOD_CI_SCHEMA_VERSION: &str = "1.0.0";
+
 /// One row of a profile table.
 ///
 /// Mirrors (a subset of) the row type used by `MixedModels.jl`. Every row
 /// records the ζ value and the full parameter vector at the corresponding
 /// conditional fit so that multiple parameters can share a single table.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProfileRow {
     /// Name of the parameter being profiled (e.g. `"σ"`, `"β1"`, `"θ3"`).
     pub p: String,
@@ -76,12 +80,55 @@ pub struct MixedModelProfile {
 }
 
 /// One row of a profile-likelihood confidence interval table.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConfintRow {
     pub parameter: String,
     pub estimate: f64,
     pub lower: f64,
     pub upper: f64,
+}
+
+/// One serializable profile-likelihood CI row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProfileLikelihoodCiRow {
+    pub parameter: String,
+    pub estimate: f64,
+    pub lower: f64,
+    pub upper: f64,
+    pub level: f64,
+    pub method: String,
+    pub regularity: String,
+    pub boundary_clamped_lower: bool,
+}
+
+/// Serializable profile-likelihood CI payload for R and other bindings.
+///
+/// The raw profile table is included, but spline interpolants are not part of
+/// the wire contract. Consumers that need intervals should read `intervals`;
+/// consumers that need diagnostics can inspect `profile_rows`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProfileLikelihoodCiPayload {
+    pub schema_name: String,
+    pub schema_version: String,
+    pub level: f64,
+    pub fit_criterion: String,
+    pub intervals: Vec<ProfileLikelihoodCiRow>,
+    pub profile_rows: Vec<ProfileRow>,
+    pub notes: Vec<String>,
+}
+
+impl ProfileLikelihoodCiPayload {
+    pub fn to_json(&self) -> std::result::Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+
+    pub fn to_json_pretty(&self) -> std::result::Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    pub fn from_json(input: &str) -> std::result::Result<Self, serde_json::Error> {
+        serde_json::from_str(input)
+    }
 }
 
 impl MixedModelProfile {
@@ -136,6 +183,53 @@ impl MixedModelProfile {
             .ok_or_else(|| {
                 MixedModelError::InvalidArgument(format!("parameter {parameter} was not profiled"))
             })
+    }
+
+    /// Build a serializable profile-likelihood CI payload.
+    pub fn confint_payload(&self, level: f64, reml: bool) -> Result<ProfileLikelihoodCiPayload> {
+        let intervals = self
+            .confint(level)?
+            .into_iter()
+            .map(|row| {
+                let boundary_clamped_lower =
+                    row.lower == 0.0 && self.profile_touches_nonnegative_boundary(&row.parameter);
+                ProfileLikelihoodCiRow {
+                    parameter: row.parameter,
+                    estimate: row.estimate,
+                    lower: row.lower,
+                    upper: row.upper,
+                    level,
+                    method: "profile_likelihood".to_string(),
+                    regularity: if boundary_clamped_lower {
+                        "nonnegative_parameter_boundary_clamped".to_string()
+                    } else {
+                        "regular_profile_likelihood".to_string()
+                    },
+                    boundary_clamped_lower,
+                }
+            })
+            .collect();
+
+        let mut notes = vec![
+            "profile-likelihood intervals are computed by spline inversion of signed-root deviance values".to_string(),
+            "profile rows are serialized for diagnostics; spline coefficients are intentionally not part of the wire contract".to_string(),
+        ];
+        if reml {
+            notes.push(
+                "REML profile payloads omit fixed-effect beta profiles; beta profile intervals require ML fits in this contract"
+                    .to_string(),
+            );
+        }
+
+        Ok(ProfileLikelihoodCiPayload {
+            schema_name: PROFILE_LIKELIHOOD_CI_SCHEMA.to_string(),
+            schema_version: PROFILE_LIKELIHOOD_CI_SCHEMA_VERSION.to_string(),
+            level,
+            fit_criterion: if reml { "REML" } else { "ML" }.to_string(),
+            intervals,
+            profile_rows: self.tbl.clone(),
+            notes,
+        })
     }
 
     /// Rows for a specific profiled parameter.
@@ -1067,6 +1161,15 @@ pub fn profile(m: &mut LinearMixedModel) -> Result<MixedModelProfile> {
         rev.extend(theta.rev);
     }
     Ok(MixedModelProfile { tbl, fwd, rev })
+}
+
+/// Compute a serializable profile-likelihood CI payload for a fitted LMM.
+pub fn profile_confint_payload(
+    m: &mut LinearMixedModel,
+    level: f64,
+) -> Result<ProfileLikelihoodCiPayload> {
+    let reml = m.optsum.reml;
+    profile(m)?.confint_payload(level, reml)
 }
 
 // ===========================================================================

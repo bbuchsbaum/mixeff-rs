@@ -19,6 +19,7 @@ pub struct DataFrame {
 
 /// A single column of data.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum Column {
     Numeric(Vec<f64>),
     Categorical(CategoricalColumn),
@@ -39,6 +40,7 @@ pub struct CategoricalColumn {
 
 /// Stable source label for a categorical contrast basis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ContrastSource {
     Treatment,
     Sum,
@@ -63,6 +65,7 @@ impl ContrastSource {
 
 /// Categorical coding mode used when no explicit contrast basis is supplied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CategoricalCoding {
     Treatment,
     CellMeans,

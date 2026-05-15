@@ -20,6 +20,7 @@ use crate::model::DataFrame;
 /// Errors raised by the dataset loader. Distinct from [`crate::error::MixedModelError`]
 /// because the loader is a dev/test convenience, not part of the model fit path.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum DatasetError {
     #[error("dataset `{0}` not found at {1}")]
     NotFound(String, PathBuf),
@@ -39,6 +40,7 @@ pub enum DatasetError {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum ColumnType {
     Numeric,
     Categorical,

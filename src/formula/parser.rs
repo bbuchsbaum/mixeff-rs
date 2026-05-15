@@ -31,6 +31,7 @@ use super::terms::{
 
 /// Errors produced while parsing a formula string.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum FormulaError {
     /// The input string is empty.
     #[error("empty formula string")]

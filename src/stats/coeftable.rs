@@ -9,6 +9,7 @@ use std::fmt;
 use statrs::distribution::{ContinuousCDF, Normal};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CoefTablePValuePolicy {
     AsymptoticWaldZ,
     Unavailable { reason: String },

@@ -3,23 +3,29 @@ use std::path::Path;
 use std::process::Command;
 
 use mixeff_rs::model::{
-    parametricbootstrap, BatchOptimizerControl, BatchOptions, BatchThetaGrouping, BatchWarmStart, BootstrapFailedRefitPolicy, BootstrapInterval, BootstrapIntervalMethod,
-    BootstrapQuantile, BootstrapRefitOptions, BootstrapReplicate, BootstrapRunMetadata,
-    BootstrapRunPayload, BootstrapSeedRecord, BootstrapTarget, BootstrapTargetKind,
-    CategoricalColumn, Column, ConvergenceVerificationOptions, DataFrame, Family,
-    FixedEffectNullBootstrapTarget, FixedEffectNullCovariancePolicy, GeneralizedLinearMixedModel,
-    KenwardRogerAdjustedVcov, KenwardRogerLbDdf, KenwardRogerSigmaG, LinearMixedModel, LinearMixedModelBatch,
-    LinkFunction, MixedModelBootstrap, MixedModelFit, ModelDims, NewReLevels, RandomEffectTermInfo, ResponseBatchFit, ResponseBatchMode,
-    ResponseColumnDiagnostic, ResponseDiagnosticReason, ResponseFitStatus, ResponseMatrixProfile,
-    ThetaBatch, VcovVarparEstimate, BOOTSTRAP_RUN_SCHEMA, BOOTSTRAP_RUN_SCHEMA_VERSION,
+    parametricbootstrap, BatchOptimizerControl, BatchOptions, BatchThetaGrouping, BatchWarmStart,
+    BootstrapFailedRefitPolicy, BootstrapInterval, BootstrapIntervalMethod, BootstrapQuantile,
+    BootstrapRefitOptions, BootstrapReplicate, BootstrapRunMetadata, BootstrapRunPayload,
+    BootstrapSeedRecord, BootstrapTarget, BootstrapTargetKind, CategoricalColumn, Column,
+    ConvergenceVerificationOptions, DataFrame, Family, FixedEffectNullBootstrapTarget,
+    FixedEffectNullCovariancePolicy, GeneralizedLinearMixedModel, KenwardRogerAdjustedVcov,
+    KenwardRogerLbDdf, KenwardRogerSigmaG, LinearMixedModel, LinearMixedModelBatch, LinkFunction,
+    MixedModelBootstrap, MixedModelFit, ModelDims, NewReLevels, RandomEffectTermInfo,
+    ResponseBatchFit, ResponseBatchMode, ResponseColumnDiagnostic, ResponseDiagnosticReason,
+    ResponseFitStatus, ResponseMatrixProfile, ThetaBatch, VcovVarparEstimate, BOOTSTRAP_RUN_SCHEMA,
+    BOOTSTRAP_RUN_SCHEMA_VERSION,
 };
 use mixeff_rs::stats::{
     assess_model_comparison_sequence, coeftable_to_markdown, profile, profile_beta, profile_betas,
-    profile_sigma, profile_theta, profile_theta_scalar, restore_replicates, restorereplicates,
-    save_replicates, savereplicates, shortest_cov_int, BlockDescription, CoefTable,
-    CoefTablePValuePolicy, ConfintRow, FixedEffectComparison, LikelihoodRatioTest, LinearModelFit,
-    MixedModelProfile, ModelComparisonAlternative, ModelComparisonAssessment, ModelComparisonClass,
-    ModelSummary, ModelSummaryRow, ProfileRow, RandomEffectComparison, VarCorr, VarCorrComponent,
+    profile_confint_payload, profile_sigma, profile_theta, profile_theta_scalar,
+    restore_replicates, restorereplicates, save_replicates, savereplicates, shortest_cov_int,
+    BlockDescription, BoundaryLikelihoodRatioTest, BoundaryLrtMixtureComponent, BoundaryLrtStatus,
+    CoefTable, CoefTablePValuePolicy, ConfintRow, FixedEffectComparison, LikelihoodRatioTest,
+    LinearModelFit, MixedModelProfile, ModelComparisonAlternative, ModelComparisonAssessment,
+    ModelComparisonClass, ModelSummary, ModelSummaryRow, ProfileLikelihoodCiPayload,
+    ProfileLikelihoodCiRow, ProfileRow, RandomEffectComparison, VarCorr, VarCorrComponent,
+    BOUNDARY_LRT_SCHEMA, BOUNDARY_LRT_SCHEMA_VERSION, PROFILE_LIKELIHOOD_CI_SCHEMA,
+    PROFILE_LIKELIHOOD_CI_SCHEMA_VERSION,
 };
 use mixeff_rs::types::MatrixBlock;
 
@@ -181,6 +187,9 @@ fn intended_stats_barrel_exports_compile_for_downstream_users() {
     fn assert_type<T>() {}
 
     assert_type::<BlockDescription>();
+    assert_type::<BoundaryLikelihoodRatioTest>();
+    assert_type::<BoundaryLrtMixtureComponent>();
+    assert_type::<BoundaryLrtStatus>();
     assert_type::<CoefTable>();
     assert_type::<CoefTablePValuePolicy>();
     assert_type::<FixedEffectComparison>();
@@ -195,18 +204,25 @@ fn intended_stats_barrel_exports_compile_for_downstream_users() {
     assert_type::<RandomEffectComparison>();
     assert_type::<MixedModelProfile>();
     assert_type::<ConfintRow>();
+    assert_type::<ProfileLikelihoodCiPayload>();
+    assert_type::<ProfileLikelihoodCiRow>();
     assert_type::<VarCorr>();
     assert_type::<VarCorrComponent>();
 
     let _ = coeftable_to_markdown as fn(&CoefTable) -> String;
     let _ = shortest_cov_int as fn(&mut [f64], f64) -> (f64, f64);
     let _ = assess_model_comparison_sequence;
+    let _ = BOUNDARY_LRT_SCHEMA;
+    let _ = BOUNDARY_LRT_SCHEMA_VERSION;
     let _ = profile;
     let _ = profile_beta;
     let _ = profile_betas;
+    let _ = profile_confint_payload;
     let _ = profile_sigma;
     let _ = profile_theta;
     let _ = profile_theta_scalar;
+    let _ = PROFILE_LIKELIHOOD_CI_SCHEMA;
+    let _ = PROFILE_LIKELIHOOD_CI_SCHEMA_VERSION;
     let _ = save_replicates::<Vec<u8>>;
     let _ = savereplicates::<Vec<u8>>;
     let _ = restore_replicates::<&[u8]>;

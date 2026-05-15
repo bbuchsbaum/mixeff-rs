@@ -2,7 +2,7 @@
 
 Date: 2026-04-29
 Audience: `mixeff` R wrapper maintainers
-Upstream: `/Users/bbuchsbaum/code/rust/mixedmodels`
+Upstream: `/Users/bbuchsbaum/code/rust/mixeff-rs`
 Downstream: `/Users/bbuchsbaum/code/mixeff`
 
 ## Executive Summary
