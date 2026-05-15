@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  cargo-test:
+    name: cargo test (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            command: cargo test
+          - name: nlopt
+            command: cargo test --features nlopt
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install NLopt build prerequisites
+        if: matrix.name == 'nlopt'
+        run: sudo apt-get update && sudo apt-get install -y cmake g++
+      - name: Run tests
+        run: ${{ matrix.command }}
