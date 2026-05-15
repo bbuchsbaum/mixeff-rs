@@ -6,12 +6,15 @@ use nalgebra::{DMatrix, DVector};
 use serde::{Deserialize, Serialize};
 
 use crate::linalg::stats_rank;
+use crate::model::linear::LinearMixedModel;
 use crate::model::traits::{MixedModelFit, RandomEffectTermInfo};
 use crate::types::OptSummary;
 
 const LOG_LIK_TOL: f64 = 1.0e-10;
 pub const BOUNDARY_LRT_SCHEMA: &str = "mixedmodels.boundary_lrt";
 pub const BOUNDARY_LRT_SCHEMA_VERSION: &str = "1.0.0";
+pub const PARAMETRIC_BOOTSTRAP_LRT_SCHEMA: &str = "mixedmodels.parametric_bootstrap_lrt";
+pub const PARAMETRIC_BOOTSTRAP_LRT_SCHEMA_VERSION: &str = "1.0.0";
 
 /// Ordinary Gaussian linear-model fit for comparison with mixed models.
 ///
@@ -532,7 +535,7 @@ impl BoundaryLikelihoodRatioTest {
             return Self::refusal(
                 BoundaryLrtStatus::NotAssessed,
                 "boundary_lrt_mixture_weights_not_certified",
-                "boundary_lrt v1 certifies only one added boundary variance/covariance parameter; use bootstrap or a simulation-calibrated mixture for higher-dimensional boundaries",
+                "boundary_lrt v1 certifies only one added boundary variance/covariance parameter; for higher-dimensional boundaries use the boundary-robust parametric-bootstrap LRT (stats::parametric_bootstrap_lrt) or a simulation-calibrated mixture",
                 comparison_class,
                 references,
             );
@@ -1414,8 +1417,8 @@ fn validate_model_comparison_options(
             ModelComparisonMethod::Auto => {}
             ModelComparisonMethod::LikelihoodRatio => {
                 if !assessment.lrt_available
-                    && !(assessment.ml_refit_required
-                        && options.refit_policy != ModelComparisonRefitPolicy::Error)
+                    && (!assessment.ml_refit_required
+                        || options.refit_policy == ModelComparisonRefitPolicy::Error)
                 {
                     return Err(assessment.lrt_reason.clone().unwrap_or_else(|| {
                         "ordinary likelihood-ratio test is unavailable for this comparison"
@@ -1597,6 +1600,121 @@ fn format_pvalue(pvalue: f64) -> String {
         return format!("<1e-{exponent:02}");
     }
     format!("{pvalue:.4}")
+}
+
+/// Result of a parametric-bootstrap likelihood-ratio test.
+///
+/// The bootstrap p-value is boundary-robust: it makes no chi-square (or
+/// 50:50-mixture) assumption, so it is valid when the added parameter sits
+/// on the boundary of its space — exactly the case the analytic
+/// [`BoundaryLikelihoodRatioTest`] refuses for more than one added
+/// variance/covariance parameter.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ParametricBootstrapLrt {
+    pub schema_name: String,
+    pub schema_version: String,
+    /// Observed statistic `2·(ℓ_larger − ℓ_smaller)` (clamped at 0 within
+    /// optimizer tolerance, matching the ordinary LRT convention).
+    pub observed_statistic: f64,
+    /// Nominal `larger.dof − smaller.dof`. Informational only — the
+    /// p-value does **not** use a chi-square reference with this dof.
+    pub chisq_dof: usize,
+    pub n_sim_requested: usize,
+    /// Replicates where the null simulation refit succeeded for *both*
+    /// the smaller and larger models.
+    pub n_sim_completed: usize,
+    /// Replicates discarded because a refit failed numerically.
+    pub n_refit_failures: usize,
+    /// `(1 + #{T* ≥ T_obs}) / (n_sim_completed + 1)`.
+    pub p_value: f64,
+}
+
+/// Parametric-bootstrap likelihood-ratio test of a nested LMM pair.
+///
+/// Simulates `n_sim` responses from the fitted **null** (`smaller`) model,
+/// refits both models to each, and compares the resulting LR statistics to
+/// the observed one. This is the boundary-robust route the analytic
+/// [`BoundaryLikelihoodRatioTest`] points to when more than one added
+/// variance/covariance parameter prevents a certified mixture.
+///
+/// Both models must be ML-fitted to the *same* observations and properly
+/// nested (`smaller` ⊂ `larger`, `larger.dof > smaller.dof`). The caller
+/// owns RNG seeding for reproducibility.
+pub fn parametric_bootstrap_lrt<R: rand::Rng>(
+    rng: &mut R,
+    n_sim: usize,
+    smaller: &LinearMixedModel,
+    larger: &LinearMixedModel,
+) -> crate::error::Result<ParametricBootstrapLrt> {
+    use crate::error::MixedModelError;
+
+    if n_sim == 0 {
+        return Err(MixedModelError::InvalidArgument(
+            "parametric-bootstrap LRT requires n_sim >= 1".to_string(),
+        ));
+    }
+    if smaller.nobs() != larger.nobs() {
+        return Err(MixedModelError::InvalidArgument(
+            "smaller and larger models must be fit to the same number of observations".to_string(),
+        ));
+    }
+    if larger.dof() <= smaller.dof() {
+        return Err(MixedModelError::InvalidArgument(
+            "larger model must have strictly more parameters than smaller (proper nesting)"
+                .to_string(),
+        ));
+    }
+
+    let observed = likelihood_ratio_values(smaller, larger).map_err(|reason| {
+        MixedModelError::InvalidArgument(format!(
+            "observed likelihood-ratio statistic is unavailable: {reason}"
+        ))
+    })?;
+    let t_obs = observed.chisq;
+
+    let mut completed = 0usize;
+    let mut failures = 0usize;
+    let mut at_least_as_extreme = 0usize;
+
+    for _ in 0..n_sim {
+        let y_star = smaller.simulate(rng);
+        let mut null_fit = smaller.clone();
+        let mut alt_fit = larger.clone();
+        match (
+            null_fit.refit(y_star.as_slice()),
+            alt_fit.refit(y_star.as_slice()),
+        ) {
+            (Ok(()), Ok(())) => {
+                let diff = alt_fit.loglikelihood() - null_fit.loglikelihood();
+                let t_star = if diff <= 0.0 { 0.0 } else { 2.0 * diff };
+                if t_star >= t_obs {
+                    at_least_as_extreme += 1;
+                }
+                completed += 1;
+            }
+            _ => failures += 1,
+        }
+    }
+
+    if completed == 0 {
+        return Err(MixedModelError::InvalidArgument(
+            "every parametric-bootstrap refit failed; no bootstrap p-value can be formed"
+                .to_string(),
+        ));
+    }
+
+    let p_value = (1.0 + at_least_as_extreme as f64) / (completed as f64 + 1.0);
+
+    Ok(ParametricBootstrapLrt {
+        schema_name: PARAMETRIC_BOOTSTRAP_LRT_SCHEMA.to_string(),
+        schema_version: PARAMETRIC_BOOTSTRAP_LRT_SCHEMA_VERSION.to_string(),
+        observed_statistic: t_obs,
+        chisq_dof: observed.chisq_dof,
+        n_sim_requested: n_sim,
+        n_sim_completed: completed,
+        n_refit_failures: failures,
+        p_value,
+    })
 }
 
 #[cfg(test)]
@@ -2722,5 +2840,97 @@ mod tests {
         ));
         assert!(out.contains("<td align=\"right\"><1e-09</td>"));
         assert!(out.ends_with("</table>\n"));
+    }
+
+    fn pb_lrt_fixture() -> crate::model::data::DataFrame {
+        use crate::model::data::DataFrame;
+        let mut y = Vec::new();
+        let mut x = Vec::new();
+        let mut g = Vec::new();
+        for subj in 0..12 {
+            let intercept = (subj as f64 - 5.5) * 4.0;
+            let slope = (subj as f64 - 5.5) * 0.8;
+            for day in 0..8 {
+                let xv = day as f64;
+                let noise = ((subj * 8 + day) as f64 * 12.9898).sin() * 7.0;
+                y.push(250.0 + intercept + (10.0 + slope) * xv + noise);
+                x.push(xv);
+                g.push(format!("s{subj}"));
+            }
+        }
+        let mut data = DataFrame::new();
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_categorical("g", g).unwrap();
+        data
+    }
+
+    #[test]
+    fn test_parametric_bootstrap_lrt_runs_and_is_seed_deterministic() {
+        use crate::formula::parse_formula;
+        use crate::model::linear::LinearMixedModel;
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let data = pb_lrt_fixture();
+        let mut smaller =
+            LinearMixedModel::new(parse_formula("y ~ 1 + x + (1 | g)").unwrap(), &data, None)
+                .unwrap();
+        smaller.fit(false).unwrap(); // ML
+        let mut larger = LinearMixedModel::new(
+            parse_formula("y ~ 1 + x + (1 + x | g)").unwrap(),
+            &data,
+            None,
+        )
+        .unwrap();
+        larger.fit(false).unwrap();
+
+        let mut rng = StdRng::seed_from_u64(20260515);
+        let result = parametric_bootstrap_lrt(&mut rng, 20, &smaller, &larger).unwrap();
+
+        assert_eq!(result.schema_name, PARAMETRIC_BOOTSTRAP_LRT_SCHEMA);
+        assert_eq!(result.n_sim_requested, 20);
+        assert_eq!(
+            result.n_sim_completed + result.n_refit_failures,
+            20,
+            "every replicate is either completed or a recorded failure"
+        );
+        assert!(result.n_sim_completed > 0);
+        assert!(result.observed_statistic >= 0.0);
+        assert!(
+            result.p_value > 0.0 && result.p_value <= 1.0,
+            "bootstrap p-value must be in (0, 1], got {}",
+            result.p_value
+        );
+        assert_eq!(result.chisq_dof, larger.dof() - smaller.dof());
+
+        // Same seed → identical result.
+        let mut rng2 = StdRng::seed_from_u64(20260515);
+        let result2 = parametric_bootstrap_lrt(&mut rng2, 20, &smaller, &larger).unwrap();
+        assert_eq!(result, result2);
+    }
+
+    #[test]
+    fn test_parametric_bootstrap_lrt_rejects_bad_arguments() {
+        use crate::formula::parse_formula;
+        use crate::model::linear::LinearMixedModel;
+        use rand::{rngs::StdRng, SeedableRng};
+
+        let data = pb_lrt_fixture();
+        let mut smaller =
+            LinearMixedModel::new(parse_formula("y ~ 1 + x + (1 | g)").unwrap(), &data, None)
+                .unwrap();
+        smaller.fit(false).unwrap();
+        let mut larger = LinearMixedModel::new(
+            parse_formula("y ~ 1 + x + (1 + x | g)").unwrap(),
+            &data,
+            None,
+        )
+        .unwrap();
+        larger.fit(false).unwrap();
+
+        let mut rng = StdRng::seed_from_u64(1);
+        assert!(parametric_bootstrap_lrt(&mut rng, 0, &smaller, &larger).is_err());
+        // Swapped nesting (smaller has more dof than "larger") is rejected.
+        assert!(parametric_bootstrap_lrt(&mut rng, 5, &larger, &smaller).is_err());
     }
 }

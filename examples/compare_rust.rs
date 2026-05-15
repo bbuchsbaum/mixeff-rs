@@ -222,9 +222,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Set MIXEDMODELS_INCLUDE_STRESS=1 to fit them anyway.
             if is_stress && !include_stress {
                 rec.status = "skipped_stress".into();
-                rec.error = Some(
-                    "stress fixture; set MIXEDMODELS_INCLUDE_STRESS=1 to fit".into(),
-                );
+                rec.error = Some("stress fixture; set MIXEDMODELS_INCLUDE_STRESS=1 to fit".into());
                 results.push(rec);
                 continue;
             }

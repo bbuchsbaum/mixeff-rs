@@ -102,9 +102,7 @@ impl NaturalCubicSpline {
         for i in (0..interior - 1).rev() {
             sol[i] = (d[i] - c[i] * sol[i + 1]) / b[i];
         }
-        for i in 0..interior {
-            m[i + 1] = sol[i];
-        }
+        m[1..interior + 1].copy_from_slice(&sol);
 
         Ok(NaturalCubicSpline {
             x: x.to_vec(),

@@ -69,6 +69,27 @@ pub enum FormulaError {
     #[error("formula has no terms on the right-hand side of '~'")]
     EmptyRhs,
 
+    /// The formula ends with a dangling `+`/`-` operator (e.g. `"y ~ x +"`).
+    #[error("formula ends with a dangling '+'/'-' operator at position {0}")]
+    TrailingOperator(usize),
+
+    /// Two terms appear without a `+`/`-` separator (e.g. `"y ~ (1|g) (1|h)"`).
+    #[error("expected '+' or '-' separating model terms at position {0}")]
+    MissingTermSeparator(usize),
+
+    /// A bare numeric literal was used as a model term (e.g. `"y ~ 2 * x"`).
+    /// Only the `0`/`1` intercept literals are meaningful.
+    #[error(
+        "numeric literal '{0}' at position {1} is not a valid model term \
+         (only the 0/1 intercept literals are allowed)"
+    )]
+    NumericLiteralTerm(String, usize),
+
+    /// `-` was applied to a random-effect block (e.g. `"y ~ x - (1|g)"`),
+    /// which is not a supported term-removal target.
+    #[error("'-' cannot remove a random-effect term at position {0}")]
+    NegatedRandomEffect(usize),
+
     /// Generic parse error with a custom message.
     #[error("{0}")]
     Other(String),
@@ -174,6 +195,33 @@ fn tokenize(input: &str) -> Result<Vec<Spanned>, FormulaError> {
                     pos,
                 });
                 i += 1;
+            }
+            '`' => {
+                // Backtick-quoted identifier: column names with spaces,
+                // reserved words, or characters the bare lexer would split
+                // (e.g. `` `my col` ``, `` `weird-name` ``, `` `2024` ``).
+                // Content is taken verbatim; only the closing backtick ends it.
+                let start = i + 1;
+                let mut j = start;
+                while j < len && chars[j] != '`' {
+                    j += 1;
+                }
+                if j >= len {
+                    return Err(FormulaError::Other(format!(
+                        "unterminated backtick-quoted identifier starting at position {pos}"
+                    )));
+                }
+                let name: String = chars[start..j].iter().collect();
+                if name.is_empty() {
+                    return Err(FormulaError::Other(format!(
+                        "empty backtick-quoted identifier at position {pos}"
+                    )));
+                }
+                tokens.push(Spanned {
+                    token: Token::Ident(name),
+                    pos,
+                });
+                i = j + 1;
             }
             '(' => {
                 tokens.push(Spanned {
@@ -283,6 +331,21 @@ fn tokenize(input: &str) -> Result<Vec<Spanned>, FormulaError> {
                     token: Token::Ident(word),
                     pos,
                 });
+            }
+            '^' | '%' | '=' | '!' | '<' | '>' => {
+                // These show up when a user writes an in-formula
+                // transformation (e.g. `x^2`, `I(x^2)`, `log(x)`,
+                // `scale(x)`, `poly(x, 2)`). Formula-level transformations
+                // are out of scope for 1.0 (tracked post-1.0). Refuse with
+                // an actionable message instead of a bare "unexpected token".
+                return Err(FormulaError::Other(format!(
+                    "unexpected '{c}' at position {pos}: in-formula transformations \
+                     (e.g. `x^2`, `I(x^2)`, `log(x)`, `scale(x)`, `poly(x, 2)`) are \
+                     not supported in this version — precompute the transformed value \
+                     as its own data column and reference that column instead. If the \
+                     column name itself contains unusual characters, quote it with \
+                     backticks (e.g. `` `log x` ``)."
+                )));
             }
             _ => {
                 return Err(FormulaError::UnexpectedToken(c.to_string(), pos));
@@ -394,11 +457,22 @@ impl Parser {
         let mut fixed: Vec<FixedTerm> = Vec::new();
         let mut random: Vec<RandomTerm> = Vec::new();
 
-        // Track whether next term is subtracted (e.g. `- 1`).
+        // `-` is term removal at the top level (lme4 semantics): `- 1` /
+        // `- 0` suppress the intercept, `- x` drops `x` from the term set.
         let mut negate = false;
+        // True when the next token must be a term (start of input, or just
+        // after a `+`/`-`). False once a term has been consumed: the next
+        // token must then be a `+`/`-` separator or end of input.
+        let mut expect_term = true;
+        // True iff a `+`/`-` was the most recently consumed token, so a
+        // dangling trailing operator can be detected at end of input.
+        let mut pending_operator = false;
 
         loop {
             if self.at_end() {
+                if pending_operator {
+                    return Err(FormulaError::TrailingOperator(self.pos()));
+                }
                 break;
             }
 
@@ -406,20 +480,33 @@ impl Parser {
                 Some(Token::Plus) => {
                     self.advance();
                     negate = false;
+                    expect_term = true;
+                    pending_operator = true;
                     continue;
                 }
                 Some(Token::Minus) => {
                     self.advance();
                     negate = true;
+                    expect_term = true;
+                    pending_operator = true;
                     continue;
                 }
                 Some(Token::LParen) => {
-                    // Random effect group.
+                    if !expect_term {
+                        return Err(FormulaError::MissingTermSeparator(self.pos()));
+                    }
+                    if negate {
+                        return Err(FormulaError::NegatedRandomEffect(self.pos()));
+                    }
                     let rts = self.parse_random_term()?;
                     random.extend(rts);
-                    negate = false;
+                    expect_term = false;
+                    pending_operator = false;
                 }
                 Some(Token::One) => {
+                    if !expect_term {
+                        return Err(FormulaError::MissingTermSeparator(self.pos()));
+                    }
                     self.advance();
                     if negate {
                         // `-1` means suppress intercept.
@@ -428,16 +515,35 @@ impl Parser {
                         fixed.push(FixedTerm::Intercept);
                     }
                     negate = false;
+                    expect_term = false;
+                    pending_operator = false;
                 }
                 Some(Token::Zero) => {
+                    if !expect_term {
+                        return Err(FormulaError::MissingTermSeparator(self.pos()));
+                    }
                     self.advance();
                     fixed.push(FixedTerm::NoIntercept);
                     negate = false;
+                    expect_term = false;
+                    pending_operator = false;
                 }
                 Some(Token::Ident(_)) => {
+                    if !expect_term {
+                        return Err(FormulaError::MissingTermSeparator(self.pos()));
+                    }
                     let terms = self.parse_term_expr()?;
-                    fixed.extend(terms);
+                    if negate {
+                        // Top-level term removal (lme4 `-` semantics).
+                        for t in &terms {
+                            fixed.retain(|existing| existing != t);
+                        }
+                    } else {
+                        fixed.extend(terms);
+                    }
                     negate = false;
+                    expect_term = false;
+                    pending_operator = false;
                 }
                 Some(other) => {
                     return Err(FormulaError::UnexpectedToken(
@@ -506,6 +612,15 @@ impl Parser {
             Some(Token::Ident(_)) => {
                 if let Some(spanned) = self.advance() {
                     if let Token::Ident(ref name) = spanned.token {
+                        // A bare numeric literal (`2`, `2.5`, `2e3`) tokenizes
+                        // as an Ident but is not a valid model term; reject it
+                        // at parse time instead of deferring to design build.
+                        if name.parse::<f64>().is_ok() {
+                            return Err(FormulaError::NumericLiteralTerm(
+                                name.clone(),
+                                spanned.pos,
+                            ));
+                        }
                         return Ok(name.clone());
                     }
                 }
@@ -1197,6 +1312,67 @@ mod tests {
     }
 
     #[test]
+    fn backtick_identifier_with_spaces_and_odd_chars() {
+        let f = parse_formula("`reaction time` ~ `day of study` + (1 | `subject id`)").unwrap();
+        assert_eq!(f.response, "reaction time");
+        assert!(f
+            .fixed_terms
+            .contains(&FixedTerm::Column("day of study".into())));
+        assert_eq!(
+            f.random_terms[0].grouping,
+            GroupingFactor::Single("subject id".into())
+        );
+    }
+
+    #[test]
+    fn backtick_identifier_allows_reserved_and_digit_starts() {
+        // `2024` and a hyphenated name would not lex as bare identifiers.
+        let f = parse_formula("y ~ `2024-cohort` + `x-1`").unwrap();
+        assert!(f
+            .fixed_terms
+            .contains(&FixedTerm::Column("2024-cohort".into())));
+        assert!(f.fixed_terms.contains(&FixedTerm::Column("x-1".into())));
+    }
+
+    #[test]
+    fn unterminated_backtick_is_actionable_error() {
+        let err = parse_formula("y ~ `oops + (1 | g)").unwrap_err();
+        match err {
+            FormulaError::Other(msg) => {
+                assert!(msg.contains("unterminated backtick"), "got: {msg}");
+            }
+            other => panic!("expected Other, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_backtick_is_rejected() {
+        let err = parse_formula("y ~ `` + x").unwrap_err();
+        match err {
+            FormulaError::Other(msg) => {
+                assert!(msg.contains("empty backtick"), "got: {msg}");
+            }
+            other => panic!("expected Other, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn in_formula_transformation_gives_actionable_refusal() {
+        for src in ["y ~ x^2", "y ~ x %in% g", "y ~ x > 0"] {
+            let err = parse_formula(src).unwrap_err();
+            match err {
+                FormulaError::Other(msg) => {
+                    assert!(
+                        msg.contains("not supported") && msg.contains("precompute"),
+                        "expected actionable transform refusal, got: {msg}"
+                    );
+                }
+                other => panic!("expected Other for `{src}`, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn triple_interaction() {
         let f = parse_formula("y ~ a:b:c").unwrap();
         assert!(f.fixed_terms.contains(&FixedTerm::Interaction(vec![
@@ -1267,5 +1443,169 @@ mod tests {
         let rt1 = &f.random_terms[1];
         assert_eq!(rt1.terms, vec![FixedTerm::Intercept]);
         assert_eq!(rt1.grouping, GroupingFactor::Single("item".into()));
+    }
+
+    // ---- Grammar property tests (strictness) ----
+
+    /// Deterministic xorshift PRNG so the generated-grammar property test is
+    /// reproducible without pulling in a proptest/quickcheck dependency.
+    struct Rng(u64);
+    impl Rng {
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next_u64() % n as u64) as usize
+        }
+    }
+
+    /// Property: any RHS assembled from the grammar
+    ///   term      := ident | ident ':' ident | ident '*' ident | '1' | '0'
+    ///   re_block  := '(' ('1' | '1 + ' ident) ('|' | '||') ident ')'
+    ///   rhs       := term-or-block ( (' + ' | ' - ') term-or-block )*
+    /// must parse successfully and yield at least one fixed or random term.
+    /// `-` is exercised as lme4 term removal, which never makes a well-formed
+    /// formula unparseable.
+    #[test]
+    fn grammar_property_wellformed_formulas_parse() {
+        let mut rng = Rng(0x9E3779B97F4A7C15);
+        let idents = ["x", "y1", "cond", "age", "grp", "subj", "item"];
+        let groups = ["g", "subj", "item", "site"];
+        for _ in 0..2000 {
+            let n_parts = 1 + rng.below(4);
+            let mut rhs = String::new();
+            for part in 0..n_parts {
+                let kind = rng.below(6);
+                let is_block = kind == 5;
+                if part > 0 {
+                    // `-` is term removal and is invalid before a RE block, so
+                    // a RE-block part is always introduced with `+`.
+                    let use_minus = !is_block && rng.below(2) == 0;
+                    rhs.push_str(if use_minus { " - " } else { " + " });
+                }
+                match kind {
+                    0 => rhs.push('1'),
+                    1 => rhs.push('0'),
+                    2 => rhs.push_str(idents[rng.below(idents.len())]),
+                    3 => {
+                        rhs.push_str(idents[rng.below(idents.len())]);
+                        rhs.push(':');
+                        rhs.push_str(idents[rng.below(idents.len())]);
+                    }
+                    4 => {
+                        rhs.push_str(idents[rng.below(idents.len())]);
+                        rhs.push('*');
+                        rhs.push_str(idents[rng.below(idents.len())]);
+                    }
+                    _ => {
+                        let bar = if rng.below(2) == 0 { "|" } else { "||" };
+                        rhs.push_str(&format!(
+                            "(1{} {} {})",
+                            if rng.below(2) == 0 {
+                                String::new()
+                            } else {
+                                format!(" + {}", idents[rng.below(idents.len())])
+                            },
+                            bar,
+                            groups[rng.below(groups.len())]
+                        ));
+                    }
+                }
+            }
+            // Guarantee at least one additive term that the generator can
+            // never reference (and therefore never `-`-remove), so a
+            // removal-heavy RHS still leaves a non-degenerate model.
+            let formula = format!("resp ~ keep_sentinel + {rhs}");
+            let parsed = parse_formula(&formula);
+            assert!(
+                parsed.is_ok(),
+                "well-formed formula failed to parse: {formula:?} -> {:?}",
+                parsed.err()
+            );
+            let f = parsed.unwrap();
+            assert!(
+                !f.fixed_terms.is_empty() || !f.random_terms.is_empty(),
+                "formula {formula:?} produced no terms"
+            );
+        }
+    }
+
+    #[test]
+    fn grammar_property_trailing_operator_rejected() {
+        for bad in ["y ~ x +", "y ~ x -", "y ~ x + (1|g) +", "y ~ 1 + x1 - "] {
+            assert!(
+                matches!(parse_formula(bad), Err(FormulaError::TrailingOperator(_))),
+                "expected TrailingOperator for {bad:?}, got {:?}",
+                parse_formula(bad)
+            );
+        }
+    }
+
+    #[test]
+    fn grammar_property_missing_separator_rejected() {
+        for bad in ["y ~ (1|g) (1|h)", "y ~ x1 x2", "y ~ x1 (1|g)"] {
+            assert!(
+                matches!(
+                    parse_formula(bad),
+                    Err(FormulaError::MissingTermSeparator(_))
+                ),
+                "expected MissingTermSeparator for {bad:?}, got {:?}",
+                parse_formula(bad)
+            );
+        }
+    }
+
+    #[test]
+    fn grammar_property_numeric_literal_term_rejected() {
+        for bad in ["y ~ 2 * x1", "y ~ x1 + 3", "y ~ 2.5 + x1", "y ~ x1:4"] {
+            assert!(
+                matches!(
+                    parse_formula(bad),
+                    Err(FormulaError::NumericLiteralTerm(_, _))
+                ),
+                "expected NumericLiteralTerm for {bad:?}, got {:?}",
+                parse_formula(bad)
+            );
+        }
+    }
+
+    #[test]
+    fn minus_is_top_level_term_removal() {
+        // lme4 semantics: `-` removes a term from the set, it does not add it.
+        let f = parse_formula("y ~ 1 + x1 + x2 - x2").unwrap();
+        assert_eq!(
+            f.fixed_terms,
+            vec![FixedTerm::Intercept, FixedTerm::Column("x1".into()),],
+            "x2 should have been removed, not added"
+        );
+
+        // `- 1` still suppresses the intercept. Per the documented
+        // normalization (parse_formula), intercept suppression is represented
+        // as the *absence* of a FixedTerm::Intercept, not a NoIntercept token.
+        let f = parse_formula("y ~ x1 - 1").unwrap();
+        assert!(!f.fixed_terms.contains(&FixedTerm::Intercept));
+        assert!(!f.fixed_terms.contains(&FixedTerm::NoIntercept));
+        assert!(f.fixed_terms.contains(&FixedTerm::Column("x1".into())));
+
+        // Removing a never-added term is a harmless no-op (the implicit
+        // intercept is still inserted since none was given explicitly).
+        let f = parse_formula("y ~ x1 - x9").unwrap();
+        assert_eq!(
+            f.fixed_terms,
+            vec![FixedTerm::Intercept, FixedTerm::Column("x1".into())]
+        );
+    }
+
+    #[test]
+    fn minus_on_random_effect_block_rejected() {
+        assert!(matches!(
+            parse_formula("y ~ x1 - (1 | g)"),
+            Err(FormulaError::NegatedRandomEffect(_))
+        ));
     }
 }

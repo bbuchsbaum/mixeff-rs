@@ -18,12 +18,14 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use serde_json::Value;
 
+// Deserialization mirror of the JSON parity record; not every field is read
+// by this comparison example.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 struct ResultRecord {
     dataset: String,
     formula: String,
     family: String,
-    #[allow(dead_code)]
     link: String,
     estimator: String,
     n_obs: Option<usize>,

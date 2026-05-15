@@ -1,4 +1,5 @@
 #![cfg(not(feature = "nlopt"))]
+#![cfg(feature = "unstable-internals")]
 
 use mixeff_rs::datasets;
 use mixeff_rs::formula::parse_formula;

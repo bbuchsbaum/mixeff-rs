@@ -93,10 +93,7 @@ fn percentile(samples: &[f64], q: f64) -> f64 {
 }
 
 fn simple_error(message: impl Into<String>) -> Box<dyn std::error::Error> {
-    Box::new(std::io::Error::new(
-        std::io::ErrorKind::Other,
-        message.into(),
-    ))
+    Box::new(std::io::Error::other(message.into()))
 }
 
 fn time_operation<F>(
@@ -161,10 +158,10 @@ fn crossed_intercept_data(n_rows: usize) -> DataFrame {
     }
 
     let mut data = DataFrame::new();
-    data.add_numeric("y", y);
-    data.add_numeric("x", x);
-    data.add_categorical("subject", subject);
-    data.add_categorical("item", item);
+    data.add_numeric("y", y).unwrap();
+    data.add_numeric("x", x).unwrap();
+    data.add_categorical("subject", subject).unwrap();
+    data.add_categorical("item", item).unwrap();
     data
 }
 
@@ -183,9 +180,9 @@ fn failure_path_data(n_rows: usize) -> DataFrame {
     }
 
     let mut data = DataFrame::new();
-    data.add_numeric("y", y);
-    data.add_numeric("x", x);
-    data.add_categorical("group", group);
+    data.add_numeric("y", y).unwrap();
+    data.add_numeric("x", x).unwrap();
+    data.add_categorical("group", group).unwrap();
     data
 }
 

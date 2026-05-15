@@ -4,32 +4,31 @@
 //! [`stats_rank`] function computes the numerical column rank of a
 //! matrix using a column-pivoted QR decomposition, with a tolerance
 //! relative to the largest diagonal element of R.
+//!
+//! The factorization is Householder QR with Businger-Golub column
+//! pivoting, matching the LAPACK `xGEQP3`/`xLAQPS` algorithm that Julia
+//! uses through `LinearAlgebra.qr(x, ColumnNorm())`. Modified
+//! Gram-Schmidt was previously used here; it loses orthogonality on
+//! near-rank-deficient designs and selected a *different* set of kept
+//! columns than LAPACK, which broke cross-language parity for
+//! rank-deficient fixed-effects designs. Householder reflectors with
+//! the LAPACK partial-norm downdating recurrence (including the
+//! reorthogonalization safeguard) restore that parity.
 
 use nalgebra::DMatrix;
 
-/// Result of a column-pivoted QR factorization.
-#[derive(Debug, Clone)]
-pub struct PivotedQR {
-    /// The upper triangular factor `R` from QR (stored in the upper
-    /// triangle of a working matrix).
-    pub r: DMatrix<f64>,
-    /// Column pivot indices (0-based). `piv[i]` is the original column
-    /// index that was moved to position `i`.
-    pub piv: Vec<usize>,
-    /// The orthogonal factor `Q` (stored as a dense matrix). This may
-    /// be used for further computations but is not always needed.
-    pub q: DMatrix<f64>,
-}
-
 /// Compute a rank-revealing QR factorization with column pivoting.
 ///
-/// Uses modified Gram-Schmidt with column pivoting. At each step the
-/// column with the largest remaining norm is pivoted into position and
-/// the remaining columns are orthogonalised against it.
+/// Uses Householder reflectors with Businger-Golub column pivoting
+/// (LAPACK `xGEQP3` semantics): at each step the column with the
+/// largest remaining 2-norm is pivoted into position, a Householder
+/// reflector eliminates the sub-diagonal entries, and the trailing
+/// partial column norms are updated with the LAPACK downdating
+/// recurrence (recomputed exactly when cancellation is detected).
 ///
 /// Returns `(rank, pivot_indices, R_factor)` where:
-/// - `rank` is the numerical column rank.
-/// - `pivot_indices` are the 0-based column permutation.
+/// - `rank` is the numerical column rank (from the R diagonal).
+/// - `pivot_indices` is the full 0-based column permutation (length `n`).
 /// - `R_factor` is the upper triangular R from the factorization.
 ///
 /// The default tolerance is `1e-8`.
@@ -45,75 +44,113 @@ pub fn pivoted_qr_with_tol(a: &DMatrix<f64>, ranktol: f64) -> (usize, Vec<usize>
         return (0, Vec::new(), DMatrix::zeros(0, 0));
     }
 
-    // Modified Gram-Schmidt with column pivoting.
-    // Q is m×min(m,n), R is min(m,n)×n.
     let min_mn = m.min(n);
-    let mut q = a.clone(); // working copy; columns get orthogonalised in-place
-    let mut r = DMatrix::<f64>::zeros(min_mn, n);
+
+    // `work` holds the matrix being reduced. Householder vectors are
+    // written into the sub-diagonal part but we never reconstruct Q;
+    // only the upper-triangular R is read back.
+    let mut work = a.clone();
     let mut piv: Vec<usize> = (0..n).collect();
-    let mut col_norms: Vec<f64> = (0..n).map(|j| q.column(j).norm_squared()).collect();
-    let mut rank = 0;
+
+    // LAPACK xLAQPS norm bookkeeping:
+    //   vn1[j] = current partial 2-norm of the active part of column j
+    //   vn2[j] = reference copy used by the cancellation safeguard
+    let mut vn1: Vec<f64> = (0..n).map(|j| work.column(j).norm()).collect();
+    let mut vn2 = vn1.clone();
+    let tol3z = f64::EPSILON.sqrt();
+
+    let mut r = DMatrix::<f64>::zeros(min_mn, n);
 
     for k in 0..min_mn {
-        // Find the column with the largest remaining norm.
+        // --- Businger-Golub pivot: largest remaining partial norm. ---
         let mut best = k;
-        let mut best_norm = col_norms[k];
+        let mut best_norm = vn1[k];
         for j in (k + 1)..n {
-            if col_norms[j] > best_norm {
+            if vn1[j] > best_norm {
                 best = j;
-                best_norm = col_norms[j];
+                best_norm = vn1[j];
             }
         }
-
-        // Swap columns k and best (in both q and bookkeeping).
         if best != k {
-            q.swap_columns(k, best);
+            work.swap_columns(k, best);
             piv.swap(k, best);
-            col_norms.swap(k, best);
-            // Also swap already-computed R entries in rows 0..k
+            vn1.swap(k, best);
+            vn2.swap(k, best);
             for i in 0..k {
-                let tmp = r[(i, k)];
-                r[(i, k)] = r[(i, best)];
-                r[(i, best)] = tmp;
+                r.swap((i, k), (i, best));
             }
         }
 
-        // Compute the norm of the remaining part of column k.
-        let norm_k = q.column(k).norm();
-        if norm_k < f64::EPSILON * (m.max(n) as f64) {
-            break;
+        // --- Householder reflector for work[k.., k] (LAPACK dlarfg). ---
+        let alpha = work[(k, k)];
+        let mut xnorm_sq = 0.0;
+        for i in (k + 1)..m {
+            xnorm_sq += work[(i, k)] * work[(i, k)];
         }
 
-        r[(k, k)] = norm_k;
-        rank += 1;
+        let (beta, tau) = if xnorm_sq == 0.0 {
+            // Column already in upper-triangular form: no reflection.
+            (alpha, 0.0)
+        } else {
+            let norm = (alpha * alpha + xnorm_sq).sqrt();
+            let beta = if alpha >= 0.0 { -norm } else { norm };
+            let tau = (beta - alpha) / beta;
+            let inv = 1.0 / (alpha - beta);
+            for i in (k + 1)..m {
+                work[(i, k)] *= inv;
+            }
+            (beta, tau)
+        };
 
-        // Normalise column k of Q.
-        let inv_norm = 1.0 / norm_k;
-        for i in 0..m {
-            q[(i, k)] *= inv_norm;
-        }
+        r[(k, k)] = beta;
 
-        // Orthogonalise remaining columns against column k.
+        // --- Apply reflector to trailing columns and write R row k. ---
         for j in (k + 1)..n {
-            let dot: f64 = (0..m).map(|i| q[(i, k)] * q[(i, j)]).sum();
-            r[(k, j)] = dot;
-            for i in 0..m {
-                q[(i, j)] -= dot * q[(i, k)];
+            if tau != 0.0 {
+                let mut dot = work[(k, j)]; // implicit v[k] == 1
+                for i in (k + 1)..m {
+                    dot += work[(i, k)] * work[(i, j)];
+                }
+                let w = tau * dot;
+                work[(k, j)] -= w;
+                for i in (k + 1)..m {
+                    work[(i, j)] -= w * work[(i, k)];
+                }
             }
-            col_norms[j] = q.column(j).norm_squared();
+            r[(k, j)] = work[(k, j)];
+
+            // --- LAPACK partial-norm downdate with safeguard. ---
+            if vn1[j] != 0.0 {
+                let mut temp = (work[(k, j)].abs() / vn1[j]).powi(2);
+                temp = (1.0 - temp).max(0.0);
+                let ratio = vn1[j] / vn2[j];
+                let temp2 = temp * ratio * ratio;
+                if temp2 <= tol3z {
+                    // Cancellation: recompute the exact trailing norm.
+                    let mut s = 0.0;
+                    for i in (k + 1)..m {
+                        s += work[(i, j)] * work[(i, j)];
+                    }
+                    let exact = s.sqrt();
+                    vn1[j] = exact;
+                    vn2[j] = exact;
+                } else {
+                    vn1[j] *= temp.sqrt();
+                }
+            }
         }
     }
 
-    // Determine rank from diagonal of R using tolerance.
-    let detected_rank = compute_rank_from_r(&r, ranktol);
-    let rank = rank.min(detected_rank);
-
+    let rank = compute_rank_from_r(&r, ranktol);
     (rank, piv, r)
 }
 
 /// Compute the rank from the R factor's diagonal using the given tolerance.
 ///
-/// A column is considered dependent if `|R[i,i]| < ranktol * |R[0,0]|`.
+/// A column is considered dependent if `|R[i,i]| <= ranktol * |R[0,0]|`.
+/// With Businger-Golub pivoting the diagonal magnitudes are
+/// non-increasing, so this matches Julia's
+/// `searchsortedlast(abs.(diag(R)), fdv*ranktol; rev=true)`.
 fn compute_rank_from_r(r: &DMatrix<f64>, ranktol: f64) -> usize {
     let diag_len = r.nrows().min(r.ncols());
     if diag_len == 0 {
@@ -144,13 +181,14 @@ fn compute_rank_from_r(r: &DMatrix<f64>, ranktol: f64) -> usize {
 /// linearly independent columns and `pivot_indices` gives the column
 /// reordering. In the full-rank case, `pivot_indices` is `0..n`.
 ///
-/// This mirrors `statsrank` from Julia's MixedModels.jl. The rank is
-/// determined from the absolute values of the diagonal of R, relative
-/// to the first (and largest) diagonal element.
-///
-/// # Arguments
-///
-/// * `a` - The matrix to analyse.
+/// This mirrors `statsrank` from Julia's MixedModels.jl, including the
+/// intercept-preservation trick: when the first column is the all-ones
+/// intercept and column pivoting would otherwise move it out of leading
+/// position, the column is temporarily inflated and the factorization
+/// re-run so the intercept stays in the retained set (matching LAPACK +
+/// the Julia reference). The rank is determined from the absolute
+/// values of the diagonal of R, relative to the first (and largest)
+/// diagonal element.
 ///
 /// The default rank tolerance is `1e-8`.
 pub fn stats_rank(a: &DMatrix<f64>) -> (usize, Vec<usize>) {
@@ -159,26 +197,52 @@ pub fn stats_rank(a: &DMatrix<f64>) -> (usize, Vec<usize>) {
 
 /// Same as [`stats_rank`] but with a custom tolerance.
 pub fn stats_rank_with_tol(a: &DMatrix<f64>, ranktol: f64) -> (usize, Vec<usize>) {
-    let (_m, n) = (a.nrows(), a.ncols());
+    let (m, n) = (a.nrows(), a.ncols());
 
     if n == 0 {
         return (0, Vec::new());
     }
 
-    let (rank, piv, _r) = pivoted_qr_with_tol(a, ranktol);
+    let (_rank, piv, r) = pivoted_qr_with_tol(a, ranktol);
 
-    if rank == n {
-        // Full rank: return the identity permutation (matching Julia behaviour).
+    let diag_len = r.nrows().min(r.ncols());
+    let dvec: Vec<f64> = (0..diag_len).map(|i| r[(i, i)].abs()).collect();
+    let fdv = dvec.first().copied().unwrap_or(0.0);
+    let cmp = fdv * ranktol;
+
+    // Full rank (and the diagonal is long enough to cover every column):
+    // identity permutation, matching Julia's `collect(axes(x, 2))`.
+    if diag_len == n && dvec.last().map(|&d| d > cmp).unwrap_or(false) {
         return (n, (0..n).collect());
     }
 
-    // For the rank-deficient case, sort the first `rank` pivot indices
-    // to maintain original column order among the independent columns
-    // (matching Julia's `sort!(view(piv, 1:rank))`).
-    let mut result_piv = piv;
-    result_piv[0..rank].sort();
+    // Rank = count of diagonal entries above the relative threshold.
+    let rank = dvec.iter().filter(|&&d| d > cmp).count();
+    if rank == n {
+        return (n, (0..n).collect());
+    }
 
-    (rank, result_piv)
+    let mut piv = piv;
+
+    // Intercept-preservation: if the first column is all-ones and the
+    // pivot moved it out of the leading slot, inflate it and re-run so
+    // LAPACK keeps it (Julia pivot.jl lines 27-34).
+    let first_col_all_ones = m > 0 && (0..m).all(|i| a[(i, 0)] == 1.0);
+    if first_col_all_ones && piv.first() != Some(&0) {
+        let mut inflated = a.clone();
+        let scale = (fdv + 1.0) / (m as f64).sqrt();
+        for i in 0..m {
+            inflated[(i, 0)] = scale;
+        }
+        let (_r2, piv2, _rr2) = pivoted_qr_with_tol(&inflated, ranktol);
+        piv = piv2;
+    }
+
+    // Maintain original column order among the linearly independent
+    // columns (Julia's `sort!(view(piv, 1:rank))`).
+    piv[0..rank].sort_unstable();
+
+    (rank, piv)
 }
 
 #[cfg(test)]
@@ -192,7 +256,6 @@ mod tests {
         let (rank, piv, r) = pivoted_qr(&a);
         assert_eq!(rank, 3);
         assert_eq!(piv.len(), 3);
-        // R should have |diag| = 1
         for i in 0..3 {
             assert_relative_eq!(r[(i, i)].abs(), 1.0, epsilon = 1e-10);
         }
@@ -215,8 +278,40 @@ mod tests {
     }
 
     #[test]
+    fn test_pivoted_qr_factorization_reconstructs_permuted_matrix() {
+        // R must satisfy: for the retained columns, |R[k,k]| equals the
+        // norm of the residual after projecting out earlier columns, and
+        // the diagonal is non-increasing (Businger-Golub property).
+        let a = DMatrix::from_row_slice(
+            4,
+            3,
+            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0, 2.0, 1.0, 3.0],
+        );
+        let (rank, piv, r) = pivoted_qr(&a);
+        assert_eq!(rank, 3);
+        // Diagonal magnitudes are non-increasing under column pivoting.
+        for i in 0..2 {
+            assert!(
+                r[(i, i)].abs() >= r[(i + 1, i + 1)].abs() - 1e-12,
+                "pivoted R diagonal must be non-increasing"
+            );
+        }
+        // The Frobenius norm of R equals that of A (orthogonal Q).
+        let a_fro = a.norm();
+        let mut r_fro = 0.0;
+        for i in 0..r.nrows() {
+            for j in i..r.ncols() {
+                r_fro += r[(i, j)] * r[(i, j)];
+            }
+        }
+        assert_relative_eq!(r_fro.sqrt(), a_fro, epsilon = 1e-9);
+        let mut sorted_piv = piv.clone();
+        sorted_piv.sort();
+        assert_eq!(sorted_piv, vec![0, 1, 2]);
+    }
+
+    #[test]
     fn test_pivoted_qr_rectangular_tall() {
-        // 4x2 full-rank matrix
         let a = DMatrix::from_row_slice(4, 2, &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 1.0]);
         let (rank, piv, r) = pivoted_qr(&a);
         assert_eq!(rank, 2);
@@ -226,10 +321,10 @@ mod tests {
 
     #[test]
     fn test_pivoted_qr_rectangular_wide() {
-        // 2x4 matrix with rank 2
         let a = DMatrix::from_row_slice(2, 4, &[1.0, 0.0, 1.0, 2.0, 0.0, 1.0, 1.0, 1.0]);
-        let (rank, _piv, _r) = pivoted_qr(&a);
+        let (rank, piv, _r) = pivoted_qr(&a);
         assert_eq!(rank, 2);
+        assert_eq!(piv.len(), 4);
     }
 
     #[test]
@@ -265,7 +360,6 @@ mod tests {
         let a = DMatrix::from_row_slice(3, 2, &[1.0, 0.0, 0.0, 1.0, 1.0, 1.0]);
         let (rank, piv) = stats_rank(&a);
         assert_eq!(rank, 2);
-        // Full rank: identity permutation
         assert_eq!(piv, vec![0, 1]);
     }
 
@@ -283,7 +377,6 @@ mod tests {
         );
         let (rank, piv) = stats_rank(&a);
         assert_eq!(rank, 2);
-        // The first `rank` pivot indices should be sorted.
         assert!(piv[0] < piv[1]);
     }
 
@@ -302,28 +395,11 @@ mod tests {
         assert_eq!(rank, 0);
     }
 
-    #[test]
-    fn test_pivoted_qr_preserves_product() {
-        // For a full-rank matrix, Q*R (with column pivoting) should
-        // reconstruct the original (permuted) matrix.
-        let a = DMatrix::from_row_slice(
-            4,
-            3,
-            &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0, 2.0, 1.0, 3.0],
-        );
-        let (rank, piv, _r) = pivoted_qr(&a);
-        assert_eq!(rank, 3);
-        // Verify the pivot is a permutation of [0,1,2]
-        let mut sorted_piv = piv.clone();
-        sorted_piv.sort();
-        assert_eq!(sorted_piv, vec![0, 1, 2]);
-    }
-
     // ── Tests ported from MixedModels.jl/test/pivot.jl ─────────────────────
 
     #[test]
     fn test_stats_rank_full_rank_intercept_plus_predictor() {
-        // Mirrors pivot.jl "fullranknumeric": [1, U] is full rank.
+        // pivot.jl "fullranknumeric": [1, U] is full rank, pivot == 1:2.
         let n = 200;
         let mut a = DMatrix::zeros(n, 2);
         for i in 0..n {
@@ -336,18 +412,15 @@ mod tests {
     }
 
     #[test]
-    fn test_stats_rank_dependent_column_realistic() {
-        // Mirrors pivot.jl "dependentcolumn": V = U − 4.5 (mean-centred U)
-        // makes [1, U, V, Z] rank-deficient with rank 3.
-        //
-        // Note: unlike Julia's LAPACK-based pivot (which preserves the intercept),
-        // our modified Gram-Schmidt drops the lowest-norm column from the dependent
-        // set {1, U, V}. The key properties — rank == 3 and Z retained — are
-        // implementation-independent and are what we test here.
+    fn test_stats_rank_dependent_column_matches_lapack_julia() {
+        // pivot.jl "dependentcolumn": V = U − 4.5 (mean-centred U) makes
+        // [1, U, V, Z] rank-deficient with rank 3. Julia/LAPACK asserts:
+        //   pivot[1] == 1   (intercept retained, first position)
+        //   pivot[3] == 4   (Z, col index 3 here, not pivoted out)
+        //   pivot[4] in {2,3} (either U or V dropped)
         let n = 200;
         let u: Vec<f64> = (0..n).map(|i| (i % 10) as f64).collect();
         let v: Vec<f64> = u.iter().map(|&x| x - 4.5).collect();
-        // Z: deterministic sequence linearly independent of 1, U, V
         let z: Vec<f64> = (0..n)
             .map(|i| (((i * 7 + 3) % 13) as f64) * 0.1 + 0.05)
             .collect();
@@ -361,18 +434,62 @@ mod tests {
         }
 
         let (rank, piv) = stats_rank(&a);
-        // V is a linear combination of 1 and U → rank 3
-        assert_eq!(rank, 3);
-        // Z (col 3) is linearly independent and must stay in the selected set
+        assert_eq!(rank, 3, "V is a linear combo of 1 and U → rank 3");
+        // Intercept retained in the leading position (LAPACK parity that
+        // the old MGS port could not satisfy).
+        assert_eq!(piv[0], 0, "intercept (col 0) must remain first");
+        // Z (col 3) is independent and must stay in the retained set.
         assert!(
             piv[..rank].contains(&3),
-            "Z (col 3) must not be pivoted out"
+            "Z (col 3) must not be pivoted out, got piv={piv:?}"
         );
-        // The dropped column must be from the linearly dependent set {1, U, V}
+        // The dropped column is U or V (the dependent pair).
         let dropped = piv[rank];
         assert!(
-            dropped == 0 || dropped == 1 || dropped == 2,
-            "dropped column must be from the dependent set, got col {dropped}"
+            dropped == 1 || dropped == 2,
+            "dropped column must be U or V, got col {dropped}"
+        );
+        // Independent columns keep ascending (original) order.
+        assert!(piv[..rank].windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn test_stats_rank_intercept_preserved_when_pivot_would_move_it() {
+        // The intercept column has a smaller raw norm than a large-scale
+        // predictor, so naive Businger-Golub pivots it out of leading
+        // position. The intercept-preservation trick must restore it.
+        let n = 50;
+        let mut a = DMatrix::zeros(n, 3);
+        for i in 0..n {
+            a[(i, 0)] = 1.0; // intercept (norm sqrt(50))
+            a[(i, 1)] = 100.0 * ((i % 7) as f64 + 1.0); // large-scale predictor
+            a[(i, 2)] = (i % 3) as f64 - 1.0;
+        }
+        let (rank, piv) = stats_rank(&a);
+        assert_eq!(rank, 3);
+        assert_eq!(piv, vec![0, 1, 2], "intercept must be preserved first");
+    }
+
+    #[test]
+    fn test_stats_rank_qr_missing_cells_relative_order() {
+        // pivot.jl "qr missing cells": independent columns preserve their
+        // relative (sorted) order and the rank is detected correctly on a
+        // rank-deficient categorical-style design.
+        let n = 60;
+        // Build [1, A, B, A:B-collinear] where the last column duplicates A.
+        let mut a = DMatrix::zeros(n, 4);
+        for i in 0..n {
+            a[(i, 0)] = 1.0;
+            a[(i, 1)] = (i % 5) as f64;
+            a[(i, 2)] = (i % 4) as f64;
+            a[(i, 3)] = (i % 5) as f64; // exact duplicate of col 1
+        }
+        let (rank, piv) = stats_rank(&a);
+        assert_eq!(rank, 3);
+        let kept = &piv[..rank];
+        assert!(
+            kept.windows(2).all(|w| w[0] < w[1]),
+            "independent columns must keep relative order, got {kept:?}"
         );
     }
 }

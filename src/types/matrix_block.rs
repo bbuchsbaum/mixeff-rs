@@ -8,6 +8,7 @@ use nalgebra_sparse::csc::CscMatrix;
 /// The blocked system stores the lower triangle of `[Z1 Z2 ... X y]'[Z1 Z2 ... X y]`.
 /// Blocks can be dense, diagonal, block-diagonal, or sparse.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum MatrixBlock {
     Dense(DMatrix<f64>),
     Sparse(CscMatrix<f64>),
@@ -130,7 +131,7 @@ pub(crate) fn with_block_triple<T, F>(
     src_a_idx: usize,
     src_b_idx: usize,
     f: F,
-) -> T
+) -> crate::error::Result<T>
 where
     F: FnOnce(&mut MatrixBlock, &MatrixBlock, &MatrixBlock) -> T,
 {
@@ -138,10 +139,17 @@ where
     debug_assert_ne!(target_idx, src_b_idx);
     debug_assert_ne!(src_a_idx, src_b_idx);
 
+    let n_blocks = blocks.len();
+    if target_idx >= n_blocks {
+        return Err(crate::error::MixedModelError::DimensionMismatch(format!(
+            "blocked Cholesky target index {target_idx} is out of bounds for {n_blocks} blocks"
+        )));
+    }
+
     let (before, target_and_after) = blocks.split_at_mut(target_idx);
     let (target, after) = target_and_after
         .split_first_mut()
-        .expect("target index must be in bounds");
+        .expect("target_idx < n_blocks checked above");
 
     let get_src = |idx: usize| -> &MatrixBlock {
         if idx < target_idx {
@@ -151,7 +159,7 @@ where
         }
     };
 
-    f(target, get_src(src_a_idx), get_src(src_b_idx))
+    Ok(f(target, get_src(src_a_idx), get_src(src_b_idx)))
 }
 
 pub(crate) fn with_dense_block<T, F>(block: &MatrixBlock, f: F) -> T

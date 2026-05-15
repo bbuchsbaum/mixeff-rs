@@ -57,7 +57,11 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { (mp + 3) as u32 } else { (mp - 9) as u32 };
+    let m = if mp < 10 {
+        (mp + 3) as u32
+    } else {
+        (mp - 9) as u32
+    };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
 }
@@ -101,8 +105,7 @@ fn write_provenance_if_missing(
         .file_stem()
         .and_then(|s| s.to_str())
         .expect("UTF-8 stem");
-    let prov_path = json_path
-        .with_file_name(format!("{stem}.provenance.json"));
+    let prov_path = json_path.with_file_name(format!("{stem}.provenance.json"));
     if prov_path.exists() {
         return Ok(false);
     }

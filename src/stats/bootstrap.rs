@@ -61,35 +61,73 @@ pub fn restore_replicates<R: Read>(
     restorereplicates(reader, model)
 }
 
-/// Stop-gap GLMM bootstrap entry point.
+/// GLMM parametric bootstrap.
 ///
-/// LMM parametric bootstrap is implemented by [`parametricbootstrap`]. GLMM
-/// response simulation still needs family-specific draws before refitting can
-/// be certified. Keep the failure explicit, especially for Gamma models, so a
-/// dispersion-family GLMM cannot accidentally reuse Gaussian LMM simulation.
+/// For each replicate: simulate a response from the fitted model under a
+/// fresh draw of the random effects (see
+/// [`GeneralizedLinearMixedModel::simulate_response`]), refit a clone of the
+/// template GLMM, and record its objective, dispersion, β, standard errors,
+/// and θ. Supported for Bernoulli, Binomial, and Poisson responses. Gamma,
+/// InverseGaussian, and Normal-as-GLM are refused: their response draws need
+/// a dispersion-aware sampler, not Gaussian LMM residual reuse.
+///
+/// A replicate whose refit fails numerically is recorded with `NaN`
+/// objective/σ/SE (matching the LMM [`parametricbootstrap`] convention) so
+/// downstream summaries can filter on finiteness.
 pub fn parametricbootstrap_glmm<R: rand::Rng>(
-    _rng: &mut R,
-    _n_rep: usize,
+    rng: &mut R,
+    n_rep: usize,
     model: &GeneralizedLinearMixedModel,
 ) -> Result<MixedModelBootstrap> {
+    use crate::model::traits::MixedModelFit;
+
     match model.family {
-        Family::Gamma => Err(MixedModelError::Unsupported(
-            "Gamma GLMM parametric bootstrap is not implemented; response simulation must draw \
-             y* ~ Gamma(shape = 1 / phi, scale = mu * phi) with phi = dispersion(true), \
-             not fall back to Gaussian LMM residual simulation"
-                .to_string(),
-        )),
-        Family::InverseGaussian | Family::Normal => Err(MixedModelError::Unsupported(format!(
-            "{:?} GLMM parametric bootstrap is not implemented for dispersion-family responses",
-            model.family
-        ))),
-        Family::Bernoulli | Family::Binomial | Family::Poisson => {
-            Err(MixedModelError::Unsupported(format!(
-                "{:?} GLMM parametric bootstrap is not implemented yet",
+        Family::Bernoulli | Family::Binomial | Family::Poisson => {}
+        Family::Gamma => {
+            return Err(MixedModelError::Unsupported(
+                "Gamma GLMM parametric bootstrap is not implemented; response simulation must \
+                 draw y* ~ Gamma(shape = 1 / phi, scale = mu * phi) with phi = dispersion(true), \
+                 not fall back to Gaussian LMM residual simulation"
+                    .to_string(),
+            ));
+        }
+        Family::InverseGaussian | Family::Normal => {
+            return Err(MixedModelError::Unsupported(format!(
+                "{:?} GLMM parametric bootstrap is not implemented for dispersion-family responses",
                 model.family
-            )))
+            )));
         }
     }
+
+    let mut fits = Vec::with_capacity(n_rep);
+    for _ in 0..n_rep {
+        let y_sim = model.simulate_response(rng)?;
+        let mut work = model.clone();
+        match work.refit(&y_sim) {
+            Ok(_) => {
+                let beta = MixedModelFit::coef(&work);
+                fits.push(BootstrapReplicate {
+                    objective: work.objective(),
+                    sigma: work.dispersion(false),
+                    se: work.stderror(),
+                    beta,
+                    theta: work.theta(),
+                });
+            }
+            Err(_) => {
+                let beta = MixedModelFit::coef(&work);
+                fits.push(BootstrapReplicate {
+                    objective: f64::NAN,
+                    sigma: f64::NAN,
+                    se: nalgebra::DVector::from_element(beta.len(), f64::NAN),
+                    beta,
+                    theta: work.theta(),
+                });
+            }
+        }
+    }
+
+    Ok(MixedModelBootstrap { fits })
 }
 
 /// Shortest coverage interval containing `level` proportion of values.
@@ -169,6 +207,120 @@ mod tests {
         let mut v = vec![0.0, 10.0, 11.0, 12.0, 100.0];
         let (lo, hi) = shortest_cov_int(&mut v, 0.6);
         assert_eq!((lo, hi), (10.0, 12.0));
+    }
+
+    fn poisson_glmm_fixture() -> GeneralizedLinearMixedModel {
+        let mut y = Vec::new();
+        let mut x = Vec::new();
+        let mut g = Vec::new();
+        for grp in 0..5 {
+            for obs in 0..8 {
+                let xv = obs as f64 - 3.5;
+                let eta = 0.8 + 0.1 * xv + [-0.2, 0.1, 0.0, 0.15, -0.05][grp];
+                y.push(eta.exp().round().max(1.0));
+                x.push(xv);
+                g.push(format!("g{}", grp + 1));
+            }
+        }
+        let mut data = DataFrame::new();
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_categorical("g", g).unwrap();
+        let formula = parse_formula("y ~ 1 + x + (1 | g)").unwrap();
+        let mut model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Poisson, None).unwrap();
+        model.fit().unwrap();
+        model
+    }
+
+    fn bernoulli_glmm_fixture() -> GeneralizedLinearMixedModel {
+        let mut y = Vec::new();
+        let mut x = Vec::new();
+        let mut g = Vec::new();
+        for grp in 0..6 {
+            for obs in 0..8 {
+                let xv = obs as f64 - 3.5;
+                // Deterministic, non-separable binary pattern.
+                let bit = ((grp + obs) % 2) as f64;
+                y.push(bit);
+                x.push(xv);
+                g.push(format!("g{}", grp + 1));
+            }
+        }
+        let mut data = DataFrame::new();
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_categorical("g", g).unwrap();
+        let formula = parse_formula("y ~ 1 + x + (1 | g)").unwrap();
+        let mut model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+        model.fit().unwrap();
+        model
+    }
+
+    #[test]
+    fn test_poisson_glmm_parametricbootstrap_runs_and_is_seed_deterministic() {
+        let model = poisson_glmm_fixture();
+
+        let mut rng1 = StdRng::seed_from_u64(20260515);
+        let boot1 = parametricbootstrap_glmm(&mut rng1, 12, &model)
+            .expect("Poisson GLMM parametric bootstrap must be supported");
+        assert_eq!(boot1.fits.len(), 12);
+
+        // Most replicates refit successfully with finite β.
+        let finite = boot1
+            .fits
+            .iter()
+            .filter(|r| r.objective.is_finite() && r.beta.iter().all(|b| b.is_finite()))
+            .count();
+        assert!(
+            finite >= 10,
+            "expected most Poisson PB replicates to converge, got {finite}/12"
+        );
+        for r in &boot1.fits {
+            assert_eq!(r.beta.len(), 2, "intercept + x");
+            assert_eq!(r.theta.len(), 1, "one (1|g) variance component");
+        }
+
+        // Same seed → identical replicates.
+        let mut rng2 = StdRng::seed_from_u64(20260515);
+        let boot2 = parametricbootstrap_glmm(&mut rng2, 12, &model).unwrap();
+        for (a, b) in boot1.fits.iter().zip(boot2.fits.iter()) {
+            assert_eq!(a.beta.as_slice(), b.beta.as_slice());
+            assert_eq!(a.theta, b.theta);
+        }
+    }
+
+    #[test]
+    fn test_bernoulli_glmm_parametricbootstrap_runs() {
+        let model = bernoulli_glmm_fixture();
+        let mut rng = StdRng::seed_from_u64(42);
+        let boot = parametricbootstrap_glmm(&mut rng, 10, &model)
+            .expect("Bernoulli GLMM parametric bootstrap must be supported");
+        assert_eq!(boot.fits.len(), 10);
+        let finite = boot
+            .fits
+            .iter()
+            .filter(|r| r.beta.iter().all(|b| b.is_finite()))
+            .count();
+        assert!(
+            finite >= 8,
+            "expected most Bernoulli PB replicates to have finite β, got {finite}/10"
+        );
+    }
+
+    #[test]
+    fn test_glmm_simulate_response_respects_family_support() {
+        // Bernoulli draws are 0/1.
+        let bern = bernoulli_glmm_fixture();
+        let mut rng = StdRng::seed_from_u64(7);
+        let ys = bern.simulate_response(&mut rng).unwrap();
+        assert!(ys.iter().all(|&v| v == 0.0 || v == 1.0));
+
+        // Poisson draws are non-negative integers.
+        let pois = poisson_glmm_fixture();
+        let ys = pois.simulate_response(&mut rng).unwrap();
+        assert!(ys.iter().all(|&v| v >= 0.0 && v.fract() == 0.0));
     }
 
     #[test]

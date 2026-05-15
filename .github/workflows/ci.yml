@@ -3,25 +3,113 @@ name: CI
 on:
   push:
   pull_request:
+  schedule:
+    # Weekly Julia-parity gate: checked-in fixtures rot silently as
+    # MixedModels.jl evolves, so re-check them on a schedule.
+    - cron: "0 6 * * 1"
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  cargo-test:
-    name: cargo test (${{ matrix.name }})
-    runs-on: ubuntu-latest
+  test:
+    name: test ${{ matrix.name }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: default
+            os: ubuntu-latest
+            command: cargo test
+          - name: default
+            os: macos-latest
+            command: cargo test
+          - name: default
+            os: windows-latest
             command: cargo test
           - name: nlopt
+            os: ubuntu-latest
             command: cargo test --features nlopt
-
+          - name: no-default-features
+            os: ubuntu-latest
+            command: cargo test --no-default-features
+          - name: prima
+            os: ubuntu-latest
+            command: cargo test --features prima
+          # Runs on every push/PR (no schedule guard) so the gated
+          # compiler/datasets/pathology contract tests stay continuously
+          # covered even though that surface is not part of the stable 1.0 API.
+          - name: unstable-internals
+            os: ubuntu-latest
+            command: cargo test --features unstable-internals
+          - name: nlopt+unstable
+            os: ubuntu-latest
+            command: cargo test --features "nlopt unstable-internals"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install NLopt build prerequisites
-        if: matrix.name == 'nlopt'
+        if: startsWith(matrix.name, 'nlopt') && runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y cmake g++
       - name: Run tests
         run: ${{ matrix.command }}
+
+  lint:
+    name: lint (fmt + clippy + doc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: clippy (deny warnings)
+        run: cargo clippy --all-targets -- -D warnings
+      - name: clippy unstable-internals (deny warnings)
+        run: cargo clippy --all-targets --features unstable-internals -- -D warnings
+      - name: rustdoc (deny warnings)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps
+
+  msrv:
+    name: MSRV (1.80)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.80
+      - name: cargo check at pinned MSRV
+        run: cargo check --all-targets
+
+  supply-chain:
+    name: cargo deny + cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny,cargo-audit
+      - name: cargo deny
+        run: cargo deny check
+      - name: cargo audit
+        run: cargo audit
+
+  julia-parity:
+    name: Julia parity fixtures (scheduled)
+    # Only on the weekly schedule: the parity gate needs a Julia toolchain
+    # plus MixedModels.jl and is too slow for every push/PR.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: "1"
+      - name: Install Julia parity dependencies
+        run: julia -e 'using Pkg; Pkg.add(["MixedModels", "DataFrames", "JSON3"])'
+      - name: Check Julia parity fixtures
+        run: bash scripts/check_julia_parity_fixtures.sh

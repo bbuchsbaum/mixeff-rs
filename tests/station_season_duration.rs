@@ -1,3 +1,5 @@
+#![cfg(feature = "unstable-internals")]
+
 use std::collections::HashMap;
 
 use mixeff_rs::compiler::{

@@ -1,3 +1,11 @@
+// This module is the `unstable-internals` public surface. On a default build
+// it is `pub(crate)` and many types / re-exports here have no in-crate
+// consumer (they were only used by external test/example crates, which are
+// now feature-gated), so they read as `unused_imports` / `dead_code`.
+// Suppress those lints ONLY when the feature is off; with `unstable-internals`
+// enabled this is real public API and full linting stays in force (verified:
+// clippy --features unstable-internals -D warnings is clean).
+#![cfg_attr(not(feature = "unstable-internals"), allow(unused_imports, dead_code))]
 //! Compiler-contract layer for mixed model specifications.
 //!
 //! This module is intentionally additive. It records semantic model meaning,

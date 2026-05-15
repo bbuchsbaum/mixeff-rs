@@ -71,9 +71,9 @@ fn simulate(n_subjects: usize, n_obs_per_subject: usize, seed: u64) -> DataFrame
     }
 
     let mut df = DataFrame::new();
-    df.add_numeric("reaction", reaction);
-    df.add_numeric("days", days);
-    df.add_categorical("subj", subj_labels);
+    df.add_numeric("reaction", reaction).unwrap();
+    df.add_numeric("days", days).unwrap();
+    df.add_categorical("subj", subj_labels).unwrap();
     df
 }
 

@@ -1,5 +1,6 @@
 /target
 .omc/
+progress.txt
 .DS_Store
 MixedModels.jl/
 .mote/

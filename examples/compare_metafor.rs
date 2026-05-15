@@ -14,6 +14,11 @@
 //!     Rscript scripts/compare_metafor.R
 //!     cargo run --release --example compare_metafor
 
+// Same rationale as the crate-level policy in src/lib.rs: the CSV reader's
+// `(Vec<i64>, Vec<f64>, Vec<f64>)` return is an intrinsic column triple;
+// aliasing it adds indirection without clarity.
+#![allow(clippy::type_complexity)]
+
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -121,9 +126,7 @@ fn report_parity(
 
     let metafor_beta = first_scalar(&payload["beta"]).ok_or("metafor beta missing")?;
     let metafor_se = first_scalar(&payload["se"]).ok_or("metafor se missing")?;
-    let metafor_tau_sq = payload["tau_sq"]
-        .as_f64()
-        .ok_or("metafor tau_sq missing")?;
+    let metafor_tau_sq = payload["tau_sq"].as_f64().ok_or("metafor tau_sq missing")?;
     let metafor_loglik = payload["log_likelihood"]
         .as_f64()
         .ok_or("metafor log_likelihood missing")?;
@@ -131,8 +134,8 @@ fn report_parity(
     println!();
     println!("Numerical parity vs metafor::rma.mv:");
     let pairs = [
-        ("beta",   rust_beta,   metafor_beta,   1e-6),
-        ("se",     rust_se,     metafor_se,     1e-5),
+        ("beta", rust_beta, metafor_beta, 1e-6),
+        ("se", rust_se, metafor_se, 1e-5),
         ("tau_sq", rust_tau_sq, metafor_tau_sq, 1e-4),
     ];
     let mut failed = 0u32;
@@ -229,5 +232,8 @@ fn first_scalar(value: &serde_json::Value) -> Option<f64> {
     if let Some(x) = value.as_f64() {
         return Some(x);
     }
-    value.as_array().and_then(|a| a.first()).and_then(|v| v.as_f64())
+    value
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|v| v.as_f64())
 }

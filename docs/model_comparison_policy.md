@@ -24,8 +24,12 @@ not perform the refit.
 
 Nested random-effect comparisons with identical fixed effects may use an LRT
 under a common ML or REML criterion. Boundary-sensitive random-effect
-comparisons may still need a bootstrap or restricted LRT for inferential use;
-the ordinary LRT table is only the mechanical likelihood-ratio calculation.
+comparisons should use the parametric-bootstrap LRT route,
+`stats::parametric_bootstrap_lrt` (schema
+`mixedmodels.parametric_bootstrap_lrt`, version `1.0.0`), which calibrates the
+reference distribution by simulation rather than assuming the asymptotic
+chi-square; the ordinary LRT table is only the mechanical likelihood-ratio
+calculation.
 
 ## Information criteria
 

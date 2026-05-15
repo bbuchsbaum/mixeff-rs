@@ -29,8 +29,12 @@ For positive LRT statistic `x`, the p-value is
 Fixed-effect comparisons return
 `boundary_lrt_requires_variance_component_comparison` or
 `boundary_lrt_not_fixed_effect_method`. Multi-parameter boundary comparisons
-return `boundary_lrt_mixture_weights_not_certified` and should be routed to a
-bootstrap or a separately calibrated simulation.
+return `boundary_lrt_mixture_weights_not_certified` and should be routed to
+the parametric-bootstrap LRT route, `stats::parametric_bootstrap_lrt`
+(schema `mixedmodels.parametric_bootstrap_lrt`, version `1.0.0`), which
+calibrates the reference distribution by simulation from the null fit instead
+of relying on an analytic mixture. The code's refusal message points callers
+at the same route.
 
 ## References
 

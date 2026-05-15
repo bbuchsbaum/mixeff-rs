@@ -1,3 +1,8 @@
+// Same rationale as the crate-level policy in src/lib.rs: the rank-deficient
+// design construction indexes parallel arrays by a shared counter to mirror the
+// Julia reference; an iterator rewrite would obscure the index algebra.
+#![allow(clippy::needless_range_loop)]
+
 use approx::assert_relative_eq;
 use rand::SeedableRng;
 use rand_distr::{Distribution, StandardNormal};

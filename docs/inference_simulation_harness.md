@@ -32,6 +32,23 @@ stable reason, and which produce finite calibrated output.
   policy, boundary rate, and Monte Carlo SE when available.
 - Repeated runs with a fixed seed preserve route status and reason codes.
 
+## Output Schema
+
+The harness (`examples/inference_route_simulation.rs`) emits a single
+schema-tagged envelope:
+
+- `schema_name`: `mixedmodels.inference_route_simulation`
+- `schema_version`: `1.0.0`
+- `seed`: the fixed RNG seed used for every simulation route.
+- `records`: one row per (scenario, route). Simulation routes additionally
+  carry `replicates`, `finite_statistics`, and `monte_carlo_se` (the
+  bootstrap-mean Monte Carlo SE of the slope coefficient, `sd/sqrt(R)`);
+  analytic routes leave those `null`.
+
+The report is built twice under the same seed and the two builds are asserted
+byte-identical before printing, so a non-deterministic route fails the harness
+rather than leaking into the JSON.
+
 ## CI Tiers
 
 - Fast PR tests: route availability/refusal contracts and JSON round trips.

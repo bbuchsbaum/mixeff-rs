@@ -258,8 +258,8 @@ fn main() {
 
     println!("threshold = {WEAK_ID_THRESHOLD}");
     println!(
-        "{:<35}  {:>10}  {:>5}  {:>5}  {}",
-        "fixture", "score", "n", "weak", "notes"
+        "{:<35}  {:>10}  {:>5}  {:>5}  notes",
+        "fixture", "score", "n", "weak"
     );
     for (name, score, n, weak, notes) in rows {
         println!(

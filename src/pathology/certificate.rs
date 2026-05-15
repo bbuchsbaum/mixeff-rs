@@ -234,7 +234,7 @@ pub struct ExpectedStatusSet {
 
 impl ExpectedStatusSet {
     pub fn contains(&self, status: FitStatus) -> bool {
-        self.allowed.iter().any(|&s| s == status)
+        self.allowed.contains(&status)
     }
 }
 

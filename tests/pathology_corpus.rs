@@ -1,3 +1,4 @@
+#![cfg(feature = "unstable-internals")]
 //! Pathology corpus integration test.
 //!
 //! For each stratum (easy, boundary, reduced_rank, refusal) we:

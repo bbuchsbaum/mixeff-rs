@@ -1,3 +1,4 @@
+#![cfg(feature = "unstable-internals")]
 //! Hygiene checks across the fixture / dataset catalog.
 //!
 //! Phase 2: comparison/manifest.json must equal the registry-derived view.
@@ -70,10 +71,24 @@ fn comparison_manifest_matches_registry_derived() {
     if on_disk != derived {
         // Show a focused diff of the `fits` arrays so the failure message is
         // actionable. The full JSON would be a wall of text.
-        let on_disk_fits = on_disk.get("fits").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        let derived_fits = derived.get("fits").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        let only_in_disk: Vec<&Value> = on_disk_fits.iter().filter(|v| !derived_fits.contains(v)).collect();
-        let only_in_derived: Vec<&Value> = derived_fits.iter().filter(|v| !on_disk_fits.contains(v)).collect();
+        let on_disk_fits = on_disk
+            .get("fits")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let derived_fits = derived
+            .get("fits")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let only_in_disk: Vec<&Value> = on_disk_fits
+            .iter()
+            .filter(|v| !derived_fits.contains(v))
+            .collect();
+        let only_in_derived: Vec<&Value> = derived_fits
+            .iter()
+            .filter(|v| !on_disk_fits.contains(v))
+            .collect();
         panic!(
             "comparison/manifest.json drifted from registry-derived manifest.\n\n\
              only in manifest.json ({}):\n{}\n\n\
@@ -154,8 +169,11 @@ fn levels_txt_matches_meta_levels() {
                 continue;
             }
             if let Some((col, rest)) = line.split_once(':') {
-                let levels: Vec<String> =
-                    rest.trim().split(',').map(|s| s.trim().to_string()).collect();
+                let levels: Vec<String> = rest
+                    .trim()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect();
                 from_file.insert(col.trim().to_string(), levels);
             }
         }
@@ -168,7 +186,9 @@ fn levels_txt_matches_meta_levels() {
             // factors (e.g. per-observation IDs); that's a valid choice.
             // We only assert here when both sides declare an order — that's
             // where drift between dump scripts and hand-edited meta surfaces.
-            let Some(declared) = &col.levels else { continue };
+            let Some(declared) = &col.levels else {
+                continue;
+            };
             let from_file_levels = match from_file.get(&col.name) {
                 Some(v) => v,
                 None => continue, // not in _levels.txt — skip (some upstream sources don't dump it)
@@ -396,10 +416,7 @@ fn every_pinned_fit_matches_within_tolerance() {
             }
         };
         if let Err(e) = model.fit(reml) {
-            failures.push(format!(
-                "{name} :: {}: fit failed: {e}",
-                fit.formula
-            ));
+            failures.push(format!("{name} :: {}: fit failed: {e}", fit.formula));
             continue;
         }
 
@@ -428,14 +445,14 @@ fn every_pinned_fit_matches_within_tolerance() {
         }
 
         if let Some(want_beta) = expected.beta.as_ref() {
-            let got_beta: Vec<f64> = MixedModelFit::coef(&model)
-                .iter()
-                .copied()
-                .collect();
+            let got_beta: Vec<f64> = MixedModelFit::coef(&model).iter().copied().collect();
             if got_beta.len() != want_beta.len() {
                 failures.push(format!(
                     "{name} :: {} ({}): β length {} ≠ expected {}",
-                    fit.formula, fit.estimator, got_beta.len(), want_beta.len()
+                    fit.formula,
+                    fit.estimator,
+                    got_beta.len(),
+                    want_beta.len()
                 ));
             } else {
                 for (i, (g, w)) in got_beta.iter().zip(want_beta.iter()).enumerate() {
@@ -461,7 +478,7 @@ fn every_pinned_fit_matches_within_tolerance() {
         }
 
         if let Some(want_theta) = expected.theta.as_ref() {
-            let got_theta: Vec<f64> = model.theta().iter().copied().collect();
+            let got_theta: Vec<f64> = model.theta().to_vec();
             if got_theta.len() == want_theta.len() {
                 for (i, (g, w)) in got_theta.iter().zip(want_theta.iter()).enumerate() {
                     if !approx_equal(*g, *w, tol.theta_abs, tol.theta_rel) {
@@ -474,7 +491,10 @@ fn every_pinned_fit_matches_within_tolerance() {
             } else {
                 failures.push(format!(
                     "{name} :: {} ({}): θ length {} ≠ expected {}",
-                    fit.formula, fit.estimator, got_theta.len(), want_theta.len()
+                    fit.formula,
+                    fit.estimator,
+                    got_theta.len(),
+                    want_theta.len()
                 ));
             }
         }

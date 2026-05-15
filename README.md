@@ -16,14 +16,30 @@ numerical engine behind the `mixeff` R package.
 - **Post-fit inference**: variance components, coefficient tables, likelihood
   ratio tests, profile-likelihood and bootstrap confidence intervals — with
   explicit, typed refusals rather than fabricated statistics.
+- **Ergonomic API**: a `prelude`, fluent `LinearMixedModelBuilder` /
+  `GeneralizedLinearMixedModelBuilder` with `FitOptions`, built-in contrast
+  constructors, and a re-exported `nalgebra` so callers don't pin our version.
+
+## Installation
+
+```toml
+[dependencies]
+mixeff-rs = "0.1"
+```
+
+No system dependencies on the default build. See
+[Cargo features](#cargo-features) for the optional NLopt / PRIMA backends.
 
 ## Quick start
 
-```rust
-use mixeff_rs::formula::parse_formula;
-use mixeff_rs::model::{DataFrame, LinearMixedModel, MixedModelFit};
+The `prelude` pulls in the common types; the builder collapses construction and
+the ML/REML choice into one chain:
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+```rust
+use mixeff_rs::prelude::*;
+use mixeff_rs::model::{FitOptions, LinearMixedModelBuilder};
+
+fn main() -> Result<()> {
     // Balanced toy data: 8 groups, clear fixed slope + group intercepts.
     let group_offsets = [-3.0, -1.5, 0.5, 2.0, -2.0, 1.0, 3.0, -0.5];
     let jitter = [0.12, -0.20, 0.05, 0.17, -0.09, 0.22];
@@ -45,15 +61,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     df.add_numeric("x", x)?;
     df.add_categorical("g", g)?;
 
-    let formula = parse_formula("y ~ 1 + x + (1 | g)")?;
-    let mut model = LinearMixedModel::new(formula, &df, None)?;
-    model.fit(false)?; // false = ML, true = REML
+    let model = LinearMixedModelBuilder::new(parse_formula("y ~ 1 + x + (1 | g)")?, &df)
+        .fit(FitOptions::reml())?; // or FitOptions::ml()
 
-    let coef = model.coef();
-    println!("fixed effects: {coef:?}"); // ~[2.0, 1.5]
+    println!("fixed effects: {:?}", model.coef()); // ~[2.0, 1.5]
     Ok(())
 }
 ```
+
+The lower-level form (`LinearMixedModel::new(formula, &df, None)?` then
+`model.fit(false)`) remains available; the builder is purely additive.
 
 ## Cargo features
 
@@ -63,11 +80,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   optimizer parity path). Requires CMake plus a C/C++ toolchain at build time.
 - `prima`: routes bounded LMM θ optimization through the PRIMA C library
   (BOBYQA). Expects a system PRIMA library visible to the linker.
+- `unstable-internals`: exposes the in-flux internal surface (`compiler`,
+  `datasets`, `pathology`) as public modules. **Not** covered by the SemVer
+  guarantee — opt in only if you need it; it may change in any release.
 
 ## Status
 
-Pre-1.0. The public API is still being shaped; see
-`docs/v1_0_release_roadmap.md` for the staged path to a stable 1.0 release.
+Early release (`0.x`). The numerical core — PLS/PIRLS, the blocked Cholesky
+update, and the profiled (RE)ML objective — is stable and parity-tested
+against MixedModels.jl; the public API framing is still settling. Per Cargo's
+`0.x` semantics **any release may contain breaking changes**, so pin an exact
+version if you need stability. The stable vs. explicitly-unstable surface and
+the precise breaking-change definition live in the
+[SemVer policy](https://github.com/bbuchsbaum/mixeff-rs/blob/main/docs/semver_policy.md);
+[`CHANGELOG.md`](CHANGELOG.md) records release notes, and the API reference is
+on [docs.rs](https://docs.rs/mixeff-rs).
+
+**Scope.** Single-response models only. Multivariate response
+(`cbind(y1, y2) ~ …`), Gamma GLMM bootstrap, GLMM profile likelihood, and the
+full `I()` / formula-transformation surface are out of scope for the current
+line and tracked as later work.
 
 ## License
 

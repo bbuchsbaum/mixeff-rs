@@ -2,7 +2,7 @@
 name = "mixeff-rs"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.74"
+rust-version = "1.80"
 description = "Mixed-effects models in Rust — engine for the mixeff R package, port of MixedModels.jl"
 license = "MIT"
 authors = ["Bradley Buchsbaum <brad.buchsbaum@gmail.com>"]
@@ -12,6 +12,9 @@ readme = "README.md"
 keywords = ["statistics", "mixed-models", "lme4", "regression", "glmm"]
 categories = ["science", "mathematics", "algorithms"]
 exclude = [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "Cargo.toml.orig",
     "MixedModels.jl/",
     "comparison/",
     "scripts/",
@@ -54,6 +57,53 @@ nlopt = ["dep:nlopt"]
 # This first slice wires bounded LMM theta optimization through PRIMA BOBYQA
 # only. The feature expects a system PRIMA C library visible to the linker.
 prima = []
+# Exposes the unstable internal surface (`compiler`, `datasets`, `pathology`)
+# as public modules. These are NOT covered by the 1.0 SemVer guarantee — the
+# compiler/IR is still in flux and dataset provenance churns. Off by default
+# so IR refinements are not SemVer-major breaks. See docs/semver_policy.md.
+unstable-internals = []
 
 [dev-dependencies]
 approx = "0.5"
+# `default-features = false` drops the plotters/cairo + rayon stack so the
+# benches build with no system graphics deps (CI- and CRAN-friendly).
+criterion = { version = "0.5", default-features = false }
+
+[[bench]]
+name = "pls_kernel"
+harness = false
+
+# Examples that consume the unstable internal surface (compiler / datasets /
+# pathology) only build when that feature is enabled, so the default
+# `cargo build --examples` stays on the stable public API.
+[[example]]
+name = "bench_compiler_contract"
+required-features = ["unstable-internals"]
+
+[[example]]
+name = "bench_penicillin_convergence"
+required-features = ["unstable-internals"]
+
+[[example]]
+name = "bench_response_matrix_batch"
+required-features = ["unstable-internals"]
+
+[[example]]
+name = "compare_rust"
+required-features = ["unstable-internals"]
+
+[[example]]
+name = "lmm_lme4_comparison"
+required-features = ["unstable-internals"]
+
+[[example]]
+name = "probe_tungara_glmm"
+required-features = ["unstable-internals"]
+
+[[example]]
+name = "probe_weak_id"
+required-features = ["unstable-internals"]
+
+[[example]]
+name = "profile_kb07"
+required-features = ["unstable-internals"]

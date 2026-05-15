@@ -15,6 +15,11 @@
 //! - `PENICILLIN_BENCH_RESPONSE_SCALE=10.0`
 //! - `PENICILLIN_BENCH_OUTDIR=/tmp/penicillin_convergence`
 
+// Same rationale as the crate-level policy in src/lib.rs: the crossed-grid
+// fixture builder indexes parallel arrays (plate/sample refs) by a shared
+// counter to mirror the reference layout; iterator rewrites obscure it.
+#![allow(clippy::needless_range_loop)]
+
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -212,9 +217,11 @@ fn simulate_penicillin_like(
         .collect();
 
     let mut df = DataFrame::new();
-    df.add_numeric("diameter", diameter);
-    df.add_categorical_with_levels("plate", plate, plate_levels);
-    df.add_categorical_with_levels("sample", sample, sample_levels);
+    df.add_numeric("diameter", diameter).unwrap();
+    df.add_categorical_with_levels("plate", plate, plate_levels)
+        .unwrap();
+    df.add_categorical_with_levels("sample", sample, sample_levels)
+        .unwrap();
     df
 }
 

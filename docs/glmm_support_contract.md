@@ -17,6 +17,14 @@ system optimizer dependency. Supported families and links are:
 - Poisson with log and square-root links.
 - Gamma with log link.
 
+`Family::InverseGaussian` (and the Gaussian-GLMM non-identity link paths) are
+**implemented but NOT certified for 1.0**: they exist in the engine but are
+not validated to the cross-language parity standard the families above are
+held to, and their finite-sample inference surface is intentionally
+incomplete (e.g. parametric bootstrap explicitly refuses Gamma /
+InverseGaussian / Normal). Treat them as experimental; they are not part of
+the SemVer-covered GLMM contract for 1.0.
+
 Offsets are fixed linear-predictor offsets. Observation weights are supported
 where the family semantics define them, including binomial trial weights.
 

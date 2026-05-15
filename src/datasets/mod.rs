@@ -1,3 +1,9 @@
+// Unstable-internals public surface: when the feature is off this module is
+// `pub(crate)` and its types / re-exports have no in-crate consumer, reading
+// as `unused_imports` / `dead_code`. Suppress only in that configuration;
+// full linting stays when `unstable-internals` is enabled. See
+// src/compiler/mod.rs for rationale.
+#![cfg_attr(not(feature = "unstable-internals"), allow(unused_imports, dead_code))]
 //! Reference datasets for testing, benchmarking, and parity work.
 //!
 //! Datasets live under `<repo>/datasets/<name>/` with two files each:
@@ -6,7 +12,7 @@
 //!   reference fit values from `lme4` or `MixedModels.jl`.
 //!
 //! The full registry is `datasets/REGISTRY.md`. Use [`load`] to pull a named
-//! dataset into a [`DataFrame`](crate::model::DataFrame), with categorical
+//! dataset into a [`crate::model::DataFrame`], with categorical
 //! columns reconstructed in the canonical level order recorded in
 //! `meta.toml` (so factor-coding lines up with the reference fits).
 
@@ -692,7 +698,10 @@ mod tests {
         assert_eq!(df.categorical("reg").unwrap().n_levels(), 3);
         assert_eq!(df.categorical("popu").unwrap().n_levels(), 9);
         assert_eq!(df.categorical("gen").unwrap().n_levels(), 24);
-        assert_eq!(df.categorical("nutrient").unwrap().levels, vec!["1".to_string(), "8".to_string()]);
+        assert_eq!(
+            df.categorical("nutrient").unwrap().levels,
+            vec!["1".to_string(), "8".to_string()]
+        );
         // Check the overdispersion: var/mean ratio of total.fruits should be ≫ 1.
         let y = df.numeric("total.fruits").unwrap();
         let mean = y.iter().sum::<f64>() / y.len() as f64;
@@ -738,7 +747,10 @@ mod tests {
         assert_eq!(df.nrow(), 16409);
         assert_eq!(df.categorical("subj").unwrap().n_levels(), 73);
         assert_eq!(df.categorical("item").unwrap().n_levels(), 240);
-        assert_eq!(df.categorical("F").unwrap().levels, vec!["LF".to_string(), "HF".to_string()]);
+        assert_eq!(
+            df.categorical("F").unwrap().levels,
+            vec!["LF".to_string(), "HF".to_string()]
+        );
         // Derived `speed = 1000 / rt` is the response in all three fits.
         assert!(df.numeric("speed").is_some());
         assert!(df.numeric("rt").is_some());
@@ -764,7 +776,10 @@ mod tests {
         assert_eq!(meta.name, "contraception");
         assert_eq!(df.nrow(), 1934);
         assert_eq!(df.categorical("dist").unwrap().n_levels(), 60);
-        assert_eq!(df.categorical("urban").unwrap().levels, vec!["Y".to_string(), "N".to_string()]);
+        assert_eq!(
+            df.categorical("urban").unwrap().levels,
+            vec!["Y".to_string(), "N".to_string()]
+        );
         // `use` is numeric 0/1 (converted from Y/N during dump).
         let use_col = df.numeric("use").expect("use is numeric 0/1");
         assert!(use_col.iter().all(|v| *v == 0.0 || *v == 1.0));
@@ -773,7 +788,10 @@ mod tests {
         // objective and surfaces a non-trivial intercept/urban correlation.
         assert_eq!(meta.fits.len(), 2);
         let scalar = meta.fits[0].expected.as_ref().expect("scalar fit pinned");
-        let slope = meta.fits[1].expected.as_ref().expect("random-slope fit pinned");
+        let slope = meta.fits[1]
+            .expected
+            .as_ref()
+            .expect("random-slope fit pinned");
         assert!(slope.objective.unwrap() < scalar.objective.unwrap());
         // Strong negative re_corr (intercept ↑ ⇒ urban-effect ↓ within district).
         assert!(slope.re_corr.unwrap() < -0.5);
@@ -802,12 +820,15 @@ mod tests {
         assert_eq!(meta.name, "culcitalogreg");
         assert_eq!(df.nrow(), 80);
         assert_eq!(df.categorical("block").unwrap().n_levels(), 10);
-        assert_eq!(df.categorical("ttt").unwrap().levels, vec![
-            "none".to_string(),
-            "crabs".to_string(),
-            "shrimp".to_string(),
-            "both".to_string(),
-        ]);
+        assert_eq!(
+            df.categorical("ttt").unwrap().levels,
+            vec![
+                "none".to_string(),
+                "crabs".to_string(),
+                "shrimp".to_string(),
+                "both".to_string(),
+            ]
+        );
         // Both Laplace and AGQ are pinned; their objectives differ
         // meaningfully (small-N AGQ correction).
         assert_eq!(meta.fits.len(), 2);
@@ -829,11 +850,7 @@ mod tests {
         assert_eq!(df.categorical("Lot").unwrap().n_levels(), 8);
         assert_eq!(df.categorical("Wafer").unwrap().n_levels(), 3);
         assert_eq!(df.categorical("Site").unwrap().n_levels(), 3);
-        assert!(meta
-            .tags
-            .structure
-            .iter()
-            .any(|s| s == "three_level"));
+        assert!(meta.tags.structure.iter().any(|s| s == "three_level"));
         // Sugar form `(1 | Lot/Wafer)` is pinned by Julia; the explicit
         // `(1 | Lot:Wafer)` form is recorded as a recommended formula
         // but not yet pinned (MixedModels.jl 5.x dispatch quirk).
@@ -878,7 +895,10 @@ mod tests {
             );
             checked += 1;
         }
-        assert!(checked >= 26, "expected at least 26 shipped datasets, saw {checked}");
+        assert!(
+            checked >= 26,
+            "expected at least 26 shipped datasets, saw {checked}"
+        );
     }
 
     /// Sanity-check every Tier-1 + Tier-2 dataset that lives in the repo.

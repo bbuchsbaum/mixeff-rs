@@ -637,8 +637,10 @@ mod tests {
             DEFAULT_CHOLESKY_ZERO_PAD_TOLERANCE
         );
 
-        let mut custom = CompilerThresholds::default();
-        custom.cholesky_zero_pad_tolerance = 0.0;
+        let custom = CompilerThresholds {
+            cholesky_zero_pad_tolerance: 0.0,
+            ..CompilerThresholds::default()
+        };
         let custom_json = serde_json::to_string(&custom).unwrap();
         assert!(custom_json.contains("cholesky_zero_pad_tolerance"));
         assert!(custom

@@ -54,7 +54,7 @@ pub fn logdet_diag(d: &DVector<f64>) -> f64 {
 ///
 /// Panics if any block is not square.
 pub fn logdet_block_diagonal(blocks: &[DMatrix<f64>]) -> f64 {
-    blocks.iter().map(|blk| logdet_triangular(blk)).sum()
+    blocks.iter().map(logdet_triangular).sum()
 }
 
 /// Log-determinant of a symmetric positive-definite matrix via its

@@ -70,6 +70,7 @@ impl Default for BatchOptimizerControl {
 
 /// Warm-start policy for per-column theta optimization.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum BatchWarmStart {
     /// Start each column at the template model's current theta.
     TemplateTheta,
@@ -83,6 +84,7 @@ pub enum BatchWarmStart {
 
 /// Grouping definition for grouped shared-theta optimization.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BatchThetaGrouping {
     /// `groups[j]` is the group id for response column `j`.
     ColumnGroups(Vec<usize>),
@@ -90,6 +92,7 @@ pub enum BatchThetaGrouping {
 
 /// Batch fitting modes for independent response columns.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum ResponseBatchMode {
     /// Profile every response column at a caller-supplied theta.
     ProfileAtTheta { theta: Vec<f64>, reml: bool },
@@ -114,6 +117,7 @@ pub enum ResponseBatchMode {
 
 /// Theta values returned by a batch fit.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum ThetaBatch {
     Shared(Vec<f64>),
     PerColumn(DMatrix<f64>),
@@ -125,6 +129,7 @@ pub enum ThetaBatch {
 
 /// Per-column fit status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ResponseFitStatus {
     Success,
     Boundary,
@@ -136,6 +141,7 @@ pub enum ResponseFitStatus {
 
 /// Structured diagnostic reason for a response-column outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ResponseDiagnosticReason {
     NonFiniteResponse,
     ConstantResponse,

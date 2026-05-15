@@ -1,3 +1,5 @@
+#![cfg(feature = "unstable-internals")]
+
 use mixeff_rs::compiler::{DiagnosticCode, DiagnosticSeverity};
 use mixeff_rs::formula::parse_formula;
 use mixeff_rs::model::{DataFrame, Family, GeneralizedLinearMixedModel, MixedModelFit};

@@ -1,13 +1,18 @@
 # mixeff-rs v1.0 Release Roadmap
 
-**Status:** draft, 2026-05-14
+**Status:** living planning document, last revised 2026-05-15. Internal — not
+part of the published crate (the `docs/` directory is excluded from the
+package) and not a stability contract. Phase A (publishability) has landed:
+crates.io metadata, `README.md`/`LICENSE`, trimmed public API,
+`#[non_exhaustive]` enums, builder/prelude, and runnable quickstart are in
+place. Later phases track the remaining hardening work.
 **Method:** synthesis of five parallel sub-agent audits covering (1) core numerics, (2) formula/data, (3) stats/inference, (4) tests/benchmarks/CI, (5) public API/docs/ergonomics.
 
 ---
 
 ## Executive summary
 
-The crate's numerical core is structurally faithful to MixedModels.jl and the inference layer is unusually disciplined for a pre-1.0 Rust crate (typed refusals, stable reason codes, versioned JSON schemas). However, **the crate is not publishable to crates.io today** and several silent-acceptance and stability hazards must close before tagging 1.0.
+The crate's numerical core is structurally faithful to MixedModels.jl and the inference layer is unusually disciplined for a pre-1.0 Rust crate (typed refusals, stable reason codes, versioned JSON schemas). The Phase A publishability blockers below have since been closed; several silent-acceptance and stability hazards in later phases must still close before tagging 1.0. (Original audit framing — "not publishable to crates.io today" — retained below for historical context.)
 
 The risk surface concentrates in five themes:
 

@@ -1,4 +1,5 @@
 #![cfg(not(feature = "nlopt"))]
+#![cfg(feature = "unstable-internals")]
 
 use mixeff_rs::compiler::{
     DiagnosticCode, InferenceAvailability, ModelKind, ObjectiveApproximation,

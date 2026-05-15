@@ -43,9 +43,9 @@ fn simulate_data(n_subjects: usize, n_obs_per_subject: usize, seed: u64) -> Data
     }
 
     let mut df = DataFrame::new();
-    df.add_numeric("reaction", reaction);
-    df.add_numeric("days", days);
-    df.add_categorical("subj", subj_labels);
+    df.add_numeric("reaction", reaction).unwrap();
+    df.add_numeric("days", days).unwrap();
+    df.add_categorical("subj", subj_labels).unwrap();
     df
 }
 
@@ -104,11 +104,11 @@ fn simulate_large_theta_data(
     }
 
     let mut df = DataFrame::new();
-    df.add_numeric("reaction", reaction);
-    df.add_numeric("days", days);
-    df.add_categorical("subj", subj_labels);
-    df.add_categorical("item", item_labels);
-    df.add_categorical("site", site_labels);
+    df.add_numeric("reaction", reaction).unwrap();
+    df.add_numeric("days", days).unwrap();
+    df.add_categorical("subj", subj_labels).unwrap();
+    df.add_categorical("item", item_labels).unwrap();
+    df.add_categorical("site", site_labels).unwrap();
     df
 }
 
@@ -138,6 +138,9 @@ fn block_logdet_factor(block: &MatrixBlock) -> f64 {
                 .map(f64::ln)
                 .sum()
         }
+        // `MatrixBlock` is `#[non_exhaustive]`; this example only handles the
+        // block kinds the parity dump produces.
+        _ => panic!("unhandled MatrixBlock variant in parity dump"),
     }
 }
 
@@ -260,12 +263,12 @@ fn load_contra() -> DataFrame {
     }
 
     let mut df = DataFrame::new();
-    df.add_numeric("use_num", use_num);
-    df.add_numeric("age", age);
-    df.add_numeric("age2", age2);
-    df.add_categorical("urban", urban);
-    df.add_categorical("livch", livch);
-    df.add_categorical("urban_dist", urban_dist);
+    df.add_numeric("use_num", use_num).unwrap();
+    df.add_numeric("age", age).unwrap();
+    df.add_numeric("age2", age2).unwrap();
+    df.add_categorical("urban", urban).unwrap();
+    df.add_categorical("livch", livch).unwrap();
+    df.add_categorical("urban_dist", urban_dist).unwrap();
     df
 }
 

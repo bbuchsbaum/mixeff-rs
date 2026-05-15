@@ -136,6 +136,20 @@ impl LinkFunction {
     }
 }
 
+/// One Wald confidence-interval row for a fixed-effect coefficient.
+///
+/// `lower`/`upper` are `estimate ± z(1-α/2) · SE`. They are `NaN` when the
+/// standard error is unavailable/non-positive or `level` is not in `(0, 1)`.
+/// This is the model-layer analogue of `stats::ConfintRow` (the layer tower
+/// forbids `model` depending on `stats`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct WaldConfintRow {
+    pub parameter: String,
+    pub estimate: f64,
+    pub lower: f64,
+    pub upper: f64,
+}
+
 /// Common interface for fitted mixed models.
 pub trait MixedModelFit {
     /// Number of observations.
@@ -237,6 +251,51 @@ pub trait MixedModelFit {
     /// construction); `Some(_)` for GLMMs.
     fn link_kind(&self) -> Option<LinkFunction> {
         None
+    }
+
+    /// Two-sided Wald confidence intervals for the fixed effects at the
+    /// given coverage `level` (e.g. `0.95`): `estimate ± z(1-α/2) · SE`.
+    ///
+    /// Rows are in unpivoted coefficient order, matching [`coef`] and
+    /// [`coef_names`]. A row's `lower`/`upper` are `NaN` when its standard
+    /// error is unavailable/non-positive or `level` is not in `(0, 1)`.
+    /// This is the large-sample interval; for small samples prefer the
+    /// profile-likelihood CIs in `stats::profile`.
+    ///
+    /// [`coef`]: MixedModelFit::coef
+    /// [`coef_names`]: MixedModelFit::coef_names
+    fn wald_confint(&self, level: f64) -> Vec<WaldConfintRow> {
+        use statrs::distribution::{ContinuousCDF, Normal};
+
+        let estimates = self.coef();
+        let std_errors = self.stderror();
+        let names = self.coef_names();
+
+        let z = if level > 0.0 && level < 1.0 {
+            Normal::new(0.0, 1.0)
+                .unwrap()
+                .inverse_cdf(1.0 - (1.0 - level) / 2.0)
+        } else {
+            f64::NAN
+        };
+
+        (0..estimates.len())
+            .map(|i| {
+                let estimate = estimates[i];
+                let se = std_errors.get(i).copied().unwrap_or(f64::NAN);
+                let (lower, upper) = if z.is_finite() && se.is_finite() && se > 0.0 {
+                    (estimate - z * se, estimate + z * se)
+                } else {
+                    (f64::NAN, f64::NAN)
+                };
+                WaldConfintRow {
+                    parameter: names.get(i).cloned().unwrap_or_default(),
+                    estimate,
+                    lower,
+                    upper,
+                }
+            })
+            .collect()
     }
 }
 

@@ -57,8 +57,8 @@ impl ModelSummary {
         let varcorr = VarCorr::from_reterms(&model.lmm.reterms, scale, None);
         summary_from_parts(
             &model.coef_names(),
-            &model.coef().as_slice().to_vec(),
-            &model.stderror().as_slice().to_vec(),
+            model.coef().as_slice(),
+            model.stderror().as_slice(),
             &varcorr,
             residual_label,
             residual_value,

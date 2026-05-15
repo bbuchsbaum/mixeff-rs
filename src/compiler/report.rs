@@ -57,23 +57,24 @@ pub enum AuditReportStatus {
 
 impl ModelAuditReport {
     pub fn from_artifact(artifact: &CompiledModelArtifact) -> Self {
-        let mut sections = Vec::new();
-        sections.push(requested_model_section(artifact));
-        sections.push(model_state_section(artifact));
-        sections.push(fixed_effect_section(artifact));
-        sections.push(random_effect_section(artifact));
-        sections.push(random_effect_information_budget_section(artifact));
         let random_term_cards = random_term_cards(artifact);
         let cross_card_constraints = cross_card_constraints(artifact);
-        sections.push(random_term_cards_section(&random_term_cards));
-        sections.push(cross_card_constraints_section(&cross_card_constraints));
-        sections.push(dependence_path_section(artifact));
-        sections.push(parameterization_trace_section(artifact));
-        sections.push(effective_covariance_section(artifact));
-        sections.push(policy_section(artifact));
-        sections.push(optimizer_section(artifact));
-        sections.push(inference_section(artifact));
-        sections.push(diagnostics_section(artifact));
+        let sections = vec![
+            requested_model_section(artifact),
+            model_state_section(artifact),
+            fixed_effect_section(artifact),
+            random_effect_section(artifact),
+            random_effect_information_budget_section(artifact),
+            random_term_cards_section(&random_term_cards),
+            cross_card_constraints_section(&cross_card_constraints),
+            dependence_path_section(artifact),
+            parameterization_trace_section(artifact),
+            effective_covariance_section(artifact),
+            policy_section(artifact),
+            optimizer_section(artifact),
+            inference_section(artifact),
+            diagnostics_section(artifact),
+        ];
 
         Self {
             schema_name: MODEL_AUDIT_REPORT_SCHEMA.to_string(),
@@ -1691,7 +1692,7 @@ impl ConvergenceVerdict {
                 source,
                 headline: optimizer.headline,
                 evidence: optimizer.evidence,
-                next_action: next_action_kind.map(|action| ConvergenceNextAction::from(action)),
+                next_action: next_action_kind.map(ConvergenceNextAction::from),
                 next_step,
             };
         }

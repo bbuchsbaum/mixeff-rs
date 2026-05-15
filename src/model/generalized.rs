@@ -1,7 +1,7 @@
 //! Generalized linear mixed-effects model (GLMM).
 //!
 //! Fits models of the form:
-//!   g(E[y]) = Xβ + Zb
+//!   `g(E[y]) = Xβ + Zb`
 //! where g is a link function, b ~ N(0, σ²Λ'Λ), and y|b follows
 //! an exponential family distribution.
 //!
@@ -77,6 +77,124 @@ pub struct GeneralizedLinearMixedModel {
     sd: Vec<f64>,
     /// Multipliers for AGQ.
     mult: Vec<f64>,
+}
+
+/// Fluent builder for [`GeneralizedLinearMixedModel`].
+///
+/// Collapses the `new` / `new_with_weights` / `new_with_offset` /
+/// `new_with_weights_and_offset` / `new_with_compiler_policy` constructor set
+/// into one chained surface. Unset options default to the same behavior as
+/// plain [`GeneralizedLinearMixedModel::new`].
+///
+/// ```
+/// use mixeff_rs::formula::parse_formula;
+/// use mixeff_rs::model::{
+///     DataFrame, Family, GeneralizedLinearMixedModelBuilder, MixedModelFit,
+/// };
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut y = Vec::new();
+/// let mut x = Vec::new();
+/// let mut g = Vec::new();
+/// for grp in 0..5 {
+///     for obs in 0..8 {
+///         let xv = obs as f64 - 3.5;
+///         let eta = 0.8 + 0.1 * xv + [-0.2, 0.1, 0.0, 0.15, -0.05][grp];
+///         y.push(eta.exp().round().max(1.0));
+///         x.push(xv);
+///         g.push(format!("g{}", grp + 1));
+///     }
+/// }
+/// let mut df = DataFrame::new();
+/// df.add_numeric("y", y)?;
+/// df.add_numeric("x", x)?;
+/// df.add_categorical("g", g)?;
+///
+/// let model = GeneralizedLinearMixedModelBuilder::new(
+///     parse_formula("y ~ 1 + x + (1 | g)")?,
+///     &df,
+///     Family::Poisson,
+/// )
+/// .fit()?;
+/// assert_eq!(model.coef().len(), 2);
+/// # Ok(())
+/// # }
+/// ```
+pub struct GeneralizedLinearMixedModelBuilder<'a> {
+    formula: Formula,
+    data: &'a DataFrame,
+    family: Family,
+    link: Option<LinkFunction>,
+    weights: Option<Vec<f64>>,
+    offset: Option<Vec<f64>>,
+    compiler_policy: Option<CompilerPolicy>,
+}
+
+impl<'a> GeneralizedLinearMixedModelBuilder<'a> {
+    /// Start a builder for `formula` over `data` with the given `family`.
+    pub fn new(formula: Formula, data: &'a DataFrame, family: Family) -> Self {
+        Self {
+            formula,
+            data,
+            family,
+            link: None,
+            weights: None,
+            offset: None,
+            compiler_policy: None,
+        }
+    }
+
+    /// Override the link (defaults to the family's canonical link).
+    pub fn link(mut self, link: LinkFunction) -> Self {
+        self.link = Some(link);
+        self
+    }
+
+    /// Attach per-observation case weights (e.g. binomial trial counts).
+    pub fn weights(mut self, weights: Vec<f64>) -> Self {
+        self.weights = Some(weights);
+        self
+    }
+
+    /// Attach a fixed per-observation linear-predictor offset.
+    pub fn offset(mut self, offset: Vec<f64>) -> Self {
+        self.offset = Some(offset);
+        self
+    }
+
+    /// Attach a compiler policy applied to the internal compiled artifact.
+    pub fn compiler_policy(mut self, compiler_policy: CompilerPolicy) -> Self {
+        self.compiler_policy = Some(compiler_policy);
+        self
+    }
+
+    /// Construct the (unfitted) model.
+    pub fn build(self) -> Result<GeneralizedLinearMixedModel> {
+        let policy = self.compiler_policy.unwrap_or_default();
+        let mut model = GeneralizedLinearMixedModel::new_with_compiler_policy(
+            self.formula,
+            self.data,
+            self.family,
+            self.link,
+            policy,
+        )?;
+        if let Some(offset) = self.offset {
+            model.set_offset(offset)?;
+        }
+        if let Some(weights) = self.weights {
+            validate_case_weights(&weights, model.y.len())?;
+            model.wt = weights;
+            model.initialize_beta_from_response();
+        }
+        Ok(model)
+    }
+
+    /// Construct and fit the model in one step.
+    pub fn fit(self) -> Result<GeneralizedLinearMixedModel> {
+        let mut model = self.build()?;
+        model.fit()?;
+        Ok(model)
+    }
 }
 
 impl GeneralizedLinearMixedModel {
@@ -360,6 +478,105 @@ impl GeneralizedLinearMixedModel {
         }
     }
 
+    /// Simulate a new response vector under a fresh draw of the random
+    /// effects (the parametric-bootstrap data step).
+    ///
+    /// Draws `b_i = Λ_i u_i` with `u_i ~ N(0, I)`, forms the linear
+    /// predictor `η = offset + Xβ̂ + Σ Z_i b_i`, maps it to `μ = g⁻¹(η)`,
+    /// and samples the response from the conditional family with mean `μ`:
+    /// Bernoulli → `{0, 1}`, Poisson → counts, Binomial → success
+    /// proportion over the per-observation trial size (prior weights,
+    /// default `1`). Dispersion families (Gamma, InverseGaussian, and
+    /// Normal-as-GLM) are refused because their draws need a
+    /// dispersion-aware sampler rather than Gaussian residual reuse.
+    pub fn simulate_response<R: rand::Rng>(&self, rng: &mut R) -> Result<Vec<f64>> {
+        use rand_distr::{Binomial, Distribution, Normal, Poisson};
+
+        match self.family {
+            Family::Bernoulli | Family::Binomial | Family::Poisson => {}
+            Family::Gamma => {
+                return Err(MixedModelError::Unsupported(
+                    "Gamma GLMM parametric bootstrap is not implemented; response simulation \
+                     must draw y* ~ Gamma(shape = 1 / phi, scale = mu * phi) with \
+                     phi = dispersion(true), not fall back to Gaussian LMM residual simulation"
+                        .to_string(),
+                ));
+            }
+            Family::InverseGaussian | Family::Normal => {
+                return Err(MixedModelError::Unsupported(format!(
+                    "{:?} GLMM parametric bootstrap is not implemented for dispersion-family \
+                     responses",
+                    self.family
+                )));
+            }
+        }
+
+        let n = self.eta.len();
+        let x = self.lmm.feterm.full_rank_x();
+        let mut eta = &self.offset + x * &self.beta;
+
+        let normal01 = Normal::new(0.0, 1.0).unwrap();
+        for rt in &self.lmm.reterms {
+            let n_levels = rt.n_levels();
+            let u = DMatrix::from_fn(rt.vsize, n_levels, |_, _| normal01.sample(rng));
+            let b = &rt.lambda * &u;
+            let bvec = DVector::from_column_slice(b.as_slice());
+            for (obs, &ref_idx) in rt.refs.iter().enumerate() {
+                let r = ref_idx as usize;
+                for s in 0..rt.vsize {
+                    eta[obs] += rt.z[(s, obs)] * bvec[r * rt.vsize + s];
+                }
+            }
+        }
+
+        let mut y = vec![0.0f64; n];
+        for (i, yi) in y.iter_mut().enumerate() {
+            let mu = self.link.linkinv(eta[i]);
+            if !mu.is_finite() {
+                return Err(MixedModelError::InvalidArgument(format!(
+                    "simulated conditional mean is non-finite at observation {i}"
+                )));
+            }
+            match self.family {
+                Family::Bernoulli => {
+                    let p = mu.clamp(0.0, 1.0);
+                    *yi = f64::from(rng.gen::<f64>() < p);
+                }
+                Family::Binomial => {
+                    let p = mu.clamp(0.0, 1.0);
+                    let trials = if self.wt.is_empty() { 1.0 } else { self.wt[i] };
+                    let n_trials = trials.round().max(0.0) as u64;
+                    if n_trials == 0 {
+                        *yi = 0.0;
+                    } else {
+                        let count = Binomial::new(n_trials, p)
+                            .map_err(|e| {
+                                MixedModelError::InvalidArgument(format!(
+                                    "binomial draw failed at observation {i}: {e}"
+                                ))
+                            })?
+                            .sample(rng) as f64;
+                        *yi = count / trials;
+                    }
+                }
+                Family::Poisson => {
+                    let lambda = mu.max(f64::MIN_POSITIVE);
+                    *yi = Poisson::new(lambda)
+                        .map_err(|e| {
+                            MixedModelError::InvalidArgument(format!(
+                                "poisson draw failed at observation {i}: {e}"
+                            ))
+                        })?
+                        .sample(rng);
+                }
+                Family::Gamma | Family::InverseGaussian | Family::Normal => {
+                    unreachable!("dispersion families refused above")
+                }
+            }
+        }
+        Ok(y)
+    }
+
     /// Variance-covariance summary for the fitted random effects.
     pub fn varcorr(&self) -> VarCorr {
         let scale = self.dispersion(false);
@@ -504,7 +721,7 @@ impl GeneralizedLinearMixedModel {
             }
 
             // --- Update the LMM with new IRLS weights ---
-            self.lmm.update_irls_weights(&sqrtwts, &working_y);
+            self.lmm.update_irls_weights(&sqrtwts, &working_y)?;
             self.lmm.update_l()?;
 
             // --- Propose new β / u from the LMM solution ---
@@ -631,6 +848,13 @@ impl GeneralizedLinearMixedModel {
         let mut mult = vec![0.0_f64; n_levels];
         let mut devc = vec![0.0_f64; n_levels];
 
+        // From here on `u[0]`/`eta`/`mu` are perturbed at each node. The guard
+        // restores them when this scope ends — including if the sweep panics.
+        let mut work = AgqRestoreGuard {
+            glmm: self,
+            u0_flat: u0_flat.clone(),
+        };
+
         for (&z, &w) in rule.z.iter().zip(rule.w.iter()) {
             if w == 0.0 {
                 continue;
@@ -644,17 +868,17 @@ impl GeneralizedLinearMixedModel {
             }
             // u[g] = u₀[g] + z * sd[g]
             for g in 0..n_levels {
-                self.u[0][(0, g)] = u0_flat[g] + z * sd[g];
+                work.u[0][(0, g)] = u0_flat[g] + z * sd[g];
             }
-            self.update_eta();
+            work.update_eta();
             // devc[g] = u[g]² + Σ devresid_i (per group)
             for g in 0..n_levels {
-                let uv = self.u[0][(0, g)];
+                let uv = work.u[0][(0, g)];
                 devc[g] = uv * uv;
             }
             for i in 0..n_obs {
                 devc[refs[i] as usize] +=
-                    self.case_weight(i) * self.dev_resid_component(self.y[i], self.mu[i]);
+                    work.case_weight(i) * work.dev_resid_component(work.y[i], work.mu[i]);
             }
             // mult[g] += exp((z² + devc0[g] - devc[g]) / 2) * w
             let z2 = z * z;
@@ -663,11 +887,8 @@ impl GeneralizedLinearMixedModel {
             }
         }
 
-        // Restore u and η/μ.
-        for g in 0..n_levels {
-            self.u[0][(0, g)] = u0_flat[g];
-        }
-        self.update_eta();
+        // `work` drops here, restoring u and η/μ (also on a panic above).
+        drop(work);
 
         let sum_devc0: f64 = devc0.iter().sum();
         let log_mult: f64 = mult.iter().map(|m| m.ln()).sum();
@@ -946,7 +1167,7 @@ impl GeneralizedLinearMixedModel {
                 self.lmm.xy_mat.xy[(obs, p)] = new_y[obs];
                 self.lmm.xy_mat.wtxy[(obs, p)] = sw * new_y[obs];
             }
-            self.lmm.recompute_a_blocks();
+            self.lmm.recompute_a_blocks()?;
         }
 
         let initial_theta = self.lmm.optsum.initial.clone();
@@ -1009,25 +1230,26 @@ impl GeneralizedLinearMixedModel {
         self.lmm.optsum.optimizer = Optimizer::NloptBobyqa;
         self.lmm.optsum.backend = Optimizer::NloptBobyqa.canonical_backend();
 
-        let mut feval_count: i64 = 0;
-        let feval_ptr = &mut feval_count as *mut i64;
+        let feval_count = std::cell::Cell::new(0i64);
         let fit_log: Rc<RefCell<Vec<FitLogEntry>>> = Rc::new(RefCell::new(Vec::with_capacity(
             self.lmm.optsum.fit_log.capacity(),
         )));
 
-        let obj_fn = {
-            let model_ptr = self as *mut GeneralizedLinearMixedModel;
-            let fit_log = Rc::clone(&fit_log);
-            move |theta: &[f64], _grad: Option<&mut [f64]>, _data: &mut ()| -> f64 {
-                let model = unsafe { &mut *model_ptr };
-                unsafe { *feval_ptr += 1 };
-                let objective = model.penalized_pirls_deviance_at_theta(theta, n_agq);
-                fit_log.borrow_mut().push(FitLogEntry {
-                    theta: theta.to_vec(),
-                    objective,
-                });
-                objective
-            }
+        // Hand the model to the BOBYQA callback through a RefCell instead of a
+        // raw `*mut Self`. The callback is the only borrower while the optimizer
+        // is alive; `model.into_inner()` recovers `&mut self` once the optimizer
+        // (and thus the closure) has been dropped.
+        let model = std::cell::RefCell::new(self);
+        let obj_fn = |theta: &[f64], _grad: Option<&mut [f64]>, _data: &mut ()| -> f64 {
+            feval_count.set(feval_count.get() + 1);
+            let objective = model
+                .borrow_mut()
+                .penalized_pirls_deviance_at_theta(theta, n_agq);
+            fit_log.borrow_mut().push(FitLogEntry {
+                theta: theta.to_vec(),
+                objective,
+            });
+            objective
         };
 
         let mut optimizer = Nlopt::new(
@@ -1057,24 +1279,26 @@ impl GeneralizedLinearMixedModel {
         let nlopt_result = optimizer.optimize(&mut theta);
         drop(optimizer);
 
-        self.finalize_theta_after_optimizer(&mut theta, n_agq)?;
-        self.lmm.optsum.return_value = match nlopt_result {
+        // Optimizer (and its closure) dropped: reclaim exclusive `&mut self`.
+        let me = model.into_inner();
+        me.finalize_theta_after_optimizer(&mut theta, n_agq)?;
+        me.lmm.optsum.return_value = match nlopt_result {
             Ok((status, _fmin)) => format!("{status:?}"),
             Err((status, _fmin)) => format!("FAILED:{status:?}"),
         };
-        self.lmm.optsum.feval = feval_count;
-        self.lmm.optsum.fit_log = rc_refcell_into_inner_or_clone(fit_log);
-        self.lmm.compiler_artifact.optimizer_certificate =
+        me.lmm.optsum.feval = feval_count.get();
+        me.lmm.optsum.fit_log = rc_refcell_into_inner_or_clone(fit_log);
+        me.lmm.compiler_artifact.optimizer_certificate =
             Some(OptimizerCertificate::from_opt_summary_with_context(
-                &self.lmm.optsum,
-                &self.theta,
-                &self.lmm.lower_bounds(),
-                Some(self.lmm.dims.n),
+                &me.lmm.optsum,
+                &me.theta,
+                &me.lmm.lower_bounds(),
+                Some(me.lmm.dims.n),
             ));
-        self.refresh_binomial_separation_diagnostics();
-        self.refresh_near_unit_random_effect_correlation_diagnostics();
+        me.refresh_binomial_separation_diagnostics();
+        me.refresh_near_unit_random_effect_correlation_diagnostics();
 
-        Ok(self)
+        Ok(me)
     }
 
     #[cfg(not(feature = "nlopt"))]
@@ -1091,28 +1315,8 @@ impl GeneralizedLinearMixedModel {
             self.lmm.optsum.fit_log.capacity(),
         )));
 
-        let objective_fn = {
-            let model_ptr = self as *mut GeneralizedLinearMixedModel;
-            let best_theta = Rc::clone(&best_theta);
-            let best_fmin = Rc::clone(&best_fmin);
-            let feval_count = Rc::clone(&feval_count);
-            let fit_log = Rc::clone(&fit_log);
-            move |theta: &[f64], _data: &mut ()| -> f64 {
-                feval_count.set(feval_count.get() + 1);
-                let objective =
-                    unsafe { (&mut *model_ptr).penalized_pirls_deviance_at_theta(theta, n_agq) };
-                fit_log.borrow_mut().push(FitLogEntry {
-                    theta: theta.to_vec(),
-                    objective,
-                });
-                if objective < best_fmin.get() {
-                    best_fmin.set(objective);
-                    *best_theta.borrow_mut() = theta.to_vec();
-                }
-                objective
-            }
-        };
-
+        // Compute every `self`-dependent input before handing the model to the
+        // optimizer callback, so `self` is free to move into the RefCell.
         let bounds: Vec<(f64, f64)> = lb.iter().map(|&lo| (lo, f64::INFINITY)).collect();
         let constraint_fns: Vec<Box<dyn cobyla::Func<()>>> = lb
             .iter()
@@ -1135,7 +1339,26 @@ impl GeneralizedLinearMixedModel {
             ftol_abs: self.lmm.optsum.ftol_abs,
             xtol_rel: self.lmm.optsum.xtol_rel,
             xtol_abs: self.lmm.optsum.xtol_abs.clone(),
-            ..cobyla::StopTols::default()
+        };
+
+        // Hand the model to the COBYLA callback through a RefCell instead of a
+        // raw `*mut Self`. The callback is the only borrower while the optimizer
+        // is alive; `model.into_inner()` recovers `&mut self` afterwards.
+        let model = std::cell::RefCell::new(self);
+        let objective_fn = |theta: &[f64], _data: &mut ()| -> f64 {
+            feval_count.set(feval_count.get() + 1);
+            let objective = model
+                .borrow_mut()
+                .penalized_pirls_deviance_at_theta(theta, n_agq);
+            fit_log.borrow_mut().push(FitLogEntry {
+                theta: theta.to_vec(),
+                objective,
+            });
+            if objective < best_fmin.get() {
+                best_fmin.set(objective);
+                *best_theta.borrow_mut() = theta.to_vec();
+            }
+            objective
         };
 
         let result = cobyla::minimize(
@@ -1175,21 +1398,23 @@ impl GeneralizedLinearMixedModel {
             }
         };
 
-        self.finalize_theta_after_optimizer(&mut theta, n_agq)?;
-        self.lmm.optsum.return_value = return_value;
-        self.lmm.optsum.feval = feval_count.get();
-        self.lmm.optsum.fit_log = rc_refcell_into_inner_or_clone(fit_log);
-        self.lmm.compiler_artifact.optimizer_certificate =
+        // Optimizer finished and consumed its closure: reclaim `&mut self`.
+        let me = model.into_inner();
+        me.finalize_theta_after_optimizer(&mut theta, n_agq)?;
+        me.lmm.optsum.return_value = return_value;
+        me.lmm.optsum.feval = feval_count.get();
+        me.lmm.optsum.fit_log = rc_refcell_into_inner_or_clone(fit_log);
+        me.lmm.compiler_artifact.optimizer_certificate =
             Some(OptimizerCertificate::from_opt_summary_with_context(
-                &self.lmm.optsum,
-                &self.theta,
-                &self.lmm.lower_bounds(),
-                Some(self.lmm.dims.n),
+                &me.lmm.optsum,
+                &me.theta,
+                &me.lmm.lower_bounds(),
+                Some(me.lmm.dims.n),
             ));
-        self.refresh_binomial_separation_diagnostics();
-        self.refresh_near_unit_random_effect_correlation_diagnostics();
+        me.refresh_binomial_separation_diagnostics();
+        me.refresh_near_unit_random_effect_correlation_diagnostics();
 
-        Ok(self)
+        Ok(me)
     }
 
     #[cfg(not(feature = "nlopt"))]
@@ -1343,7 +1568,7 @@ impl GeneralizedLinearMixedModel {
         Ok(self)
     }
 
-    fn finalize_theta_after_optimizer(&mut self, theta: &mut Vec<f64>, n_agq: usize) -> Result<()> {
+    fn finalize_theta_after_optimizer(&mut self, theta: &mut [f64], n_agq: usize) -> Result<()> {
         LinearMixedModel::rectify_theta_columns(theta, &self.lmm.parmap, self.lmm.reterms.len());
 
         // Final PIRLS at optimal θ, after matching MixedModels.jl's
@@ -1357,7 +1582,7 @@ impl GeneralizedLinearMixedModel {
 
         self.lmm.optsum.n_agq = n_agq;
         self.lmm.optsum.fmin = self.deviance(n_agq);
-        self.lmm.optsum.final_params = theta.clone();
+        self.lmm.optsum.final_params = theta.to_vec();
         Ok(())
     }
 
@@ -1587,6 +1812,41 @@ impl GeneralizedLinearMixedModel {
             cobyla::FailStatus::ForcedStop => "FORCED_STOP".to_string(),
             cobyla::FailStatus::UnexpectedError => "UNEXPECTED_ERROR".to_string(),
         }
+    }
+}
+
+/// RAII guard for the AGQ deviance sweep.
+///
+/// [`GeneralizedLinearMixedModel::deviance`] perturbs `u[0]` (and, via
+/// `update_eta`, `eta`/`mu`) at each Gauss-Hermite node. If the sweep panics
+/// mid-way the model would be left perturbed and inconsistent. This guard
+/// restores the conditional modes and recomputes `eta`/`mu` on drop — on the
+/// normal path *and* during unwinding.
+struct AgqRestoreGuard<'a> {
+    glmm: &'a mut GeneralizedLinearMixedModel,
+    /// `u[0]` snapshot at the conditional modes (flat, length `n_levels`).
+    u0_flat: Vec<f64>,
+}
+
+impl std::ops::Deref for AgqRestoreGuard<'_> {
+    type Target = GeneralizedLinearMixedModel;
+    fn deref(&self) -> &Self::Target {
+        self.glmm
+    }
+}
+
+impl std::ops::DerefMut for AgqRestoreGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.glmm
+    }
+}
+
+impl Drop for AgqRestoreGuard<'_> {
+    fn drop(&mut self) {
+        for (g, &uv) in self.u0_flat.iter().enumerate() {
+            self.glmm.u[0][(0, g)] = uv;
+        }
+        self.glmm.update_eta();
     }
 }
 
@@ -2035,7 +2295,7 @@ fn validate_glmm_response_domain(family: Family, link: LinkFunction, y: &[f64]) 
 }
 
 fn initial_response_mean(family: Family, y: &DVector<f64>, weights: &[f64]) -> Option<f64> {
-    if y.len() == 0 {
+    if y.is_empty() {
         return None;
     }
     let mut weighted_sum = 0.0;
@@ -2204,6 +2464,120 @@ mod tests {
     use crate::formula::parse_formula;
     use crate::model::data::DataFrame;
     use approx::assert_relative_eq;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    fn agq_poisson_fixture() -> GeneralizedLinearMixedModel {
+        let mut y = Vec::new();
+        let mut x = Vec::new();
+        let mut g = Vec::new();
+        for grp in 0..5 {
+            for obs in 0..8 {
+                let xv = obs as f64 - 3.5;
+                let eta = 0.8 + 0.1 * xv + [-0.2, 0.1, 0.0, 0.15, -0.05][grp];
+                y.push(eta.exp().round().max(1.0));
+                x.push(xv);
+                g.push(format!("g{}", grp + 1));
+            }
+        }
+        let mut data = DataFrame::new();
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_categorical("g", g).unwrap();
+        let formula = parse_formula("y ~ 1 + x + (1 | g)").unwrap();
+        let mut model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Poisson, None).unwrap();
+        model.fit().unwrap();
+        model
+    }
+
+    #[test]
+    fn agq_deviance_restores_state_on_normal_path() {
+        let mut model = agq_poisson_fixture();
+        let u0 = model.u[0].clone();
+        let eta0 = model.eta.clone();
+        let mu0 = model.mu.clone();
+
+        let dev = model.deviance(5);
+        assert!(dev.is_finite());
+
+        // The AGQ sweep perturbs u/eta/mu; the guard must restore them exactly.
+        assert_eq!(model.u[0], u0, "u not restored after deviance(5)");
+        assert_eq!(model.eta, eta0, "eta not restored after deviance(5)");
+        assert_eq!(model.mu, mu0, "mu not restored after deviance(5)");
+    }
+
+    #[test]
+    fn agq_restore_guard_restores_state_on_panic() {
+        let mut model = agq_poisson_fixture();
+        let u0 = model.u[0].clone();
+        let eta0 = model.eta.clone();
+        let mu0 = model.mu.clone();
+        let u0_flat: Vec<f64> = model.u[0].as_slice().to_vec();
+        let n_levels = model.u[0].ncols();
+
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let mut work = AgqRestoreGuard {
+                glmm: &mut model,
+                u0_flat: u0_flat.clone(),
+            };
+            // Desync state the way the AGQ sweep would, then blow up mid-sweep.
+            for g in 0..n_levels {
+                work.u[0][(0, g)] += 7.0;
+            }
+            work.update_eta();
+            panic!("simulated panic inside AGQ sweep");
+        }));
+
+        assert!(result.is_err(), "the closure was expected to panic");
+        // Guard's Drop ran during unwinding and restored the model.
+        assert_eq!(model.u[0], u0, "u not restored after panic");
+        assert_eq!(model.eta, eta0, "eta not restored after panic");
+        assert_eq!(model.mu, mu0, "mu not restored after panic");
+    }
+
+    #[test]
+    fn glmm_builder_matches_direct_construction_byte_for_byte() {
+        let mut y = Vec::new();
+        let mut x = Vec::new();
+        let mut g = Vec::new();
+        for grp in 0..5 {
+            for obs in 0..8 {
+                let xv = obs as f64 - 3.5;
+                let eta = 0.8 + 0.1 * xv + [-0.2, 0.1, 0.0, 0.15, -0.05][grp];
+                y.push(eta.exp().round().max(1.0));
+                x.push(xv);
+                g.push(format!("g{}", grp + 1));
+            }
+        }
+        let mut data = DataFrame::new();
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_categorical("g", g).unwrap();
+
+        let mut direct = GeneralizedLinearMixedModel::new(
+            parse_formula("y ~ 1 + x + (1 | g)").unwrap(),
+            &data,
+            Family::Poisson,
+            None,
+        )
+        .unwrap();
+        direct.fit().unwrap();
+
+        let built = GeneralizedLinearMixedModelBuilder::new(
+            parse_formula("y ~ 1 + x + (1 | g)").unwrap(),
+            &data,
+            Family::Poisson,
+        )
+        .fit()
+        .unwrap();
+
+        assert_eq!(
+            built.coef(),
+            direct.coef(),
+            "builder coef must match direct"
+        );
+        assert_eq!(built.theta, direct.theta, "builder theta must match direct");
+    }
 
     fn assert_glmm_theta_diagonals_nonnegative(model: &GeneralizedLinearMixedModel) {
         for (idx, &(_, row, col)) in model.lmm.parmap.iter().enumerate() {

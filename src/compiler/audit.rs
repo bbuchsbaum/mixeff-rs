@@ -388,9 +388,7 @@ fn fixed_random_redundancy_diagnostics(
                 return None;
             };
             let fixed_term = fixed_effects.terms.iter().find(|audit| audit.term == *name)?;
-            if data.categorical(name).is_none() {
-                return None;
-            }
+            data.categorical(name)?;
             if fixed_term.status == FixedEffectTermStatus::NotEstimable {
                 return None;
             }
@@ -1571,7 +1569,7 @@ fn expand_interaction_basis_audit(
 
     cartesian_audit_columns(&per_var)
         .into_iter()
-        .map(|(name, values)| audit_values(&name, "interaction", refs, values.into_iter()))
+        .map(|(name, values)| audit_values(&name, "interaction", refs, values))
         .collect()
 }
 
@@ -1594,7 +1592,7 @@ fn categorical_basis_audits(
                     "categorical_cell"
                 },
                 refs,
-                encoded.values.into_iter(),
+                encoded.values,
             )
         })
         .collect()

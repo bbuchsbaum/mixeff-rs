@@ -1,4 +1,5 @@
 #![cfg(feature = "nlopt")]
+#![cfg(feature = "unstable-internals")]
 
 // These wire fixtures pin fitted compiler artifacts against the NLopt-backed
 // parity optimizer path. The no-feature build has separate COBYLA-owned

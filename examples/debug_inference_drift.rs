@@ -32,7 +32,7 @@ fn diagnose_penicillin() {
     println!("  REML obj         = {:.10}", model.objective_value());
     println!(
         "  Δ vs lmerTest std_error 0.80859536 : {:.3e}",
-        stderror - 0.80859536165823642
+        stderror - 0.808_595_361_658_236_4
     );
 
     // Probe REML objective.  Use the *fitted* model — deviance_varpar relies on
@@ -221,12 +221,12 @@ fn sleepstudy_fixture() -> DataFrame {
     let days: Vec<f64> = (0..18).flat_map(|_| (0..10u64).map(|d| d as f64)).collect();
     let subj: Vec<String> = subjects
         .iter()
-        .flat_map(|s| std::iter::repeat_n(s.to_string(), 10))
+        .flat_map(|s| std::iter::repeat(s.to_string()).take(10))
         .collect();
     let mut df = DataFrame::new();
-    df.add_numeric("reaction", reaction);
-    df.add_numeric("days", days);
-    df.add_categorical("subj", subj);
+    df.add_numeric("reaction", reaction).unwrap();
+    df.add_numeric("days", days).unwrap();
+    df.add_categorical("subj", subj).unwrap();
     df
 }
 
@@ -264,14 +264,14 @@ fn penicillin_fixture() -> DataFrame {
     ];
     let plate: Vec<String> = plate_letters
         .iter()
-        .flat_map(|p| std::iter::repeat_n(p.to_string(), 6))
+        .flat_map(|p| std::iter::repeat(p.to_string()).take(6))
         .collect();
     let sample: Vec<String> = (0..24)
         .flat_map(|_| ["A", "B", "C", "D", "E", "F"].iter().map(|s| s.to_string()))
         .collect();
     let mut df = DataFrame::new();
-    df.add_numeric("diameter", diameter);
-    df.add_categorical("plate", plate);
-    df.add_categorical("sample", sample);
+    df.add_numeric("diameter", diameter).unwrap();
+    df.add_categorical("plate", plate).unwrap();
+    df.add_categorical("sample", sample).unwrap();
     df
 }

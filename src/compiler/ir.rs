@@ -227,23 +227,6 @@ impl RandomTermIr {
                     kind: RandomCoefficientKind::Interaction,
                     source: names.join(":"),
                 }),
-                FixedTerm::Nested(names) => {
-                    let label = names.join("/");
-                    diagnostics.push(
-                        Diagnostic::new(
-                            DiagnosticCode::FormulaCanonicalizationUnsupported,
-                            DiagnosticSeverity::Warning,
-                            DiagnosticStage::SemanticIr,
-                            "nested random coefficient bases are not canonicalized in compiler v0",
-                        )
-                        .with_affected_terms(vec![source.clone()]),
-                    );
-                    basis.push(RandomCoefficient {
-                        name: label.clone(),
-                        kind: RandomCoefficientKind::Unsupported,
-                        source: label,
-                    });
-                }
             }
         }
 
@@ -630,9 +613,6 @@ fn random_term_identity_key(term: &RandomTerm, include_covariance: bool) -> Stri
             }
             FixedTerm::Interaction(names) => {
                 basis.insert(format!("interaction:{}", names.join(":")));
-            }
-            FixedTerm::Nested(names) => {
-                basis.insert(format!("nested:{}", names.join("/")));
             }
         }
     }

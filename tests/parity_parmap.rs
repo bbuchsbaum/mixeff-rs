@@ -1,3 +1,7 @@
+// Same rationale as the crate-level policy in src/lib.rs: the parmap parity
+// check indexes parallel arrays by a shared counter to mirror the reference.
+#![allow(clippy::needless_range_loop)]
+
 use serde::Deserialize;
 
 use mixeff_rs::formula::parse_formula;

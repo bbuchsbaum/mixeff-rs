@@ -15,6 +15,7 @@ use crate::types::{MatrixBlock, ReMat};
 
 /// Storage strategy used by a fixed-effect design backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FixedDesignStorage {
     /// Materialized dense `n x p` matrix.
     Dense,
@@ -35,6 +36,7 @@ pub struct FixedDesignSummary {
 
 /// Backend preference used when compiling a formula fixed-effect design.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FixedDesignBackendPreference {
     /// Use a conservative policy based on dense allocation size and streamed
     /// row density.
@@ -238,6 +240,7 @@ pub trait FixedDesignBackend {
 /// matches their transformed columns, while the fitting engine consumes a
 /// single design type.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum FixedDesign {
     /// Materialized dense `n x p` fixed-effect design.
     Dense(DenseFixedDesign),
@@ -849,9 +852,6 @@ pub fn build_streamed_fixed_effects_design(
             }
             FixedTerm::Interaction(vars) => {
                 append_streamed_interaction(vars, data, &mut column_names, &mut rows)?;
-            }
-            FixedTerm::Nested(_) => {
-                // Nesting is expanded into main effect + interaction during parsing.
             }
         }
     }

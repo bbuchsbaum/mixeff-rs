@@ -266,9 +266,12 @@ may be rewritten without changing the contract.
   log-likelihood as informational because metafor and lme4-style PLS use
   different normalization constants.
 - `varcorr()` on a summary-estimate fit does not contain a "Residual" row.
-- Satterthwaite on a summary-estimate fit returns `Unavailable` with the
-  documented reason.
-- Kenward-Roger on a summary-estimate fit returns `Unavailable` (inherited).
+- Satterthwaite on a summary-estimate fit returns
+  `InferenceStatus::NotAssessed` with the documented reason (see the body
+  above; `Unavailable` is not an `InferenceStatus` variant).
+- Kenward-Roger on a summary-estimate fit returns
+  `MixedModelError::InvalidArgument`, inherited from the weighted-model gate
+  at `kenward_roger_sigma_g`.
 - `cargo test` and `cargo clippy --all-targets` are clean.
 - Existing fixtures under `tests/fixtures/compiler_contract/` are
   byte-identical: this contract introduces a new fit class, it does not

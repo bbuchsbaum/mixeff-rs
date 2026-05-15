@@ -1,3 +1,9 @@
+// Unstable-internals public surface: when the feature is off this module is
+// `pub(crate)` and its types / re-exports have no in-crate consumer, reading
+// as `unused_imports` / `dead_code`. Suppress only in that configuration;
+// full linting stays when `unstable-internals` is enabled. See
+// src/compiler/mod.rs for rationale.
+#![cfg_attr(not(feature = "unstable-internals"), allow(unused_imports, dead_code))]
 //! Pathology corpus: synthetic mixed-model designs with analytically-derived
 //! identifiability certificates.
 //!

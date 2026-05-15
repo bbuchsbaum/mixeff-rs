@@ -6,6 +6,8 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+// Deserialization mirrors of the benchmark JSON; not every column is read.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct RustResult {
     label: String,
@@ -21,6 +23,7 @@ struct RustResult {
     sigma: f64,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 struct RResult {
     label: String,

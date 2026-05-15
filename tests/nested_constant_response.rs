@@ -1,3 +1,5 @@
+#![cfg(feature = "unstable-internals")]
+
 use mixeff_rs::compiler::{ConvergenceLevel, ConvergenceSource, ConvergenceVerdict};
 use mixeff_rs::compiler::{DiagnosticCode, DiagnosticSeverity};
 use mixeff_rs::datasets;

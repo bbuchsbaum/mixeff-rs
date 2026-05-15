@@ -16,10 +16,12 @@ use crate::model::linear::LinearMixedModel;
 /// summary-estimate fits.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
+#[derive(Default)]
 pub enum SamplingVarianceScale {
     /// `V_i` is on the absolute scale. The implied residual variance for
     /// observation `i` is exactly `V_i`. This is the typical case for
     /// published meta-analysis inputs.
+    #[default]
     Absolute,
     /// `V_i` is unscaled (for example, the diagonal of `(X' X)^{-1}` from a
     /// first-stage OLS) and the caller supplies a separate first-stage
@@ -30,12 +32,6 @@ pub enum SamplingVarianceScale {
         /// strictly positive.
         sigma: f64,
     },
-}
-
-impl Default for SamplingVarianceScale {
-    fn default() -> Self {
-        SamplingVarianceScale::Absolute
-    }
 }
 
 /// Options for [`LinearMixedModel::from_summary_estimates`].
@@ -64,21 +60,17 @@ impl Default for SummaryEstimateOptions {
 /// decide whether to display a "Residual" row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
+#[derive(Default)]
 pub enum ResidualSource {
     /// `sigma` is estimated from the data (the usual LMM case) or pinned
     /// for parity testing without changing model class semantics. Default.
+    #[default]
     EstimatedSigma,
     /// `sigma` is fixed at `1.0` because per-observation sampling variances
     /// were supplied through `LinearMixedModel::from_summary_estimates`.
     /// In this regime, random-effect variances are absolute (between-study
     /// `tau^2`) and `varcorr()` should not display a residual row.
     FixedSamplingVariance,
-}
-
-impl Default for ResidualSource {
-    fn default() -> Self {
-        ResidualSource::EstimatedSigma
-    }
 }
 
 impl LinearMixedModel {
@@ -332,7 +324,9 @@ mod tests {
     fn rejects_non_finite_variance() {
         let mut df = DataFrame::new();
         df.add_numeric("logrr", vec![0.1, 0.2, 0.3]).unwrap();
-        df.add_numeric("v_logrr", vec![0.04, f64::NAN, 0.01])
+        // Inject the non-finite sentinel past the add_numeric boundary guard
+        // so the from_summary_estimates defense-in-depth check is exercised.
+        df.add_numeric_unchecked("v_logrr", vec![0.04, f64::NAN, 0.01])
             .unwrap();
         df.add_categorical(
             "study",
@@ -360,7 +354,9 @@ mod tests {
     #[test]
     fn rejects_non_finite_estimate() {
         let mut df = DataFrame::new();
-        df.add_numeric("logrr", vec![0.1, f64::INFINITY, 0.3])
+        // Inject the non-finite sentinel past the add_numeric boundary guard
+        // so the from_summary_estimates defense-in-depth check is exercised.
+        df.add_numeric_unchecked("logrr", vec![0.1, f64::INFINITY, 0.3])
             .unwrap();
         df.add_numeric("v_logrr", vec![0.04, 0.09, 0.01]).unwrap();
         df.add_categorical(

@@ -101,6 +101,113 @@ impl CategoricalContrast {
             source,
         })
     }
+
+    /// Treatment (dummy) coding with the first level as the reference.
+    ///
+    /// `k` levels produce a `k × (k-1)` matrix whose reference row is all
+    /// zeros; column `j` is the indicator for `levels[j + 1]`.
+    pub fn treatment(levels: Vec<String>) -> Result<Self> {
+        let k = Self::require_min_levels(&levels)?;
+        let mut matrix = DMatrix::zeros(k, k - 1);
+        for j in 0..k - 1 {
+            matrix[(j + 1, j)] = 1.0;
+        }
+        let column_names = levels[1..].to_vec();
+        Self::new(
+            levels,
+            matrix,
+            column_names,
+            false,
+            ContrastSource::Treatment,
+        )
+    }
+
+    /// Sum-to-zero (deviation) coding.
+    ///
+    /// `k` levels produce a `k × (k-1)` matrix where column `j` is `1` for
+    /// `levels[j]`, `-1` for the last level, and `0` otherwise.
+    pub fn sum(levels: Vec<String>) -> Result<Self> {
+        let k = Self::require_min_levels(&levels)?;
+        let mut matrix = DMatrix::zeros(k, k - 1);
+        for j in 0..k - 1 {
+            matrix[(j, j)] = 1.0;
+            matrix[(k - 1, j)] = -1.0;
+        }
+        let column_names = levels[..k - 1].to_vec();
+        Self::new(levels, matrix, column_names, false, ContrastSource::Sum)
+    }
+
+    /// Helmert coding: each column contrasts a level against the mean of all
+    /// preceding levels (matches R's `contr.helmert`).
+    pub fn helmert(levels: Vec<String>) -> Result<Self> {
+        let k = Self::require_min_levels(&levels)?;
+        let mut matrix = DMatrix::zeros(k, k - 1);
+        for c in 0..k - 1 {
+            for row in 0..=c {
+                matrix[(row, c)] = -1.0;
+            }
+            matrix[(c + 1, c)] = (c + 1) as f64;
+        }
+        let column_names = levels[1..].to_vec();
+        Self::new(levels, matrix, column_names, false, ContrastSource::Helmert)
+    }
+
+    /// Orthonormal polynomial contrasts over equally-spaced scores (matches
+    /// R's `contr.poly`). Columns are the linear, quadratic, … trends; the
+    /// contrast is marked `ordered`.
+    pub fn polynomial(levels: Vec<String>) -> Result<Self> {
+        let k = Self::require_min_levels(&levels)?;
+        // Centered, equally-spaced scores keep the Vandermonde well-conditioned.
+        let center = (k - 1) as f64 / 2.0;
+        let mut vander = DMatrix::zeros(k, k);
+        for i in 0..k {
+            let x = i as f64 - center;
+            let mut acc = 1.0;
+            for p in 0..k {
+                vander[(i, p)] = acc;
+                acc *= x;
+            }
+        }
+        let qr = vander.qr();
+        let q = qr.q();
+        let r = qr.r();
+        let mut matrix = DMatrix::zeros(k, k - 1);
+        for deg in 1..k {
+            // R normalizes so the QR diagonal is positive (fixes column sign).
+            let sign = if r[(deg, deg)] < 0.0 { -1.0 } else { 1.0 };
+            for row in 0..k {
+                matrix[(row, deg - 1)] = sign * q[(row, deg)];
+            }
+        }
+        let column_names = (1..k).map(polynomial_column_name).collect();
+        Self::new(
+            levels,
+            matrix,
+            column_names,
+            true,
+            ContrastSource::Polynomial,
+        )
+    }
+
+    fn require_min_levels(levels: &[String]) -> Result<usize> {
+        let k = levels.len();
+        if k < 2 {
+            return Err(MixedModelError::InvalidArgument(format!(
+                "a categorical contrast needs at least 2 levels, got {k}"
+            )));
+        }
+        Ok(k)
+    }
+}
+
+/// R-style polynomial contrast column label: `.L`, `.Q`, `.C`, then `^4`, …
+fn polynomial_column_name(degree: usize) -> String {
+    match degree {
+        1 => ".L".to_string(),
+        2 => ".Q".to_string(),
+        3 => ".C".to_string(),
+        d => format!("^{d}"),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -266,7 +373,30 @@ impl DataFrame {
     }
 
     /// Add a numeric column.
+    ///
+    /// Rejects non-finite values (`NaN`, `+Inf`, `-Inf`): they would otherwise
+    /// propagate silently into the cross-product and surface only as an opaque
+    /// Cholesky failure. Use [`DataFrame::add_numeric_unchecked`] to bypass this
+    /// check when non-finite sentinels are intentional.
     pub fn add_numeric(&mut self, name: &str, data: Vec<f64>) -> Result<&mut Self> {
+        if let Some(pos) = data.iter().position(|v| !v.is_finite()) {
+            return Err(MixedModelError::InvalidArgument(format!(
+                "numeric column `{name}` contains a non-finite value ({}) at index {pos}; \
+                 reject NaN/Inf before fitting or use add_numeric_unchecked",
+                data[pos]
+            )));
+        }
+        self.validate_new_column_len(name, data.len())?;
+        self.columns.insert(name.to_string(), Column::Numeric(data));
+        Ok(self)
+    }
+
+    /// Add a numeric column without rejecting non-finite values.
+    ///
+    /// Escape hatch for callers that deliberately encode `NaN`/`Inf` sentinels.
+    /// Non-finite values propagate unchecked into model fitting and will
+    /// typically surface as a Cholesky/positive-definite failure.
+    pub fn add_numeric_unchecked(&mut self, name: &str, data: Vec<f64>) -> Result<&mut Self> {
         self.validate_new_column_len(name, data.len())?;
         self.columns.insert(name.to_string(), Column::Numeric(data));
         Ok(self)
@@ -376,9 +506,128 @@ fn validate_contrast_shape(
     Ok(())
 }
 
+impl Default for DataFrame {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn levels(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("L{i}")).collect()
+    }
+
+    #[test]
+    fn contrast_constructors_reject_under_two_levels() {
+        for ctor in [
+            CategoricalContrast::treatment,
+            CategoricalContrast::sum,
+            CategoricalContrast::helmert,
+            CategoricalContrast::polynomial,
+        ] {
+            assert!(ctor(levels(1)).is_err());
+            assert!(ctor(levels(2)).is_ok());
+        }
+    }
+
+    #[test]
+    fn treatment_contrast_has_zero_reference_row() {
+        let c = CategoricalContrast::treatment(levels(4)).unwrap();
+        assert_eq!(c.source, ContrastSource::Treatment);
+        assert_eq!(c.matrix.shape(), (4, 3));
+        assert_eq!(c.column_names, vec!["L1", "L2", "L3"]);
+        for j in 0..3 {
+            assert_eq!(c.matrix[(0, j)], 0.0);
+            assert_eq!(c.matrix[(j + 1, j)], 1.0);
+        }
+    }
+
+    #[test]
+    fn sum_contrast_last_row_is_minus_one() {
+        let c = CategoricalContrast::sum(levels(3)).unwrap();
+        assert_eq!(c.source, ContrastSource::Sum);
+        assert_eq!(c.matrix.shape(), (3, 2));
+        for j in 0..2 {
+            assert_eq!(c.matrix[(j, j)], 1.0);
+            assert_eq!(c.matrix[(2, j)], -1.0);
+        }
+        // Columns sum to zero (the defining deviation-coding property).
+        for j in 0..2 {
+            let s: f64 = (0..3).map(|i| c.matrix[(i, j)]).sum();
+            assert!(s.abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn helmert_contrast_matches_r_contr_helmert_4() {
+        // R's contr.helmert(4):
+        //   [,1] [,2] [,3]
+        //   -1   -1   -1
+        //    1   -1   -1
+        //    0    2   -1
+        //    0    0    3
+        let c = CategoricalContrast::helmert(levels(4)).unwrap();
+        assert_eq!(c.source, ContrastSource::Helmert);
+        let expected = [
+            [-1.0, -1.0, -1.0],
+            [1.0, -1.0, -1.0],
+            [0.0, 2.0, -1.0],
+            [0.0, 0.0, 3.0],
+        ];
+        for i in 0..4 {
+            for j in 0..3 {
+                assert_eq!(c.matrix[(i, j)], expected[i][j], "({i},{j})");
+            }
+        }
+    }
+
+    #[test]
+    fn polynomial_contrast_is_orthonormal_and_ordered() {
+        let c = CategoricalContrast::polynomial(levels(4)).unwrap();
+        assert_eq!(c.source, ContrastSource::Polynomial);
+        assert!(c.ordered);
+        assert_eq!(c.column_names, vec![".L", ".Q", ".C"]);
+        let m = &c.matrix;
+        // Orthonormal columns: M'M == I_{k-1}.
+        for a in 0..3 {
+            for b in 0..3 {
+                let dot: f64 = (0..4).map(|i| m[(i, a)] * m[(i, b)]).sum();
+                let want = if a == b { 1.0 } else { 0.0 };
+                assert!((dot - want).abs() < 1e-10, "<{a},{b}> = {dot}");
+            }
+        }
+        // Linear column increases monotonically across levels.
+        for i in 0..3 {
+            assert!(m[(i + 1, 0)] > m[(i, 0)]);
+        }
+    }
+
+    #[test]
+    fn add_numeric_rejects_non_finite() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut df = DataFrame::new();
+            let err = df.add_numeric("x", vec![1.0, bad, 3.0]).unwrap_err();
+            match err {
+                MixedModelError::InvalidArgument(msg) => {
+                    assert!(msg.contains("non-finite"), "got: {msg}");
+                    assert!(msg.contains("`x`"), "got: {msg}");
+                    assert!(msg.contains("index 1"), "got: {msg}");
+                }
+                other => panic!("expected InvalidArgument, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn add_numeric_unchecked_allows_non_finite() {
+        let mut df = DataFrame::new();
+        df.add_numeric_unchecked("x", vec![1.0, f64::NAN, 3.0])
+            .unwrap();
+        assert_eq!(df.numeric("x").map(|c| c.len()), Some(3));
+    }
 
     #[test]
     fn test_add_categorical_with_levels_unknown_value_returns_err() {
@@ -451,11 +700,5 @@ mod tests {
 
         assert!(matches!(err, MixedModelError::DimensionMismatch(_)));
         assert!(!df.has_column("group"));
-    }
-}
-
-impl Default for DataFrame {
-    fn default() -> Self {
-        Self::new()
     }
 }

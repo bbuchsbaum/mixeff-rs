@@ -2886,3 +2886,61 @@ lmm =
 The user experience should be boring in the best sense: either the model is fit
 with explicit, defensible inference, or the system explains why that model is
 not estimable and what design-level change would make the analysis coherent.
+
+---
+
+## Appendix: the three inference-status vocabularies are deliberately distinct
+
+`BoundaryLrtStatus`, `FixedEffectInferenceStatus`, and
+`CoefTablePValuePolicy` look like "three vocabularies for the same idea." They
+are not, and they are intentionally **not** unified. This section is the single
+authoritative place that says so; treat any future "let's collapse these"
+proposal as needing to refute the reasoning here first.
+
+They answer three different questions, at three different granularities, with
+three different wire commitments:
+
+| Type | Defined in | Granularity | Question it answers | Variants | Serialized? | `#[non_exhaustive]` |
+|---|---|---|---|---|---|---|
+| `FixedEffectInferenceStatus` | `compiler/artifact.rs` | per **β row** | "For this fixed-effect coefficient, is there a usable test, and if not, which *structural* reason?" | `Available`, `PValueUnavailable`, `NotEstimable`, `NotAssessed`, `Unsupported` | yes (snake_case, in the compiled-model-artifact / fixed-effect-inference-table JSON contract) | no |
+| `BoundaryLrtStatus` | `stats/lrt.rs` | whole **LRT payload** | "For this *variance-component* boundary LRT route (a mixture-distribution test, not a fixed effect), did the route produce a result?" | `Available`, `NotAssessed`, `Unsupported` | yes (snake_case, in the boundary-LRT JSON contract) | yes |
+| `CoefTablePValuePolicy` | `stats/coeftable.rs` | whole **classic coeftable** | "Which p-value *method* did the classic `coeftable` emit, or why did it emit none?" — a method/policy, **not** a status | `AsymptoticWaldZ`, `Unavailable { reason: String }` | no (not `Serialize`) | yes |
+
+Why unification is the wrong move:
+
+1. **Different statistical objects.** `FixedEffectInferenceStatus` is about a
+   single fixed-effect row's test. `BoundaryLrtStatus` is about a
+   variance-component likelihood-ratio test with a 50:50 χ² mixture reference
+   — a different estimand entirely (see the boundary-LRT section above).
+   `CoefTablePValuePolicy` is not a status at all: it is the *chosen method*
+   for the legacy `coeftable`, and it carries a free-text `reason` payload that
+   the other two deliberately do not.
+2. **Different cardinalities.** Per-row vs per-route vs per-table. A single
+   unified enum would have to be re-interpreted at three scopes, which is
+   exactly the ambiguity this separation prevents.
+3. **Independent, already-shipped wire contracts.** Two of the three serialize
+   into *separate* JSON contracts with their own snapshot tests and contract
+   docs (`profile_likelihood_json_contract.md`,
+   `boundary_lrt_variance_component_contract.md`,
+   `bootstrap_fixed_effect_contract.md`). The third is intentionally
+   non-serialized. Merging the wire forms would be a SemVer-major break of the
+   stable surface (see `semver_policy.md`) for zero semantic gain.
+
+Cross-walk for the variants that *look* identical:
+
+- `Available` (`FixedEffectInferenceStatus`) ≠ `Available` (`BoundaryLrtStatus`).
+  The first asserts a usable per-row fixed-effect test; the second asserts the
+  boundary variance-component route produced a mixture-referenced statistic.
+  They are never interchangeable and must not be matched across types.
+- `Unsupported` / `NotAssessed` likewise scope to their own object: a row
+  vs a route. "Not assessed" on a β row means inference was not requested for
+  that coefficient; on the LRT route it means the boundary route was not run.
+- `CoefTablePValuePolicy::Unavailable { reason }` is the only one carrying a
+  human-readable reason, because the classic table is the user-facing legacy
+  surface where an explanatory string is warranted; the structured artifact
+  statuses keep reasons in separate `reason_code` fields instead.
+
+Conclusion: the three vocabularies are a deliberate, contract-bearing
+separation of *per-row inference availability*, *per-route LRT status*, and
+*coeftable p-value method*. They are documented here as distinct rather than
+unified, which is the resolution sanctioned for this design point.

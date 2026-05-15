@@ -583,9 +583,8 @@ pub fn profile_theta(
         } else {
             theta_hat + 0.05
         };
-        let mut probe_start = theta_hat_vector.clone();
-        let (_, obj) =
-            optimize_theta_profile_point(m, index, probe, &mut probe_start, &lower_bounds)?;
+        let probe_start = theta_hat_vector.clone();
+        let (_, obj) = optimize_theta_profile_point(m, index, probe, &probe_start, &lower_bounds)?;
         theta_profile_step_factor_from_probe(theta_hat, probe, obj_hat, obj)
     };
 

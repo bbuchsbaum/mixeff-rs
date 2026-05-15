@@ -295,8 +295,8 @@ impl fmt::Display for VarCorr {
         writeln!(f, "Variance components:")?;
         writeln!(
             f,
-            "{:<12} {:<16} {:>12} {:>10}  {}",
-            "Groups", "Name", "Variance", "Std.Dev.", "Corr."
+            "{:<12} {:<16} {:>12} {:>10}  Corr.",
+            "Groups", "Name", "Variance", "Std.Dev."
         )?;
 
         for comp in &self.components {

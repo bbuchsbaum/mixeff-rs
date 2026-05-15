@@ -148,7 +148,7 @@ impl UniformBlockDiagonal {
     /// signature mirrors `copy_oftype` from the Julia source and allows
     /// in-place element transformation (e.g., rounding).
     pub fn copy_with<F: Fn(f64) -> f64>(&self, f: F) -> Self {
-        let blocks = self.blocks.iter().map(|blk| blk.map(|v| f(v))).collect();
+        let blocks = self.blocks.iter().map(|blk| blk.map(&f)).collect();
         Self {
             blocks,
             block_size: self.block_size,

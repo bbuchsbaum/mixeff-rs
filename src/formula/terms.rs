@@ -40,8 +40,6 @@ pub enum FixedTerm {
     Column(String),
     /// An interaction between two or more predictors (`a:b`).
     Interaction(Vec<String>),
-    /// A nesting specification (`a/b`), which expands to `a + a:b`.
-    Nested(Vec<String>),
 }
 
 /// A random-effect specification, corresponding to `(terms | grouping)` or
@@ -112,7 +110,6 @@ impl fmt::Display for FixedTerm {
             FixedTerm::NoIntercept => write!(f, "0"),
             FixedTerm::Column(name) => write!(f, "{name}"),
             FixedTerm::Interaction(names) => write!(f, "{}", names.join(":")),
-            FixedTerm::Nested(names) => write!(f, "{}", names.join("/")),
         }
     }
 }
