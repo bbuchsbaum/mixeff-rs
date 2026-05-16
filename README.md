@@ -1,9 +1,14 @@
 # mixeff-rs
 
-Mixed-effects models in Rust — a port of Julia's
-[MixedModels.jl](https://github.com/JuliaStats/MixedModels.jl) for fitting
-linear and generalized linear mixed-effects models. This crate is the
-numerical engine behind the `mixeff` R package.
+Mixed-effects models in Rust — fitting linear and generalized linear
+mixed-effects models. The implementation is developed against Julia's
+[MixedModels.jl](https://github.com/JuliaStats/MixedModels.jl) as its
+reference and parity target: it follows the same PLS/PIRLS formulation and is
+cross-checked numerically against it, but it is an **independent
+implementation** that diverges where pragmatic (notably optimizer selection
+and the fallback strategy, which have no direct Julia analogue) rather than a
+line-for-line port. This crate is the numerical engine behind the `mixeff` R
+package.
 
 ## Features
 
@@ -27,8 +32,14 @@ numerical engine behind the `mixeff` R package.
 mixeff-rs = "0.1"
 ```
 
-No system dependencies on the default build. See
-[Cargo features](#cargo-features) for the optional NLopt / PRIMA backends.
+The default build enables the NLopt optimizer backend for fast BOBYQA/NEWUOA
+fits. Use `default-features = false` for a dependency-light native build that
+uses TrustBQ for multi-theta LMMs. See [Cargo features](#cargo-features) for
+details.
+
+The native TrustBQ profile is useful for downstream packages, binary
+distribution, embedded use, and build systems that prefer to avoid additional C
+dependencies. NLopt-backed builds remain the default performance path.
 
 ## Quick start
 
@@ -74,10 +85,12 @@ The lower-level form (`LinearMixedModel::new(formula, &df, None)?` then
 
 ## Cargo features
 
-- `default`: COBYLA-based native fits for LMMs and GLMMs. No system
-  dependencies.
-- `nlopt`: enables NLopt (BOBYQA / large-θ paths and the optional GLMM
-  optimizer parity path). Requires CMake plus a C/C++ toolchain at build time.
+- `default`: enables `nlopt`, the release optimizer path for fast BOBYQA /
+  NEWUOA LMM fits and optional GLMM optimizer parity. Requires CMake plus a
+  C/C++ toolchain at build time.
+- `nlopt`: enables NLopt explicitly. Downstream packagers that cannot carry
+  NLopt can use `default-features = false` to keep the native TrustBQ LMM path
+  and native GLMM fallbacks.
 - `prima`: routes bounded LMM θ optimization through the PRIMA C library
   (BOBYQA). Expects a system PRIMA library visible to the linker.
 - `unstable-internals`: exposes the in-flux internal surface (`compiler`,

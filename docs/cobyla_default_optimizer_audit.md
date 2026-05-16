@@ -1,9 +1,15 @@
-# COBYLA Default Optimizer Audit
+# Historical COBYLA No-Default-Features Optimizer Audit
 
-Context: commit `8967f2b` changed Cargo defaults from `default = ["nlopt"]`
-to `default = []`. That made the no-feature LMM path use native COBYLA for
-multi-parameter theta fits. The NLopt feature still runs the BOBYQA/NEWUOA
-parity path used by the Julia/R reference fixtures.
+This is a historical audit of the former no-default-features LMM path. The
+current dependency-light `--no-default-features` LMM path uses native TrustBQ
+for multi-parameter theta fits; COBYLA remains available explicitly and is
+still used by native GLMM fallback paths.
+
+Context at the time of the audit: the release default optimizer path was NLopt
+because BOBYQA/NEWUOA was substantially more iteration-efficient on vector and
+crossed LMMs. The dependency-light `--no-default-features` build used native
+COBYLA for multi-parameter theta fits, so this audit recorded the expected
+COBYLA drift against the NLopt reference path used by the Julia/R fixtures.
 
 ## Commands
 
@@ -11,12 +17,13 @@ Measured with:
 
 ```sh
 cargo test --features nlopt --lib test_cobyla_nlopt_delta_audit_stays_within_documented_envelope -- --nocapture
-cargo test --lib cobyla_default -- --nocapture
+cargo test --no-default-features --lib cobyla_default -- --nocapture
 ```
 
 The first command compares forced COBYLA against the NLopt-enabled reference
-path in one test binary. The second command exercises the default no-feature
-COBYLA-owned contracts.
+path in one test binary. The second command exercised the former
+no-default-features COBYLA-owned contracts; current no-default LMM tests assert
+the TrustBQ native path instead.
 
 ## Delta Table
 
@@ -69,10 +76,11 @@ control. `OptSummary.rhoend` remains PRIMA-specific.
 
 ## Resulting Contract
 
-- NLopt parity tests stay behind `#[cfg(feature = "nlopt")]`.
-- Default no-feature builds own COBYLA tests for finite KR/Satterthwaite
-  inference, finite pastes variance components, explicit singular-fit
-  certificate state, and realistic drift envelopes.
+- NLopt parity tests stay behind `#[cfg(feature = "nlopt")]` and are covered
+  by the default release build.
+- No-default-features builds now own TrustBQ-native tests for finite
+  KR/Satterthwaite inference, finite pastes variance components, explicit
+  singular-fit certificate state, and realistic drift envelopes.
 - Native COBYLA now validates and honors `OptSummary.initial_step` instead of
   silently using a hard-coded scalar step.
-- CI must run both `cargo test` and `cargo test --features nlopt`.
+- CI must run both `cargo test` and `cargo test --no-default-features`.

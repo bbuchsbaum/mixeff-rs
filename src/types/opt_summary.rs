@@ -17,6 +17,8 @@ pub enum Optimizer {
     Cobyla,
     /// Bound-aware pattern search used for small multivariate θ vectors.
     PatternSearch,
+    /// In-tree bounded quadratic trust-region optimizer.
+    TrustBq,
     /// NLopt NEWUOA for unconstrained larger θ vectors.
     NloptNewuoa,
     /// NLopt BOBYQA for bound-constrained θ vectors.
@@ -34,7 +36,7 @@ pub enum Optimizer {
 /// Optimization backend providing the optimizer.
 ///
 /// Mirrors `OptSummary.backend` from MixedModels.jl. The default backend is
-/// `Native` (the COBYLA crate and the in-tree pattern-search optimizer).
+/// `Native` (in-tree TrustBQ/pattern-search plus the COBYLA crate).
 /// `Nlopt` is the upstream default in the Julia reference and is the active
 /// backend for any `Optimizer::Nlopt*` variant. `Prima` is reserved for the
 /// PRIMA derivative-free family; `Optimizer::PrimaBobyqa` is wired for LMMs
@@ -42,7 +44,7 @@ pub enum Optimizer {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum OptimizerBackend {
-    /// In-tree Rust optimizers (COBYLA crate, pattern search).
+    /// In-tree Rust optimizers and native fallback crates.
     Native,
     /// NLopt-backed optimizers (BOBYQA, NEWUOA).
     Nlopt,
@@ -54,7 +56,9 @@ impl Optimizer {
     /// Canonical backend for this optimizer.
     pub fn canonical_backend(self) -> OptimizerBackend {
         match self {
-            Optimizer::Cobyla | Optimizer::PatternSearch => OptimizerBackend::Native,
+            Optimizer::Cobyla | Optimizer::PatternSearch | Optimizer::TrustBq => {
+                OptimizerBackend::Native
+            }
             Optimizer::NloptNewuoa | Optimizer::NloptBobyqa => OptimizerBackend::Nlopt,
             Optimizer::PrimaBobyqa
             | Optimizer::PrimaCobyla
@@ -277,6 +281,7 @@ impl OptSummary {
         match self.optimizer {
             Optimizer::Cobyla => "cobyla",
             Optimizer::PatternSearch => "pattern_search",
+            Optimizer::TrustBq => "trust_bq",
             Optimizer::NloptNewuoa => "newuoa",
             Optimizer::NloptBobyqa => "bobyqa",
             Optimizer::PrimaBobyqa => "bobyqa",
@@ -293,6 +298,7 @@ impl OptSummary {
         match self.optimizer {
             Optimizer::Cobyla => "LN_COBYLA",
             Optimizer::PatternSearch => "PATTERN_SEARCH",
+            Optimizer::TrustBq => "TRUST_BQ",
             Optimizer::NloptNewuoa => "LN_NEWUOA",
             Optimizer::NloptBobyqa => "LN_BOBYQA",
             Optimizer::PrimaBobyqa => "bobyqa",

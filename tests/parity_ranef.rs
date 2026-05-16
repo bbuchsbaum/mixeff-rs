@@ -35,15 +35,15 @@ fn kb07_style_data() -> DataFrame {
     let mut subj = Vec::with_capacity(20);
     let mut item = Vec::with_capacity(20);
 
-    for s in 0..5 {
-        for i in 0..4 {
+    for (s, (&subj_effect, &subj_slope)) in subj_effects.iter().zip(&subj_slopes).enumerate() {
+        for (i, &item_effect) in item_effects.iter().enumerate() {
             let xi = i as f64;
             let row = s * 4 + i + 1;
             y.push(
                 20.0 + 2.0 * xi
-                    + subj_effects[s]
-                    + item_effects[i]
-                    + subj_slopes[s] * xi
+                    + subj_effect
+                    + item_effect
+                    + subj_slope * xi
                     + ((row % 7) as f64 - 3.0) * 0.03,
             );
             x.push(xi);

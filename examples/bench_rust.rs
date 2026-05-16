@@ -196,6 +196,56 @@ fn bench_fit_with_feval(
     (times_ms, objectives, fevals)
 }
 
+#[allow(clippy::type_complexity)]
+fn bench_fit_with_breakdown(
+    data: &DataFrame,
+    formula_str: &str,
+    n_warmup: usize,
+    n_reps: usize,
+    reml: bool,
+) -> (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>) {
+    let formula = parse_formula(formula_str).expect("formula parse failed");
+
+    for _ in 0..n_warmup {
+        let mut m = LinearMixedModel::new(formula.clone(), data, None).unwrap();
+        let _ = m.fit(reml);
+    }
+
+    let mut totals_ms = Vec::with_capacity(n_reps);
+    let mut build_ms = Vec::with_capacity(n_reps);
+    let mut fit_ms = Vec::with_capacity(n_reps);
+    let mut objectives = Vec::with_capacity(n_reps);
+    let mut fevals = Vec::with_capacity(n_reps);
+
+    for _ in 0..n_reps {
+        let total_start = Instant::now();
+        let build_start = Instant::now();
+        let mut m = LinearMixedModel::new(formula.clone(), data, None).unwrap();
+        let build_elapsed = build_start.elapsed().as_secs_f64() * 1000.0;
+
+        let fit_start = Instant::now();
+        match m.fit(reml) {
+            Ok(_) => {
+                fit_ms.push(fit_start.elapsed().as_secs_f64() * 1000.0);
+                totals_ms.push(total_start.elapsed().as_secs_f64() * 1000.0);
+                build_ms.push(build_elapsed);
+                objectives.push(m.objective());
+                fevals.push(m.optsum.feval as f64);
+            }
+            Err(e) => {
+                eprintln!("Fit failed: {}", e);
+                fit_ms.push(f64::NAN);
+                totals_ms.push(f64::NAN);
+                build_ms.push(build_elapsed);
+                objectives.push(f64::NAN);
+                fevals.push(f64::NAN);
+            }
+        }
+    }
+
+    (totals_ms, build_ms, fit_ms, objectives, fevals)
+}
+
 fn median(v: &[f64]) -> f64 {
     let mut sorted: Vec<f64> = v.iter().copied().filter(|x| x.is_finite()).collect();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -258,13 +308,14 @@ fn main() {
 
     // Scalar RE: (1 | subj)
     println!("\n# Scalar RE: reaction ~ 1 + days + (1 | subj)");
-    println!("scenario,n_subjects,n_obs,total_n,median_ms,mean_ms,min_ms,objective");
+    println!("scenario,n_subjects,n_obs,total_n,median_ms,mean_ms,min_ms,build_median_ms,fit_median_ms,objective,median_feval,mean_feval");
 
     for &(n_subj, n_obs, label) in &scenarios {
         let data = simulate_data(n_subj, n_obs, 42);
         let total_n = n_subj * n_obs;
 
-        let (times, objs) = bench_fit(&data, "reaction ~ 1 + days + (1 | subj)", 2, 7, true);
+        let (times, builds, fits, objs, fevals) =
+            bench_fit_with_breakdown(&data, "reaction ~ 1 + days + (1 | subj)", 2, 7, true);
 
         let med = median(&times);
         let mn = mean(&times);
@@ -274,10 +325,14 @@ fn main() {
             .filter(|x| x.is_finite())
             .fold(f64::INFINITY, f64::min);
         let obj = mean(&objs);
+        let build_med = median(&builds);
+        let fit_med = median(&fits);
+        let fe_med = median(&fevals);
+        let fe_mean = mean(&fevals);
 
         println!(
-            "scalar_{},{},{},{},{:.3},{:.3},{:.3},{:.6}",
-            label, n_subj, n_obs, total_n, med, mn, mi, obj
+            "scalar_{},{},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.6},{:.1},{:.1}",
+            label, n_subj, n_obs, total_n, med, mn, mi, build_med, fit_med, obj, fe_med, fe_mean
         );
     }
 

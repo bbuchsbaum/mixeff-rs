@@ -3,7 +3,7 @@ name = "mixeff-rs"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
-description = "Mixed-effects models in Rust — engine for the mixeff R package, port of MixedModels.jl"
+description = "Linear and generalized linear mixed-effects models in Rust; engine for the mixeff R package, parity-tested against Julia's MixedModels.jl"
 license = "MIT"
 authors = ["Bradley Buchsbaum <brad.buchsbaum@gmail.com>"]
 repository = "https://github.com/bbuchsbaum/mixeff-rs"
@@ -47,11 +47,12 @@ toml = { version = "0.8", default-features = false, features = ["parse"] }
 minilp = "0.2"
 
 [features]
-default = []
+default = ["nlopt"]
 # Enables NLopt (BOBYQA / large-θ paths and optional GLMM optimizer parity).
-# Requires CMake plus a C/C++ toolchain at build time, which is heavy
-# for downstream R/CRAN-tarball distribution. The default build uses
-# COBYLA-based native fits for LMMs and GLMMs.
+# This is the default release optimizer path because it is substantially more
+# iteration-efficient on vector and crossed LMMs. Dependency-light builds can
+# opt out with `--no-default-features`, which uses the native TrustBQ LMM
+# optimizer plus native GLMM fallbacks.
 nlopt = ["dep:nlopt"]
 # Enables the PRIMA C backend for explicitly requested Powell optimizers.
 # This first slice wires bounded LMM theta optimization through PRIMA BOBYQA
@@ -66,7 +67,7 @@ unstable-internals = []
 [dev-dependencies]
 approx = "0.5"
 # `default-features = false` drops the plotters/cairo + rayon stack so the
-# benches build with no system graphics deps (CI- and CRAN-friendly).
+# benches build with no system graphics deps.
 criterion = { version = "0.5", default-features = false }
 
 [[bench]]

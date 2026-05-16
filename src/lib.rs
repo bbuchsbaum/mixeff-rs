@@ -1,8 +1,12 @@
-//! Mixed-effects models in Rust — a port of Julia's MixedModels.jl.
+//! Mixed-effects models in Rust.
 //!
 //! This crate provides types and algorithms for fitting linear and
-//! generalized linear mixed-effects models, ported from the Julia
-//! package [MixedModels.jl](https://github.com/JuliaStats/MixedModels.jl).
+//! generalized linear mixed-effects models. It is developed against Julia's
+//! [MixedModels.jl](https://github.com/JuliaStats/MixedModels.jl) as the
+//! reference and parity target — the same PLS/PIRLS formulation, cross-checked
+//! numerically — but is an independent implementation with deliberate
+//! divergences (notably optimizer selection and the fallback strategy), not a
+//! line-for-line port.
 //!
 //! # Quick start
 //!
@@ -51,9 +55,10 @@
 
 // Clippy allowlist policy (v1.0 — see docs/v1_0_release_roadmap.md Phase D #18).
 //
-// This crate is a numerically-faithful port of Julia's MixedModels.jl. A small,
-// deliberately narrow set of style lints is allowed crate-wide because fixing
-// them would obscure the reference algorithms or change numeric semantics:
+// This crate is a numerically-faithful implementation of the MixedModels.jl
+// algorithms. A small, deliberately narrow set of style lints is allowed
+// crate-wide because fixing them would obscure the reference algorithms or
+// change numeric semantics:
 //
 // - `needless_range_loop`: blocked-Cholesky / Z'Z / Λθ kernels index several
 //   parallel arrays by the same counter to mirror the Julia/BLAS loop algebra;

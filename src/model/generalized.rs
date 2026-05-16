@@ -1207,6 +1207,10 @@ impl GeneralizedLinearMixedModel {
         match self.lmm.optsum.optimizer {
             Optimizer::PatternSearch => self.fit_native_pattern_search(n_agq),
             Optimizer::Cobyla => self.fit_native_cobyla(n_agq),
+            Optimizer::TrustBq => Err(MixedModelError::Optimization(
+                "TrustBQ is currently wired for LMM theta optimization only; pick COBYLA or pattern_search for GLMMs"
+                    .to_string(),
+            )),
             Optimizer::NloptBobyqa | Optimizer::NloptNewuoa => Err(MixedModelError::Optimization(
                 "NLopt GLMM optimizers require the `nlopt` feature; rebuild with `--features nlopt` or pick a native optimizer"
                     .to_string(),
@@ -2865,6 +2869,7 @@ mod tests {
         data
     }
 
+    #[cfg(not(feature = "nlopt"))]
     fn two_term_poisson_fixture() -> DataFrame {
         let mut y = Vec::new();
         let mut x = Vec::new();

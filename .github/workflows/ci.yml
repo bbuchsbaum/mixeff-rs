@@ -36,7 +36,7 @@ jobs:
             command: cargo test --no-default-features
           - name: prima
             os: ubuntu-latest
-            command: cargo test --features prima
+            command: cargo test --no-default-features --features prima
           # Runs on every push/PR (no schedule guard) so the gated
           # compiler/datasets/pathology contract tests stay continuously
           # covered even though that surface is not part of the stable 1.0 API.
@@ -50,7 +50,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install NLopt build prerequisites
-        if: startsWith(matrix.name, 'nlopt') && runner.os == 'Linux'
+        if: matrix.name != 'no-default-features' && matrix.name != 'prima' && runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y cmake g++
       - name: Run tests
         run: ${{ matrix.command }}
@@ -63,6 +63,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - name: Install NLopt build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y cmake g++
       - name: rustfmt
         run: cargo fmt --all -- --check
       - name: clippy (deny warnings)
@@ -80,6 +82,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.80
+      - name: Install NLopt build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y cmake g++
       - name: cargo check at pinned MSRV
         run: cargo check --all-targets
 

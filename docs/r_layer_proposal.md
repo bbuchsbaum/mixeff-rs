@@ -630,6 +630,9 @@ Default recommendation:
 
 - target CRAN-compatible packaging, with R-universe and GitHub as development
   distribution channels
+- use `mixeff-rs` with `default-features = false` for the first CRAN
+  submission; reserve the default NLopt-backed Rust profile for r-universe,
+  GitHub, local, and later CRAN-performance builds
 - keep `lme4` in `Suggests`, not `Imports`; use it for parity tests and
   optional generic compatibility
 - do not mask `lme4::lmer()` or `lme4::glmer()` on attach
@@ -853,6 +856,8 @@ Expected dependency posture:
 - optional `Imports` or `Suggests` depending on return-shape policy:
   `tibble`, `pillar`
 - `Suggests`: `lme4`, `emmeans`, `testthat`, `withr`, `knitr`, `rmarkdown`
+- `SystemRequirements`: `Cargo, rustc` for the initial CRAN profile; add
+  CMake only if a future CRAN build enables NLopt
 
 The Rust bridge can be implemented with `extendr` or a small C ABI. The
 contract should not depend on that choice. The stable boundary is the model
@@ -865,6 +870,8 @@ spec, artifact/report schemas, and typed table payloads.
 Settle the operational contracts before R code grows around them:
 
 - CRAN-compatible build target, with R-universe/GitHub for development builds
+- first CRAN build compiles Rust with `--no-default-features`; NLopt is a
+  performance profile outside the initial CRAN submission
 - bridge prototype choice and C ABI escape hatch
 - Rust MSRV and stable-only build policy
 - lme4 as `Suggests`, not `Imports`

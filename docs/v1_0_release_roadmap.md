@@ -86,13 +86,28 @@ The inference layer needs only connective tissue (Wald CIs, GLMM PB for binomial
 
 ### 4. Tests, benchmarks, CI — substantive tests, weak infrastructure
 
-**Tests:** 790 total on default features (692 lib, 93 integration, 5 doctests); 825 with `--features nlopt` (708 lib, 112 integration, 5 doctests). Public-API negative test (`tests/public_api.rs`) spawns a downstream `cargo check` to assert internal types aren't leaked — proper contract test. Boundary-LRT and profile-JSON contract tests are substantive.
+**Tests:** default features now include NLopt, so the default gate covers the
+BOBYQA/NEWUOA release optimizer path; `--no-default-features` remains the
+native TrustBQ/COBYLA fallback gate. Public-API negative test (`tests/public_api.rs`)
+spawns a downstream `cargo check` to assert internal types aren't leaked —
+proper contract test. Boundary-LRT and profile-JSON contract tests are
+substantive.
 
 **Gaps:**
 - GLMM unit coverage is thin (45 tests for a major subsystem); covered mostly via integration parity fixtures.
-- `tests/compiler_contract_snapshots.rs` (25 tests, 54 KB) runs *only* under `--features nlopt`.
+- `tests/compiler_contract_snapshots.rs` (25 tests) runs under default features
+  because NLopt is now enabled by default.
 
-**CI (`.github/workflows/ci.yml`, just added):** ubuntu-only, two jobs (default + nlopt features). **Missing:** clippy, fmt, doc build, MSRV pin, macOS/Windows legs, `--no-default-features`, `--features prima`, release-mode tests, `cargo audit`/`cargo deny`, scheduled nightly, coverage reporting.
+**CI (`.github/workflows/ci.yml`, just added):** includes default/NLopt,
+`--no-default-features`, unstable-internals, clippy/fmt/doc, and scheduled
+parity coverage. **Missing:** release-mode tests, `cargo audit`/`cargo deny`,
+and coverage reporting.
+
+**Downstream optimizer profiles:** the Rust crate's default build is the fast
+NLopt-backed release path. Downstream packages that need a dependency-light
+native build can use `mixeff-rs` with `default-features = false`, selecting
+TrustBQ for multi-theta LMMs while keeping the same public model surface. See
+`docs/optimizer_profiles.md`.
 
 **Parity:** `scripts/check_julia_parity_fixtures.sh` exists with a tolerant JSON differ (`compare_json_tolerant.py`), but is **not wired into CI**. Checked-in fixtures can rot silently when MixedModels.jl evolves.
 
@@ -147,9 +162,9 @@ The inference layer needs only connective tissue (Wald CIs, GLMM PB for binomial
 ### Phase D — CI & parity gates (1 week)
 
 18. **Clippy cleanup (prerequisite for #19's gate):** `cargo clippy --all-targets -- -D warnings` currently fails hard — ~72 lib errors plus ~100 lib-test errors. This is real code work, not CI wiring. Land a clippy cleanup (or a documented, narrow `#[allow]` allowlist policy) *before* promising `-D warnings` in CI.
-19. **CI matrix expansion:** macOS + Windows legs, clippy with `-D warnings` (after #18), `cargo fmt --check`, `cargo doc --no-deps -D warnings`, `--no-default-features` leg, `--features prima` leg, MSRV-pinned leg.
+19. **CI matrix expansion:** keep macOS + Windows default legs, clippy with `-D warnings`, `cargo fmt --check`, `cargo doc --no-deps -D warnings`, `--no-default-features` leg, `--features prima` leg, MSRV-pinned leg.
 20. **Wire `check_julia_parity_fixtures.sh` into a scheduled CI job** (weekly is sufficient).
-21. **Default-feature alternative** for `tests/compiler_contract_snapshots.rs` (currently only runs under `--features nlopt`).
+21. **No-default-feature alternative** for `tests/compiler_contract_snapshots.rs` if native-optimizer artifact coverage becomes necessary.
 22. **`cargo deny` / `cargo audit`** in CI.
 
 ---

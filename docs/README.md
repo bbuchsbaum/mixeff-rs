@@ -45,6 +45,8 @@ but are explicitly **not** part of the 1.0 stability surface.
 
 - [`v1_0_release_roadmap.md`](v1_0_release_roadmap.md) — the phased plan to
   1.0 (Phases A–E) and explicit out-of-scope list.
+- [`optimizer_profiles.md`](optimizer_profiles.md) — default NLopt and native
+  TrustBQ optimizer profiles, downstream implications, and tuning policy.
 - [`compiler_contract_v0_prd.md`](compiler_contract_v0_prd.md) — the v0
   compiler/IR PRD (the `compiler` module is unstable surface).
 - [`random_term_card_prd.md`](random_term_card_prd.md) — random-term card PRD.
@@ -57,6 +59,8 @@ but are explicitly **not** part of the 1.0 stability surface.
 - [`random_effects_formulas.md`](random_effects_formulas.md) — random-effects
   formula syntax reference.
 - [`r_layer_proposal.md`](r_layer_proposal.md) — proposed R client layer.
+- [`mmtrust_psd_lmm_prototype.md`](mmtrust_psd_lmm_prototype.md) — direct
+  PSD-covariance LMM prototype plan for scalar and 2x2 blocks.
 
 ## Parity & audit evidence
 
@@ -70,7 +74,7 @@ discrepancies against the Julia reference.
 - [`prima_backend_parity.md`](prima_backend_parity.md) — PRIMA optimizer
   backend parity.
 - [`cobyla_default_optimizer_audit.md`](cobyla_default_optimizer_audit.md) —
-  audit of COBYLA as the default optimizer.
+  historical audit of the former COBYLA no-default-features optimizer.
 - [`fixed_effect_p_value_validation.md`](fixed_effect_p_value_validation.md) —
   validation evidence for the fixed-effect p-value contract.
 - [`inference_simulation_harness.md`](inference_simulation_harness.md) — the

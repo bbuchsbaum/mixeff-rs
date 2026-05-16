@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use nalgebra::{DMatrix, DVector, SymmetricEigen};
 
-use crate::linalg::pivot::pivoted_qr_with_tol;
+use crate::linalg::pivot::{pivoted_qr_with_tol, stats_rank_with_tol};
 use crate::model::data::{CategoricalCoding, Column, ContrastSource, DataFrame};
 use crate::types::OptSummary;
 
@@ -929,7 +929,11 @@ fn audit_fixed_effects(semantic_model: &SemanticModel, data: &DataFrame) -> Fixe
     } = builder.finish();
 
     let rank = fixed_rank_assessment(&matrix);
-    let aliased_columns = aliased_columns(&matrix, rank.rank.unwrap_or(0), &columns);
+    let aliased_columns = if rank.status == RankStatus::RankDeficient {
+        aliased_columns(&matrix, rank.rank.unwrap_or(0), &columns)
+    } else {
+        Vec::new()
+    };
     if rank.status == RankStatus::RankDeficient {
         let observed_rank = rank.rank.unwrap_or(0);
         let requested_columns = rank.expected.unwrap_or(0);
@@ -1039,7 +1043,7 @@ fn audit_fixed_effects(semantic_model: &SemanticModel, data: &DataFrame) -> Fixe
         rank,
         columns,
         terms,
-        contrast_bases: categorical_contrast_audits(data),
+        contrast_bases: categorical_contrast_audits_for_terms(data, &semantic_model.fixed_terms),
         aliased_columns,
         empty_cells,
         diagnostics,
@@ -1287,7 +1291,7 @@ fn fixed_rank_assessment(matrix: &DMatrix<f64>) -> RankAssessment {
     let rank = if expected == 0 {
         0
     } else {
-        let (rank, _pivots, _r) = pivoted_qr_with_tol(matrix, 1e-8);
+        let (rank, _pivots) = stats_rank_with_tol(matrix, 1e-8);
         rank
     };
     RankAssessment {
@@ -1605,11 +1609,30 @@ fn categorical_coding(coding: RandomBasisCoding) -> CategoricalCoding {
     }
 }
 
-fn categorical_contrast_audits(data: &DataFrame) -> Vec<CategoricalContrastAudit> {
-    data.column_names()
+fn categorical_contrast_audits_for_terms(
+    data: &DataFrame,
+    fixed_terms: &[String],
+) -> Vec<CategoricalContrastAudit> {
+    let mut variables = Vec::new();
+    for term in fixed_terms {
+        if term == "1" || term == "0" {
+            continue;
+        }
+        for variable in term.split(':') {
+            if data.categorical(variable).is_some()
+                && !variables
+                    .iter()
+                    .any(|existing: &String| existing == variable)
+            {
+                variables.push(variable.to_string());
+            }
+        }
+    }
+
+    variables
         .into_iter()
         .filter_map(|variable| {
-            let cat = data.categorical(variable)?;
+            let cat = data.categorical(&variable)?;
             let explicit = cat.contrast.is_some();
             let (column_names, source, ordered, contrast_matrix) = match &cat.contrast {
                 Some(contrast) => (
@@ -1634,7 +1657,7 @@ fn categorical_contrast_audits(data: &DataFrame) -> Vec<CategoricalContrastAudit
                 }
             };
             Some(CategoricalContrastAudit {
-                variable: variable.to_string(),
+                variable,
                 levels: cat.levels.clone(),
                 column_names,
                 source,

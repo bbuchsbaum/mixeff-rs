@@ -7,7 +7,8 @@ fit metadata, and artifact diagnostics described here.
 
 ## Supported Fits
 
-The default build must fit supported GLMMs without requiring NLopt or any
+The default build enables NLopt, but supported GLMMs must also fit under the
+dependency-light `--no-default-features` build without requiring NLopt or any
 system optimizer dependency. Supported families and links are:
 
 - Bernoulli with logit link.
@@ -48,10 +49,11 @@ GLMM artifacts must report finite-sample LMM inference as unsupported.
 
 ## Optimizer Policy
 
-The CRAN-friendly/default backend is native Rust. The default native optimizer
-is COBYLA, and callers may request the in-tree bound-aware PatternSearch
-backend. NLopt and PRIMA remain optional parity/development backends, not
-required runtime dependencies.
+The Rust crate's default release build enables NLopt. Dependency-light
+downstream builds can use `--no-default-features`, where the native LMM
+optimizer is TrustBQ and GLMMs use the existing native COBYLA / PatternSearch
+backends. PRIMA remains an optional development backend, not a required runtime
+dependency.
 
 Artifacts and summaries must record:
 

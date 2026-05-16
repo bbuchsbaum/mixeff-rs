@@ -1,9 +1,9 @@
 #![cfg(feature = "nlopt")]
 #![cfg(feature = "unstable-internals")]
 
-// These wire fixtures pin fitted compiler artifacts against the NLopt-backed
-// parity optimizer path. The no-feature build has separate COBYLA-owned
-// contracts in `src/model/linear.rs`.
+// These wire fixtures pin fitted compiler artifacts against the default
+// NLopt-backed parity optimizer path. The no-default-features build has
+// separate COBYLA-owned contracts in `src/model/linear.rs`.
 
 use std::fs;
 use std::path::Path;
@@ -544,16 +544,16 @@ fn fixed_effect_inference_tables_match_wire_fixture() {
     assert_all_rows_have_status(&sleepstudy, FixedEffectInferenceStatus::Available);
     assert!(sleepstudy.rows.iter().all(|row| {
         row.kind == FixedEffectInferenceRowKind::Coefficient
-            && row.method == FixedEffectInferenceMethod::Satterthwaite
+            && row.method == FixedEffectInferenceMethod::AsymptoticWaldZ
             && row.reliability == ReliabilityGrade::Low
-            && row.statistic_name == Some(FixedEffectStatisticName::T)
+            && row.statistic_name == Some(FixedEffectStatisticName::Z)
             && row.numerator_df.is_none()
-            && row.denominator_df.is_some()
+            && row.denominator_df.is_none()
             && row.p_value.is_some()
             && row
                 .notes
                 .iter()
-                .any(|note| note.contains("Satterthwaite denominator df"))
+                .any(|note| note.contains("asymptotic Wald z"))
     }));
 
     let penicillin = fitted_penicillin_inference_table();
@@ -561,9 +561,9 @@ fn fixed_effect_inference_tables_match_wire_fixture() {
     assert_fixed_effect_table_labels(&penicillin, &["(Intercept)"]);
     assert_all_rows_have_status(&penicillin, FixedEffectInferenceStatus::Available);
     assert!(penicillin.rows.iter().all(|row| {
-        row.method == FixedEffectInferenceMethod::Satterthwaite
-            && row.statistic_name == Some(FixedEffectStatisticName::T)
-            && row.denominator_df.is_some()
+        row.method == FixedEffectInferenceMethod::AsymptoticWaldZ
+            && row.statistic_name == Some(FixedEffectStatisticName::Z)
+            && row.denominator_df.is_none()
             && row.p_value.is_some()
     }));
 

@@ -360,21 +360,25 @@ fn build_sparse_adjoint(
     n_obs: usize,
 ) -> CscMatrix<f64> {
     let nrows = vsize * n_levels;
+    let mut col_offsets = Vec::with_capacity(n_obs + 1);
+    let mut row_indices = Vec::with_capacity(vsize * n_obs);
+    let mut values = Vec::with_capacity(vsize * n_obs);
 
-    // Collect triplets (row, col, value).
-    let mut triplets: Vec<(usize, usize, f64)> = Vec::with_capacity(vsize * n_obs);
-
+    col_offsets.push(0);
     for (obs, &lvl) in refs.iter().enumerate() {
         let row_start = (lvl as usize) * vsize;
         for r in 0..vsize {
             let val = z[(r, obs)];
             if val != 0.0 {
-                triplets.push((row_start + r, obs, val));
+                row_indices.push(row_start + r);
+                values.push(val);
             }
         }
+        col_offsets.push(row_indices.len());
     }
 
-    triplet_to_csc(nrows, n_obs, &triplets)
+    CscMatrix::try_from_csc_data(nrows, n_obs, col_offsets, row_indices, values)
+        .expect("ReMat::new constructs sorted CSC adjoint data")
 }
 
 /// Build a CSC matrix from triplets. Duplicate entries at the same

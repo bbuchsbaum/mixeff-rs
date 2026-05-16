@@ -203,6 +203,10 @@ pub fn stats_rank_with_tol(a: &DMatrix<f64>, ranktol: f64) -> (usize, Vec<usize>
         return (0, Vec::new());
     }
 
+    if let Some(full_rank) = quick_full_rank_identity_pivot(a, ranktol) {
+        return full_rank;
+    }
+
     let (_rank, piv, r) = pivoted_qr_with_tol(a, ranktol);
 
     let diag_len = r.nrows().min(r.ncols());
@@ -243,6 +247,46 @@ pub fn stats_rank_with_tol(a: &DMatrix<f64>, ranktol: f64) -> (usize, Vec<usize>
     piv[0..rank].sort_unstable();
 
     (rank, piv)
+}
+
+fn quick_full_rank_identity_pivot(a: &DMatrix<f64>, ranktol: f64) -> Option<(usize, Vec<usize>)> {
+    let (m, n) = (a.nrows(), a.ncols());
+    if m == 0 || n == 0 || n > 2 {
+        return None;
+    }
+
+    if n == 1 {
+        let norm = a.column(0).norm();
+        return (norm > f64::EPSILON).then(|| (1, vec![0]));
+    }
+
+    let mut g00 = 0.0;
+    let mut g01 = 0.0;
+    let mut g11 = 0.0;
+    for row in 0..m {
+        let x0 = a[(row, 0)];
+        let x1 = a[(row, 1)];
+        g00 += x0 * x0;
+        g01 += x0 * x1;
+        g11 += x1 * x1;
+    }
+
+    let trace = g00 + g11;
+    if trace <= f64::EPSILON {
+        return None;
+    }
+    let diff = g00 - g11;
+    let discriminant = (diff * diff + 4.0 * g01 * g01).sqrt();
+    let lambda_max = 0.5 * (trace + discriminant);
+    let lambda_min = (0.5 * (trace - discriminant)).max(0.0);
+    if lambda_max <= f64::EPSILON {
+        return None;
+    }
+
+    let sigma_max = lambda_max.sqrt();
+    let sigma_min = lambda_min.sqrt();
+    let full_rank_margin = (ranktol * sigma_max * 100.0).max(f64::EPSILON.sqrt());
+    (sigma_min > full_rank_margin).then(|| (2, vec![0, 1]))
 }
 
 #[cfg(test)]

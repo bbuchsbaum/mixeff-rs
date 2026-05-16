@@ -236,37 +236,6 @@
           "diagnostics": []
         }
       ],
-      "contrast_bases": [
-        {
-          "variable": "subject",
-          "levels": [
-            "s1",
-            "s2",
-            "s3"
-          ],
-          "column_names": [
-            "subject: s2",
-            "subject: s3"
-          ],
-          "source": "treatment",
-          "ordered": false,
-          "explicit": false,
-          "contrast_matrix": [
-            [
-              0.0,
-              0.0
-            ],
-            [
-              1.0,
-              0.0
-            ],
-            [
-              0.0,
-              1.0
-            ]
-          ]
-        }
-      ],
       "aliased_columns": [
         "x"
       ],
