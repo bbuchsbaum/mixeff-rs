@@ -155,7 +155,7 @@ TrustBQ for multi-theta LMMs while keeping the same public model surface. See
 
 13. **`wald_confint(model, level)`** on `CoefTable` (`lower`/`upper` columns) and on `MixedModelFit`.
 14. **`CoefTable` exposes Satterthwaite/KR rows** when available — either re-export `FixedEffectInferenceTable` from `stats::*` as the authoritative coeftable, or extend `CoefTable` with `df`, `statistic_name`, `method` fields.
-15. **GLMM parametric bootstrap** for Bernoulli/Binomial/Poisson (Gamma can remain refused).
+15. **GLMM parametric bootstrap** for Bernoulli/Binomial/Poisson/Gamma.
 16. **PB-LRT route** for one added variance component, or downgrade the boundary-LRT refusal text that points users to it.
 17. **Inference simulation harness completion:** `reduced_rank` and `boundary` scenarios, replicate counts, MC-SE, fixed-seed determinism, harness output declares its own schema.
 
@@ -217,7 +217,7 @@ TrustBQ for multi-theta LMMs while keeping the same public model surface. See
 ## Out of scope for 1.0 (explicit)
 
 - Multivariate response (`cbind(y1, y2) ~ ...`) — post-1.0; 2.0 candidate.
-- Gamma GLMM bootstrap.
+- InverseGaussian / Normal-as-GLM parametric bootstrap.
 - Kenward-Roger for crossed/nested designs beyond the current scalar-test scope.
 - `I()` / formula-level transformations beyond a minimal subset.
 - `polars`/`arrow` integration as a first-class boundary (users continue to convert to `DataFrame` at the seam).

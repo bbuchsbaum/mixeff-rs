@@ -67,9 +67,9 @@ pub fn restore_replicates<R: Read>(
 /// fresh draw of the random effects (see
 /// [`GeneralizedLinearMixedModel::simulate_response`]), refit a clone of the
 /// template GLMM, and record its objective, dispersion, β, standard errors,
-/// and θ. Supported for Bernoulli, Binomial, and Poisson responses. Gamma,
-/// InverseGaussian, and Normal-as-GLM are refused: their response draws need
-/// a dispersion-aware sampler, not Gaussian LMM residual reuse.
+/// and θ. Supported for Bernoulli, Binomial, Poisson, and Gamma responses.
+/// InverseGaussian and Normal-as-GLM are refused until they have certified
+/// family-specific response simulators.
 ///
 /// A replicate whose refit fails numerically is recorded with `NaN`
 /// objective/σ/SE (matching the LMM [`parametricbootstrap`] convention) so
@@ -81,19 +81,18 @@ pub fn parametricbootstrap_glmm<R: rand::Rng>(
 ) -> Result<MixedModelBootstrap> {
     use crate::model::traits::MixedModelFit;
 
+    if !model.is_fitted() {
+        return Err(MixedModelError::InvalidArgument(
+            "GLMM parametric bootstrap requires a fitted model".to_string(),
+        ));
+    }
+
     match model.family {
-        Family::Bernoulli | Family::Binomial | Family::Poisson => {}
-        Family::Gamma => {
-            return Err(MixedModelError::Unsupported(
-                "Gamma GLMM parametric bootstrap is not implemented; response simulation must \
-                 draw y* ~ Gamma(shape = 1 / phi, scale = mu * phi) with phi = dispersion(true), \
-                 not fall back to Gaussian LMM residual simulation"
-                    .to_string(),
-            ));
-        }
+        Family::Bernoulli | Family::Binomial | Family::Poisson | Family::Gamma => {}
         Family::InverseGaussian | Family::Normal => {
             return Err(MixedModelError::Unsupported(format!(
-                "{:?} GLMM parametric bootstrap is not implemented for dispersion-family responses",
+                "{:?} GLMM parametric bootstrap is not implemented; no certified \
+                 family-specific response simulator is available",
                 model.family
             )));
         }
@@ -259,6 +258,21 @@ mod tests {
     }
 
     #[test]
+    fn test_glmm_parametricbootstrap_requires_fitted_model() {
+        let model = gamma_glmm_fixture();
+        let mut rng = StdRng::seed_from_u64(99);
+        let err = parametricbootstrap_glmm(&mut rng, 1, &model)
+            .expect_err("GLMM parametric bootstrap requires a fitted template");
+
+        match err {
+            MixedModelError::InvalidArgument(msg) => {
+                assert!(msg.contains("requires a fitted model"));
+            }
+            other => panic!("expected InvalidArgument error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_poisson_glmm_parametricbootstrap_runs_and_is_seed_deterministic() {
         let model = poisson_glmm_fixture();
 
@@ -321,23 +335,35 @@ mod tests {
         let pois = poisson_glmm_fixture();
         let ys = pois.simulate_response(&mut rng).unwrap();
         assert!(ys.iter().all(|&v| v >= 0.0 && v.fract() == 0.0));
+
+        // Gamma draws are strictly positive and dispersion-aware.
+        let mut gamma = gamma_glmm_fixture();
+        gamma.fit().unwrap();
+        let ys = gamma.simulate_response(&mut rng).unwrap();
+        assert!(ys.iter().all(|&v| v.is_finite() && v > 0.0));
     }
 
     #[test]
-    fn test_gamma_glmm_parametricbootstrap_refuses_until_family_draw_exists() {
-        let model = gamma_glmm_fixture();
+    fn test_gamma_glmm_parametricbootstrap_runs_with_positive_draws() {
+        let mut model = gamma_glmm_fixture();
+        model.fit().unwrap();
         let mut rng = StdRng::seed_from_u64(20260429);
-        let err = parametricbootstrap_glmm(&mut rng, 1, &model)
-            .expect_err("Gamma GLMM bootstrap must be an explicit unsupported path for now");
+        let boot = parametricbootstrap_glmm(&mut rng, 8, &model)
+            .expect("Gamma GLMM parametric bootstrap must use positive family draws");
 
-        match err {
-            MixedModelError::Unsupported(msg) => {
-                assert!(msg.contains("Gamma GLMM parametric bootstrap"));
-                assert!(msg.contains("shape = 1 / phi"));
-                assert!(msg.contains("mu * phi"));
-                assert!(msg.contains("not fall back to Gaussian"));
-            }
-            other => panic!("expected Unsupported error, got {other:?}"),
+        assert_eq!(boot.fits.len(), 8);
+        let finite = boot
+            .fits
+            .iter()
+            .filter(|r| r.objective.is_finite() && r.beta.iter().all(|b| b.is_finite()))
+            .count();
+        assert!(
+            finite >= 6,
+            "expected most Gamma PB replicates to converge, got {finite}/8"
+        );
+        for r in &boot.fits {
+            assert_eq!(r.beta.len(), 2, "intercept + x");
+            assert_eq!(r.theta.len(), 1, "one (1|group) variance component");
         }
     }
 }

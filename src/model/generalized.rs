@@ -512,30 +512,34 @@ impl GeneralizedLinearMixedModel {
     /// and samples the response from the conditional family with mean `μ`:
     /// Bernoulli → `{0, 1}`, Poisson → counts, Binomial → success
     /// proportion over the per-observation trial size (prior weights,
-    /// default `1`). Dispersion families (Gamma, InverseGaussian, and
-    /// Normal-as-GLM) are refused because their draws need a
-    /// dispersion-aware sampler rather than Gaussian residual reuse.
+    /// default `1`), and Gamma → positive draws with `shape = 1 / phi`
+    /// and `scale = mu * phi`, where `phi = dispersion(true)`.
+    /// InverseGaussian and Normal-as-GLM are refused because they do not
+    /// yet have certified family-specific response simulators.
     pub fn simulate_response<R: rand::Rng>(&self, rng: &mut R) -> Result<Vec<f64>> {
-        use rand_distr::{Binomial, Distribution, Normal, Poisson};
+        use rand_distr::{Binomial, Distribution, Gamma as GammaDistribution, Normal, Poisson};
 
         match self.family {
-            Family::Bernoulli | Family::Binomial | Family::Poisson => {}
-            Family::Gamma => {
-                return Err(MixedModelError::Unsupported(
-                    "Gamma GLMM parametric bootstrap is not implemented; response simulation \
-                     must draw y* ~ Gamma(shape = 1 / phi, scale = mu * phi) with \
-                     phi = dispersion(true), not fall back to Gaussian LMM residual simulation"
-                        .to_string(),
-                ));
-            }
+            Family::Bernoulli | Family::Binomial | Family::Poisson | Family::Gamma => {}
             Family::InverseGaussian | Family::Normal => {
                 return Err(MixedModelError::Unsupported(format!(
-                    "{:?} GLMM parametric bootstrap is not implemented for dispersion-family \
-                     responses",
+                    "{:?} GLMM parametric bootstrap is not implemented; no certified \
+                     family-specific response simulator is available",
                     self.family
                 )));
             }
         }
+        let gamma_phi = if matches!(self.family, Family::Gamma) {
+            let phi = self.dispersion(true);
+            if !phi.is_finite() || phi <= 0.0 {
+                return Err(MixedModelError::InvalidArgument(format!(
+                    "Gamma GLMM bootstrap requires positive finite phi = dispersion(true); got {phi}"
+                )));
+            }
+            Some(phi)
+        } else {
+            None
+        };
 
         let n = self.eta.len();
         let x = self.lmm.feterm.full_rank_x();
@@ -595,7 +599,28 @@ impl GeneralizedLinearMixedModel {
                         })?
                         .sample(rng);
                 }
-                Family::Gamma | Family::InverseGaussian | Family::Normal => {
+                Family::Gamma => {
+                    let phi = gamma_phi.expect("Gamma phi computed above");
+                    let mean = if mu > 0.0 {
+                        mu
+                    } else if mu == 0.0 {
+                        f64::MIN_POSITIVE
+                    } else {
+                        return Err(MixedModelError::InvalidArgument(format!(
+                            "Gamma draw requires positive conditional mean at observation {i}; got {mu}"
+                        )));
+                    };
+                    let shape = 1.0 / phi;
+                    let scale = mean * phi;
+                    *yi = GammaDistribution::new(shape, scale)
+                        .map_err(|e| {
+                            MixedModelError::InvalidArgument(format!(
+                                "Gamma draw failed at observation {i}: {e}"
+                            ))
+                        })?
+                        .sample(rng);
+                }
+                Family::InverseGaussian | Family::Normal => {
                     unreachable!("dispersion families refused above")
                 }
             }

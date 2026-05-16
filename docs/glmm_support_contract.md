@@ -22,8 +22,8 @@ system optimizer dependency. Supported families and links are:
 **implemented but NOT certified for 1.0**: they exist in the engine but are
 not validated to the cross-language parity standard the families above are
 held to, and their finite-sample inference surface is intentionally
-incomplete (e.g. parametric bootstrap explicitly refuses Gamma /
-InverseGaussian / Normal). Treat them as experimental; they are not part of
+incomplete (e.g. parametric bootstrap explicitly refuses InverseGaussian /
+Normal). Treat them as experimental; they are not part of
 the SemVer-covered GLMM contract for 1.0.
 
 Offsets are fixed linear-predictor offsets. Observation weights are supported

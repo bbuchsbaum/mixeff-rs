@@ -141,7 +141,6 @@ The following are deliberately deferred (2.0 candidates); their absence is
 not a defect:
 
 - Multivariate response (`cbind(y1, y2) ~ ...`).
-- Gamma GLMM parametric bootstrap.
 - Kenward-Roger beyond the current scalar-test scope.
 - Full `I()` / formula-level transformations beyond a minimal subset.
 - First-class `polars` / `arrow` ingestion.
