@@ -203,9 +203,10 @@ fn test_cbpp_agq5_deviance_matches_julia() {
     assert_eq!(model.nobs(), expected.nobs);
     assert_eq!(model.dof(), expected.dof);
     assert_eq!(expected.formula, "proportion ~ 1 + period + (1 | herd)");
-    assert_eq!(model.theta.len(), expected.theta.len());
+    let model_theta = model.theta();
+    assert_eq!(model_theta.len(), expected.theta.len());
     assert_eq!(model.beta.len(), expected.beta.len());
-    for (actual, want) in model.theta.iter().zip(expected.theta.iter()) {
+    for (actual, want) in model_theta.iter().zip(expected.theta.iter()) {
         assert_relative_eq!(*actual, *want, epsilon = 1e-8);
     }
     for (actual, want) in model.beta.iter().zip(expected.beta.iter()) {
@@ -230,9 +231,9 @@ fn test_cbpp_agq5_native_cobyla_fit_records_agq_contract() {
     assert_eq!(model.nobs(), expected.nobs);
     assert_eq!(model.dof(), expected.dof);
     assert_eq!(expected.formula, "proportion ~ 1 + period + (1 | herd)");
-    assert_eq!(model.lmm.optsum.optimizer, Optimizer::Cobyla);
-    assert_eq!(model.lmm.optsum.backend.label(), "native");
-    assert_eq!(model.lmm.optsum.n_agq, expected.n_agq);
+    assert_eq!(model.lmm().optsum.optimizer, Optimizer::Cobyla);
+    assert_eq!(model.lmm().optsum.backend.label(), "native");
+    assert_eq!(model.lmm().optsum.n_agq, expected.n_agq);
     assert!(model.objective().is_finite());
     assert!(model.deviance(1).is_finite());
     assert!(model.deviance(expected.n_agq).is_finite());
@@ -247,7 +248,7 @@ fn test_agq_scales_correctly_with_strong_intercept_variance() {
     let mut model = cbpp_model(5);
     let laplace = model.deviance(1);
     let agq = model.deviance(5);
-    assert!(model.theta[0] > 0.5);
+    assert!(model.theta()[0] > 0.5);
     assert!(
         (laplace - agq).abs() > 0.05,
         "AGQ should not collapse to the Laplace deviance when the intercept variance is material"

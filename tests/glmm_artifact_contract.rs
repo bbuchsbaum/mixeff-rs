@@ -56,9 +56,9 @@ fn native_glmm_artifact_records_support_contract_metadata() {
         InferenceAvailability::Unsupported { .. }
     ));
 
-    assert_eq!(model.lmm.optsum.n_agq, 1);
-    assert_eq!(model.lmm.optsum.backend.label(), "native");
-    assert_eq!(model.lmm.optsum.optimizer_name(), "cobyla");
+    assert_eq!(model.lmm().optsum.n_agq, 1);
+    assert_eq!(model.lmm().optsum.backend.label(), "native");
+    assert_eq!(model.lmm().optsum.optimizer_name(), "cobyla");
 
     let certificate = artifact
         .optimizer_certificate

@@ -123,7 +123,7 @@ fn test_rank_deficient_aic_bic_matches_julia() {
     model.fit(false).unwrap();
 
     assert_eq!(model.nobs(), expected.nobs);
-    assert_eq!(model.feterm.rank, expected.fixed_effect_rank);
+    assert_eq!(model.fixed_effect_rank(), expected.fixed_effect_rank);
     assert_eq!(model.dof(), expected.dof);
     assert_relative_eq!(model.objective(), expected.ml.objective, epsilon = 1e-8);
     assert_relative_eq!(model.aic(), expected.ml.aic, epsilon = 1e-8);
@@ -139,7 +139,7 @@ fn test_rank_deficient_sigma2_reml_matches_julia() {
     let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
     model.fit(true).unwrap();
 
-    assert_eq!(model.feterm.rank, expected.fixed_effect_rank);
+    assert_eq!(model.fixed_effect_rank(), expected.fixed_effect_rank);
     assert_relative_eq!(model.objective(), expected.reml.objective, epsilon = 1e-8);
     assert_relative_eq!(model.sigma(), expected.reml.sigma, epsilon = 2e-7);
     assert_relative_eq!(model.varest(), expected.reml.varest, epsilon = 4e-8);
@@ -153,7 +153,7 @@ fn test_rank_deficient_dof_matches_julia() {
     let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
     model.fit(false).unwrap();
 
-    assert_eq!(model.feterm.rank, expected.fixed_effect_rank);
+    assert_eq!(model.fixed_effect_rank(), expected.fixed_effect_rank);
     assert_eq!(model.dof(), expected.dof);
 }
 
@@ -166,7 +166,7 @@ fn test_issue_809_wide_fixed_effects_are_rank_saturated_not_fit_success() {
     let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
 
     assert_eq!(model.nobs(), n);
-    assert_eq!(model.feterm.rank, n);
+    assert_eq!(model.fixed_effect_rank(), n);
     assert_eq!(model.dof_residual(), 0);
 
     let err = model

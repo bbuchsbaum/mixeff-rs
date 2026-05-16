@@ -150,7 +150,10 @@ fn selection_time_fixed_effect_inference_table() -> FixedEffectInferenceTable {
     let (data, _meta) = datasets::load("sleepstudy").unwrap();
     let formula = parse_formula("Reaction ~ 1 + Days + (1 | Subject)").unwrap();
     let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
-    model.compiler_artifact.reductions.push(ReductionRecord {
+    model
+        .compiler_artifact_mut()
+        .reductions
+        .push(ReductionRecord {
         trigger: ReductionTrigger::SelectionTime,
         phase: "post_selection".to_string(),
         reason: "response-dependent random-effect selection".to_string(),

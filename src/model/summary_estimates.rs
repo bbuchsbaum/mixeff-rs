@@ -8,6 +8,7 @@ use crate::error::{MixedModelError, Result};
 use crate::formula::Formula;
 use crate::model::data::DataFrame;
 use crate::model::linear::LinearMixedModel;
+use serde::{Deserialize, Serialize};
 
 /// How the caller scaled the input sampling variances.
 ///
@@ -58,7 +59,8 @@ impl Default for SummaryEstimateOptions {
 ///
 /// Carried on `LinearMixedModel` and propagated to `VarCorr` so renderers can
 /// decide whether to display a "Residual" row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 #[derive(Default)]
 pub enum ResidualSource {

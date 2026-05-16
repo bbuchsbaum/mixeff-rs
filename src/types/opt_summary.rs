@@ -113,6 +113,7 @@ pub struct FitLogEntry {
 /// tolerances, and a log of all function evaluations. The defaults
 /// match those in Julia's MixedModels.jl.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct OptSummary {
     // ---- Parameter values ----
     /// Initial parameter vector (θ₀).

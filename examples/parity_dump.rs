@@ -146,15 +146,16 @@ fn block_logdet_factor(block: &MatrixBlock) -> f64 {
 
 fn objective_components(model: &LinearMixedModel) -> (f64, f64, f64) {
     let k = model.reterms.len();
+    let l_blocks = model.l_blocks();
     let logdet_re = (0..k)
         .map(|j| {
             let idx = j * (j + 1) / 2 + j;
-            2.0 * block_logdet_factor(&model.l_blocks[idx])
+            2.0 * block_logdet_factor(&l_blocks[idx])
         })
         .sum();
 
     let last_idx = k * (k + 1) / 2 + k;
-    let last = model.l_blocks[last_idx].as_dense();
+    let last = l_blocks[last_idx].as_dense();
     let mut logdet_xx = 0.0;
     for i in 0..(last.nrows().saturating_sub(1)) {
         let d = last[(i, i)];
@@ -313,14 +314,14 @@ fn dump_contra_glmm(n_agq: usize) {
         family: "bernoulli".to_string(),
         link: "logit".to_string(),
         n_rows: data.nrow(),
-        n_groups: model.lmm.reterms[0].n_levels(),
+        n_groups: model.lmm().reterms[0].n_levels(),
         fit_n_agq: n_agq,
-        fit_theta: model.theta.clone(),
+        fit_theta: model.theta(),
         fit_beta: model.beta.iter().copied().collect(),
         fit_objective: model.objective(),
         fit_deviance_laplace: dev_lap,
         fit_deviance_agq: dev_agq,
-        fit_feval: model.lmm.optsum.feval,
+        fit_feval: model.lmm().optsum.feval,
     };
 
     println!("{}", serde_json::to_string_pretty(&dump).unwrap());

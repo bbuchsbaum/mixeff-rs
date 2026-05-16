@@ -70,3 +70,60 @@ pub enum LinAlgError {
 }
 
 pub type Result<T> = std::result::Result<T, MixedModelError>;
+
+impl MixedModelError {
+    /// Stable machine-readable error code for downstream bindings.
+    ///
+    /// These strings are part of the public error contract. The display text
+    /// may improve over time, but callers that need branching behavior should
+    /// use this code instead of parsing [`std::fmt::Display`] output.
+    pub fn code(&self) -> &'static str {
+        match self {
+            MixedModelError::Formula(_) => "formula",
+            MixedModelError::LinAlg(_) => "linalg",
+            MixedModelError::Optimization(_) => "optimization",
+            MixedModelError::DimensionMismatch(_) => "dimension_mismatch",
+            MixedModelError::NotFitted => "not_fitted",
+            MixedModelError::AlreadyFitted => "already_fitted",
+            MixedModelError::ConstantResponse => "constant_response",
+            MixedModelError::NoRandomEffects => "no_random_effects",
+            MixedModelError::InvalidArgument(_) => "invalid_argument",
+            MixedModelError::Unsupported(_) => "unsupported",
+            MixedModelError::UnsupportedFamilyLink { .. } => "unsupported_family_link",
+            MixedModelError::ProblemTooLarge(_) => "problem_too_large",
+            MixedModelError::Singular(_) => "singular_model",
+            MixedModelError::RankSaturatedFixedEffects { .. } => "rank_saturated_fixed_effects",
+            MixedModelError::PosDefException => "positive_definite_exception",
+        }
+    }
+}
+
+impl LinAlgError {
+    /// Stable machine-readable code for linear algebra errors.
+    pub fn code(&self) -> &'static str {
+        match self {
+            LinAlgError::NotPositiveDefinite => "matrix_not_positive_definite",
+            LinAlgError::DimensionMismatch(_) => "dimension_mismatch",
+            LinAlgError::Singular => "singular_matrix",
+            LinAlgError::RankDeficient { .. } => "rank_deficient",
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mixed_model_error_codes_are_stable_machine_strings() {
+        let err = MixedModelError::InvalidArgument("bad input".to_string());
+        assert_eq!(err.code(), "invalid_argument");
+
+        let linalg = LinAlgError::RankDeficient {
+            rank: 2,
+            expected: 3,
+        };
+        assert_eq!(linalg.code(), "rank_deficient");
+        assert_eq!(MixedModelError::LinAlg(linalg).code(), "linalg");
+    }
+}

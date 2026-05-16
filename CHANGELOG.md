@@ -40,6 +40,11 @@ API framing, the inference surface, and release infrastructure.
   parametric-bootstrap LRT route for one added variance component.
 - Inference simulation harness (`examples/inference_route_simulation.rs`) with
   a stable JSON output schema.
+- `mixedmodels.fit_summary` `1.0.0` — versioned JSON envelope for downstream
+  wrappers that need objective values, optimizer metadata, coefficient tables,
+  variance components, and summary-table rows in one stable payload.
+- Stable `MixedModelError::code()` and `LinAlgError::code()` machine strings
+  for downstream bindings that must branch without parsing display text.
 - Default-feature compiler-contract coverage
   (`tests/compiler_contract_structure.rs`) so wire-serialization regressions
   are caught on every CI run, not only the NLopt leg.
@@ -53,8 +58,12 @@ API framing, the inference surface, and release infrastructure.
   `VERSIONING.md`; the broader policy prose that duplicated `VERSIONING.md` has
   been removed and replaced with a header note cross-linking to
   `VERSIONING.md` as the authoritative source.
-- `#[non_exhaustive]` added to public enums so adding variants is no longer a
-  SemVer-major change.
+- `#[non_exhaustive]` added to public enums and model/result structs where
+  downstream construction should stay builder/accessor based; adding fields or
+  variants is no longer a SemVer-major change.
+- Solver internals on `LinearMixedModel` and `GeneralizedLinearMixedModel`
+  sealed behind accessors / trait methods so 1.0 does not freeze the PLS,
+  Cholesky, compiler-artifact, or PIRLS working-state layout.
 - Numerical primitives (`linalg`) demoted from `pub` to `pub(crate)` — they are
   internal to the fit path, not part of the stable API.
 - `compiler`, `datasets`, and `pathology` are no longer part of the default

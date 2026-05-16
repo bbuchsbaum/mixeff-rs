@@ -25,13 +25,15 @@ use crate::model::linear::LinearMixedModel;
 use crate::model::traits::{Family, LinkFunction, MixedModelFit, RandomEffectTermInfo};
 use crate::stats::{BlockDescription, ModelSummary, VarCorr};
 use crate::types::{FitLogEntry, MatrixBlock, OptSummary, Optimizer, ReMat};
+use crate::unstable_internal_method;
 
 /// A generalized linear mixed-effects model.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 #[allow(dead_code)] // beta0/u0 reserved for step-halving; devc/devc0/sd/mult reserved for AGQ
 pub struct GeneralizedLinearMixedModel {
     /// Internal linear mixed model (local Laplace approximation).
-    pub lmm: LinearMixedModel,
+    pub(crate) lmm: LinearMixedModel,
 
     /// Fixed-effects coefficients (pivoted).
     pub beta: DVector<f64>,
@@ -39,19 +41,19 @@ pub struct GeneralizedLinearMixedModel {
     beta0: DVector<f64>,
 
     /// Covariance parameters.
-    pub theta: Vec<f64>,
+    pub(crate) theta: Vec<f64>,
 
     /// Random effects on the b-scale: vec(Λ * u) per term.
-    pub b: Vec<DMatrix<f64>>,
+    pub(crate) b: Vec<DMatrix<f64>>,
     /// Random effects on the u-scale (orthogonal).
-    pub u: Vec<DMatrix<f64>>,
+    pub(crate) u: Vec<DMatrix<f64>>,
     /// Previous u for step-halving.
     u0: Vec<DMatrix<f64>>,
 
     /// Linear predictor η = Xβ + Zb.
-    pub eta: DVector<f64>,
+    pub(crate) eta: DVector<f64>,
     /// Conditional mean μ = g⁻¹(η).
-    pub mu: DVector<f64>,
+    pub(crate) mu: DVector<f64>,
     /// Response vector.
     pub y: DVector<f64>,
     /// Fixed linear predictor offset, one value per observation.
@@ -198,6 +200,30 @@ impl<'a> GeneralizedLinearMixedModelBuilder<'a> {
 }
 
 impl GeneralizedLinearMixedModel {
+    unstable_internal_method! {
+    /// Inner [`LinearMixedModel`] holding the local Laplace approximation
+    /// (raw PIRLS solver state).
+    ///
+    /// Unstable internal surface: `pub` only with the `unstable-internals`
+    /// feature; otherwise `pub(crate)`. Not part of the stable 1.0 API; the
+    /// θ vector is available through [`MixedModelFit::theta`].
+    #[allow(dead_code)]
+    unstable_vis fn lmm(&self) -> &LinearMixedModel {
+        &self.lmm
+    }
+    }
+
+    unstable_internal_method! {
+    /// Mutable inner [`LinearMixedModel`] (raw PIRLS solver state).
+    ///
+    /// Unstable internal surface: `pub` only with the `unstable-internals`
+    /// feature; otherwise `pub(crate)`. Not part of the stable 1.0 API.
+    #[allow(dead_code)]
+    unstable_vis fn lmm_mut(&mut self) -> &mut LinearMixedModel {
+        &mut self.lmm
+    }
+    }
+
     /// Construct a GLMM from formula, data, distribution, and link.
     pub fn new(
         formula: Formula,

@@ -265,10 +265,12 @@ fn profile_update_stages(
         let l10 = model.reterms[0].lambda[(1, 0)];
         let l11 = model.reterms[0].lambda[(1, 1)];
 
+        let (l_blocks, a_blocks) = model.l_blocks_mut_a_blocks();
+
         let t = Instant::now();
         scale_l00_vsize2(
-            blockdiag2_mut(&mut model.l_blocks[0]),
-            blockdiag2(&model.a_blocks[0]),
+            blockdiag2_mut(&mut l_blocks[0]),
+            blockdiag2(&a_blocks[0]),
             l00,
             l01,
             l10,
@@ -278,8 +280,8 @@ fn profile_update_stages(
 
         let t = Instant::now();
         scale_l10_vsize2(
-            dense_block_mut(&mut model.l_blocks[1]),
-            dense_block(&model.a_blocks[1]),
+            dense_block_mut(&mut l_blocks[1]),
+            dense_block(&a_blocks[1]),
             l00,
             l01,
             l10,
@@ -287,25 +289,25 @@ fn profile_update_stages(
         );
         samples.scale_l10.push(us(t));
 
-        dense_block_mut(&mut model.l_blocks[2]).copy_from(dense_block(&model.a_blocks[2]));
+        dense_block_mut(&mut l_blocks[2]).copy_from(dense_block(&a_blocks[2]));
 
         let t = Instant::now();
-        chol_l00_vsize2(blockdiag2_mut(&mut model.l_blocks[0]));
+        chol_l00_vsize2(blockdiag2_mut(&mut l_blocks[0]));
         samples.chol_l00.push(us(t));
 
         let t = Instant::now();
         {
-            let (left, right) = model.l_blocks.split_at_mut(1);
+            let (left, right) = l_blocks.split_at_mut(1);
             solve_l10_vsize2(dense_block_mut(&mut right[0]), blockdiag2(&left[0]));
         }
         samples.solve_l10.push(us(t));
 
-        let l10_mat = dense_block(&model.l_blocks[1]).clone();
-        let a2 = dense_block(&model.a_blocks[2]);
+        let l10_mat = dense_block(&l_blocks[1]).clone();
+        let a2 = dense_block(&a_blocks[2]);
 
         let t = Instant::now();
         {
-            let l11_mat = dense_block_mut(&mut model.l_blocks[2]);
+            let l11_mat = dense_block_mut(&mut l_blocks[2]);
             l11_mat.copy_from(a2);
             l11_mat.gemm(-1.0, &l10_mat, &l10_mat.transpose(), 1.0);
             chol_small_dense(l11_mat);
@@ -314,7 +316,7 @@ fn profile_update_stages(
 
         let t = Instant::now();
         {
-            let l11_mat = dense_block_mut(&mut model.l_blocks[2]);
+            let l11_mat = dense_block_mut(&mut l_blocks[2]);
             l11_mat.copy_from(a2);
             downdate_l11_hand(l11_mat, &l10_mat);
             chol_small_dense(l11_mat);

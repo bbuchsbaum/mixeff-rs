@@ -135,6 +135,7 @@ Each `mixedmodels.*` schema carries its own `schema_name` + `schema_version`
 `mixedmodels.profile_likelihood_ci` `1.0.0`,
 `mixedmodels.parametric_bootstrap_lrt` `1.0.0`,
 `mixedmodels.bootstrap_run` `1.0.0`,
+`mixedmodels.fit_summary` `1.0.0`,
 `mixedmodels.fixed_effect_inference_table` `1.0.0`). **These schema versions
 are versioned independently of the crate version** and follow SemVer in their
 own right:
@@ -157,6 +158,11 @@ Rules:
   renaming one is a schema-MAJOR change. Adding a new reason code is
   schema-MINOR **only if** consumers are documented to treat unknown codes as
   an opaque refusal (they are).
+- Stable error-code strings returned by `MixedModelError::code()` and
+  `LinAlgError::code()` are likewise part of the downstream binding contract.
+  Renaming or reusing one for a different condition is a MAJOR change; adding a
+  new code for a new `#[non_exhaustive]` variant is MINOR when consumers are
+  documented to handle unknown codes opaquely.
 - Schemas behind `unstable-internals` (the `compiler`/IR schemas:
   `mixedmodels.compiled_model_artifact`, `mixedmodels.semantic_model`,
   `mixedmodels.theta_map`, `mixedmodels.random_term_card`, etc.) are **not**

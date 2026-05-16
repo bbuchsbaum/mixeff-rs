@@ -4,9 +4,11 @@ use std::fmt;
 
 use crate::model::summary_estimates::ResidualSource;
 use crate::types::ReMat;
+use serde::{Deserialize, Serialize};
 
 /// Variance and correlation of random effects.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct VarCorr {
     /// One entry per random-effects term.
     pub components: Vec<VarCorrComponent>,
@@ -21,7 +23,8 @@ pub struct VarCorr {
 }
 
 /// Variance components for a single random-effects grouping factor.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct VarCorrComponent {
     /// Name of the grouping factor.
     pub group: String,

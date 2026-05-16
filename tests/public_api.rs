@@ -2,6 +2,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+use mixeff_rs::error::MixedModelError;
 use mixeff_rs::model::{
     parametricbootstrap, BatchOptimizerControl, BatchOptions, BatchThetaGrouping, BatchWarmStart,
     BootstrapFailedRefitPolicy, BootstrapInterval, BootstrapIntervalMethod, BootstrapQuantile,
@@ -24,8 +25,8 @@ use mixeff_rs::stats::{
     LinearModelFit, MixedModelProfile, ModelComparisonAlternative, ModelComparisonAssessment,
     ModelComparisonClass, ModelSummary, ModelSummaryRow, ProfileLikelihoodCiPayload,
     ProfileLikelihoodCiRow, ProfileRow, RandomEffectComparison, VarCorr, VarCorrComponent,
-    BOUNDARY_LRT_SCHEMA, BOUNDARY_LRT_SCHEMA_VERSION, PROFILE_LIKELIHOOD_CI_SCHEMA,
-    PROFILE_LIKELIHOOD_CI_SCHEMA_VERSION,
+    BOUNDARY_LRT_SCHEMA, BOUNDARY_LRT_SCHEMA_VERSION, FIT_SUMMARY_SCHEMA,
+    FIT_SUMMARY_SCHEMA_VERSION, PROFILE_LIKELIHOOD_CI_SCHEMA, PROFILE_LIKELIHOOD_CI_SCHEMA_VERSION,
 };
 use mixeff_rs::types::MatrixBlock;
 
@@ -123,6 +124,93 @@ pub fn touch_internal_api() {
 }
 
 #[test]
+fn downstream_crate_cannot_touch_sealed_model_internals() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let temp_root = std::env::temp_dir().join(format!(
+        "mixeff-rs-public-api-sealed-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&temp_root);
+    fs::create_dir_all(temp_root.join("src")).unwrap();
+    fs::write(
+        temp_root.join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "mixeff_rs_public_api_sealed"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+mixeff-rs = {{ path = "{}" }}
+"#,
+            manifest_dir.display()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        temp_root.join("src/lib.rs"),
+        r#"use mixeff_rs::model::{CategoricalColumn, GeneralizedLinearMixedModel, LinearMixedModel};
+
+pub fn touch_lmm(model: &LinearMixedModel) {
+    let _ = &model.feterm;
+    let _ = &model.parmap;
+    let _ = &model.a_blocks;
+    let _ = &model.compiler_artifact;
+}
+
+pub fn touch_glmm(model: &GeneralizedLinearMixedModel) {
+    let _ = &model.lmm;
+    let _ = &model.theta;
+    let _ = &model.b;
+    let _ = &model.mu;
+}
+
+pub fn construct_non_exhaustive_column() -> CategoricalColumn {
+    CategoricalColumn {
+        levels: Vec::new(),
+        refs: Vec::new(),
+        values: Vec::new(),
+        contrast: None,
+    }
+}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO"))
+        .arg("check")
+        .arg("--quiet")
+        .arg("--manifest-path")
+        .arg(temp_root.join("Cargo.toml"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    let _ = fs::remove_dir_all(&temp_root);
+
+    assert!(
+        !output.status.success(),
+        "downstream crate unexpectedly touched sealed model internals"
+    );
+    for needle in [
+        "field `feterm`",
+        "field `parmap`",
+        "field `a_blocks`",
+        "field `compiler_artifact`",
+        "field `lmm`",
+        "field `theta`",
+        "field `b`",
+        "field `mu`",
+        "non-exhaustive",
+    ] {
+        assert!(
+            stderr.contains(needle),
+            "expected `{needle}` in sealed API failure, got:\n{stderr}"
+        );
+    }
+}
+
+#[test]
 fn intended_model_barrel_exports_compile_for_downstream_users() {
     fn assert_type<T>() {}
     fn assert_trait<T: ?Sized>() {}
@@ -183,6 +271,20 @@ fn intended_types_exports_compile_for_downstream_users() {
 }
 
 #[test]
+fn stable_result_and_error_types_are_send_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    assert_send_sync::<MixedModelError>();
+    assert_send_sync::<LinearMixedModel>();
+    assert_send_sync::<GeneralizedLinearMixedModel>();
+    assert_send_sync::<CoefTable>();
+    assert_send_sync::<ModelSummary>();
+    assert_send_sync::<ModelSummaryRow>();
+    assert_send_sync::<VarCorr>();
+    assert_send_sync::<VarCorrComponent>();
+}
+
+#[test]
 fn intended_stats_barrel_exports_compile_for_downstream_users() {
     fn assert_type<T>() {}
 
@@ -195,6 +297,7 @@ fn intended_stats_barrel_exports_compile_for_downstream_users() {
     assert_type::<FixedEffectComparison>();
     assert_type::<LikelihoodRatioTest>();
     assert_type::<LinearModelFit>();
+    assert_type::<mixeff_rs::stats::FitSummaryPayload>();
     assert_type::<ModelComparisonAlternative>();
     assert_type::<ModelComparisonAssessment>();
     assert_type::<ModelComparisonClass>();
@@ -214,6 +317,8 @@ fn intended_stats_barrel_exports_compile_for_downstream_users() {
     let _ = assess_model_comparison_sequence;
     let _ = BOUNDARY_LRT_SCHEMA;
     let _ = BOUNDARY_LRT_SCHEMA_VERSION;
+    let _ = FIT_SUMMARY_SCHEMA;
+    let _ = FIT_SUMMARY_SCHEMA_VERSION;
     let _ = profile;
     let _ = profile_beta;
     let _ = profile_betas;

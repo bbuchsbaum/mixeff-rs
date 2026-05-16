@@ -32,10 +32,13 @@ The following modules and their documented public items are part of the stable
 
 - **`mixeff_rs::stats`** — post-fit summaries (`varcorr`, `coeftable`,
   `model_summary`, `lrt`, `bootstrap`, `profile`) and their documented JSON
-  contracts (schema names and versions declared in that module).
+  contracts (schema names and versions declared in that module, including
+  `mixedmodels.fit_summary` `1.0.0`).
 
 - **`mixeff_rs::error`** — `MixedModelError`, `Result`
-  (`std::result::Result<T, MixedModelError>`).
+  (`std::result::Result<T, MixedModelError>`), and stable
+  `MixedModelError::code()` / `LinAlgError::code()` strings for downstream
+  bindings.
 
 - **`mixeff_rs::types`** — typed model-matrix containers intentionally
   exposed for advanced callers (e.g. `MatrixBlock`, `OptSummary`,
@@ -102,6 +105,33 @@ set:
 
 Adding a variant to any of these enums is a **MINOR** release. Downstream
 code must match with `_ => { /* … */ }` or similar.
+
+---
+
+## `#[non_exhaustive]` public struct inventory
+
+Public structs that expose data for reading but should not be constructed by
+downstream code through struct literals are also `#[non_exhaustive]`. Use
+constructors, builders, accessors, or serde payload constructors instead.
+
+| Struct | Module |
+|--------|--------|
+| `LinearMixedModel` | `mixeff_rs::model` |
+| `GeneralizedLinearMixedModel` | `mixeff_rs::model` |
+| `OptSummary` | `mixeff_rs::types` |
+| `CategoricalColumn` | `mixeff_rs::model` |
+| `CategoricalContrast` | `mixeff_rs::model` |
+| `CoefTable` | `mixeff_rs::stats` |
+| `ModelSummary` | `mixeff_rs::stats` |
+| `ModelSummaryRow` | `mixeff_rs::stats` |
+| `VarCorr` | `mixeff_rs::stats` |
+| `VarCorrComponent` | `mixeff_rs::stats` |
+| `FitSummaryPayload` | `mixeff_rs::stats` |
+
+Adding a field to any of these structs is a **MINOR** release when the field is
+defaultable for serde or unavailable to downstream struct literals. Removing or
+renaming an existing public field remains a **MAJOR** change unless the type is
+behind `unstable-internals`.
 
 ---
 

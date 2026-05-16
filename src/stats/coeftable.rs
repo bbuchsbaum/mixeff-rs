@@ -6,11 +6,13 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
 use statrs::distribution::{ContinuousCDF, Normal};
 
 use crate::stats::profile::ConfintRow;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum CoefTablePValuePolicy {
     AsymptoticWaldZ,
@@ -27,7 +29,8 @@ pub enum CoefTablePValuePolicy {
 ///
 /// The p-values use the z-distribution (large-sample approximation),
 /// matching the default behaviour of `coeftable` in MixedModels.jl.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct CoefTable {
     /// Column names (one per fixed-effects term).
     pub names: Vec<String>,

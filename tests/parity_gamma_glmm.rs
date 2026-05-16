@@ -271,8 +271,8 @@ fn test_gamma_log_glmm_native_cobyla_preserves_fixture_contract() {
     assert_eq!(expected.link, "log");
     assert_eq!(model.nobs(), expected.nobs);
     assert_eq!(model.dof(), expected.dof);
-    assert_eq!(model.lmm.optsum.optimizer, Optimizer::Cobyla);
-    assert_eq!(model.lmm.optsum.backend.label(), "native");
+    assert_eq!(model.opt_summary().optimizer, Optimizer::Cobyla);
+    assert_eq!(model.opt_summary().backend.label(), "native");
     assert_eq!(model.theta().len(), expected.rust_reference.theta.len());
     assert_eq!(model.fixef().len(), expected.rust_reference.beta.len());
     assert!(model.objective().is_finite());

@@ -1,13 +1,54 @@
 //! Mixed-model summary tables used by MIME-style renderers.
 
+use serde::{Deserialize, Serialize};
 use statrs::distribution::{ChiSquared, ContinuousCDF};
 
 use crate::model::traits::MixedModelFit;
 use crate::model::{GeneralizedLinearMixedModel, LinearMixedModel};
-use crate::stats::VarCorr;
+use crate::stats::{CoefTable, VarCorr};
+
+/// Stable schema name for serialized post-fit summaries.
+pub const FIT_SUMMARY_SCHEMA: &str = "mixedmodels.fit_summary";
+/// Stable schema version for serialized post-fit summaries.
+pub const FIT_SUMMARY_SCHEMA_VERSION: &str = "1.0.0";
+
+/// Versioned, downstream-friendly fit-summary payload.
+///
+/// This is the JSON-facing summary contract for wrappers that need fitted
+/// objective values, optimizer metadata, fixed-effect tables, variance
+/// components, and the rendered-model summary data in one stable envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct FitSummaryPayload {
+    pub schema_name: String,
+    pub schema_version: String,
+    pub model_kind: String,
+    pub formula: Option<String>,
+    pub family: Option<String>,
+    pub link: Option<String>,
+    pub nobs: usize,
+    pub dof: usize,
+    pub objective: f64,
+    pub loglikelihood: f64,
+    pub aic: f64,
+    pub bic: f64,
+    pub is_fitted: bool,
+    pub is_singular: bool,
+    pub theta: Vec<f64>,
+    pub dispersion: f64,
+    pub optimizer: String,
+    pub optimizer_code: String,
+    pub optimizer_backend: String,
+    pub optimizer_status: String,
+    pub feval: i64,
+    pub coefficients: CoefTable,
+    pub varcorr: VarCorr,
+    pub summary: ModelSummary,
+}
 
 /// One row in a model summary table.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ModelSummaryRow {
     pub label: String,
     pub estimate: Option<f64>,
@@ -18,7 +59,8 @@ pub struct ModelSummaryRow {
 }
 
 /// A markdown/HTML/LaTeX-ready summary of a fitted mixed model.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ModelSummary {
     pub sigma_headers: Vec<String>,
     pub rows: Vec<ModelSummaryRow>,
@@ -206,6 +248,99 @@ impl ModelSummary {
                 cells
             })
             .collect()
+    }
+}
+
+impl FitSummaryPayload {
+    /// Build a fit-summary payload from a fitted or pre-fit linear model.
+    pub fn from_linear_model(model: &LinearMixedModel) -> Self {
+        Self::from_parts(
+            "linear_mixed_model",
+            model,
+            None,
+            None,
+            model.coeftable(),
+            model.varcorr(),
+            ModelSummary::from_linear_model(model),
+        )
+    }
+
+    /// Build a fit-summary payload from a fitted or pre-fit generalized model.
+    pub fn from_generalized_model(model: &GeneralizedLinearMixedModel) -> Self {
+        Self::from_parts(
+            "generalized_linear_mixed_model",
+            model,
+            model.family_kind().map(family_label),
+            model.link_kind().map(link_label),
+            CoefTable::new(
+                model.coef_names(),
+                model.coef().as_slice().to_vec(),
+                model.stderror().as_slice().to_vec(),
+            ),
+            model.varcorr(),
+            ModelSummary::from_generalized_model(model),
+        )
+    }
+
+    fn from_parts<M: MixedModelFit>(
+        model_kind: &str,
+        model: &M,
+        family: Option<&'static str>,
+        link: Option<&'static str>,
+        coefficients: CoefTable,
+        varcorr: VarCorr,
+        summary: ModelSummary,
+    ) -> Self {
+        let opt = model.opt_summary();
+        FitSummaryPayload {
+            schema_name: FIT_SUMMARY_SCHEMA.to_string(),
+            schema_version: FIT_SUMMARY_SCHEMA_VERSION.to_string(),
+            model_kind: model_kind.to_string(),
+            formula: model.formula_label(),
+            family: family.map(str::to_string),
+            link: link.map(str::to_string),
+            nobs: model.nobs(),
+            dof: model.dof(),
+            objective: model.objective(),
+            loglikelihood: model.loglikelihood(),
+            aic: model.aic(),
+            bic: model.bic(),
+            is_fitted: model.is_fitted(),
+            is_singular: model.is_singular(),
+            theta: model.theta(),
+            dispersion: model.dispersion(false),
+            optimizer: opt.optimizer_name().to_string(),
+            optimizer_code: opt.optimizer_code().to_string(),
+            optimizer_backend: opt.backend_name().to_string(),
+            optimizer_status: opt.return_value.clone(),
+            feval: opt.feval,
+            coefficients,
+            varcorr,
+            summary,
+        }
+    }
+}
+
+fn family_label(family: crate::model::traits::Family) -> &'static str {
+    match family {
+        crate::model::traits::Family::Normal => "normal",
+        crate::model::traits::Family::Bernoulli => "bernoulli",
+        crate::model::traits::Family::Binomial => "binomial",
+        crate::model::traits::Family::Poisson => "poisson",
+        crate::model::traits::Family::Gamma => "gamma",
+        crate::model::traits::Family::InverseGaussian => "inverse_gaussian",
+    }
+}
+
+fn link_label(link: crate::model::traits::LinkFunction) -> &'static str {
+    match link {
+        crate::model::traits::LinkFunction::Identity => "identity",
+        crate::model::traits::LinkFunction::Log => "log",
+        crate::model::traits::LinkFunction::Logit => "logit",
+        crate::model::traits::LinkFunction::Probit => "probit",
+        crate::model::traits::LinkFunction::Cloglog => "cloglog",
+        crate::model::traits::LinkFunction::Inverse => "inverse",
+        crate::model::traits::LinkFunction::Sqrt => "sqrt",
     }
 }
 
@@ -674,6 +809,106 @@ mod tests {
     }
 
     #[test]
+    fn fit_summary_payload_for_lmm_is_versioned_and_serializable() {
+        let mut data = DataFrame::new();
+        data.add_numeric("y", vec![2.0, 2.5, 3.0, 3.2, 4.0, 4.4, 5.0, 5.1])
+            .unwrap();
+        data.add_numeric("x", vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0])
+            .unwrap();
+        data.add_categorical(
+            "g",
+            vec![
+                "a".to_string(),
+                "a".to_string(),
+                "b".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+                "c".to_string(),
+                "d".to_string(),
+                "d".to_string(),
+            ],
+        )
+        .unwrap();
+
+        let formula = parse_formula("y ~ 1 + x + (1 | g)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.set_theta(&[0.5]).unwrap();
+        model.update_l().unwrap();
+        model.optsum.feval = 7;
+        model.optsum.return_value = "FTOL_REACHED".to_string();
+
+        let payload = FitSummaryPayload::from_linear_model(&model);
+        assert_eq!(payload.schema_name, FIT_SUMMARY_SCHEMA);
+        assert_eq!(payload.schema_version, FIT_SUMMARY_SCHEMA_VERSION);
+        assert_eq!(payload.model_kind, "linear_mixed_model");
+        assert_eq!(payload.optimizer_backend, "native");
+        assert_eq!(payload.feval, 7);
+        assert_eq!(payload.family, None);
+        assert_eq!(payload.link, None);
+
+        let json = serde_json::to_string(&payload).unwrap();
+        let decoded: FitSummaryPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.schema_name, FIT_SUMMARY_SCHEMA);
+        assert_eq!(decoded.schema_version, FIT_SUMMARY_SCHEMA_VERSION);
+        assert_eq!(decoded.coefficients.names, payload.coefficients.names);
+        assert_eq!(
+            decoded.varcorr.components.len(),
+            payload.varcorr.components.len()
+        );
+        assert_eq!(
+            decoded
+                .summary
+                .rows
+                .iter()
+                .map(|row| &row.label)
+                .collect::<Vec<_>>(),
+            payload
+                .summary
+                .rows
+                .iter()
+                .map(|row| &row.label)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn summary_table_components_are_serde_roundtrippable() {
+        let coefs = CoefTable::new(vec!["(Intercept)".to_string()], vec![1.25], vec![0.5]);
+        let varcorr = VarCorr {
+            components: vec![crate::stats::VarCorrComponent {
+                group: "g".to_string(),
+                names: vec!["(Intercept)".to_string()],
+                std_dev: vec![0.75],
+                correlations: Vec::new(),
+            }],
+            residual_sd: Some(1.0),
+            residual_source: crate::model::summary_estimates::ResidualSource::EstimatedSigma,
+        };
+        let summary = ModelSummary {
+            sigma_headers: vec!["σ_g".to_string()],
+            rows: vec![row(
+                "(Intercept)",
+                Some(1.25),
+                Some(0.5),
+                Some(2.5),
+                Some(0.012),
+                &[Some(0.75)],
+            )],
+        };
+
+        let coefs_rt: CoefTable =
+            serde_json::from_str(&serde_json::to_string(&coefs).unwrap()).unwrap();
+        let varcorr_rt: VarCorr =
+            serde_json::from_str(&serde_json::to_string(&varcorr).unwrap()).unwrap();
+        let summary_rt: ModelSummary =
+            serde_json::from_str(&serde_json::to_string(&summary).unwrap()).unwrap();
+
+        assert_eq!(coefs_rt, coefs);
+        assert_eq!(varcorr_rt, varcorr);
+        assert_eq!(summary_rt, summary);
+    }
+
+    #[test]
     fn test_from_generalized_model_omits_residual_for_bernoulli() {
         let mut data = DataFrame::new();
         data.add_numeric("y", vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0])
@@ -730,5 +965,46 @@ mod tests {
             model.block_description().to_markdown(),
             crate::stats::BlockDescription::from_generalized_model(&model).to_markdown()
         );
+    }
+
+    #[test]
+    fn fit_summary_payload_for_glmm_names_family_and_link() {
+        let mut data = DataFrame::new();
+        data.add_numeric("y", vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0])
+            .unwrap();
+        data.add_numeric("x", vec![-1.0, -0.5, 0.0, 0.5, 1.0, 1.5])
+            .unwrap();
+        data.add_categorical(
+            "g",
+            vec![
+                "a".to_string(),
+                "a".to_string(),
+                "b".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+                "c".to_string(),
+            ],
+        )
+        .unwrap();
+
+        let formula = parse_formula("y ~ 1 + x + (1 | g)").unwrap();
+        let mut model = GeneralizedLinearMixedModel::new(
+            formula,
+            &data,
+            Family::Bernoulli,
+            Some(LinkFunction::Logit),
+        )
+        .unwrap();
+        model.lmm.set_theta(&[0.75]).unwrap();
+        model.lmm.update_l().unwrap();
+        model.beta[0] = 0.2;
+        model.beta[1] = 0.1;
+        model.lmm.optsum.feval = 3;
+
+        let payload = FitSummaryPayload::from_generalized_model(&model);
+        assert_eq!(payload.model_kind, "generalized_linear_mixed_model");
+        assert_eq!(payload.family.as_deref(), Some("bernoulli"));
+        assert_eq!(payload.link.as_deref(), Some("logit"));
+        assert_eq!(payload.schema_version, FIT_SUMMARY_SCHEMA_VERSION);
     }
 }

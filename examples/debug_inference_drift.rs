@@ -221,7 +221,7 @@ fn sleepstudy_fixture() -> DataFrame {
     let days: Vec<f64> = (0..18).flat_map(|_| (0..10u64).map(|d| d as f64)).collect();
     let subj: Vec<String> = subjects
         .iter()
-        .flat_map(|s| std::iter::repeat(s.to_string()).take(10))
+        .flat_map(|s| std::iter::repeat_n(s.to_string(), 10))
         .collect();
     let mut df = DataFrame::new();
     df.add_numeric("reaction", reaction).unwrap();
@@ -264,7 +264,7 @@ fn penicillin_fixture() -> DataFrame {
     ];
     let plate: Vec<String> = plate_letters
         .iter()
-        .flat_map(|p| std::iter::repeat(p.to_string()).take(6))
+        .flat_map(|p| std::iter::repeat_n(p.to_string(), 6))
         .collect();
     let sample: Vec<String> = (0..24)
         .flat_map(|_| ["A", "B", "C", "D", "E", "F"].iter().map(|s| s.to_string()))

@@ -79,21 +79,22 @@ use crate::unstable_internal_method;
 ///   `LinearMixedModel::from_summary_estimates`). See
 ///   `docs/summary_estimates_meta_analysis.md`.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct LinearMixedModel {
     pub formula: Formula,
     pub reterms: Vec<ReMat>,
-    pub xy_mat: FeMat,
+    pub(crate) xy_mat: FeMat,
     pub y: DVector<f64>,
-    pub feterm: FeTerm,
-    pub fixed_design: FixedDesign,
-    pub sqrtwts: Vec<f64>,
-    pub parmap: Vec<(usize, usize, usize)>, // (block, row, col)
+    pub(crate) feterm: FeTerm,
+    pub(crate) fixed_design: FixedDesign,
+    pub(crate) sqrtwts: Vec<f64>,
+    pub(crate) parmap: Vec<(usize, usize, usize)>, // (block, row, col)
     pub dims: ModelDims,
-    pub a_blocks: Vec<MatrixBlock>,
-    pub l_blocks: Vec<MatrixBlock>,
+    pub(crate) a_blocks: Vec<MatrixBlock>,
+    pub(crate) l_blocks: Vec<MatrixBlock>,
     pub optsum: OptSummary,
-    pub compiler_artifact: CompiledModelArtifact,
-    pub residual_source: crate::model::summary_estimates::ResidualSource,
+    pub(crate) compiler_artifact: CompiledModelArtifact,
+    pub(crate) residual_source: crate::model::summary_estimates::ResidualSource,
     /// Training-time categorical level order (and explicit contrast, if any)
     /// for every categorical column in the fitting frame, keyed by column
     /// name. Used by [`LinearMixedModel::predict_new`] to rebuild the
@@ -1015,9 +1016,93 @@ impl LinearMixedModel {
         &self.compiler_artifact
     }
 
+    unstable_internal_method! {
+    /// Mutable compiler artifact (model-IR / audit metadata).
+    ///
+    /// Unstable internal surface: `pub` only with the `unstable-internals`
+    /// feature; otherwise `pub(crate)`. The compiler/IR is still in flux and
+    /// is not part of the stable 1.0 API.
+    #[allow(dead_code)]
+    unstable_vis fn compiler_artifact_mut(&mut self) -> &mut CompiledModelArtifact {
+        &mut self.compiler_artifact
+    }
+    }
+
     /// Compiler policy attached to this model.
     pub fn compiler_policy(&self) -> &CompilerPolicy {
         &self.compiler_artifact.compiler_policy
+    }
+
+    /// Map from each θ index to its `(block, row, col)` slot in the relative
+    /// covariance factor.
+    pub fn parmap(&self) -> &[(usize, usize, usize)] {
+        &self.parmap
+    }
+
+    /// Active fixed-effect rank after pivoting and rank detection.
+    pub fn fixed_effect_rank(&self) -> usize {
+        self.feterm.rank
+    }
+
+    unstable_internal_method! {
+    /// Lower triangle of `[Z X y]'[Z X y]` in blocked storage (raw PLS
+    /// solver state).
+    ///
+    /// Unstable internal surface: `pub` only with the `unstable-internals`
+    /// feature; otherwise `pub(crate)`. Leaks the blocked-Cholesky layout and
+    /// is not part of the stable 1.0 API.
+    #[allow(dead_code)]
+    unstable_vis fn a_blocks(&self) -> &[MatrixBlock] {
+        &self.a_blocks
+    }
+    }
+
+    unstable_internal_method! {
+    /// Mutable lower triangle of `[Z X y]'[Z X y]` (raw PLS solver state).
+    ///
+    /// Unstable internal surface: `pub` only with the `unstable-internals`
+    /// feature; otherwise `pub(crate)`. Not part of the stable 1.0 API.
+    #[allow(dead_code)]
+    unstable_vis fn a_blocks_mut(&mut self) -> &mut [MatrixBlock] {
+        &mut self.a_blocks
+    }
+    }
+
+    unstable_internal_method! {
+    /// Blocked lower Cholesky factor of `Λ'AΛ + I` (raw PLS solver state).
+    ///
+    /// Unstable internal surface: `pub` only with the `unstable-internals`
+    /// feature; otherwise `pub(crate)`. Leaks the blocked-Cholesky layout and
+    /// is not part of the stable 1.0 API.
+    #[allow(dead_code)]
+    unstable_vis fn l_blocks(&self) -> &[MatrixBlock] {
+        &self.l_blocks
+    }
+    }
+
+    unstable_internal_method! {
+    /// Mutable blocked lower Cholesky factor `Λ'AΛ + I` (raw PLS solver
+    /// state).
+    ///
+    /// Unstable internal surface: `pub` only with the `unstable-internals`
+    /// feature; otherwise `pub(crate)`. Not part of the stable 1.0 API.
+    #[allow(dead_code)]
+    unstable_vis fn l_blocks_mut(&mut self) -> &mut [MatrixBlock] {
+        &mut self.l_blocks
+    }
+    }
+
+    unstable_internal_method! {
+    /// Disjoint mutable `l_blocks` and immutable `a_blocks` borrows (raw PLS
+    /// solver state), so kernels can update `L` in place from `A` without
+    /// fighting the borrow checker.
+    ///
+    /// Unstable internal surface: `pub` only with the `unstable-internals`
+    /// feature; otherwise `pub(crate)`. Not part of the stable 1.0 API.
+    #[allow(dead_code)]
+    unstable_vis fn l_blocks_mut_a_blocks(&mut self) -> (&mut [MatrixBlock], &[MatrixBlock]) {
+        (&mut self.l_blocks, &self.a_blocks)
+    }
     }
 
     /// Runtime summary for the selected fixed-effect design backend.
@@ -17433,7 +17518,7 @@ mod tests {
         );
         assert!(
             test.denominator_df
-                .map_or(true, |value| value.is_finite() && value > 0.0),
+                .is_none_or(|value| value.is_finite() && value > 0.0),
             "{label}: denominator df should be finite and positive when present: {:?}",
             test.denominator_df
         );

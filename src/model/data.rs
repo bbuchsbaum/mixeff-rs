@@ -27,6 +27,7 @@ pub enum Column {
 
 /// A categorical (factor) column with level encoding.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct CategoricalColumn {
     /// The unique levels in order of first appearance.
     pub levels: Vec<String>,
@@ -76,6 +77,7 @@ pub enum CategoricalCoding {
 /// Rows are in categorical level order and columns are the encoded basis
 /// columns used in fixed-effect and random-effect design construction.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct CategoricalContrast {
     pub levels: Vec<String>,
     pub matrix: DMatrix<f64>,

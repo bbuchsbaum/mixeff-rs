@@ -39,7 +39,10 @@ pub use lrt::{
     RandomEffectComparison, BOUNDARY_LRT_SCHEMA, BOUNDARY_LRT_SCHEMA_VERSION,
     PARAMETRIC_BOOTSTRAP_LRT_SCHEMA, PARAMETRIC_BOOTSTRAP_LRT_SCHEMA_VERSION,
 };
-pub use model_summary::{ModelSummary, ModelSummaryRow};
+pub use model_summary::{
+    FitSummaryPayload, ModelSummary, ModelSummaryRow, FIT_SUMMARY_SCHEMA,
+    FIT_SUMMARY_SCHEMA_VERSION,
+};
 pub use profile::{
     profile, profile_beta, profile_betas, profile_confint_payload, profile_sigma, profile_theta,
     profile_theta_scalar, ConfintRow, MixedModelProfile, ProfileLikelihoodCiPayload,

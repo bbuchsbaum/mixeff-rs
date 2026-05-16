@@ -22,12 +22,12 @@ fn assert_native_glmm_fit(
     assert!(model.loglikelihood().is_finite());
     assert!(model.dispersion(false).is_finite());
     assert!(model.dispersion(true).is_finite());
-    assert_eq!(model.lmm.optsum.optimizer, Optimizer::Cobyla);
-    assert_eq!(model.lmm.optsum.backend.label(), "native");
-    assert_eq!(model.lmm.optsum.n_agq, n_agq);
-    assert!(model.lmm.optsum.feval > 0);
-    assert!(model.lmm.optsum.fmin.is_finite());
-    assert!(!model.lmm.optsum.fit_log.is_empty());
+    assert_eq!(model.lmm().optsum.optimizer, Optimizer::Cobyla);
+    assert_eq!(model.lmm().optsum.backend.label(), "native");
+    assert_eq!(model.lmm().optsum.n_agq, n_agq);
+    assert!(model.lmm().optsum.feval > 0);
+    assert!(model.lmm().optsum.fmin.is_finite());
+    assert!(!model.lmm().optsum.fit_log.is_empty());
     let certificate = model
         .compiler_artifact()
         .optimizer_certificate

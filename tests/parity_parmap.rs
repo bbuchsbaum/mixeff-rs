@@ -82,5 +82,5 @@ fn test_parmap_vsize3_lower_triangular_order() {
         .iter()
         .map(|entry| (entry.term, entry.row, entry.col))
         .collect::<Vec<_>>();
-    assert_eq!(model.parmap, expected_parmap);
+    assert_eq!(model.parmap(), expected_parmap);
 }
