@@ -1,101 +1,118 @@
-# SemVer Policy
+# Module-Inventory Appendix to VERSIONING.md
 
-This document defines what `mixeff-rs` considers a breaking change, which parts
-of the public surface are covered by stability guarantees once **1.0.0** ships,
-and which parts are explicitly **not** covered.
+This document is the module-inventory appendix to
+[`VERSIONING.md`](../VERSIONING.md) (the authoritative versioning contract).
+See `VERSIONING.md` for breaking-change rules across the Rust API, numerical
+output, formula DSL, JSON schemas, and Julia parity.
 
-It is a companion to [`../CHANGELOG.md`](../CHANGELOG.md) and the phased plan in
-[`v1_0_release_roadmap.md`](v1_0_release_roadmap.md).
+Where the two documents conflict, `VERSIONING.md` wins. This document is
+restricted to the enumeration below: which modules are in the stable surface,
+which are behind `unstable-internals`, and which `#[non_exhaustive]` enums
+exist.
 
-## Pre-1.0 (current state)
+---
 
-No `1.0.0` has been tagged. While the version is `0.x`, **any release may
-contain breaking changes**, including minor-version bumps, per Cargo's `0.x`
-semantics. Pin an exact version if you need stability before 1.0.
+## Stable surface (covered by SemVer guarantees after 1.0.0)
 
-## Versioning after 1.0.0
+The following modules and their documented public items are part of the stable
+1.0 API, asserted by `tests/public_api.rs`:
 
-Once `1.0.0` is tagged, the crate follows [SemVer 2.0.0](https://semver.org/):
+- **`mixeff_rs::prelude`** — glob-import bundle: `DataFrame`,
+  `LinearMixedModel`, `GeneralizedLinearMixedModel`, `MixedModelFit`,
+  `Family`, `LinkFunction`, `parse_formula`, `Result`, `MixedModelError`.
 
-- **MAJOR** — a breaking change to the stable surface (see below).
-- **MINOR** — backward-compatible additions (new functions, new enum variants
-  on `#[non_exhaustive]` enums, new methods, new modules).
-- **PATCH** — backward-compatible bug fixes, including numerical-accuracy fixes.
+- **`mixeff_rs::formula`** — `parse_formula`, the `Formula` AST types
+  (`Formula`, `FixedTerm`, `RandomTerm`, `GroupingFactor`), `FormulaError`.
 
-### What counts as a breaking change
+- **`mixeff_rs::model`** — `DataFrame`, `LinearMixedModel`,
+  `LinearMixedModelBuilder`, `GeneralizedLinearMixedModel`,
+  `GeneralizedLinearMixedModelBuilder`, `FitOptions`, `ModelCriterion`,
+  `MixedModelFit`, `Family`, `LinkFunction`, and all documented fit /
+  inference / bootstrap entry points.
 
-- Removing or renaming any item in the stable surface.
-- Changing a public function/method signature in a non-additive way.
-- Adding a variant to a public enum that is **not** `#[non_exhaustive]`.
-- Adding a required field to a public struct with public fields, or to a
-  struct constructible by a public constructor, in a non-additive way.
-- Raising the MSRV (treated as a minor bump with a CHANGELOG note, not a
-  major bump, but never silently).
-
-### What is *not* a breaking change
-
-- Adding variants to a `#[non_exhaustive]` enum. All public enums
-  (`MixedModelError`, `Family`, `LinkFunction`, `Optimizer`,
-  `BootstrapIntervalMethod`, `ContrastSource`, `ModelComparisonClass`,
-  `ModelComparisonReasonCode`, `RandomTermExpansion`, `NewReLevels`,
-  `CategoricalCoding`, `Column`, …) are `#[non_exhaustive]` for this reason —
-  match on them with a wildcard arm.
-- Numerical-output changes that move a fitted value within documented
-  tolerance to track an upstream MixedModels.jl correction. The objective,
-  θ ordering, and factor-block layout are parity-stable; a *bug fix* that
-  corrects a wrong number is a PATCH, not a breaking change. Cross-language
-  parity is verified by the scheduled Julia parity CI gate.
-- Changes to anything in the **unstable surface** (next section).
-
-## Stable surface (covered by guarantees after 1.0.0)
-
-- `mixeff_rs::prelude`
-- `mixeff_rs::formula` — `parse_formula`, the `Formula` AST, `FormulaError`.
-- `mixeff_rs::model` — `DataFrame`, `LinearMixedModel`,
-  `GeneralizedLinearMixedModel`, `MixedModelFit`, `Family`, `LinkFunction`,
-  and the documented fit / inference / bootstrap entry points.
-- `mixeff_rs::stats` — post-fit summaries (`varcorr`, `coeftable`,
+- **`mixeff_rs::stats`** — post-fit summaries (`varcorr`, `coeftable`,
   `model_summary`, `lrt`, `bootstrap`, `profile`) and their documented JSON
-  contracts.
-- `mixeff_rs::error` — `MixedModelError`, `Result`.
-- `mixeff_rs::types` — the typed model-matrix containers intentionally exposed
-  for advanced callers (e.g. `MatrixBlock`; this is asserted by
-  `tests/public_api.rs`).
-- The re-exported `mixeff_rs::nalgebra` **path** is stable; the nalgebra
-  *version* behind it follows nalgebra's own SemVer and a major nalgebra bump
-  is a major bump here.
+  contracts (schema names and versions declared in that module).
 
-## Unstable surface (NOT covered by guarantees)
+- **`mixeff_rs::error`** — `MixedModelError`, `Result`
+  (`std::result::Result<T, MixedModelError>`).
 
-The following are gated behind the opt-in **`unstable-internals`** Cargo
-feature and are **not** part of the 1.0 stability contract. On a default
-build they are `pub(crate)` (not reachable downstream); enabling
-`unstable-internals` exposes them as `pub`. Anything reachable only via that
-feature may change in any release without a major bump:
+- **`mixeff_rs::types`** — typed model-matrix containers intentionally
+  exposed for advanced callers (e.g. `MatrixBlock`, `OptSummary`,
+  `FitLogEntry`, `Optimizer`, `GaussHermiteNormalized`).
 
-- `mixeff_rs::compiler` — the model-IR / compiler surface (~40+ public types)
-  is tied to a v0 PRD that is still being shaped. Every IR refinement would
-  otherwise force a major bump; it is explicitly excluded.
-- `mixeff_rs::pathology` — diagnostic/identifiability internals.
-- `mixeff_rs::datasets` — bundled reference fixtures; contents and provenance
-  metadata may change as parity fixtures are regenerated.
+- **`mixeff_rs::nalgebra`** (re-export via `pub use nalgebra`) — the path is
+  stable; the nalgebra *version* behind it follows nalgebra's own SemVer and
+  a major nalgebra bump is a major crate bump.
 
-`mixeff_rs::linalg` is already `pub(crate)` and is not public surface at all.
+---
+
+## Unstable surface (NOT covered by SemVer guarantees)
+
+The following modules are gated behind the opt-in **`unstable-internals`**
+Cargo feature. On a default build they are `pub(crate)`; enabling
+`unstable-internals` makes them `pub`. They may change in any release without
+a major version bump:
+
+- **`mixeff_rs::compiler`** — model-IR / compiler surface (~40+ public
+  types). The compiler/IR is still being shaped and every IR refinement would
+  otherwise force a major bump; it is explicitly excluded from the 1.0
+  contract. Stable JSON schemas emitted by the compiler (e.g.
+  `mixedmodels.compiled_model_artifact`, `mixedmodels.semantic_model`,
+  `mixedmodels.theta_map`, `mixedmodels.random_term_card`) are similarly
+  excluded — consumers must not rely on them under a stability expectation.
+
+- **`mixeff_rs::pathology`** — diagnostic and identifiability-classification
+  internals. Pathology certificates themselves (the typed refusal channel) are
+  stable; the internals that compute them are not.
+
+- **`mixeff_rs::datasets`** — bundled reference fixtures; contents and
+  provenance metadata may change as parity fixtures are regenerated.
+
+Not reachable downstream at all (always `pub(crate)`):
+
+- **`mixeff_rs::linalg`** — numerical primitives (blocked Cholesky, pivoted
+  QR, rank updates). Internal to the fit path; demoted from `pub` for v1.0.
+
+- **`mixeff_rs::optimizer`** (private `mod optimizer`) — internal optimizer
+  dispatch; not re-exported.
+
+---
+
+## `#[non_exhaustive]` enum inventory
+
+All public enums are `#[non_exhaustive]` so that adding variants is a
+**MINOR** change, not MAJOR. Match on them with a wildcard arm. The current
+set:
+
+| Enum | Module |
+|------|--------|
+| `MixedModelError` | `mixeff_rs::error` |
+| `Family` | `mixeff_rs::model` |
+| `LinkFunction` | `mixeff_rs::model` |
+| `Optimizer` | `mixeff_rs::types` |
+| `BootstrapIntervalMethod` | `mixeff_rs::stats` |
+| `ContrastSource` | `mixeff_rs::model` |
+| `ModelComparisonClass` | `mixeff_rs::stats` |
+| `ModelComparisonReasonCode` | `mixeff_rs::stats` |
+| `RandomTermExpansion` | `mixeff_rs::formula` |
+| `NewReLevels` | `mixeff_rs::model` |
+| `CategoricalCoding` | `mixeff_rs::model` |
+| `Column` | `mixeff_rs::types` |
+
+Adding a variant to any of these enums is a **MINOR** release. Downstream
+code must match with `_ => { /* … */ }` or similar.
+
+---
 
 ## Out of scope for 1.0
 
-The following are deliberately deferred to post-1.0 (2.0 candidates) and their
-absence is not a defect:
+The following are deliberately deferred (2.0 candidates); their absence is
+not a defect:
 
 - Multivariate response (`cbind(y1, y2) ~ ...`).
 - Gamma GLMM parametric bootstrap.
 - Kenward-Roger beyond the current scalar-test scope.
 - Full `I()` / formula-level transformations beyond a minimal subset.
-- First-class `polars` / `arrow` ingestion (convert to `DataFrame` at the seam).
+- First-class `polars` / `arrow` ingestion.
 - Profile likelihood for GLMM.
-
-## MSRV
-
-The minimum supported Rust version is **1.80** (declared in `Cargo.toml`).
-An MSRV increase is called out in the CHANGELOG and treated as at least a
-minor bump; it is never done silently in a patch.

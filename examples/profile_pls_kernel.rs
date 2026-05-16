@@ -2,7 +2,7 @@
 //! sleepstudy-shaped random-slope data.
 //!
 //! Run:
-//!     cargo run --release --example profile_pls_kernel
+//!     cargo run --release --features unstable-internals --example profile_pls_kernel
 
 use std::time::Instant;
 

@@ -4,10 +4,11 @@ All notable changes to `mixeff-rs` are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to adhere to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
-once 1.0.0 ships. See the
-[SemVer policy](https://github.com/bbuchsbaum/mixeff-rs/blob/main/docs/semver_policy.md)
-for the stability contract and the list of modules that are explicitly *not*
-covered by SemVer guarantees.
+once 1.0.0 ships. See [VERSIONING.md](VERSIONING.md) for the authoritative
+versioning contract (breaking-change rules across the Rust API, numerical output,
+formula DSL, JSON schemas, and Julia parity) and
+[docs/semver_policy.md](docs/semver_policy.md) for the module-by-module stable
+vs. `unstable-internals` surface inventory.
 
 ## [Unreleased]
 
@@ -17,6 +18,12 @@ API framing, the inference surface, and release infrastructure.
 
 ### Added
 
+- `VERSIONING.md` — authoritative versioning policy covering the five versioned
+  surfaces (Rust API, numerical output, formula DSL, JSON schemas, Julia parity),
+  SemVer interpretation, numerical-tolerance band, MSRV policy, deprecation
+  process, and downstream R/Python compatibility matrix.
+- `RELEASE_CHECKLIST.md` — step-by-step release runbook (pre-release gates,
+  version/changelog bump, package verification, tag, publish, soak, post-release).
 - `LinearMixedModelBuilder` + `GeneralizedLinearMixedModelBuilder` +
   `FitOptions` / `ModelCriterion` — fluent construction that collapses the
   `fit(reml: bool)` boolean and the GLMM `new_with_*` constructor set into one
@@ -42,6 +49,10 @@ API framing, the inference surface, and release infrastructure.
 
 ### Changed
 
+- `docs/semver_policy.md` reduced to the module-inventory appendix of
+  `VERSIONING.md`; the broader policy prose that duplicated `VERSIONING.md` has
+  been removed and replaced with a header note cross-linking to
+  `VERSIONING.md` as the authoritative source.
 - `#[non_exhaustive]` added to public enums so adding variants is no longer a
   SemVer-major change.
 - Numerical primitives (`linalg`) demoted from `pub` to `pub(crate)` — they are
@@ -52,7 +63,8 @@ API framing, the inference surface, and release infrastructure.
   frozen into the 1.0 SemVer contract. Internal crate code is unaffected;
   downstream code that needs them must enable `unstable-internals`. CI runs an
   `unstable-internals` leg on every push so that surface stays tested.
-- MSRV declared honestly as Rust 1.80 (`std::sync::LazyLock`).
+- MSRV declared honestly as Rust 1.85, matching the current dependency graph's
+  Rust 2024 edition requirement.
 - Documented, deliberately narrow crate-level Clippy `#[allow]` policy for
   lints that would obscure the reference algorithms or change numeric
   semantics (see `src/lib.rs`).

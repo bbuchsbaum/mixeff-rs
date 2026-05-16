@@ -5,9 +5,10 @@
 //! - `theta_objective_loop`: a single `objective_at(theta)` evaluation — the
 //!   inner callback the optimizer drives thousands of times per fit.
 //!
-//! Run with `cargo bench`. Output is text-only (criterion is built without
-//! plotters), so it is portable and CI-friendly. Compare runs by archiving
-//! criterion's own `target/criterion` estimates between commits.
+//! Run with `cargo bench --features unstable-internals`. Output is text-only
+//! (criterion is built without plotters), so it is portable and CI-friendly.
+//! Compare runs by archiving criterion's own `target/criterion` estimates
+//! between commits.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use mixeff_rs::formula::parse_formula;

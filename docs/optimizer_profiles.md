@@ -76,8 +76,8 @@ For objective/factorization profiling, use
 `examples/objective_eval_bench.rs`:
 
 ```sh
-cargo run --release --example objective_eval_bench
-cargo run --release --no-default-features --example objective_eval_bench
+cargo run --release --features unstable-internals --example objective_eval_bench
+cargo run --release --no-default-features --features unstable-internals --example objective_eval_bench
 ```
 
 This harness builds and fits each model once, then repeatedly evaluates the

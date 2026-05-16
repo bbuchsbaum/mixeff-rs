@@ -6,8 +6,8 @@
 //! primarily reflects repeated PLS/factorization objective cost.
 //!
 //! ```sh
-//! cargo run --release --example objective_eval_bench
-//! cargo run --release --no-default-features --example objective_eval_bench
+//! cargo run --release --features unstable-internals --example objective_eval_bench
+//! cargo run --release --no-default-features --features unstable-internals --example objective_eval_bench
 //! ```
 
 use std::hint::black_box;

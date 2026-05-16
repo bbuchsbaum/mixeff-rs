@@ -132,8 +132,10 @@ fn rank_deficient_fixed_effect_inference_table() -> FixedEffectInferenceTable {
 fn regularized_fixed_effect_inference_table() -> FixedEffectInferenceTable {
     let (data, _meta) = datasets::load("sleepstudy").unwrap();
     let formula = parse_formula("Reaction ~ 1 + Days + (1 | Subject)").unwrap();
-    let mut policy = CompilerPolicy::default();
-    policy.random_strategy = mixeff_rs::compiler::RandomStrategy::Regularized;
+    let policy = CompilerPolicy {
+        random_strategy: mixeff_rs::compiler::RandomStrategy::Regularized,
+        ..CompilerPolicy::default()
+    };
     let mut model = LinearMixedModel::new_with_compiler_policy(formula, &data, None, policy)
         .expect("regularized-policy sleepstudy model should construct");
     model.fit(true).unwrap();

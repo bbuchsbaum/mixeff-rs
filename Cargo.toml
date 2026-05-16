@@ -2,7 +2,7 @@
 name = "mixeff-rs"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.85"
 description = "Linear and generalized linear mixed-effects models in Rust; engine for the mixeff R package, parity-tested against Julia's MixedModels.jl"
 license = "MIT"
 authors = ["Bradley Buchsbaum <brad.buchsbaum@gmail.com>"]
@@ -73,6 +73,7 @@ criterion = { version = "0.5", default-features = false }
 [[bench]]
 name = "pls_kernel"
 harness = false
+required-features = ["unstable-internals"]
 
 # Examples that consume the unstable internal surface (compiler / datasets /
 # pathology) only build when that feature is enabled, so the default
@@ -94,7 +95,23 @@ name = "compare_rust"
 required-features = ["unstable-internals"]
 
 [[example]]
+name = "debug_inference_drift"
+required-features = ["unstable-internals"]
+
+[[example]]
 name = "lmm_lme4_comparison"
+required-features = ["unstable-internals"]
+
+[[example]]
+name = "objective_eval_bench"
+required-features = ["unstable-internals"]
+
+[[example]]
+name = "parity_dump"
+required-features = ["unstable-internals"]
+
+[[example]]
+name = "profile_pls_kernel"
 required-features = ["unstable-internals"]
 
 [[example]]

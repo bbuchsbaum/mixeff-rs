@@ -46,6 +46,12 @@ jobs:
           - name: nlopt+unstable
             os: ubuntu-latest
             command: cargo test --features "nlopt unstable-internals"
+          # Release-mode test leg: optimizer/Cholesky behavior can differ
+          # between debug and release builds (FMA contraction, inlining), so
+          # this is a required blocking job, not optional.
+          - name: release
+            os: ubuntu-latest
+            command: cargo test --release
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -77,15 +83,16 @@ jobs:
         run: cargo doc --no-deps
 
   msrv:
-    name: MSRV (1.80)
+    name: MSRV (1.85)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.80
-      - name: Install NLopt build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y cmake g++
-      - name: cargo check at pinned MSRV
-        run: cargo check --all-targets
+      - uses: dtolnay/rust-toolchain@1.85
+      # NLopt requires CMake/C++ toolchain; skip it for the MSRV leg by using
+      # --no-default-features so we avoid C/CMake MSRV coupling while still
+      # actually running tests (not just checking) at the declared MSRV.
+      - name: cargo test at pinned MSRV (no-default-features)
+        run: cargo +1.85 test --no-default-features
 
   supply-chain:
     name: cargo deny + cargo audit

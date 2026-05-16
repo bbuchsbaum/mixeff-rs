@@ -83,6 +83,46 @@
 // without pinning its own dependency to our minor version.
 pub use nalgebra;
 
+/// Declare one or more methods that belong to the **unstable internal**
+/// surface.
+///
+/// Each wrapped method is emitted as `pub` only when the opt-in
+/// `unstable-internals` Cargo feature is enabled; otherwise it is emitted as
+/// `pub(crate)`. This is the per-item analogue of the module-level
+/// `#[cfg(feature = "unstable-internals")] pub mod / pub(crate) mod` pattern
+/// used for `compiler` / `datasets` / `pathology`. Raw numerical solver entry
+/// points (`update_l`, `objective_at`, the Kenward-Roger builders, the KKT
+/// certificate, …) leak PLS internals and so must not be part of the stable
+/// 1.0 surface, but in-tree benches/examples and the `unstable-internals`
+/// consumers still need them. See docs/semver_policy.md.
+///
+/// Apply `unstable-internals`-gated visibility to a method.
+///
+/// Each invocation re-emits a single method with `pub` when the
+/// `unstable-internals` feature is on and `pub(crate)` otherwise, by token
+/// substitution on the leading visibility keyword. Write the method with a
+/// placeholder `unstable_vis` where the visibility would go:
+///
+/// ```ignore
+/// unstable_internal_method! {
+///     /// docs
+///     unstable_vis fn foo(&self) -> u32 { 1 }
+/// }
+/// ```
+macro_rules! unstable_internal_method {
+    ( $(#[$attr:meta])* unstable_vis $($rest:tt)* ) => {
+        #[cfg(feature = "unstable-internals")]
+        $(#[$attr])*
+        pub $($rest)*
+
+        #[cfg(not(feature = "unstable-internals"))]
+        $(#[$attr])*
+        pub(crate) $($rest)*
+    };
+}
+
+pub(crate) use unstable_internal_method;
+
 // `compiler`, `datasets`, and `pathology` are NOT part of the stable 1.0
 // public API (the compiler/IR is still in flux; dataset provenance metadata
 // churns). They are public only under the opt-in `unstable-internals`
