@@ -32,6 +32,13 @@ pub enum MixedModelError {
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
 
+    #[error("cannot compute central finite-difference {target} for varpar[{index}]: value is at or too near lower bound {lower}")]
+    BoundaryFiniteDifference {
+        target: &'static str,
+        index: usize,
+        lower: f64,
+    },
+
     #[error("Unsupported model: {0}")]
     Unsupported(String),
 

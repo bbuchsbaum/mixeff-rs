@@ -1,7 +1,8 @@
 #![cfg(not(feature = "nlopt"))]
 
 use mixedmodels::compiler::{
-    DiagnosticCode, InferenceAvailability, ModelKind, ObjectiveApproximation,
+    DiagnosticCode, FixedEffectCovarianceStatus, InferenceAvailability, ModelKind,
+    ObjectiveApproximation,
 };
 use mixedmodels::formula::parse_formula;
 use mixedmodels::model::{DataFrame, Family, GeneralizedLinearMixedModel, LinkFunction};
@@ -54,10 +55,50 @@ fn native_glmm_artifact_records_support_contract_metadata() {
         artifact.model_boundary.inference_availability,
         InferenceAvailability::Unsupported { .. }
     ));
+    let inference_reason = match &artifact.model_boundary.inference_availability {
+        InferenceAvailability::Unsupported { reason } => reason,
+        other => panic!("expected GLMM inference unsupported boundary, got {other:?}"),
+    };
+    assert!(inference_reason.contains("Satterthwaite/KR"));
 
     assert_eq!(model.lmm.optsum.n_agq, 1);
     assert_eq!(model.lmm.optsum.backend.label(), "native");
     assert_eq!(model.lmm.optsum.optimizer_name(), "cobyla");
+
+    let covariance = artifact
+        .fixed_effect_covariance_matrix
+        .as_ref()
+        .expect("fitted GLMM artifact must carry a covariance payload");
+    assert_eq!(covariance.status, FixedEffectCovarianceStatus::Unavailable);
+    assert!(
+        covariance.matrix.is_none(),
+        "unavailable GLMM covariance must be matrix=null, not partially numeric"
+    );
+    assert_eq!(covariance.details.basis, "user_order");
+    assert_eq!(covariance.details.rank, model.lmm.feterm.rank);
+    assert_eq!(covariance.details.symmetric, None);
+    assert_eq!(covariance.details.positive_semidefinite, None);
+    assert_eq!(covariance.details.condition_number, None);
+    assert!(covariance
+        .reason
+        .as_deref()
+        .unwrap_or("")
+        .contains("GLMM fixed-effect covariance matrix is unavailable"));
+    assert!(covariance
+        .notes
+        .iter()
+        .any(|note| note.contains("do not reconstruct a dense covariance matrix")));
+
+    let covariance_json = artifact
+        .table_by_name("fixed_effect_covariance_matrix")
+        .unwrap()
+        .expect("fitted GLMM artifact must expose covariance table by name");
+    assert_eq!(covariance_json["schema_version"], "1.0.0");
+    assert_eq!(covariance_json["status"], "unavailable");
+    assert!(
+        covariance_json["matrix"].is_null(),
+        "serialized unavailable GLMM covariance must use matrix=null"
+    );
 
     let certificate = artifact
         .optimizer_certificate

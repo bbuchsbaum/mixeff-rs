@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use nalgebra::{DMatrix, DVector};
 
+use super::artifact::{FixedEffectInferenceReasonCode, FixedEffectReliabilityReasonCode};
 use super::diagnostics::Diagnostic;
 
 /// Context-specific estimability assessment. The variants avoid representing
@@ -455,7 +456,10 @@ pub struct FixedEffectTest {
     pub p_values: Vec<Option<f64>>,
     pub method: InferenceMethod,
     pub reliability: ReliabilityGrade,
+    pub reliability_reason: FixedEffectReliabilityReasonCode,
     pub status: InferenceStatus,
+    pub reason_code: Option<FixedEffectInferenceReasonCode>,
+    pub reason_detail: Option<String>,
     pub estimability: FixedContrastEstimability,
     pub notes: Vec<String>,
 }

@@ -28,6 +28,43 @@ fn comparison_root() -> PathBuf {
     repo_root().join("comparison")
 }
 
+fn read_comparison_json(name: &str) -> Value {
+    let path = comparison_root().join(name);
+    serde_json::from_str(
+        &fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}")),
+    )
+    .unwrap_or_else(|e| panic!("parse {path:?}: {e}"))
+}
+
+fn comparison_results<'a>(file: &'a Value, label: &str) -> &'a Vec<Value> {
+    file.get("results")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("{label}: missing results[]"))
+}
+
+fn result_status(record: &Value) -> &str {
+    record
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("<missing status>")
+}
+
+fn result_key(record: &Value) -> String {
+    let dataset = record
+        .get("dataset")
+        .and_then(Value::as_str)
+        .unwrap_or("<missing dataset>");
+    let formula = record
+        .get("formula")
+        .and_then(Value::as_str)
+        .unwrap_or("<missing formula>");
+    let estimator = record
+        .get("estimator")
+        .and_then(Value::as_str)
+        .unwrap_or("<missing estimator>");
+    format!("{dataset}\n{formula}\n{estimator}")
+}
+
 /// Build the manifest JSON exactly as `examples/compare_rust.rs` writes it.
 /// Keep this in sync with the writer: any change there must mirror here.
 fn derived_manifest() -> Value {
@@ -70,10 +107,24 @@ fn comparison_manifest_matches_registry_derived() {
     if on_disk != derived {
         // Show a focused diff of the `fits` arrays so the failure message is
         // actionable. The full JSON would be a wall of text.
-        let on_disk_fits = on_disk.get("fits").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        let derived_fits = derived.get("fits").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        let only_in_disk: Vec<&Value> = on_disk_fits.iter().filter(|v| !derived_fits.contains(v)).collect();
-        let only_in_derived: Vec<&Value> = derived_fits.iter().filter(|v| !on_disk_fits.contains(v)).collect();
+        let on_disk_fits = on_disk
+            .get("fits")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let derived_fits = derived
+            .get("fits")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let only_in_disk: Vec<&Value> = on_disk_fits
+            .iter()
+            .filter(|v| !derived_fits.contains(v))
+            .collect();
+        let only_in_derived: Vec<&Value> = derived_fits
+            .iter()
+            .filter(|v| !on_disk_fits.contains(v))
+            .collect();
         panic!(
             "comparison/manifest.json drifted from registry-derived manifest.\n\n\
              only in manifest.json ({}):\n{}\n\n\
@@ -85,6 +136,247 @@ fn comparison_manifest_matches_registry_derived() {
             serde_json::to_string_pretty(&only_in_derived).unwrap_or_default(),
         );
     }
+}
+
+#[test]
+fn comparison_result_vectors_are_arrays_or_null() {
+    for file_name in ["rust_results.json", "lme4_results.json"] {
+        let file = read_comparison_json(file_name);
+        for rec in comparison_results(&file, file_name) {
+            let key = result_key(rec);
+            for field in ["beta", "coef_names", "theta"] {
+                let value = rec
+                    .get(field)
+                    .unwrap_or_else(|| panic!("{file_name}: {key}: missing `{field}`"));
+                assert!(
+                    value.is_null() || value.is_array(),
+                    "{file_name}: {key}: `{field}` must be an array for available fits or null for unavailable fits; got {value}"
+                );
+            }
+            if let Some(warnings) = rec.get("warnings") {
+                assert!(
+                    warnings.is_array(),
+                    "{file_name}: {key}: `warnings` must stay an array; got {warnings}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn comparison_glmm_rows_are_wired_or_explicitly_classified() {
+    let rust = read_comparison_json("rust_results.json");
+    let mut ok_bernoulli_logit = false;
+    let mut ok_binomial_logit = false;
+    let mut ok_gamma_log = false;
+    let mut ok_poisson_log = false;
+    let mut required_ok = std::collections::BTreeSet::from([
+        "arabidopsis".to_string(),
+        "cbpp".to_string(),
+        "contraception".to_string(),
+        "culcitalogreg".to_string(),
+        "gopherdat2".to_string(),
+        "grouseticks".to_string(),
+        "verbagg".to_string(),
+    ]);
+
+    for rec in comparison_results(&rust, "rust_results.json") {
+        let family = rec.get("family").and_then(Value::as_str).unwrap_or("");
+        let link = rec.get("link").and_then(Value::as_str).unwrap_or("");
+        if family == "Gaussian" && link == "Identity" {
+            continue;
+        }
+
+        let key = result_key(rec);
+        let status = result_status(rec);
+        assert_ne!(
+            status, "not_implemented",
+            "GLMM comparison row must be wired through the driver or explicitly classified: {key}"
+        );
+
+        match status {
+            "ok" => {
+                if family == "Bernoulli" && link == "Logit" {
+                    ok_bernoulli_logit = true;
+                }
+                if family == "Binomial" && link == "Logit" {
+                    ok_binomial_logit = true;
+                }
+                if family == "Gamma" && link == "Log" {
+                    ok_gamma_log = true;
+                }
+                if family == "Poisson" && link == "Log" {
+                    ok_poisson_log = true;
+                }
+                if let Some(dataset) = rec.get("dataset").and_then(Value::as_str) {
+                    required_ok.remove(dataset);
+                }
+                for field in [
+                    "beta",
+                    "coef_names",
+                    "theta",
+                    "objective",
+                    "loglik",
+                    "aic",
+                    "bic",
+                ] {
+                    let value = rec
+                        .get(field)
+                        .unwrap_or_else(|| panic!("rust_results.json: {key}: missing `{field}`"));
+                    assert!(
+                        !value.is_null(),
+                        "rust_results.json: {key}: ok GLMM row has null `{field}`"
+                    );
+                }
+                assert_eq!(
+                    rec.get("response_constants").and_then(Value::as_str),
+                    Some("dropped"),
+                    "rust_results.json: {key}: Rust GLMM objective/logLik must declare response constants as dropped"
+                );
+                assert!(
+                    rec.get("objective_definition")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| !value.is_empty()),
+                    "rust_results.json: {key}: ok GLMM row must declare objective_definition"
+                );
+                for field in ["optimizer", "optimizer_backend", "optimizer_return_code"] {
+                    assert!(
+                        rec.get(field)
+                            .and_then(Value::as_str)
+                            .is_some_and(|value| !value.is_empty()),
+                        "rust_results.json: {key}: ok GLMM row must declare `{field}`"
+                    );
+                }
+                assert!(
+                    rec.get("optimizer_fevals")
+                        .and_then(Value::as_i64)
+                        .is_some_and(|value| value > 0),
+                    "rust_results.json: {key}: ok GLMM row must record positive optimizer_fevals"
+                );
+            }
+            "unsupported" => {
+                let detail = rec.get("error").and_then(Value::as_str).unwrap_or("");
+                assert!(
+                    !detail.is_empty(),
+                    "rust_results.json: {key}: unsupported GLMM row must carry a reason"
+                );
+            }
+            "skipped_stress" => {}
+            other => panic!("rust_results.json: {key}: unexpected GLMM status `{other}`"),
+        }
+    }
+
+    assert!(
+        ok_bernoulli_logit,
+        "comparison/rust_results.json must contain at least one fitted Bernoulli/Logit GLMM"
+    );
+    assert!(
+        ok_binomial_logit,
+        "comparison/rust_results.json must contain at least one fitted Binomial/Logit GLMM"
+    );
+    assert!(
+        ok_gamma_log,
+        "comparison/rust_results.json must contain at least one fitted Gamma/Log GLMM"
+    );
+    assert!(
+        ok_poisson_log,
+        "comparison/rust_results.json must contain at least one fitted Poisson/Log GLMM"
+    );
+    assert!(
+        required_ok.is_empty(),
+        "expected GLMM comparison datasets to fit successfully; still missing ok status for {required_ok:?}"
+    );
+}
+
+#[test]
+fn comparison_glmm_objective_constant_semantics_are_explicit() {
+    let expectations = [
+        ("rust_results.json", "dropped"),
+        ("lme4_results.json", "included"),
+    ];
+
+    for (file_name, expected_constants) in expectations {
+        let file = read_comparison_json(file_name);
+        let mut checked = 0usize;
+        for rec in comparison_results(&file, file_name) {
+            let family = rec.get("family").and_then(Value::as_str).unwrap_or("");
+            let link = rec.get("link").and_then(Value::as_str).unwrap_or("");
+            if family == "Gaussian" && link == "Identity" {
+                continue;
+            }
+            if result_status(rec) != "ok" {
+                continue;
+            }
+            let key = result_key(rec);
+            assert_eq!(
+                rec.get("response_constants").and_then(Value::as_str),
+                Some(expected_constants),
+                "{file_name}: {key}: GLMM response-constant convention is not explicit"
+            );
+            assert!(
+                rec.get("objective_definition")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.is_empty()),
+                "{file_name}: {key}: GLMM objective_definition missing"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "{file_name}: expected at least one ok GLMM row to check"
+        );
+    }
+}
+
+#[test]
+fn comparison_stress_rows_are_skipped_consistently_by_default() {
+    let rust = read_comparison_json("rust_results.json");
+    let r = read_comparison_json("lme4_results.json");
+    let r_by_key: std::collections::BTreeMap<String, &Value> =
+        comparison_results(&r, "lme4_results.json")
+            .iter()
+            .map(|rec| (result_key(rec), rec))
+            .collect();
+
+    let mut checked = 0usize;
+    for case in datasets::iter_cases() {
+        if case.meta.tags.difficulty.as_deref() != Some("stress") {
+            continue;
+        }
+        let key = format!(
+            "{}\n{}\n{}",
+            case.name, case.fit.formula, case.fit.estimator
+        );
+        let rust_rec = comparison_results(&rust, "rust_results.json")
+            .iter()
+            .find(|rec| result_key(rec) == key)
+            .unwrap_or_else(|| panic!("rust_results.json missing stress row {key}"));
+        let r_rec = r_by_key
+            .get(&key)
+            .unwrap_or_else(|| panic!("lme4_results.json missing stress row {key}"));
+
+        for (label, rec) in [
+            ("rust_results.json", rust_rec),
+            ("lme4_results.json", *r_rec),
+        ] {
+            assert_eq!(
+                result_status(rec),
+                "skipped_stress",
+                "{label}: stress row should use default skipped_stress status: {key}"
+            );
+            let reason = rec.get("error").and_then(Value::as_str).unwrap_or("");
+            assert!(
+                reason.contains("MIXEDMODELS_INCLUDE_STRESS=1"),
+                "{label}: stress skip reason should name the opt-in env var: {key}"
+            );
+        }
+        checked += 1;
+    }
+
+    assert!(
+        checked > 0,
+        "dataset registry should contain stress fixtures"
+    );
 }
 
 /// CSV header must declare every column in `meta.toml::[[columns]]`.
@@ -154,8 +446,11 @@ fn levels_txt_matches_meta_levels() {
                 continue;
             }
             if let Some((col, rest)) = line.split_once(':') {
-                let levels: Vec<String> =
-                    rest.trim().split(',').map(|s| s.trim().to_string()).collect();
+                let levels: Vec<String> = rest
+                    .trim()
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .collect();
                 from_file.insert(col.trim().to_string(), levels);
             }
         }
@@ -168,7 +463,9 @@ fn levels_txt_matches_meta_levels() {
             // factors (e.g. per-observation IDs); that's a valid choice.
             // We only assert here when both sides declare an order — that's
             // where drift between dump scripts and hand-edited meta surfaces.
-            let Some(declared) = &col.levels else { continue };
+            let Some(declared) = &col.levels else {
+                continue;
+            };
             let from_file_levels = match from_file.get(&col.name) {
                 Some(v) => v,
                 None => continue, // not in _levels.txt — skip (some upstream sources don't dump it)
@@ -396,10 +693,7 @@ fn every_pinned_fit_matches_within_tolerance() {
             }
         };
         if let Err(e) = model.fit(reml) {
-            failures.push(format!(
-                "{name} :: {}: fit failed: {e}",
-                fit.formula
-            ));
+            failures.push(format!("{name} :: {}: fit failed: {e}", fit.formula));
             continue;
         }
 
@@ -428,14 +722,14 @@ fn every_pinned_fit_matches_within_tolerance() {
         }
 
         if let Some(want_beta) = expected.beta.as_ref() {
-            let got_beta: Vec<f64> = MixedModelFit::coef(&model)
-                .iter()
-                .copied()
-                .collect();
+            let got_beta: Vec<f64> = MixedModelFit::coef(&model).iter().copied().collect();
             if got_beta.len() != want_beta.len() {
                 failures.push(format!(
                     "{name} :: {} ({}): β length {} ≠ expected {}",
-                    fit.formula, fit.estimator, got_beta.len(), want_beta.len()
+                    fit.formula,
+                    fit.estimator,
+                    got_beta.len(),
+                    want_beta.len()
                 ));
             } else {
                 for (i, (g, w)) in got_beta.iter().zip(want_beta.iter()).enumerate() {
@@ -474,7 +768,10 @@ fn every_pinned_fit_matches_within_tolerance() {
             } else {
                 failures.push(format!(
                     "{name} :: {} ({}): θ length {} ≠ expected {}",
-                    fit.formula, fit.estimator, got_theta.len(), want_theta.len()
+                    fit.formula,
+                    fit.estimator,
+                    got_theta.len(),
+                    want_theta.len()
                 ));
             }
         }

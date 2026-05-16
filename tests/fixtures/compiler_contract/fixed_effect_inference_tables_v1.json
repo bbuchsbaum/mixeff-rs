@@ -19,13 +19,13 @@
         "label": "(Intercept)",
         "method": "asymptotic_wald_z",
         "notes": [
-          "asymptotic Wald z is a labeled fallback, not a finite-sample correction",
-          "auto Satterthwaite unavailable: Satterthwaite fixed-effect inference could not compute vcov_beta derivatives: Invalid argument: cannot compute central finite-difference derivative for varpar[0]: value is at or too near lower bound 0"
+          "asymptotic Wald z is a labeled fallback, not a finite-sample correction"
         ],
         "numerator_df": null,
         "p_value": 0.0,
         "reason": null,
         "reliability": "low",
+        "reliability_reason": "asymptotic_wald_z_at_boundary",
         "statistic": 8.494334531081904,
         "statistic_name": "z",
         "status": "available",
@@ -39,7 +39,7 @@
     "crate_version": "0.1.0",
     "rows": [
       {
-        "denominator_df": 5.4868519247876435,
+        "denominator_df": null,
         "estimability": {
           "assessment": {
             "diagnostics": [],
@@ -50,21 +50,22 @@
           },
           "estimand": "fixed_contrast"
         },
-        "estimate": 22.97222222222248,
+        "estimate": 22.972222222219276,
         "kind": "coefficient",
         "label": "(Intercept)",
-        "method": "satterthwaite",
+        "method": "asymptotic_wald_z",
         "notes": [
-          "Satterthwaite denominator df computed from finite-difference vcov_beta Jacobian and deviance Hessian over varpar"
+          "asymptotic Wald z is a labeled fallback, not a finite-sample correction"
         ],
         "numerator_df": null,
-        "p_value": 3.6210030041061714e-7,
+        "p_value": 0.0,
         "reason": null,
         "reliability": "low",
-        "statistic": 28.410835785517058,
-        "statistic_name": "t",
+        "reliability_reason": "interior_converged_well_specified",
+        "statistic": 28.418822499439727,
+        "statistic_name": "z",
         "status": "available",
-        "std_error": 0.8085725599784358
+        "std_error": 0.8083453219313421
       }
     ],
     "schema_name": "mixedmodels.fixed_effect_inference_table",
@@ -90,13 +91,13 @@
         "label": "(Intercept)",
         "method": "asymptotic_wald_z",
         "notes": [
-          "asymptotic Wald z is a labeled fallback, not a finite-sample correction",
-          "auto Satterthwaite unavailable: Satterthwaite fixed-effect inference requires an available fixed-effect standard error"
+          "asymptotic Wald z is a labeled fallback, not a finite-sample correction"
         ],
         "numerator_df": null,
         "p_value": null,
         "reason": "standard error is unavailable, so the Wald z p-value is unavailable",
         "reliability": "low",
+        "reliability_reason": "standard_error_unavailable",
         "statistic": null,
         "statistic_name": "z",
         "status": "p_value_unavailable",
@@ -123,6 +124,7 @@
         "p_value": null,
         "reason": "contrast touches aliased or non-finite coefficient directions",
         "reliability": "not_available",
+        "reliability_reason": "contrast_not_estimable",
         "statistic": null,
         "statistic_name": null,
         "status": "not_estimable",
@@ -145,13 +147,13 @@
         "label": "x2",
         "method": "asymptotic_wald_z",
         "notes": [
-          "asymptotic Wald z is a labeled fallback, not a finite-sample correction",
-          "auto Satterthwaite unavailable: Satterthwaite fixed-effect inference requires an available fixed-effect standard error"
+          "asymptotic Wald z is a labeled fallback, not a finite-sample correction"
         ],
         "numerator_df": null,
         "p_value": null,
         "reason": "standard error is unavailable, so the Wald z p-value is unavailable",
         "reliability": "low",
+        "reliability_reason": "standard_error_unavailable",
         "statistic": null,
         "statistic_name": "z",
         "status": "p_value_unavailable",
@@ -165,7 +167,7 @@
     "crate_version": "0.1.0",
     "rows": [
       {
-        "denominator_df": 130.83561018561446,
+        "denominator_df": null,
         "estimability": {
           "assessment": {
             "diagnostics": [],
@@ -176,26 +178,25 @@
           },
           "estimand": "fixed_contrast"
         },
-        "estimate": 10.000000083827498,
+        "estimate": 9.99999999999756,
         "kind": "coefficient",
         "label": "(Intercept)",
-        "method": "satterthwaite",
+        "method": "asymptotic_wald_z",
         "notes": [
-          "Satterthwaite denominator df computed from finite-difference vcov_beta Jacobian and deviance Hessian over varpar",
-          "deviance Hessian has 2 near-zero eigenvalue(s)",
-          "vcov_varpar used the positive-eigenvalue subspace of the Hessian"
+          "asymptotic Wald z is a labeled fallback, not a finite-sample correction"
         ],
         "numerator_df": null,
         "p_value": 0.0,
         "reason": null,
         "reliability": "low",
-        "statistic": 230.3781904716021,
-        "statistic_name": "t",
+        "reliability_reason": "asymptotic_wald_z_at_boundary",
+        "statistic": 113.25324686603231,
+        "statistic_name": "z",
         "status": "available",
-        "std_error": 0.0434068870119898
+        "std_error": 0.08829768926472012
       },
       {
-        "denominator_df": 130.8356101871162,
+        "denominator_df": null,
         "estimability": {
           "assessment": {
             "diagnostics": [],
@@ -206,23 +207,22 @@
           },
           "estimand": "fixed_contrast"
         },
-        "estimate": 2.0000000359260164,
+        "estimate": 1.9999999999989582,
         "kind": "coefficient",
         "label": "x",
-        "method": "satterthwaite",
+        "method": "asymptotic_wald_z",
         "notes": [
-          "Satterthwaite denominator df computed from finite-difference vcov_beta Jacobian and deviance Hessian over varpar",
-          "deviance Hessian has 2 near-zero eigenvalue(s)",
-          "vcov_varpar used the positive-eigenvalue subspace of the Hessian"
+          "asymptotic Wald z is a labeled fallback, not a finite-sample correction"
         ],
         "numerator_df": null,
         "p_value": 0.0,
         "reason": null,
         "reliability": "low",
-        "statistic": 107.5099623421262,
-        "statistic_name": "t",
+        "reliability_reason": "asymptotic_wald_z_at_boundary",
+        "statistic": 52.6665726271726,
+        "statistic_name": "z",
         "status": "available",
-        "std_error": 0.018602927508815113
+        "std_error": 0.03797475135048157
       }
     ],
     "schema_name": "mixedmodels.fixed_effect_inference_table",
@@ -252,10 +252,11 @@
         "p_value": null,
         "reason": "ordinary fixed-effect p-values are unavailable for exploratory fit intent",
         "reliability": "not_available",
-        "statistic": 25.793809277001287,
+        "reliability_reason": "inference_unavailable_by_policy",
+        "statistic": 25.79380927700157,
         "statistic_name": null,
         "status": "p_value_unavailable",
-        "std_error": 9.746722639864002
+        "std_error": 9.746722639863895
       },
       {
         "denominator_df": null,
@@ -278,10 +279,11 @@
         "p_value": null,
         "reason": "ordinary fixed-effect p-values are unavailable for exploratory fit intent",
         "reliability": "not_available",
-        "statistic": 13.015428879637998,
+        "reliability_reason": "inference_unavailable_by_policy",
+        "statistic": 13.01542887963814,
         "statistic_name": null,
         "status": "p_value_unavailable",
-        "std_error": 0.8042213634597587
+        "std_error": 0.8042213634597499
       }
     ],
     "schema_name": "mixedmodels.fixed_effect_inference_table",
@@ -311,10 +313,11 @@
         "p_value": null,
         "reason": "ordinary fixed-effect p-values are unavailable after selection-time model changes",
         "reliability": "not_available",
-        "statistic": 25.793809277001287,
+        "reliability_reason": "inference_unavailable_by_policy",
+        "statistic": 25.79380927700157,
         "statistic_name": null,
         "status": "p_value_unavailable",
-        "std_error": 9.746722639864002
+        "std_error": 9.746722639863895
       },
       {
         "denominator_df": null,
@@ -337,10 +340,11 @@
         "p_value": null,
         "reason": "ordinary fixed-effect p-values are unavailable after selection-time model changes",
         "reliability": "not_available",
-        "statistic": 13.015428879637998,
+        "reliability_reason": "inference_unavailable_by_policy",
+        "statistic": 13.01542887963814,
         "statistic_name": null,
         "status": "p_value_unavailable",
-        "std_error": 0.8042213634597587
+        "std_error": 0.8042213634597499
       }
     ],
     "schema_name": "mixedmodels.fixed_effect_inference_table",
@@ -350,7 +354,7 @@
     "crate_version": "0.1.0",
     "rows": [
       {
-        "denominator_df": 22.80954908426727,
+        "denominator_df": null,
         "estimability": {
           "assessment": {
             "diagnostics": [],
@@ -364,21 +368,22 @@
         "estimate": 251.40510484848258,
         "kind": "coefficient",
         "label": "(Intercept)",
-        "method": "satterthwaite",
+        "method": "asymptotic_wald_z",
         "notes": [
-          "Satterthwaite denominator df computed from finite-difference vcov_beta Jacobian and deviance Hessian over varpar"
+          "asymptotic Wald z is a labeled fallback, not a finite-sample correction"
         ],
         "numerator_df": null,
         "p_value": 0.0,
         "reason": null,
         "reliability": "low",
-        "statistic": 25.793809277001287,
-        "statistic_name": "t",
+        "reliability_reason": "interior_converged_well_specified",
+        "statistic": 25.79380927700157,
+        "statistic_name": "z",
         "status": "available",
-        "std_error": 9.746722639864002
+        "std_error": 9.746722639863895
       },
       {
-        "denominator_df": 160.9995547831258,
+        "denominator_df": null,
         "estimability": {
           "assessment": {
             "diagnostics": [],
@@ -392,18 +397,19 @@
         "estimate": 10.46728595959599,
         "kind": "coefficient",
         "label": "Days",
-        "method": "satterthwaite",
+        "method": "asymptotic_wald_z",
         "notes": [
-          "Satterthwaite denominator df computed from finite-difference vcov_beta Jacobian and deviance Hessian over varpar"
+          "asymptotic Wald z is a labeled fallback, not a finite-sample correction"
         ],
         "numerator_df": null,
         "p_value": 0.0,
         "reason": null,
         "reliability": "low",
-        "statistic": 13.015428879637998,
-        "statistic_name": "t",
+        "reliability_reason": "interior_converged_well_specified",
+        "statistic": 13.01542887963814,
+        "statistic_name": "z",
         "status": "available",
-        "std_error": 0.8042213634597587
+        "std_error": 0.8042213634597499
       }
     ],
     "schema_name": "mixedmodels.fixed_effect_inference_table",
@@ -435,6 +441,7 @@
         "p_value": null,
         "reason": "standard error is unavailable, so the Wald z p-value is unavailable",
         "reliability": "low",
+        "reliability_reason": "standard_error_unavailable",
         "statistic": null,
         "statistic_name": "z",
         "status": "p_value_unavailable",

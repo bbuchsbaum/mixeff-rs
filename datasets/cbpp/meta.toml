@@ -40,6 +40,20 @@ beta = [-1.3983, -0.9919, -1.1282, -1.5797]   # intercept, period2, period3, per
 re_sigmas = [0.6421]
 objective = 100.0945                           # -2 logLik
 
+[[fits]]
+# Adaptive Gauss-Hermite row keeps the comparison/speed harness exercising the
+# non-Laplace binomial path on the canonical small GLMM fixture.
+formula = "incidence / size ~ 1 + period + (1 | herd)"
+family = "Binomial"
+link = "Logit"
+weights = "size"
+estimator = "AGQ"
+[fits.expected]
+# lme4 glmer reference, nAGQ = 7
+beta = [-1.3992, -0.9914, -1.1278, -1.5795]
+re_sigmas = [0.6475]
+objective = 100.0100                           # -2 logLik
+
 [tags]
 structure = ["random_intercept", "scalar_re", "glmm"]
 family = "binomial"

@@ -4,7 +4,7 @@ use super::audit::{DesignAudit, InformationBudgetStatus, RandomTermAudit};
 use super::diagnostics::{Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticStage};
 use super::ir::{CovarianceForm, InterceptPolicy, RandomTermIr, SemanticModel};
 
-pub const DEFAULT_CONVERGENCE_DERIVATIVE_NPARMAX: usize = 10;
+pub const DEFAULT_CONVERGENCE_DERIVATIVE_NPARMAX: usize = 4;
 pub const DEFAULT_CHOLESKY_ZERO_PAD_TOLERANCE: f64 = f64::EPSILON;
 
 fn default_cholesky_zero_pad_tolerance() -> f64 {

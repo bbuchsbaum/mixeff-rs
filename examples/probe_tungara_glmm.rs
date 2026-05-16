@@ -1,7 +1,8 @@
 //! Probe the public tungara GLMM stress fixture directly through the GLMM API.
 //!
-//! This is intentionally separate from `compare_rust`, whose current manifest
-//! runner reports GLMMs as not wired yet.
+//! This is intentionally separate from the routine comparison harness because
+//! the tungara fixture is stress-tier and is skipped unless
+//! `MIXEDMODELS_INCLUDE_STRESS=1` is set.
 
 use mixedmodels::datasets;
 use mixedmodels::formula::parse_formula;

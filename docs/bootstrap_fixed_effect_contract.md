@@ -45,12 +45,14 @@ Out of scope:
 
 ## Bootstrap Targets
 
-Rust must distinguish at least two simulation targets.
+Rust must distinguish simulation targets by both mechanism and inferential use.
 
 | Target | Meaning | May produce fixed-effect p-value? |
 |---|---|---|
 | `full_model_distribution` | Simulate from the fitted model as estimated. Useful for replicate distributions, percentile intervals, diagnostics, and smoke tests. | No |
 | `fixed_effect_null` | Simulate from a constrained model satisfying `L beta = rhs`, with variance parameters and residual scale estimated under the declared null policy. | Yes |
+| `likelihood_ratio` | Simulate from the reduced/null model, refit reduced and alternative models, and summarize likelihood-ratio statistics. | Yes, for validated model comparisons |
+| `cluster_resample` | Resample observed grouping levels with replacement for one declared grouping factor, refit on the resampled data, and summarize the resulting estimator distribution. | No in schema `1.0.0`; intervals and diagnostics only |
 
 For `fixed_effect_null`, the payload must record:
 
@@ -66,6 +68,82 @@ For `fixed_effect_null`, the payload must record:
 Until `fixed_effect_null` exists, explicit bootstrap fixed-effect test requests
 return `method = bootstrap`, `status = not_assessed`, `p_value = null`, and a
 Rust-owned reason.
+
+### Cluster Resampling Contract
+
+`cluster_resample` is a non-parametric bootstrap target for grouped LMM data. It
+samples observed levels of one declared grouping factor with replacement and
+refits the same model on the resampled data. This target is intended for
+estimator distributions, interval estimation, and diagnostics when parametric
+bootstrap assumptions are fragile, especially at covariance boundaries.
+
+The first `cluster_resample` contract is deliberately **not** a certified
+fixed-effect hypothesis-test target. A p-value requires a stated pivotal or
+constrained-null construction. Until such a construction is implemented under a
+separate target/policy, requests for fixed-effect p-values from
+`cluster_resample` must return `method = bootstrap`, `status = not_assessed`,
+`p_value = null`, and a stable reason such as
+`bootstrap_cluster_resample_p_value_unavailable`.
+
+Input options must include:
+
+- `group`: the grouping factor to resample.
+- requested replicate count, failed-refit policy, and seed.
+- statistic or interval target: coefficient(s), scalar contrast(s), or
+  explicitly supported term summaries.
+
+For a model with multiple grouping factors, `group` is mandatory. Resampling one
+factor while preserving another has different inferential meaning from
+resampling both, so ambiguous requests must be rejected with a stable reason
+rather than choosing a factor implicitly.
+
+Cluster relabeling is engine-owned. If a level is sampled more than once in one
+replicate, each copy receives a fresh replicate-local level label before refit;
+otherwise duplicate sampled clusters would be merged into one larger cluster.
+For fixed seed and identical input data, the sampled levels and minted labels
+must be reproducible. The payload must record the resampled group and enough
+accounting to audit the draw, at minimum:
+
+- resampled grouping factor name.
+- number of original levels.
+- per-replicate distinct sampled level count.
+- per-replicate duplicate count or a compact duplicate-count summary.
+- relabeling policy label, initially `replicate_local_unique_levels`.
+
+Suggested API shape:
+
+```rust
+BootstrapTargetKind::ClusterResample
+
+BootstrapTarget::cluster_resample(label: impl Into<String>)
+
+LinearMixedModel::cluster_resample_full_model_contrast_payload(
+    data: &DataFrame,
+    group: &str,
+    hypothesis: &FixedEffectHypothesis,
+    options: &FixedEffectBootstrapOptions,
+    levels: &[f64],
+)
+```
+
+The run payload uses the same replicate accounting as other bootstrap targets:
+requested/completed/successful replicates, failed refits, failed-refit policy,
+boundary count/rate, seed record, refit options, replicate statistics, and
+notes. In the initial Rust implementation, `DataFrame::cluster_resample()`
+performs deterministic replicate-local relabeling and the fitted-model method
+requires the original `DataFrame` because cluster resampling changes the row set
+and must rebuild the design. Cluster-specific accounting is currently summarized
+in payload notes; a future schema should promote it to a target-specific
+metadata block so downstream clients do not parse notes.
+
+Implementation tests for this target must cover:
+
+- fixed-seed draw/relabeling determinism, including a replicate where one
+  original level is sampled at least twice.
+- single-grouping-factor smoke run with finite replicate summaries.
+- multi-grouping-factor validation requiring an explicit `group`.
+- unsupported p-value requests returning a labeled `not_assessed` row rather
+  than computing from an unstated null distribution.
 
 ## Run Payload
 
@@ -106,6 +184,28 @@ p-values. The payload may also carry `replicate_statistics`; this is required
 for non-coefficient scalar contrasts because the basic replicate collection
 stores coefficient standard errors but not replicate covariance matrices.
 
+`BootstrapTargetKind::LikelihoodRatio` is the Rust-owned model-comparison
+bootstrap target. `LinearMixedModel::bootstrap_likelihood_ratio_test()` validates
+the reduced/alternative pair with the same strict comparison machinery used by
+ordinary LRTs, requires ML-fitted models, simulates from the reduced model,
+refits both models for every replicate, and returns a
+`BootstrapLikelihoodRatioTest` containing the observed statistic, bootstrap
+p-value, MCSE, and a `BootstrapRunPayload` whose `replicate_statistics` are the
+replicate LRT statistics. The result never substitutes an asymptotic chi-square
+p-value into the bootstrap field.
+
+Full-model distribution payloads may carry an `intervals` block. For schema
+`1.0.0`, fixed-effect coefficient and scalar-contrast interval payloads include
+percentile and basic intervals:
+
+- `percentile`: equal-tail quantiles of the finite replicate statistics.
+- `basic`: endpoints reflected around the observed statistic,
+  `2 * observed - percentile_upper` and `2 * observed - percentile_lower`.
+
+BCa intervals are deferred until the contract includes jackknife or influence
+values. Full-model interval payloads must keep `mcse = null` and must not report
+a hypothesis-test p-value.
+
 ### Stable Wire Labels
 
 Bootstrap option and detail labels are part of the bridge contract for schema
@@ -132,8 +232,18 @@ stable snake-case strings:
 
 | Target field | Wire label |
 |---|---|
-| `target_kind` | `fixed_effect_null` or `full_model_distribution` |
+| `target_kind` | `fixed_effect_null`, `full_model_distribution`, or `cluster_resample` |
 | `null_target.covariance_policy` | `reuse_fitted_covariance` |
+| `cluster_resample.relabeling_policy` | `replicate_local_unique_levels` |
+
+`details.bootstrap.replicate_statistics` is the row-level bridge projection of
+the run payload's replicate statistic vector. Inline finite statistics are JSON
+numbers; non-finite statistics are represented as `null`, preserving the
+completed-replicate length while giving downstream clients a stable sentinel.
+`finite_statistic_count` is the count of non-null entries, and `mcse` is
+computed against that finite count whenever statistic values are available.
+Schema `1.0.0` always inlines the vector; a future schema may replace very large
+runs with a durable sidecar reference.
 
 Implementation note: `bd-01KQBDWN5Q6Z8RRQVXNEJVY1M9` adds
 `LinearMixedModel::fixed_effect_null_bootstrap_target()` and
@@ -154,12 +264,13 @@ replicate-count failures. `auto` does not select bootstrap in schema `1.0.0`.
 
 Implementation note: `bd-01KQDBF2MKD9WYE3YMH11SCVC3` adds
 `LinearMixedModel::fixed_effect_null_bootstrap_inference_table()` and
-`fixed_effect_null_bootstrap_inference_row()` as the bridgeable Rust-owned
-entry points for R. They construct a certified `fixed_effect_null` target,
+`fixed_effect_null_bootstrap_inference_row()` are bridgeable Rust-owned
+entry points for downstream clients. They construct a certified
+`fixed_effect_null` target,
 simulate/refit through the Rust LMM engine, build a durable
 `BootstrapRunPayload`, and return `mixedmodels.fixed_effect_inference_table`
-rows. R should call this surface rather than deriving fixed-effect bootstrap
-p-values from replicate files.
+rows. Downstream adapters should call this surface rather than deriving
+fixed-effect bootstrap p-values from replicate files.
 
 ## P-Value Rule
 
@@ -173,6 +284,21 @@ t_b   = abs((L beta_b   - rhs) / se_b)
 
 where the bootstrap samples are generated from the certified
 `fixed_effect_null` target.
+
+For a multi-df fixed-effect hypothesis, the bootstrap statistic is an
+effective-rank Wald/F statistic:
+
+```text
+q     = rank(L V L')
+F_obs = ((L beta_hat - rhs)' (L V_hat L')^+ (L beta_hat - rhs)) / q
+F_b   = ((L beta_b   - rhs)' (L V_b   L')^+ (L beta_b   - rhs)) / q_b
+```
+
+Rows report `statistic_name = F`, `numerator_df = q`, and the
+contrast-family details record requested and effective restriction rank. The
+tail rule is the same empirical bootstrap tail rule, with `r = count(F_b >=
+F_obs)`. Rank-zero, non-estimable, or non-finite covariance cases return a
+labeled unavailable row rather than falling back to a scalar approximation.
 
 The p-value is:
 

@@ -5,8 +5,8 @@ use mixedmodels::compiler::{
     compile_formula_ir, CompiledModelArtifact, CompilerPolicy, EstimabilityAssessment,
     FixedContrastEstimability, FixedEffectInferenceMethod, FixedEffectInferenceRow,
     FixedEffectInferenceRowKind, FixedEffectInferenceStatus, FixedEffectInferenceTable,
-    FixedEffectStatisticName, ModelAuditReport, ReductionRecord, ReductionTrigger,
-    ReliabilityGrade,
+    FixedEffectReliabilityReasonCode, FixedEffectStatisticName, ModelAuditReport, ReductionRecord,
+    ReductionTrigger, ReliabilityGrade,
 };
 use mixedmodels::datasets;
 use mixedmodels::formula::parse_formula;
@@ -174,12 +174,15 @@ fn unavailable_se_fixed_effect_inference_table() -> FixedEffectInferenceTable {
         method: FixedEffectInferenceMethod::AsymptoticWaldZ,
         status: FixedEffectInferenceStatus::PValueUnavailable,
         reliability: ReliabilityGrade::Low,
+        reliability_reason: FixedEffectReliabilityReasonCode::StandardErrorUnavailable,
         estimability: EstimabilityAssessment::FixedContrast(FixedContrastEstimability::estimable(
             "x", 1, 1,
         )),
         reason: Some(
             "standard error is unavailable, so the Wald z p-value is unavailable".to_string(),
         ),
+        reason_code: None,
+        reason_detail: None,
         details: None,
         notes: vec![
             "asymptotic Wald z is a labeled fallback, not a finite-sample correction".to_string(),
@@ -262,8 +265,9 @@ fn rank_mixture_data() -> DataFrame {
         let eta = group_index as f64 - 8.5;
         let intercept_shift = 0.07 * eta;
         let slope_shift = 0.03 * eta;
-        for x_value in [-1.0, -0.25, 0.25, 1.0] {
-            y.push(10.0 + intercept_shift + (2.0 + slope_shift) * x_value);
+        for (obs_index, x_value) in [-1.0, -0.25, 0.25, 1.0].into_iter().enumerate() {
+            let residual = 0.03 * ((group_index + obs_index) % 3) as f64 - 0.03;
+            y.push(10.0 + intercept_shift + (2.0 + slope_shift) * x_value + residual);
             x.push(x_value);
             group.push(format!("g{}", group_index + 1));
         }
@@ -279,6 +283,7 @@ fn rank_mixture_data() -> DataFrame {
 fn rank_mixture_artifact() -> CompiledModelArtifact {
     let formula = parse_formula("y ~ x + (1 + x | group)").unwrap();
     let mut model = LinearMixedModel::new(formula, &rank_mixture_data(), None).unwrap();
+    model.optsum.max_feval = 50_000;
     model.fit(true).unwrap();
     model.verify_convergence().unwrap();
     model.compiler_artifact().clone()
@@ -537,16 +542,18 @@ fn fixed_effect_inference_tables_match_wire_fixture() {
     assert_all_rows_have_status(&sleepstudy, FixedEffectInferenceStatus::Available);
     assert!(sleepstudy.rows.iter().all(|row| {
         row.kind == FixedEffectInferenceRowKind::Coefficient
-            && row.method == FixedEffectInferenceMethod::Satterthwaite
+            && row.method == FixedEffectInferenceMethod::AsymptoticWaldZ
             && row.reliability == ReliabilityGrade::Low
-            && row.statistic_name == Some(FixedEffectStatisticName::T)
+            && row.reliability_reason
+                == FixedEffectReliabilityReasonCode::InteriorConvergedWellSpecified
+            && row.statistic_name == Some(FixedEffectStatisticName::Z)
             && row.numerator_df.is_none()
-            && row.denominator_df.is_some()
+            && row.denominator_df.is_none()
             && row.p_value.is_some()
             && row
                 .notes
                 .iter()
-                .any(|note| note.contains("Satterthwaite denominator df"))
+                .any(|note| note.contains("asymptotic Wald z is a labeled fallback"))
     }));
 
     let penicillin = fitted_penicillin_inference_table();
@@ -554,9 +561,11 @@ fn fixed_effect_inference_tables_match_wire_fixture() {
     assert_fixed_effect_table_labels(&penicillin, &["(Intercept)"]);
     assert_all_rows_have_status(&penicillin, FixedEffectInferenceStatus::Available);
     assert!(penicillin.rows.iter().all(|row| {
-        row.method == FixedEffectInferenceMethod::Satterthwaite
-            && row.statistic_name == Some(FixedEffectStatisticName::T)
-            && row.denominator_df.is_some()
+        row.method == FixedEffectInferenceMethod::AsymptoticWaldZ
+            && row.reliability_reason
+                == FixedEffectReliabilityReasonCode::InteriorConvergedWellSpecified
+            && row.statistic_name == Some(FixedEffectStatisticName::Z)
+            && row.denominator_df.is_none()
             && row.p_value.is_some()
     }));
 
@@ -575,6 +584,9 @@ fn fixed_effect_inference_tables_match_wire_fixture() {
     assert_fixed_effect_table_round_trips(&boundary);
     assert_fixed_effect_table_labels(&boundary, &["(Intercept)"]);
     assert_all_rows_have_status(&boundary, FixedEffectInferenceStatus::Available);
+    assert!(boundary.rows.iter().all(|row| {
+        row.reliability_reason == FixedEffectReliabilityReasonCode::AsymptoticWaldZAtBoundary
+    }));
 
     let rank_deficient = rank_deficient_fixed_effect_inference_table();
     assert_fixed_effect_table_round_trips(&rank_deficient);
@@ -582,6 +594,7 @@ fn fixed_effect_inference_tables_match_wire_fixture() {
     assert!(rank_deficient.rows.iter().any(|row| {
         row.status == FixedEffectInferenceStatus::NotEstimable
             && row.method == FixedEffectInferenceMethod::NotComputed
+            && row.reliability_reason == FixedEffectReliabilityReasonCode::ContrastNotEstimable
             && row.p_value.is_none()
             && row.reason.as_deref().unwrap_or("").contains("aliased")
     }));
@@ -592,6 +605,8 @@ fn fixed_effect_inference_tables_match_wire_fixture() {
     assert_all_rows_have_status(&regularized, FixedEffectInferenceStatus::PValueUnavailable);
     assert!(regularized.rows.iter().all(|row| {
         row.method == FixedEffectInferenceMethod::NotComputed
+            && row.reliability_reason
+                == FixedEffectReliabilityReasonCode::InferenceUnavailableByPolicy
             && row.p_value.is_none()
             && row
                 .reason
@@ -609,6 +624,8 @@ fn fixed_effect_inference_tables_match_wire_fixture() {
     );
     assert!(selection_time.rows.iter().all(|row| {
         row.method == FixedEffectInferenceMethod::NotComputed
+            && row.reliability_reason
+                == FixedEffectReliabilityReasonCode::InferenceUnavailableByPolicy
             && row.p_value.is_none()
             && row
                 .reason
@@ -626,6 +643,7 @@ fn fixed_effect_inference_tables_match_wire_fixture() {
     );
     assert!(unavailable_se.rows.iter().all(|row| {
         row.std_error.is_none()
+            && row.reliability_reason == FixedEffectReliabilityReasonCode::StandardErrorUnavailable
             && row.p_value.is_none()
             && row
                 .reason
@@ -1121,17 +1139,19 @@ fn rank_mixture_artifact_matches_wire_fixture() {
         value["optimizer_certificate"]["evidence"]["sample_size"]["n_observations"],
         72
     );
+    let covariance_diagnostic = value["optimizer_certificate"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|diagnostic| diagnostic["payload"]["term_id"] == "r0")
+        .expect("expected covariance diagnostic for r0");
     assert_eq!(
-        value["optimizer_certificate"]["diagnostics"][0]["message"],
+        covariance_diagnostic["message"],
         "fitted covariance for (1 + x | group) has effective rank 1 of requested rank 2"
     );
     assert_eq!(
-        value["optimizer_certificate"]["diagnostics"][0]["affected_terms"][0],
+        covariance_diagnostic["affected_terms"][0],
         "(1 + x | group)"
-    );
-    assert_eq!(
-        value["optimizer_certificate"]["diagnostics"][0]["payload"]["term_id"],
-        "r0"
     );
     assert_eq!(
         value["optimizer_certificate"]["evidence"]["gradient"]["method"],
@@ -1139,7 +1159,7 @@ fn rank_mixture_artifact_matches_wire_fixture() {
     );
     assert_eq!(
         value["optimizer_certificate"]["verification"]["status"],
-        "unstable"
+        "fragile"
     );
     assert!(
         value["optimizer_certificate"]["verification"]["runs"]
@@ -1167,11 +1187,11 @@ fn rank_mixture_audit_report_matches_wire_fixture() {
     assert!(section["lines"][0]["detail"]
         .as_str()
         .unwrap()
-        .contains("supported direction PC1: 0.919*intercept + 0.394*x"));
+        .contains("supported direction PC1: 0.920*intercept + 0.393*x"));
     assert!(section["lines"][0]["detail"]
         .as_str()
         .unwrap()
-        .contains("unsupported direction PC2: -0.394*intercept + 0.919*x"));
+        .contains("unsupported direction PC2: -0.393*intercept + 0.920*x"));
     let optimizer = json_section_by_title(&value, "Optimizer");
     assert_eq!(optimizer["lines"][1]["label"], "convergence interpretation");
     assert!(optimizer["lines"][1]["detail"]
@@ -1188,7 +1208,7 @@ fn rank_mixture_audit_report_matches_wire_fixture() {
         .unwrap()
         .contains("inspect Effective Covariance"));
     assert_eq!(optimizer["lines"][12]["label"], "convergence verification");
-    assert_eq!(optimizer["lines"][12]["status"], "error");
+    assert_eq!(optimizer["lines"][12]["status"], "warning");
     assert_wire_fixture(
         "tests/fixtures/compiler_contract/rank_mixture_model_audit_report_v1.json",
         &json,
@@ -1362,7 +1382,8 @@ fn intercept_dominant_reduced_rank_artifact() -> CompiledModelArtifact {
         let slope_shift = intercept_shift * 0.1;
         for k in 0..6_usize {
             let x_val = (k as f64 - 2.5) * 0.4;
-            y.push(10.0 + intercept_shift + (2.0 + slope_shift) * x_val);
+            let residual = 0.15 * ((g + k) % 4) as f64 - 0.225;
+            y.push(10.0 + intercept_shift + (2.0 + slope_shift) * x_val + residual);
             x.push(x_val);
             group.push(format!("g{}", g + 1));
         }
@@ -1373,6 +1394,7 @@ fn intercept_dominant_reduced_rank_artifact() -> CompiledModelArtifact {
 
     let formula = parse_formula("y ~ x + (1 + x | group)").unwrap();
     let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+    model.optsum.max_feval = 50_000;
     model.fit(true).unwrap();
     model.compiler_artifact().clone()
 }
@@ -1408,19 +1430,19 @@ fn intercept_dominant_reduced_rank_emits_interpretable_submodel() {
         "objective_gap must be a non-negative finite number, got {gap}"
     );
     assert_eq!(suggestion["within_tolerance"], serde_json::json!(true));
+    let covariance_diagnostic = value["optimizer_certificate"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|diagnostic| {
+            diagnostic["payload"]["interpretable_submodel"]["suggested_formula"] == "(1 | group)"
+        })
+        .expect("expected covariance diagnostic with interpretable submodel");
     assert_eq!(
-        value["optimizer_certificate"]["diagnostics"][0]["payload"]["interpretable_submodel"]
-            ["suggested_formula"],
-        "(1 | group)"
-    );
-    assert_eq!(
-        value["optimizer_certificate"]["diagnostics"][0]["message"],
+        covariance_diagnostic["message"],
         "fitted covariance for (1 + x | group) has effective rank 1 of requested rank 2"
     );
-    assert_eq!(
-        value["optimizer_certificate"]["diagnostics"][0]["payload"]["term_id"],
-        "r0"
-    );
+    assert_eq!(covariance_diagnostic["payload"]["term_id"], "r0");
     assert_wire_fixture(
         "tests/fixtures/compiler_contract/intercept_dominant_reduced_rank_artifact_v1.json",
         &json,

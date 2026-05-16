@@ -14,6 +14,11 @@ Each stage is independent — re-run only the side that changed. The R driver
 honours `[[columns]].levels` so factor encoding matches the canonical order
 recorded in `meta.toml`.
 
+Supported GLMM families are part of the routine harness. The Rust driver emits
+Laplace and supported AGQ rows for Bernoulli, Binomial, Poisson, and Gamma
+fits; stress-tier GLMM rows are skipped unless `MIXEDMODELS_INCLUDE_STRESS=1`
+is set.
+
 ## Files
 
 | File                    | Producer                          | Consumed by                          |
@@ -33,7 +38,7 @@ Each entry in `*_results.json::results[]`:
   "formula": "Reaction ~ 1 + Days + (1 + Days | Subject)",
   "family": "Gaussian", "link": "Identity", "estimator": "REML",
   "n_obs": 180,
-  "status": "ok | unsupported | error | not_implemented | skipped",
+  "status": "ok | unsupported | error | not_implemented | skipped | skipped_stress",
   "error": null,
   "beta": [251.405, 10.467],
   "coef_names": ["(Intercept)", "Days"],
@@ -41,6 +46,14 @@ Each entry in `*_results.json::results[]`:
   "theta": [0.929, 0.018, 0.222],
   "objective": 1743.628,
   "loglik": -871.814, "aic": 1755.628, "bic": 1774.787,
+  "objective_definition": "restricted_deviance",
+  "response_constants": "not_applicable",
+  "optimizer": "cobyla",
+  "optimizer_backend": "native",
+  "optimizer_return_code": "FTOL_REACHED",
+  "optimizer_fevals": 37,
+  "optimizer_fmin": 1743.628,
+  "optimizer_max_fevals": 10000,
   "is_singular": false,
   "fit_time_ms": 0.13,        // cold (first repeat)
   "fit_time_ms_min": 0.10,    // best of 3 repeats
@@ -55,8 +68,24 @@ Each entry in `*_results.json::results[]`:
   random-slope; reported with the underlying error). Rust-side only.
 - `error` — fit raised an unexpected error.
 - `not_implemented` — fit family/link not yet wired into the driver
-  (currently: GLMMs on the Rust side).
+  (should be rare; the GLMM driver is wired for supported families).
 - `skipped` — the manifest was skipped before fitting (rare).
+- `skipped_stress` — stress-tier fixture omitted from routine comparison
+  regeneration; set `MIXEDMODELS_INCLUDE_STRESS=1` to include it.
+
+`objective_definition` and `response_constants` make GLMM likelihood/deviance
+semantics explicit. Rust GLMM rows currently report
+`response_constants = "dropped"` for the profiled GLMM objective; lme4 GLMM
+rows report `response_constants = "included"` for `-2 * logLik`. The report
+marks objective deltas as non-comparable (`n/c`) when those conventions differ
+instead of failing the row on a constant-term convention.
+
+Timing fields are executable contract data, not only report decoration.
+`fit_time_ms` is the first cold repeat and `fit_time_ms_min` is the best of the
+recorded repeats. GLMM speed gates require representative routine rows to have
+positive timings, optimizer labels, return codes, function-evaluation counts,
+and Rust minimum fit time at least as fast as the corresponding `lme4` minimum
+unless the row is explicitly fenced.
 
 ## Tolerances
 
@@ -73,17 +102,40 @@ loosen these if you're comparing against a different optimizer baseline.
 
 ## Known limitations (current Rust side)
 
-- **`*` operator does not expand interactions**: `a*b` produces `a + b`
-  instead of `a + b + a:b`. Surfaced by `cake`, `oats`, `orthodont` (all
-  show ❌ in the accuracy table).
-- **Categorical predictors in random slopes** are rejected with
-  `not found or not numeric`. Surfaced by `kb07` maximal/zerocorr fits and
-  `machines :: (Machine | Worker)`.
-- **GLMMs** (cbpp, verbagg, grouseticks, tungara_single_caller) are emitted to the manifest but
-  marked `not_implemented` until the driver wires up the
-  `GeneralizedLinearMixedModel` path.
+- **GLMM objective/logLik constants**: Binomial and Poisson engines do not all
+  report response-family constants on the same scale yet. The report now
+  fences those objective deltas as `n/c`; β/σ diagnostics remain visible.
+- **Fixed-only formulas** are rejected by the mixed-model driver. The
+  comparison table keeps those rows visible as `error` rather than silently
+  treating them as linear models.
+- **Stress fixtures** are skipped by default on both sides so routine
+  regeneration finishes quickly. Set `MIXEDMODELS_INCLUDE_STRESS=1` to include
+  them.
 - **Coefficient-name formatting**: Rust uses `"Type: T2"` (space-colon),
   R uses `"TypeT2"`. Cosmetic; doesn't affect numerical match.
+
+## Release checks
+
+Run this loop before publishing GLMM-facing changes:
+
+```bash
+cargo run --release --example compare_rust
+Rscript scripts/compare_lme4.R
+cargo run --release --example compare_report
+cargo test --test glmm_comparison_gates
+cargo test --test glmm_speed_parity
+cargo test --test glmm_artifact_contract
+```
+
+For the large crossed Poisson speed row, collect a focused local profile with:
+
+```bash
+MIXEDMODELS_PROFILE_REPEATS=100 cargo run --release --example profile_grouseticks_glmm
+```
+
+`comparison/REPORT.md` should have no unclassified GLMM numeric disagreements,
+and every routine row covered by `tests/glmm_speed_parity.rs` should meet its
+speed threshold.
 
 ## Adding a new dataset
 

@@ -174,7 +174,7 @@
         {
           "label": "r0",
           "status": "info",
-          "detail": "requested rank 2, supported rank 1; basis=intercept, x; supported direction PC1: 0.919*intercept + 0.394*x (1.000 variance explained); unsupported direction PC2: -0.394*intercept + 0.919*x (0.000 variance explained); inference consequence: fixed-effect inference is conditional on a certificate-time reduced-rank covariance summary; unsupported directions are not evidence of zero population variance"
+          "detail": "requested rank 2, supported rank 1; basis=intercept, x; supported direction PC1: 0.920*intercept + 0.393*x (1.000 variance explained); unsupported direction PC2: -0.393*intercept + 0.920*x (0.000 variance explained); inference consequence: fixed-effect inference is conditional on a certificate-time reduced-rank covariance summary; unsupported directions are not evidence of zero population variance"
         }
       ]
     },
@@ -198,23 +198,23 @@
         },
         {
           "label": "convergence interpretation",
-          "status": "error",
-          "detail": "optimizer reported an acceptable stop; effective covariance is reduced rank; unsupported directions are weakly identified, not proof of zero population variance; stationarity checked by finite_difference; Hessian evidence is approximate (finite-difference active-subspace Hessian is positive semidefinite); bounded verification did not reproduce the fitted optimum"
+          "status": "warning",
+          "detail": "optimizer reported an acceptable stop; effective covariance is reduced rank; unsupported directions are weakly identified, not proof of zero population variance; stationarity checked by finite_difference; Hessian evidence is approximate (active-subspace Hessian has negative curvature); bounded verification is fragile; compare objectives and theta before routine inference"
         },
         {
           "label": "optimizer",
           "status": "info",
-          "detail": "bobyqa"
+          "detail": "cobyla"
         },
         {
           "label": "objective",
           "status": "info",
-          "detail": "-818.115658"
+          "detail": "-181.831680"
         },
         {
           "label": "optimizer stop",
           "status": "ok",
-          "detail": "return_code=SUCCESS; acceptable=true; budget_exhausted=false; fevals=369; objective_delta=829.08"
+          "detail": "return_code=XTOL_REACHED; acceptable=true; budget_exhausted=false; fevals=2659; objective_delta=194.39"
         },
         {
           "label": "parameter space",
@@ -229,32 +229,32 @@
         {
           "label": "gradient evidence",
           "status": "ok",
-          "detail": "method=finite_difference; raw=26.11; scaled=0.03; free=26.11; projected=26.11; kkt_boundary=0.00"
+          "detail": "method=finite_difference; raw=0.00; scaled=0.00; free=0.00; projected=0.00; kkt_boundary=0.00"
         },
         {
           "label": "hessian evidence",
           "status": "info",
-          "detail": "method=finite_difference; quality=approximate (finite-difference active-subspace Hessian is positive semidefinite); min_eigen=2.00; condition=37687.43; rank=3"
+          "detail": "method=finite_difference; quality=approximate (active-subspace Hessian has negative curvature); min_eigen=-2933555.42; condition=unknown; rank=2"
         },
         {
           "label": "certification quality",
           "status": "info",
-          "detail": "approximate (free-gradient norm 2.611324e1 exceeds tolerance 2.860272e-3)"
+          "detail": "approximate (free-gradient norm 1.518977e-3 exceeds tolerance 1.348450e-3; active-subspace Hessian minimum eigenvalue -2.933555e6 is below tolerance -1.348450e-5; active-subspace Hessian rank 2 is below expected rank 3)"
         },
         {
           "label": "convergence next steps",
-          "status": "error",
+          "status": "warning",
           "detail": "compare objectives, theta, and beta across verification runs | inspect Effective Covariance and consider diagonal covariance, a simpler random-effect term, or design_compiled policy | scale predictors, simplify the random-effects structure, or collect more grouping levels"
         },
         {
           "label": "derivative checks",
           "status": "info",
-          "detail": "0 failed; 1 mismatch; 0 not assessed"
+          "detail": "0 failed; 3 mismatch; 0 not assessed"
         },
         {
           "label": "convergence verification",
-          "status": "error",
-          "detail": "status=unstable; runs=3; agreeing=0; objective_tol=1.000e-5; theta_tol=1.000e-3; beta_tol=1.000e-4; restart from fitted theta did not reproduce the recorded optimum"
+          "status": "warning",
+          "detail": "status=fragile; runs=3; agreeing=0; objective_tol=1.000e-5; theta_tol=1.000e-3; beta_tol=1.000e-4; objective, fixed effects, and rank are stable, but parameterization checks are fragile: restart_from_optimum, jitter_restart_1, optimizer_consensus_pattern_search"
         }
       ]
     },
@@ -279,7 +279,7 @@
         {
           "label": "covariance_reduced",
           "status": "info",
-          "detail": "fitted covariance for r0 has effective rank 1 of requested rank 2; affected=r0; suggested=treat unsupported covariance directions as unsupported by this fit, not as proof of zero population variance"
+          "detail": "fitted covariance for (1 + x | group) has effective rank 1 of requested rank 2; affected=(1 + x | group); suggested=treat unsupported covariance directions as unsupported by this fit, not as proof of zero population variance"
         }
       ]
     }
@@ -335,9 +335,9 @@
       "code": "covariance_reduced",
       "severity": "info",
       "stage": "certification",
-      "message": "fitted covariance for r0 has effective rank 1 of requested rank 2",
+      "message": "fitted covariance for (1 + x | group) has effective rank 1 of requested rank 2",
       "affected_terms": [
-        "r0"
+        "(1 + x | group)"
       ],
       "suggested_actions": [
         "treat unsupported covariance directions as unsupported by this fit, not as proof of zero population variance"
@@ -345,9 +345,11 @@
       "payload": {
         "effective_rank_absolute_tolerance": 1e-10,
         "effective_rank_relative_tolerance": 1e-6,
-        "rank_tolerance": 4.014407594579746e-8,
+        "rank_tolerance": 1.6574134833925516e-7,
         "requested_rank": 2,
-        "supported_rank": 1
+        "source_syntax": "(1 + x | group)",
+        "supported_rank": 1,
+        "term_id": "r0"
       }
     }
   ]

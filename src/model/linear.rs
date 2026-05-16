@@ -9,6 +9,13 @@
 //! function (deviance or REML criterion) is profiled over β and σ², leaving
 //! only θ to be optimized numerically.
 
+use dyn_stack::{MemBuffer, MemStack};
+use faer::linalg::cholesky::llt::factor::{
+    cholesky_in_place, cholesky_in_place_scratch, LltRegularization,
+};
+use faer::mat::MatMut;
+use faer::prelude::*;
+use faer::Par;
 use nalgebra::{DMatrix, DVector, SymmetricEigen};
 use nalgebra_sparse::{coo::CooMatrix, csc::CscMatrix};
 #[cfg(feature = "nlopt")]
@@ -25,9 +32,11 @@ use crate::compiler::{
     ConvergenceVerificationStatus, CovarianceFamily, CovarianceFamilyTransition, DesignAudit,
     Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticStage, DominantLoading,
     EffectiveCovarianceSummary, EffectiveRankStatus, EstimabilityAssessment, EstimabilityStatus,
-    EvidenceMethod, FixedContrastEstimability, FixedEffectHypothesis, FixedEffectInferenceDetails,
-    FixedEffectInferenceMethod, FixedEffectInferenceRow, FixedEffectInferenceRowKind,
-    FixedEffectInferenceStatus, FixedEffectInferenceTable, FixedEffectNullTargetSummary,
+    EvidenceMethod, FixedContrastEstimability, FixedEffectCovarianceMatrixDetails,
+    FixedEffectCovarianceMatrixPayload, FixedEffectCovarianceStatus, FixedEffectHypothesis,
+    FixedEffectInferenceDetails, FixedEffectInferenceMethod, FixedEffectInferenceReasonCode,
+    FixedEffectInferenceRow, FixedEffectInferenceRowKind, FixedEffectInferenceStatus,
+    FixedEffectInferenceTable, FixedEffectNullTargetSummary, FixedEffectReliabilityReasonCode,
     FixedEffectStatisticName, FixedEffectTest, FixedEffectTestMethod, InferenceMethod,
     InferenceStatus, InterpretableSubmodel, KenwardRogerInferenceDetails, ModelAuditReport,
     ModelStateChange, ModelStateSummary, OptimizerCertificate, OptimizerDerivativeEvidence,
@@ -169,6 +178,25 @@ pub struct VcovVarparEstimate {
     pub used_reduced_rank: bool,
     pub reliability: ReliabilityGrade,
     pub notes: Vec<String>,
+}
+
+struct SatterthwaiteFixedEffectContext {
+    jacobian: Vec<DMatrix<f64>>,
+    vcov_varpar: VcovVarparEstimate,
+}
+
+struct FixedEffectMethodUnavailable {
+    reason: String,
+    reason_code: Option<FixedEffectInferenceReasonCode>,
+    reason_detail: Option<String>,
+}
+
+struct PreparedFixedEffectTest {
+    hypothesis: FixedEffectHypothesis,
+    estimates: Vec<f64>,
+    standard_errors: Vec<Option<f64>>,
+    statistics: Vec<Option<f64>>,
+    estimability: FixedContrastEstimability,
 }
 
 /// Kenward-Roger response-covariance decomposition.
@@ -392,11 +420,105 @@ fn copy_block(dst: &mut MatrixBlock, src: &MatrixBlock) {
 }
 
 fn subtract_product_from_blocks(c: &mut MatrixBlock, a: &MatrixBlock, b: &MatrixBlock) {
+    if let (MatrixBlock::Sparse(a_sparse), MatrixBlock::Sparse(b_sparse)) = (a, b) {
+        if let MatrixBlock::Dense(c_mat) = c {
+            subtract_sparse_sparse_transpose(c_mat, a_sparse, b_sparse);
+            return;
+        }
+    }
+
+    if let (MatrixBlock::Sparse(a_sparse), MatrixBlock::Dense(b_dense)) = (a, b) {
+        if let MatrixBlock::Dense(c_mat) = c {
+            subtract_sparse_dense_transpose(c_mat, a_sparse, b_dense);
+            return;
+        }
+    }
+
+    if let (MatrixBlock::Dense(a_dense), MatrixBlock::Sparse(b_sparse)) = (a, b) {
+        if let MatrixBlock::Dense(c_mat) = c {
+            subtract_dense_sparse_transpose(c_mat, a_dense, b_sparse);
+            return;
+        }
+    }
+
     with_dense_block(a, |a_dense| {
         with_dense_block(b, |b_dense| {
             subtract_product(c, a_dense, b_dense);
         })
     });
+}
+
+fn subtract_sparse_sparse_transpose(c: &mut DMatrix<f64>, a: &CscMatrix<f64>, b: &CscMatrix<f64>) {
+    debug_assert_eq!(a.ncols(), b.ncols());
+    debug_assert_eq!(c.nrows(), a.nrows());
+    debug_assert_eq!(c.ncols(), b.nrows());
+
+    let c_nrows = c.nrows();
+    let c_values = c.as_mut_slice();
+    let a_offsets = a.col_offsets();
+    let a_rows = a.row_indices();
+    let a_values = a.values();
+    let b_offsets = b.col_offsets();
+    let b_rows = b.row_indices();
+    let b_values = b.values();
+
+    for col_idx in 0..a.ncols() {
+        let a_start = a_offsets[col_idx];
+        let a_end = a_offsets[col_idx + 1];
+        let b_start = b_offsets[col_idx];
+        let b_end = b_offsets[col_idx + 1];
+
+        for a_pos in a_start..a_end {
+            let a_row = a_rows[a_pos];
+            let a_value = a_values[a_pos];
+            for b_pos in b_start..b_end {
+                let b_row = b_rows[b_pos];
+                c_values[b_row * c_nrows + a_row] -= a_value * b_values[b_pos];
+            }
+        }
+    }
+}
+
+fn subtract_sparse_dense_transpose(c: &mut DMatrix<f64>, a: &CscMatrix<f64>, b: &DMatrix<f64>) {
+    debug_assert_eq!(a.ncols(), b.ncols());
+    debug_assert_eq!(c.nrows(), a.nrows());
+    debug_assert_eq!(c.ncols(), b.nrows());
+
+    let c_nrows = c.nrows();
+    let c_values = c.as_mut_slice();
+    let b_nrows = b.nrows();
+    let b_values = b.as_slice();
+
+    for col_idx in 0..a.ncols() {
+        let b_col_offset = col_idx * b_nrows;
+        let a_col = a.col(col_idx);
+        for (&a_row, &a_value) in a_col.row_indices().iter().zip(a_col.values()) {
+            for b_row in 0..b_nrows {
+                c_values[b_row * c_nrows + a_row] -= a_value * b_values[b_col_offset + b_row];
+            }
+        }
+    }
+}
+
+fn subtract_dense_sparse_transpose(c: &mut DMatrix<f64>, a: &DMatrix<f64>, b: &CscMatrix<f64>) {
+    debug_assert_eq!(a.ncols(), b.ncols());
+    debug_assert_eq!(c.nrows(), a.nrows());
+    debug_assert_eq!(c.ncols(), b.nrows());
+
+    let a_nrows = a.nrows();
+    let c_nrows = c.nrows();
+    let a_values = a.as_slice();
+    let c_values = c.as_mut_slice();
+    for col_idx in 0..b.ncols() {
+        let b_col = b.col(col_idx);
+        let a_col_offset = col_idx * a_nrows;
+        for (&b_row, &b_value) in b_col.row_indices().iter().zip(b_col.values()) {
+            let c_col_offset = b_row * c_nrows;
+            for a_row in 0..a_nrows {
+                c_values[c_col_offset + a_row] -= a_values[a_col_offset + a_row] * b_value;
+            }
+        }
+    }
 }
 
 #[inline]
@@ -1135,6 +1257,7 @@ impl LinearMixedModel {
         self.refresh_optimizer_certificate();
         self.refresh_effective_covariance_summaries();
         self.refresh_covariance_parameter_traces();
+        self.refresh_fixed_effect_covariance_matrix();
         self.refresh_fixed_effect_inference_table();
         Ok(())
     }
@@ -1831,24 +1954,14 @@ impl LinearMixedModel {
     pub fn recompute_a_blocks(&mut self) {
         let k = self.reterms.len();
         let mut idx = 0;
-        let sqrtwts = if self.sqrtwts.is_empty() {
-            None
-        } else {
-            Some(DVector::from_column_slice(&self.sqrtwts))
-        };
-        let weighted_fixed_design =
-            weighted_fixed_design_for_solver(&self.fixed_design, sqrtwts.as_ref()).expect(
-                "stored fixed-effect design and sqrt weights must have compatible dimensions",
-            );
-        let weighted_response = self.xy_mat.wtxy.column(self.feterm.rank).into_owned();
 
         // RE × RE blocks
         for i in 0..k {
             for j in 0..=i {
                 let block = if i == j {
-                    compute_re_cross_product(&self.reterms[i], &self.reterms[i])
+                    compute_re_cross_product_for_irls(&self.reterms[i], &self.reterms[i])
                 } else {
-                    compute_re_cross_product(&self.reterms[i], &self.reterms[j])
+                    compute_re_cross_product_for_irls(&self.reterms[i], &self.reterms[j])
                 };
                 self.a_blocks[idx] = block;
                 idx += 1;
@@ -1857,21 +1970,13 @@ impl LinearMixedModel {
 
         // FE × RE blocks: [X|y]' Z_j
         for j in 0..k {
-            let block = compute_fixed_response_re_cross_product(
-                &weighted_fixed_design,
-                &weighted_response,
-                &self.reterms[j],
-            )
-            .expect("stored fixed-effect design and random terms must have compatible dimensions");
+            let block = compute_fe_re_cross_product(&self.xy_mat, &self.reterms[j]);
             self.a_blocks[idx] = block;
             idx += 1;
         }
 
         // FE × FE block: [X|y]' [X|y]
-        self.a_blocks[idx] = MatrixBlock::Dense(
-            compute_fixed_response_cross_product(&weighted_fixed_design, &weighted_response)
-                .expect("stored fixed-effect design and response must have compatible dimensions"),
-        );
+        self.a_blocks[idx] = MatrixBlock::Dense(compute_wtxy_cross_product(&self.xy_mat.wtxy));
     }
 
     fn determinant_term_and_pwrss_for_reml(&self, reml: bool) -> (f64, f64) {
@@ -2108,10 +2213,11 @@ impl LinearMixedModel {
                 .unwrap_or(f64::NEG_INFINITY);
             let step =
                 feasible_central_step(varpar[index], lower, steps[index]).ok_or_else(|| {
-                    MixedModelError::InvalidArgument(format!(
-                        "cannot compute central finite-difference derivative for varpar[{index}]: \
-                     value is at or too near lower bound {lower}"
-                    ))
+                    MixedModelError::BoundaryFiniteDifference {
+                        target: "derivative",
+                        index,
+                        lower,
+                    }
                 })?;
 
             let mut plus = varpar.to_vec();
@@ -2762,10 +2868,11 @@ impl LinearMixedModel {
                 .unwrap_or(f64::NEG_INFINITY);
             let step =
                 feasible_central_step(varpar[index], lower, steps[index]).ok_or_else(|| {
-                    MixedModelError::InvalidArgument(format!(
-                        "cannot compute central finite-difference Hessian for varpar[{index}]: \
-                     value is at or too near lower bound {lower}"
-                    ))
+                    MixedModelError::BoundaryFiniteDifference {
+                        target: "Hessian",
+                        index,
+                        lower,
+                    }
                 })?;
             central_steps.push(step);
         }
@@ -3984,6 +4091,7 @@ impl LinearMixedModel {
         const RUST_FTOL_ABS_DEFAULT: f64 = 1e-12;
         const RUST_INITIAL_STEP_DEFAULT: f64 = 0.75;
         const LARGE_VSIZE2_BOBYQA_FTOL_REL_DEFAULT: f64 = 1e-10;
+        const LARGE_THETA_NEWUOA_FTOL_REL_DEFAULT: f64 = 5e-10;
 
         self.optsum.optimizer = optimizer;
         let use_large_vsize2_tuning =
@@ -4055,6 +4163,11 @@ impl LinearMixedModel {
                 // scale that changes the fitted model. Keep the stricter
                 // Julia-style default for other model classes.
                 LARGE_VSIZE2_BOBYQA_FTOL_REL_DEFAULT
+            } else if optimizer == Optimizer::NloptNewuoa && n_theta > 6 {
+                // Large crossed LMMs can spend many evaluations polishing
+                // below lme4-level parity. This keeps objective drift below
+                // the benchmark tolerance while avoiding the final slow tail.
+                LARGE_THETA_NEWUOA_FTOL_REL_DEFAULT
             } else {
                 JULIA_FTOL_REL_DEFAULT
             }
@@ -4206,6 +4319,7 @@ impl LinearMixedModel {
         self.refresh_optimizer_certificate();
         self.refresh_effective_covariance_summaries();
         self.refresh_covariance_parameter_traces();
+        self.refresh_fixed_effect_covariance_matrix();
         self.refresh_fixed_effect_inference_table();
         Ok(self)
     }
@@ -4324,11 +4438,25 @@ impl LinearMixedModel {
     ///
     /// Returns one matrix per RE term with shape `vsize × n_levels`.
     pub fn ranef_u(&self) -> Vec<DMatrix<f64>> {
+        let beta = self.beta();
+        self.ranef_u_given_beta(&beta)
+    }
+
+    /// Conditional modes of the random effects for a caller-supplied fixed-effect vector.
+    ///
+    /// GLMM slow/default fitting optimizes `[β; θ]` jointly. In that mode PIRLS
+    /// must hold β fixed while updating the conditional modes of the random
+    /// effects, rather than re-profiling β from the weighted LMM solve.
+    pub(crate) fn ranef_u_given_beta(&self, beta: &DVector<f64>) -> Vec<DMatrix<f64>> {
         let k = self.reterms.len();
         let p = self.dims.p;
         let n = self.dims.n;
-        let beta = self.beta();
         let wtxy = &self.xy_mat.wtxy;
+        debug_assert_eq!(
+            beta.len(),
+            p,
+            "fixed-effect beta length must match the full-rank design"
+        );
 
         // Step 1: weighted residuals wr[obs] = wy[obs] - wX[obs,:]*beta
         let mut wr = vec![0.0f64; n];
@@ -4379,21 +4507,12 @@ impl LinearMixedModel {
         // Forward pass: solve L * v = c  (lower-triangular blocked forward substitution)
         let mut v_vecs: Vec<DVector<f64>> = Vec::with_capacity(k);
         for j in 0..k {
-            let nranef_j = self.reterms[j].n_ranef();
-
             let mut rhs = c_vecs[j].clone();
 
             // rhs -= L[j,m] * v_m  for all already-solved m < j
             for m in 0..j {
-                let l_jm = self.l_blocks[block_index(j, m)].as_dense();
-                let v_m = &v_vecs[m];
-                for row in 0..nranef_j {
-                    let mut dot = 0.0;
-                    for col in 0..v_m.len() {
-                        dot += l_jm[(row, col)] * v_m[col];
-                    }
-                    rhs[row] -= dot;
-                }
+                let l_jm = &self.l_blocks[block_index(j, m)];
+                subtract_left_block_vector_product(&mut rhs, l_jm, &v_vecs[m]);
             }
 
             // Solve L[j,j] * v_j = rhs  (forward substitution)
@@ -4406,22 +4525,12 @@ impl LinearMixedModel {
         // Backward pass: solve L' * u = v  (upper-triangular blocked back-substitution)
         let mut u_vecs: Vec<DVector<f64>> = vec![DVector::zeros(0); k];
         for j in (0..k).rev() {
-            let nranef_j = self.reterms[j].n_ranef();
-
             let mut rhs = v_vecs[j].clone();
 
             // rhs -= L[m,j]' * u_m  for all already-solved m > j
             for m in (j + 1)..k {
-                let l_mj = self.l_blocks[block_index(m, j)].as_dense();
-                let u_m = &u_vecs[m];
-                // L[m,j]' is nranef_j × nranef_m: rhs[row] -= sum_col l_mj[(col,row)] * u_m[col]
-                for row in 0..nranef_j {
-                    let mut dot = 0.0;
-                    for col in 0..u_m.len() {
-                        dot += l_mj[(col, row)] * u_m[col];
-                    }
-                    rhs[row] -= dot;
-                }
+                let l_mj = &self.l_blocks[block_index(m, j)];
+                subtract_left_block_transpose_vector_product(&mut rhs, l_mj, &u_vecs[m]);
             }
 
             // Solve L[j,j]' * u_j = rhs  (backward substitution with L')
@@ -5097,10 +5206,13 @@ impl LinearMixedModel {
                         .to_string(),
                 },
                 reliability: ReliabilityGrade::NotAvailable,
+                reliability_reason: FixedEffectReliabilityReasonCode::ContrastNotEstimable,
                 status: InferenceStatus::NotEstimable {
                     reason: "contrast touches aliased or non-finite coefficient directions"
                         .to_string(),
                 },
+                reason_code: None,
+                reason_detail: None,
                 estimability,
                 notes: Vec::new(),
             };
@@ -5123,7 +5235,10 @@ impl LinearMixedModel {
                     reason: reason.clone(),
                 },
                 reliability: ReliabilityGrade::NotAvailable,
+                reliability_reason: FixedEffectReliabilityReasonCode::InferenceUnavailableByPolicy,
                 status: InferenceStatus::Unsupported { reason },
+                reason_code: None,
+                reason_detail: None,
                 estimability,
                 notes: Vec::new(),
             };
@@ -5148,6 +5263,7 @@ impl LinearMixedModel {
                             standard_errors,
                             statistics,
                             estimability,
+                            FixedEffectReliabilityReasonCode::DegreesOfFreedomUnavailableSoZSubstituted,
                         );
                         if let Some(reason) = fixed_effect_inference_reason(&satterthwaite) {
                             wald.notes
@@ -5174,6 +5290,13 @@ impl LinearMixedModel {
                     standard_errors,
                     statistics,
                     estimability,
+                    if self.optimizer_certificate_reports_boundary()
+                        || self.has_reduced_effective_covariance()
+                    {
+                        FixedEffectReliabilityReasonCode::AsymptoticWaldZAtBoundary
+                    } else {
+                        FixedEffectReliabilityReasonCode::InteriorConvergedWellSpecified
+                    },
                 ),
                 CoefTablePValuePolicy::Unavailable { reason } => {
                     fixed_effect_test_p_value_unavailable(
@@ -5261,10 +5384,13 @@ impl LinearMixedModel {
                 p_values: vec![None; estimability.requested_rank.unwrap_or(1)],
                 method: InferenceMethod::ParametricBootstrap,
                 reliability: ReliabilityGrade::NotAvailable,
+                reliability_reason: FixedEffectReliabilityReasonCode::ContrastNotEstimable,
                 status: InferenceStatus::NotEstimable {
                     reason: "bootstrap fixed-effect inference requires an estimable contrast"
                         .to_string(),
                 },
+                reason_code: None,
+                reason_detail: None,
                 estimability,
                 notes: Vec::new(),
             };
@@ -5397,7 +5523,9 @@ impl LinearMixedModel {
             match work.refit(y_sim.as_slice()) {
                 Ok(()) => {
                     statistics.push(
-                        scalar_contrast_abs_studentized(&work, hypothesis).unwrap_or(f64::NAN),
+                        fixed_effect_bootstrap_statistic(&work, hypothesis)
+                            .map(|summary| summary.statistic)
+                            .unwrap_or(f64::NAN),
                     );
                     fits.push(BootstrapReplicate {
                         objective: work.objective(),
@@ -5425,14 +5553,17 @@ impl LinearMixedModel {
         }
 
         let bootstrap = MixedModelBootstrap { fits };
-        let p_value = scalar_contrast_abs_studentized(self, hypothesis).and_then(|observed| {
+        let p_value = fixed_effect_bootstrap_statistic(self, hypothesis).and_then(|observed| {
             let finite = statistics
                 .iter()
                 .copied()
                 .filter(|value| value.is_finite())
                 .collect::<Vec<_>>();
             (!finite.is_empty()).then(|| {
-                let extreme = finite.iter().filter(|&&value| value >= observed).count();
+                let extreme = finite
+                    .iter()
+                    .filter(|&&value| value >= observed.statistic)
+                    .count();
                 (extreme as f64 + 1.0) / (finite.len() as f64 + 1.0)
             })
         });
@@ -5452,6 +5583,380 @@ impl LinearMixedModel {
             p_value,
         );
         Ok(bootstrap.into_run_payload_with_statistics(metadata, statistics))
+    }
+
+    pub fn full_model_bootstrap_contrast_payload(
+        &self,
+        hypothesis: &FixedEffectHypothesis,
+        options: &FixedEffectBootstrapOptions,
+        levels: &[f64],
+    ) -> Result<BootstrapRunPayload> {
+        let n_coefficients = self.coef_names().len();
+        if hypothesis.n_coefficients() != n_coefficients {
+            return Err(MixedModelError::DimensionMismatch(format!(
+                "full-model bootstrap contrast has {} coefficient column(s), but the model has {n_coefficients}",
+                hypothesis.n_coefficients()
+            )));
+        }
+        if hypothesis.n_contrasts() != 1 {
+            return Err(MixedModelError::InvalidArgument(
+                "full-model bootstrap intervals are currently certified only for scalar contrasts"
+                    .to_string(),
+            ));
+        }
+        if levels.is_empty() {
+            return Err(MixedModelError::InvalidArgument(
+                "full-model bootstrap intervals require at least one confidence level".to_string(),
+            ));
+        }
+
+        let mut rng = match options.seed {
+            Some(seed) => rand::rngs::StdRng::seed_from_u64(seed),
+            None => rand::rngs::StdRng::from_entropy(),
+        };
+        let bootstrap = parametricbootstrap(&mut rng, options.requested_replicates, self);
+        let statistics =
+            self.full_model_contrast_statistics_from_replicates(hypothesis, &bootstrap)?;
+        let observed = scalar_contrast_estimate(self, hypothesis).ok_or_else(|| {
+            MixedModelError::InvalidArgument(
+                "full-model bootstrap intervals require a finite observed scalar contrast"
+                    .to_string(),
+            )
+        })?;
+        let intervals =
+            bootstrap_scalar_intervals(&hypothesis.label, &statistics, observed, levels)?;
+        let seed_record = options
+            .seed
+            .map(BootstrapSeedRecord::std_rng)
+            .unwrap_or_else(BootstrapSeedRecord::unspecified);
+        let metadata = bootstrap.run_metadata_for_model(
+            self,
+            BootstrapTarget {
+                kind: BootstrapTargetKind::FullModelDistribution,
+                label: format!("{} full-model distribution", hypothesis.label),
+                contrast_label: Some(hypothesis.label.clone()),
+            },
+            options.requested_replicates,
+            options.failed_refit_policy,
+            seed_record,
+            BootstrapRefitOptions::from_model(self),
+            Some(hypothesis.label.clone()),
+            Some(&statistics),
+            None,
+        );
+
+        Ok(bootstrap
+            .into_run_payload_with_statistics_and_intervals(metadata, statistics, intervals))
+    }
+
+    pub fn bootstrap_likelihood_ratio_test(
+        &self,
+        alternative: &LinearMixedModel,
+        options: &FixedEffectBootstrapOptions,
+    ) -> Result<BootstrapLikelihoodRatioTest> {
+        if self.nobs() != alternative.nobs() {
+            return Err(MixedModelError::InvalidArgument(format!(
+                "bootstrap LRT requires models fitted to the same number of observations; reduced has {}, alternative has {}",
+                self.nobs(),
+                alternative.nobs()
+            )));
+        }
+        if self.optsum.reml || alternative.optsum.reml {
+            return Err(MixedModelError::InvalidArgument(
+                "bootstrap LRT requires ML-fitted models; refit REML models with reml=false"
+                    .to_string(),
+            ));
+        }
+
+        let observed_lrt = crate::stats::LikelihoodRatioTest::test(&[
+            self as &dyn MixedModelFit,
+            alternative as &dyn MixedModelFit,
+        ])
+        .map_err(|error| {
+            MixedModelError::InvalidArgument(format!(
+                "bootstrap LRT comparison validation failed: {error}"
+            ))
+        })?;
+        let observed_statistic = observed_lrt.chisq.first().copied().ok_or_else(|| {
+            MixedModelError::InvalidArgument(
+                "bootstrap LRT requires exactly one reduced/alternative comparison".to_string(),
+            )
+        })?;
+        if !observed_statistic.is_finite() || observed_statistic < 0.0 {
+            return Err(MixedModelError::InvalidArgument(
+                "bootstrap LRT observed statistic is non-finite or negative".to_string(),
+            ));
+        }
+
+        let mut rng = match options.seed {
+            Some(seed) => rand::rngs::StdRng::seed_from_u64(seed),
+            None => rand::rngs::StdRng::from_entropy(),
+        };
+        let mut fits = Vec::with_capacity(options.requested_replicates);
+        let mut statistics = Vec::with_capacity(options.requested_replicates);
+
+        for _ in 0..options.requested_replicates {
+            let y_sim = self.simulate(&mut rng);
+            let mut null_work = self.clone();
+            let mut alternative_work = alternative.clone();
+            let null_refit = null_work.refit(y_sim.as_slice());
+            let alternative_refit = alternative_work.refit(y_sim.as_slice());
+            match (null_refit, alternative_refit) {
+                (Ok(()), Ok(())) => {
+                    let loglik_diff = alternative_work.loglikelihood() - null_work.loglikelihood();
+                    let statistic = if loglik_diff <= 0.0 {
+                        0.0
+                    } else {
+                        2.0 * loglik_diff
+                    };
+                    statistics.push(if statistic.is_finite() {
+                        statistic
+                    } else {
+                        f64::NAN
+                    });
+                    fits.push(BootstrapReplicate {
+                        objective: alternative_work.objective(),
+                        sigma: alternative_work.sigma(),
+                        beta: alternative_work.beta(),
+                        se: alternative_work.stderror(),
+                        theta: alternative_work.theta(),
+                    });
+                }
+                _ => {
+                    let beta = alternative.beta();
+                    statistics.push(f64::NAN);
+                    fits.push(BootstrapReplicate {
+                        objective: f64::NAN,
+                        sigma: f64::NAN,
+                        beta,
+                        se: DVector::from_element(alternative.feterm.rank, f64::NAN),
+                        theta: alternative.theta(),
+                    });
+                    if options.failed_refit_policy == BootstrapFailedRefitPolicy::Abort {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let finite = statistics
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .collect::<Vec<_>>();
+        let p_value = (!finite.is_empty()).then(|| {
+            let extreme = finite
+                .iter()
+                .filter(|&&value| value >= observed_statistic)
+                .count();
+            (extreme as f64 + 1.0) / (finite.len() as f64 + 1.0)
+        });
+        let bootstrap = MixedModelBootstrap { fits };
+        let seed_record = options
+            .seed
+            .map(BootstrapSeedRecord::std_rng)
+            .unwrap_or_else(BootstrapSeedRecord::unspecified);
+        let metadata = bootstrap.run_metadata_for_model(
+            alternative,
+            BootstrapTarget::likelihood_ratio(format!(
+                "{} vs {}",
+                self.formula, alternative.formula
+            )),
+            options.requested_replicates,
+            options.failed_refit_policy,
+            seed_record,
+            BootstrapRefitOptions::from_model(alternative),
+            Some("lrt".to_string()),
+            Some(&statistics),
+            p_value,
+        );
+        let mcse = metadata.mcse;
+        let payload = bootstrap.into_run_payload_with_statistics(metadata, statistics);
+        Ok(BootstrapLikelihoodRatioTest {
+            observed_statistic,
+            p_value,
+            mcse,
+            payload,
+            notes: vec![
+                "bootstrap LRT simulates from the reduced model and refits reduced and alternative models"
+                    .to_string(),
+                "asymptotic chi-square p-values are not substituted into the bootstrap result"
+                    .to_string(),
+            ],
+        })
+    }
+
+    pub fn cluster_resample_full_model_contrast_payload(
+        &self,
+        data: &DataFrame,
+        group: &str,
+        hypothesis: &FixedEffectHypothesis,
+        options: &FixedEffectBootstrapOptions,
+        levels: &[f64],
+    ) -> Result<BootstrapRunPayload> {
+        if data.nrow() != self.nobs() {
+            return Err(MixedModelError::InvalidArgument(format!(
+                "cluster bootstrap data has {} rows, but the fitted model has {} observations",
+                data.nrow(),
+                self.nobs()
+            )));
+        }
+        if self
+            .reterms
+            .iter()
+            .filter(|term| term.grouping_name == group)
+            .count()
+            == 0
+        {
+            return Err(MixedModelError::InvalidArgument(format!(
+                "cluster bootstrap group `{group}` is not a random-effect grouping factor in the fitted model"
+            )));
+        }
+        let n_coefficients = self.coef_names().len();
+        if hypothesis.n_coefficients() != n_coefficients {
+            return Err(MixedModelError::DimensionMismatch(format!(
+                "cluster bootstrap contrast has {} coefficient column(s), but the model has {n_coefficients}",
+                hypothesis.n_coefficients()
+            )));
+        }
+        if hypothesis.n_contrasts() != 1 {
+            return Err(MixedModelError::InvalidArgument(
+                "cluster bootstrap intervals are currently certified only for scalar contrasts"
+                    .to_string(),
+            ));
+        }
+        if levels.is_empty() {
+            return Err(MixedModelError::InvalidArgument(
+                "cluster bootstrap intervals require at least one confidence level".to_string(),
+            ));
+        }
+
+        let mut rng = match options.seed {
+            Some(seed) => rand::rngs::StdRng::seed_from_u64(seed),
+            None => rand::rngs::StdRng::from_entropy(),
+        };
+        let mut fits = Vec::with_capacity(options.requested_replicates);
+        let mut statistics = Vec::with_capacity(options.requested_replicates);
+        let mut distinct_counts = Vec::with_capacity(options.requested_replicates);
+        let mut duplicate_counts = Vec::with_capacity(options.requested_replicates);
+
+        for _ in 0..options.requested_replicates {
+            let (resampled, draw) = data.cluster_resample(group, &mut rng)?;
+            distinct_counts.push(draw.distinct_sampled_level_count);
+            duplicate_counts.push(draw.duplicate_count);
+
+            let mut work = match LinearMixedModel::new(self.formula.clone(), &resampled, None) {
+                Ok(model) => model,
+                Err(_) => {
+                    statistics.push(f64::NAN);
+                    fits.push(BootstrapReplicate {
+                        objective: f64::NAN,
+                        sigma: f64::NAN,
+                        beta: self.beta(),
+                        se: DVector::from_element(self.feterm.rank, f64::NAN),
+                        theta: self.theta(),
+                    });
+                    if options.failed_refit_policy == BootstrapFailedRefitPolicy::Abort {
+                        break;
+                    }
+                    continue;
+                }
+            };
+
+            match work.fit(self.optsum.reml) {
+                Ok(_) => {
+                    statistics
+                        .push(scalar_contrast_estimate(&work, hypothesis).unwrap_or(f64::NAN));
+                    fits.push(BootstrapReplicate {
+                        objective: work.objective(),
+                        sigma: work.sigma(),
+                        beta: work.beta(),
+                        se: work.stderror(),
+                        theta: work.theta(),
+                    });
+                }
+                Err(_) => {
+                    statistics.push(f64::NAN);
+                    fits.push(BootstrapReplicate {
+                        objective: f64::NAN,
+                        sigma: f64::NAN,
+                        beta: self.beta(),
+                        se: DVector::from_element(self.feterm.rank, f64::NAN),
+                        theta: self.theta(),
+                    });
+                    if options.failed_refit_policy == BootstrapFailedRefitPolicy::Abort {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let observed = scalar_contrast_estimate(self, hypothesis).ok_or_else(|| {
+            MixedModelError::InvalidArgument(
+                "cluster bootstrap intervals require a finite observed scalar contrast".to_string(),
+            )
+        })?;
+        let intervals =
+            bootstrap_scalar_intervals(&hypothesis.label, &statistics, observed, levels)?;
+        let bootstrap = MixedModelBootstrap { fits };
+        let seed_record = options
+            .seed
+            .map(BootstrapSeedRecord::std_rng)
+            .unwrap_or_else(BootstrapSeedRecord::unspecified);
+        let mut metadata = bootstrap.run_metadata_for_model(
+            self,
+            BootstrapTarget::cluster_resample(format!(
+                "{} cluster resample by {group}",
+                hypothesis.label
+            )),
+            options.requested_replicates,
+            options.failed_refit_policy,
+            seed_record,
+            BootstrapRefitOptions::from_model(self),
+            Some(hypothesis.label.clone()),
+            Some(&statistics),
+            None,
+        );
+        metadata.notes.push(
+            "cluster_resample is an estimator-distribution target; it does not certify fixed-effect hypothesis-test p-values"
+                .to_string(),
+        );
+        metadata.notes.push(format!(
+            "cluster_resample group={group}, relabeling_policy=replicate_local_unique_levels"
+        ));
+        if let (Some(min_distinct), Some(max_duplicates)) =
+            (distinct_counts.iter().min(), duplicate_counts.iter().max())
+        {
+            metadata.notes.push(format!(
+                "cluster_resample draw summary: min_distinct_sampled_levels={min_distinct}, max_duplicate_count={max_duplicates}"
+            ));
+        }
+
+        Ok(bootstrap
+            .into_run_payload_with_statistics_and_intervals(metadata, statistics, intervals))
+    }
+
+    fn full_model_contrast_statistics_from_replicates(
+        &self,
+        hypothesis: &FixedEffectHypothesis,
+        payload: &MixedModelBootstrap,
+    ) -> Result<Vec<f64>> {
+        let rhs = hypothesis.rhs.values[0];
+        let mut values = Vec::with_capacity(payload.len());
+        for fit in &payload.fits {
+            if !fit.is_successful() {
+                values.push(f64::NAN);
+                continue;
+            }
+            let beta = self.fixed_effect_active_vector_to_user_basis(&fit.beta, "beta")?;
+            let statistic = (&hypothesis.l.values * beta)[0] - rhs;
+            values.push(if statistic.is_finite() {
+                statistic
+            } else {
+                f64::NAN
+            });
+        }
+        Ok(values)
     }
 
     pub fn fixed_effect_term_hypotheses(&self) -> Vec<FixedEffectHypothesis> {
@@ -5503,6 +6008,67 @@ impl LinearMixedModel {
         FixedEffectInferenceTable::new(rows)
     }
 
+    fn satterthwaite_fixed_effect_context(
+        &self,
+    ) -> std::result::Result<SatterthwaiteFixedEffectContext, FixedEffectMethodUnavailable> {
+        let mut varpar = self.theta();
+        varpar.push(self.sigma());
+        let mut evaluator = self.clone();
+        let jacobian = evaluator
+            .jac_vcov_beta_varpar(&varpar)
+            .map_err(|error| {
+                let boundary_failure =
+                    matches!(&error, MixedModelError::BoundaryFiniteDifference { .. });
+                let reason_code = if boundary_failure {
+                    FixedEffectInferenceReasonCode::SatterthwaiteUnavailableAtBoundary
+                } else {
+                    FixedEffectInferenceReasonCode::SatterthwaiteVarparCovarianceUnavailable
+                };
+                let reason = if boundary_failure {
+                    "Satterthwaite degrees of freedom require derivatives of the variance parameters; at a boundary fit, at least one variance-parameter derivative is not defined."
+                } else {
+                    "Satterthwaite degrees of freedom are unavailable because fixed-effect covariance derivatives could not be computed."
+                }
+                .to_string();
+                FixedEffectMethodUnavailable {
+                    reason,
+                    reason_code: Some(reason_code),
+                    reason_detail: Some(format!(
+                        "Satterthwaite fixed-effect inference could not compute vcov_beta derivatives: {error}"
+                    )),
+                }
+            })?;
+        let vcov_varpar =
+            evaluator
+                .vcov_varpar(&varpar, self.optsum.reml)
+                .map_err(|error| {
+                    let boundary_failure =
+                        matches!(&error, MixedModelError::BoundaryFiniteDifference { .. });
+                    let reason_code = if boundary_failure {
+                        FixedEffectInferenceReasonCode::SatterthwaiteUnavailableAtBoundary
+                    } else {
+                        FixedEffectInferenceReasonCode::SatterthwaiteVarparDevianceUnavailable
+                    };
+                    let reason = if boundary_failure {
+                        "Satterthwaite degrees of freedom require variance-parameter uncertainty estimates; at a boundary fit, at least one variance-parameter direction is not locally regular."
+                    } else {
+                        "Satterthwaite degrees of freedom are unavailable because the variance-parameter covariance estimate could not be computed."
+                    }
+                    .to_string();
+                    FixedEffectMethodUnavailable {
+                        reason,
+                        reason_code: Some(reason_code),
+                        reason_detail: Some(format!(
+                            "Satterthwaite fixed-effect inference could not estimate vcov_varpar: {error}"
+                        )),
+                    }
+                })?;
+        Ok(SatterthwaiteFixedEffectContext {
+            jacobian,
+            vcov_varpar,
+        })
+    }
+
     fn satterthwaite_fixed_effect_test(
         &self,
         hypothesis: FixedEffectHypothesis,
@@ -5510,6 +6076,82 @@ impl LinearMixedModel {
         standard_errors: Vec<Option<f64>>,
         statistics: Vec<Option<f64>>,
         estimability: FixedContrastEstimability,
+    ) -> FixedEffectTest {
+        let method = InferenceMethod::Satterthwaite;
+        if hypothesis.n_contrasts() != 1 {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                method,
+                estimability,
+                "Satterthwaite fixed-effect inference is currently certified only for scalar contrasts"
+                    .to_string(),
+            );
+        }
+
+        let Some(std_error) = standard_errors.first().copied().flatten() else {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                method,
+                estimability,
+                "Satterthwaite fixed-effect inference requires an available fixed-effect standard error"
+                    .to_string(),
+            );
+        };
+        let var_con = std_error * std_error;
+        if !var_con.is_finite() || var_con <= 0.0 {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                method,
+                estimability,
+                "Satterthwaite fixed-effect inference requires a finite positive contrast variance"
+                    .to_string(),
+            );
+        }
+
+        let context = match self.satterthwaite_fixed_effect_context() {
+            Ok(context) => context,
+            Err(unavailable) => {
+                return fixed_effect_test_not_assessed_with_method_and_reason(
+                    hypothesis,
+                    estimates,
+                    standard_errors,
+                    statistics,
+                    method,
+                    estimability,
+                    unavailable.reason,
+                    unavailable.reason_code,
+                    unavailable.reason_detail,
+                );
+            }
+        };
+
+        self.satterthwaite_fixed_effect_test_with_context(
+            hypothesis,
+            estimates,
+            standard_errors,
+            statistics,
+            estimability,
+            &context,
+        )
+    }
+
+    fn satterthwaite_fixed_effect_test_with_context(
+        &self,
+        hypothesis: FixedEffectHypothesis,
+        estimates: Vec<f64>,
+        standard_errors: Vec<Option<f64>>,
+        statistics: Vec<Option<f64>>,
+        estimability: FixedContrastEstimability,
+        context: &SatterthwaiteFixedEffectContext,
     ) -> FixedEffectTest {
         use statrs::distribution::{ContinuousCDF, StudentsT};
 
@@ -5553,39 +6195,8 @@ impl LinearMixedModel {
             );
         }
 
-        let mut varpar = self.theta();
-        varpar.push(self.sigma());
-        let mut evaluator = self.clone();
-        let jacobian = match evaluator.jac_vcov_beta_varpar(&varpar) {
-            Ok(jacobian) => jacobian,
-            Err(error) => {
-                return fixed_effect_test_not_assessed_with_method(
-                    hypothesis,
-                    estimates,
-                    standard_errors,
-                    statistics,
-                    method,
-                    estimability,
-                    format!("Satterthwaite fixed-effect inference could not compute vcov_beta derivatives: {error}"),
-                );
-            }
-        };
-        let vcov_varpar = match evaluator.vcov_varpar(&varpar, self.optsum.reml) {
-            Ok(estimate) => estimate,
-            Err(error) => {
-                return fixed_effect_test_not_assessed_with_method(
-                    hypothesis,
-                    estimates,
-                    standard_errors,
-                    statistics,
-                    method,
-                    estimability,
-                    format!("Satterthwaite fixed-effect inference could not estimate vcov_varpar: {error}"),
-                );
-            }
-        };
-
-        let gradient = jacobian
+        let gradient = context
+            .jacobian
             .iter()
             .map(|derivative| contrast_row_quadratic_form(&hypothesis.l.values, 0, derivative))
             .collect::<Vec<_>>();
@@ -5603,7 +6214,8 @@ impl LinearMixedModel {
         }
 
         let gradient = DVector::from_vec(gradient);
-        let satt_denom = (gradient.transpose() * &vcov_varpar.covariance * &gradient)[(0, 0)];
+        let satt_denom =
+            (gradient.transpose() * &context.vcov_varpar.covariance * &gradient)[(0, 0)];
         if !satt_denom.is_finite() || satt_denom <= 0.0 {
             return fixed_effect_test_not_assessed_with_method(
                 hypothesis,
@@ -5651,7 +6263,7 @@ impl LinearMixedModel {
             "Satterthwaite denominator df computed from finite-difference vcov_beta Jacobian and deviance Hessian over varpar"
                 .to_string(),
         ];
-        notes.extend(vcov_varpar.notes);
+        notes.extend(context.vcov_varpar.notes.clone());
 
         FixedEffectTest {
             hypothesis,
@@ -5663,7 +6275,11 @@ impl LinearMixedModel {
             p_values: vec![p_value],
             method,
             reliability: ReliabilityGrade::Low,
+            reliability_reason:
+                FixedEffectReliabilityReasonCode::SatterthwaiteFiniteDifferenceApproximation,
             status: InferenceStatus::Available,
+            reason_code: None,
+            reason_detail: None,
             estimability,
             notes,
         }
@@ -5677,8 +6293,6 @@ impl LinearMixedModel {
         statistics: Vec<Option<f64>>,
         estimability: FixedContrastEstimability,
     ) -> FixedEffectTest {
-        use statrs::distribution::{ContinuousCDF, FisherSnedecor, StudentsT};
-
         let method = InferenceMethod::KenwardRoger;
         if !self.optsum.reml {
             return fixed_effect_test_not_assessed_with_method(
@@ -5709,7 +6323,29 @@ impl LinearMixedModel {
                 );
             }
         };
-        let lbddf = match self.kenward_roger_lbddf_with_adjusted(&hypothesis.l.values, &adjusted) {
+        self.kenward_roger_fixed_effect_test_with_adjusted(
+            hypothesis,
+            estimates,
+            standard_errors,
+            statistics,
+            estimability,
+            &adjusted,
+        )
+    }
+
+    fn kenward_roger_fixed_effect_test_with_adjusted(
+        &self,
+        hypothesis: FixedEffectHypothesis,
+        estimates: Vec<f64>,
+        standard_errors: Vec<Option<f64>>,
+        statistics: Vec<Option<f64>>,
+        estimability: FixedContrastEstimability,
+        adjusted: &KenwardRogerAdjustedVcov,
+    ) -> FixedEffectTest {
+        use statrs::distribution::{ContinuousCDF, FisherSnedecor, StudentsT};
+
+        let method = InferenceMethod::KenwardRoger;
+        let lbddf = match self.kenward_roger_lbddf_with_adjusted(&hypothesis.l.values, adjusted) {
             Ok(lbddf) => lbddf,
             Err(error) => {
                 return fixed_effect_test_not_assessed_with_method(
@@ -5749,7 +6385,7 @@ impl LinearMixedModel {
             "Kenward-Roger adjusted covariance and denominator df computed from response-space Sigma/G components"
                 .to_string(),
         ];
-        notes.extend(adjusted.notes);
+        notes.extend(adjusted.notes.clone());
         notes.extend(lbddf.notes);
 
         if hypothesis.n_contrasts() == 1 {
@@ -5805,7 +6441,10 @@ impl LinearMixedModel {
                 p_values: vec![p_value],
                 method,
                 reliability: lbddf.reliability,
+                reliability_reason: FixedEffectReliabilityReasonCode::KenwardRogerApproximation,
                 status: InferenceStatus::Available,
+                reason_code: None,
+                reason_detail: None,
                 estimability,
                 notes,
             };
@@ -5871,7 +6510,10 @@ impl LinearMixedModel {
             p_values: vec![p_value],
             method,
             reliability: lbddf.reliability,
+            reliability_reason: FixedEffectReliabilityReasonCode::KenwardRogerApproximation,
             status: InferenceStatus::Available,
+            reason_code: None,
+            reason_detail: None,
             estimability,
             notes,
         }
@@ -5894,18 +6536,6 @@ impl LinearMixedModel {
         const CONTINUITY_CORRECTION: f64 = 1.0;
 
         let method = InferenceMethod::ParametricBootstrap;
-        if hypothesis.n_contrasts() != 1 {
-            return fixed_effect_test_not_assessed_with_method(
-                hypothesis,
-                estimates,
-                standard_errors,
-                statistics,
-                method,
-                estimability,
-                "bootstrap_not_default_auto_method: bootstrap fixed-effect inference is currently certified only for scalar contrasts"
-                    .to_string(),
-            );
-        }
 
         if payload.metadata.schema_name != BOOTSTRAP_RUN_SCHEMA
             || payload.metadata.schema_version != BOOTSTRAP_RUN_SCHEMA_VERSION
@@ -6007,7 +6637,7 @@ impl LinearMixedModel {
             );
         }
 
-        let Some(observed_statistic) = statistics.first().copied().flatten().map(f64::abs) else {
+        let Some(observed) = fixed_effect_bootstrap_statistic(self, &hypothesis) else {
             return fixed_effect_test_not_assessed_with_method(
                 hypothesis,
                 estimates,
@@ -6019,6 +6649,7 @@ impl LinearMixedModel {
                     .to_string(),
             );
         };
+        let observed_statistic = observed.statistic;
 
         let replicate_statistics = match payload.replicate_statistics.as_deref() {
             Some(values) => {
@@ -6034,7 +6665,16 @@ impl LinearMixedModel {
                             .to_string(),
                     );
                 }
-                values.iter().map(|value| value.abs()).collect::<Vec<_>>()
+                values
+                    .iter()
+                    .map(|value| {
+                        if hypothesis.n_contrasts() == 1 {
+                            value.abs()
+                        } else {
+                            *value
+                        }
+                    })
+                    .collect::<Vec<_>>()
             }
             None => {
                 match self.bootstrap_coefficient_statistics_from_replicates(&hypothesis, payload) {
@@ -6147,17 +6787,23 @@ impl LinearMixedModel {
         ];
         notes.extend(payload.metadata.notes.clone());
 
+        let numerator_df =
+            (hypothesis.n_contrasts() > 1).then_some(observed.restriction_rank as f64);
+
         FixedEffectTest {
             hypothesis,
             estimates,
             standard_errors,
             statistics: vec![Some(observed_statistic)],
-            numerator_df: None,
+            numerator_df,
             denominator_df: None,
             p_values: vec![Some(p_value)],
             method,
             reliability,
+            reliability_reason: FixedEffectReliabilityReasonCode::BootstrapMonteCarloReplicates,
             status: InferenceStatus::Available,
+            reason_code: None,
+            reason_detail: None,
             estimability,
             notes,
         }
@@ -6211,9 +6857,369 @@ impl LinearMixedModel {
         FixedEffectInferenceTable::new(rows)
     }
 
+    pub fn fixed_effect_inference_table_with_method(
+        &self,
+        method: FixedEffectTestMethod,
+    ) -> FixedEffectInferenceTable {
+        if method == FixedEffectTestMethod::Auto {
+            return self.fixed_effect_inference_table();
+        }
+
+        let satterthwaite_context = (method == FixedEffectTestMethod::Satterthwaite)
+            .then(|| self.satterthwaite_fixed_effect_context());
+        let kenward_roger_adjusted = (method == FixedEffectTestMethod::KenwardRoger).then(|| {
+            if self.optsum.reml {
+                self.kenward_roger_adjusted_vcov().map_err(|error| {
+                    format!(
+                        "Kenward-Roger fixed-effect inference could not compute adjusted vcov: {error}"
+                    )
+                })
+            } else {
+                Err("Kenward-Roger fixed-effect inference is certified only for REML LMM fits"
+                    .to_string())
+            }
+        });
+
+        let rows = self
+            .coefficient_hypotheses()
+            .into_iter()
+            .map(|hypothesis| {
+                let test = match self.prepare_fixed_effect_test(hypothesis) {
+                    Ok(prepared) => self.fixed_effect_test_from_prepared_with_method(
+                        prepared,
+                        method,
+                        satterthwaite_context.as_ref(),
+                        kenward_roger_adjusted.as_ref(),
+                    ),
+                    Err(test) => test,
+                };
+                fixed_effect_test_to_inference_row(FixedEffectInferenceRowKind::Coefficient, test)
+            })
+            .collect();
+        FixedEffectInferenceTable::new(rows)
+    }
+
+    pub fn fixed_effect_covariance_matrix_payload(&self) -> FixedEffectCovarianceMatrixPayload {
+        let coef_names = self.coef_names();
+        let full_p = coef_names.len();
+        let aliased = self.aliased_fixed_effect_names(&coef_names);
+        let rank = self.feterm.rank;
+        let sigma = self.sigma();
+        let base_details = |symmetric: Option<bool>,
+                            positive_semidefinite: Option<bool>,
+                            condition_number: Option<f64>| {
+            FixedEffectCovarianceMatrixDetails {
+                basis: "user_order".to_string(),
+                sigma: sigma.is_finite().then_some(sigma),
+                rank,
+                aliased: aliased.clone(),
+                symmetric,
+                positive_semidefinite,
+                condition_number,
+            }
+        };
+
+        if !aliased.is_empty() || rank < full_p {
+            let reason = if aliased.is_empty() {
+                format!(
+                    "fixed-effect covariance matrix is unavailable because the fixed-effect design is rank-deficient (rank {rank} of {full_p})"
+                )
+            } else {
+                format!(
+                    "fixed-effect covariance matrix is unavailable because the fixed-effect design is rank-deficient (rank {rank} of {full_p}); aliased coefficients: {}",
+                    aliased.join(", ")
+                )
+            };
+            return FixedEffectCovarianceMatrixPayload::model_based(
+                coef_names,
+                None,
+                FixedEffectCovarianceStatus::Unavailable,
+                ReliabilityGrade::NotAvailable,
+                Some(reason),
+                base_details(None, None, None),
+                vec![
+                    "schema 1.0.0 does not encode missing or aliased covariance cells inside an otherwise numeric matrix".to_string(),
+                ],
+            );
+        }
+
+        let vcov = self.vcov();
+        if vcov.shape() != (full_p, full_p) {
+            return FixedEffectCovarianceMatrixPayload::model_based(
+                coef_names,
+                None,
+                FixedEffectCovarianceStatus::Unavailable,
+                ReliabilityGrade::NotAvailable,
+                Some(format!(
+                    "fixed-effect covariance matrix has shape {} x {}, expected {full_p} x {full_p}",
+                    vcov.nrows(),
+                    vcov.ncols()
+                )),
+                base_details(None, None, None),
+                Vec::new(),
+            );
+        }
+
+        if !matrix_is_finite(&vcov) {
+            return FixedEffectCovarianceMatrixPayload::model_based(
+                coef_names,
+                None,
+                FixedEffectCovarianceStatus::Unavailable,
+                ReliabilityGrade::NotAvailable,
+                Some("fixed-effect covariance matrix contains non-finite entries".to_string()),
+                base_details(None, None, None),
+                vec!["schema 1.0.0 requires a fully finite numeric matrix or null".to_string()],
+            );
+        }
+
+        let symmetric = matrix_max_asymmetry(&vcov) <= 1e-10;
+        let sym_vcov = symmetrize_matrix(&vcov);
+        let eig = SymmetricEigen::new(sym_vcov.clone());
+        let max_abs_eigenvalue = eig
+            .eigenvalues
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0, f64::max);
+        let tolerance = (1e-10 * max_abs_eigenvalue.max(1.0)).max(1e-12);
+        let min_eigenvalue = eig
+            .eigenvalues
+            .iter()
+            .copied()
+            .fold(f64::INFINITY, f64::min);
+        let positive_semidefinite = min_eigenvalue >= -tolerance;
+        let condition_number = covariance_condition_number(&eig.eigenvalues, tolerance);
+        let details = base_details(
+            Some(symmetric),
+            Some(positive_semidefinite),
+            condition_number,
+        );
+
+        if !symmetric {
+            return FixedEffectCovarianceMatrixPayload::model_based(
+                coef_names,
+                None,
+                FixedEffectCovarianceStatus::Unavailable,
+                ReliabilityGrade::NotAvailable,
+                Some(
+                    "fixed-effect covariance matrix is not symmetric within tolerance".to_string(),
+                ),
+                details,
+                Vec::new(),
+            );
+        }
+
+        if !positive_semidefinite {
+            return FixedEffectCovarianceMatrixPayload::model_based(
+                coef_names,
+                None,
+                FixedEffectCovarianceStatus::Unavailable,
+                ReliabilityGrade::NotAvailable,
+                Some(
+                    "fixed-effect covariance matrix is not positive semidefinite within tolerance"
+                        .to_string(),
+                ),
+                details,
+                Vec::new(),
+            );
+        }
+
+        FixedEffectCovarianceMatrixPayload::model_based(
+            coef_names,
+            Some(matrix_rows(&sym_vcov)),
+            FixedEffectCovarianceStatus::Available,
+            ReliabilityGrade::High,
+            None,
+            details,
+            Vec::new(),
+        )
+    }
+
+    fn aliased_fixed_effect_names(&self, coef_names: &[String]) -> Vec<String> {
+        self.feterm
+            .piv
+            .iter()
+            .skip(self.feterm.rank)
+            .filter_map(|&original_index| coef_names.get(original_index).cloned())
+            .collect()
+    }
+
+    fn refresh_fixed_effect_covariance_matrix(&mut self) {
+        self.compiler_artifact.fixed_effect_covariance_matrix =
+            Some(self.fixed_effect_covariance_matrix_payload());
+    }
+
     fn refresh_fixed_effect_inference_table(&mut self) {
-        self.compiler_artifact.fixed_effect_inference_table =
-            Some(self.fixed_effect_inference_table());
+        // Keep fit() cheap: Auto inference may try Satterthwaite finite
+        // differences, which is a user-requested inference calculation rather
+        // than a prerequisite for a fitted artifact. The artifact still carries
+        // coefficient rows, but uses the model-based Wald-Z contract.
+        self.compiler_artifact.fixed_effect_inference_table = Some(
+            self.fixed_effect_inference_table_with_method(FixedEffectTestMethod::AsymptoticWaldZ),
+        );
+    }
+
+    fn prepare_fixed_effect_test(
+        &self,
+        hypothesis: FixedEffectHypothesis,
+    ) -> std::result::Result<PreparedFixedEffectTest, FixedEffectTest> {
+        let label = hypothesis.label.clone();
+        let n_coefficients = self.coef_names().len();
+        if hypothesis.n_coefficients() != n_coefficients {
+            let reason = format!(
+                "contrast has {} coefficient column(s), but the model has {n_coefficients}",
+                hypothesis.n_coefficients()
+            );
+            return Err(fixed_effect_test_unavailable(
+                hypothesis,
+                FixedContrastEstimability::not_assessed(label),
+                InferenceStatus::Unsupported { reason },
+            ));
+        }
+
+        let beta = self.coef();
+        let vcov = self.vcov();
+        let estimates = (&hypothesis.l.values * &beta - &hypothesis.rhs.values)
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        let standard_errors = contrast_standard_errors(&hypothesis.l.values, &vcov);
+        let statistics = estimates
+            .iter()
+            .zip(standard_errors.iter())
+            .map(|(&estimate, se)| {
+                se.and_then(|se| {
+                    (se > 0.0 && se.is_finite() && estimate.is_finite()).then_some(estimate / se)
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let estimability = assess_fixed_contrast_estimability(&hypothesis, &beta, &vcov);
+        if estimability.status == EstimabilityStatus::NotEstimable {
+            let n = estimability.requested_rank.unwrap_or(1);
+            return Err(FixedEffectTest {
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                numerator_df: Some(1.0),
+                denominator_df: None,
+                p_values: vec![None; n],
+                method: InferenceMethod::NotComputed {
+                    reason: "contrast is not estimable under the fitted fixed-effect design"
+                        .to_string(),
+                },
+                reliability: ReliabilityGrade::NotAvailable,
+                reliability_reason: FixedEffectReliabilityReasonCode::ContrastNotEstimable,
+                status: InferenceStatus::NotEstimable {
+                    reason: "contrast touches aliased or non-finite coefficient directions"
+                        .to_string(),
+                },
+                reason_code: None,
+                reason_detail: None,
+                estimability,
+                notes: Vec::new(),
+            });
+        }
+
+        Ok(PreparedFixedEffectTest {
+            hypothesis,
+            estimates,
+            standard_errors,
+            statistics,
+            estimability,
+        })
+    }
+
+    fn fixed_effect_test_from_prepared_with_method(
+        &self,
+        prepared: PreparedFixedEffectTest,
+        method: FixedEffectTestMethod,
+        satterthwaite_context: Option<
+            &std::result::Result<SatterthwaiteFixedEffectContext, FixedEffectMethodUnavailable>,
+        >,
+        kenward_roger_adjusted: Option<&std::result::Result<KenwardRogerAdjustedVcov, String>>,
+    ) -> FixedEffectTest {
+        match method {
+            FixedEffectTestMethod::Auto => unreachable!("auto handled by caller"),
+            FixedEffectTestMethod::AsymptoticWaldZ => match self.fixed_effect_p_value_policy() {
+                CoefTablePValuePolicy::AsymptoticWaldZ => fixed_effect_test_asymptotic_wald_z(
+                    prepared.hypothesis,
+                    prepared.estimates,
+                    prepared.standard_errors,
+                    prepared.statistics,
+                    prepared.estimability,
+                    if self.optimizer_certificate_reports_boundary()
+                        || self.has_reduced_effective_covariance()
+                    {
+                        FixedEffectReliabilityReasonCode::AsymptoticWaldZAtBoundary
+                    } else {
+                        FixedEffectReliabilityReasonCode::InteriorConvergedWellSpecified
+                    },
+                ),
+                CoefTablePValuePolicy::Unavailable { reason } => {
+                    fixed_effect_test_p_value_unavailable(
+                        prepared.hypothesis,
+                        prepared.estimates,
+                        prepared.standard_errors,
+                        prepared.statistics,
+                        prepared.estimability,
+                        reason,
+                    )
+                }
+            },
+            FixedEffectTestMethod::Satterthwaite => match satterthwaite_context {
+                Some(Ok(context)) => self.satterthwaite_fixed_effect_test_with_context(
+                    prepared.hypothesis,
+                    prepared.estimates,
+                    prepared.standard_errors,
+                    prepared.statistics,
+                    prepared.estimability,
+                    context,
+                ),
+                Some(Err(unavailable)) => fixed_effect_test_not_assessed_with_method_and_reason(
+                    prepared.hypothesis,
+                    prepared.estimates,
+                    prepared.standard_errors,
+                    prepared.statistics,
+                    InferenceMethod::Satterthwaite,
+                    prepared.estimability,
+                    unavailable.reason.clone(),
+                    unavailable.reason_code,
+                    unavailable.reason_detail.clone(),
+                ),
+                None => unreachable!("Satterthwaite context missing"),
+            },
+            FixedEffectTestMethod::KenwardRoger => match kenward_roger_adjusted {
+                Some(Ok(adjusted)) => self.kenward_roger_fixed_effect_test_with_adjusted(
+                    prepared.hypothesis,
+                    prepared.estimates,
+                    prepared.standard_errors,
+                    prepared.statistics,
+                    prepared.estimability,
+                    adjusted,
+                ),
+                Some(Err(reason)) => fixed_effect_test_not_assessed_with_method(
+                    prepared.hypothesis,
+                    prepared.estimates,
+                    prepared.standard_errors,
+                    prepared.statistics,
+                    InferenceMethod::KenwardRoger,
+                    prepared.estimability,
+                    reason.clone(),
+                ),
+                None => unreachable!("Kenward-Roger context missing"),
+            },
+            FixedEffectTestMethod::ParametricBootstrap => fixed_effect_test_not_assessed_with_method(
+                prepared.hypothesis,
+                prepared.estimates,
+                prepared.standard_errors,
+                prepared.statistics,
+                InferenceMethod::ParametricBootstrap,
+                prepared.estimability,
+                "parametric bootstrap fixed-effect inference requires a certified fixed_effect_null bootstrap payload; call test_contrast_with_bootstrap_payload with replicate accounting, failed-refit policy, Monte Carlo uncertainty, and reproducibility state"
+                    .to_string(),
+            ),
+        }
     }
 
     fn fixed_effect_p_value_policy(&self) -> CoefTablePValuePolicy {
@@ -7053,6 +8059,18 @@ fn matrix_max_asymmetry(matrix: &DMatrix<f64>) -> f64 {
     max_delta
 }
 
+fn covariance_condition_number(eigenvalues: &DVector<f64>, tolerance: f64) -> Option<f64> {
+    let mut min_positive = f64::INFINITY;
+    let mut max_positive = 0.0_f64;
+    for eigenvalue in eigenvalues.iter().copied() {
+        if eigenvalue > tolerance {
+            min_positive = min_positive.min(eigenvalue);
+            max_positive = max_positive.max(eigenvalue);
+        }
+    }
+    (min_positive.is_finite() && min_positive > 0.0).then_some(max_positive / min_positive)
+}
+
 fn invert_spd_matrix(matrix: &DMatrix<f64>, context: &str) -> Result<DMatrix<f64>> {
     if matrix.nrows() != matrix.ncols() {
         return Err(MixedModelError::DimensionMismatch(format!(
@@ -7333,6 +8351,135 @@ fn scalar_contrast_abs_studentized(
     (estimate.is_finite() && se.is_finite() && se > 0.0).then_some((estimate / se).abs())
 }
 
+#[derive(Debug, Clone, Copy)]
+struct FixedEffectBootstrapStatistic {
+    statistic: f64,
+    restriction_rank: usize,
+}
+
+fn fixed_effect_bootstrap_statistic(
+    model: &LinearMixedModel,
+    hypothesis: &FixedEffectHypothesis,
+) -> Option<FixedEffectBootstrapStatistic> {
+    if hypothesis.n_coefficients() != model.coef_names().len() {
+        return None;
+    }
+
+    if hypothesis.n_contrasts() == 1 {
+        return scalar_contrast_abs_studentized(model, hypothesis).map(|statistic| {
+            FixedEffectBootstrapStatistic {
+                statistic,
+                restriction_rank: 1,
+            }
+        });
+    }
+
+    let beta = model.coef();
+    let vcov = model.vcov();
+    if !matrix_is_finite(&vcov) {
+        return None;
+    }
+
+    let estimate = &hypothesis.l.values * beta - &hypothesis.rhs.values;
+    if estimate.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+
+    let contrast_cov =
+        symmetrize_matrix(&(&hypothesis.l.values * vcov * hypothesis.l.values.transpose()));
+    if !matrix_is_finite(&contrast_cov) {
+        return None;
+    }
+
+    let eig = SymmetricEigen::new(contrast_cov.clone());
+    let max_abs = eig
+        .eigenvalues
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0, f64::max);
+    let tolerance = (1e-10 * max_abs.max(1.0)).max(1e-12);
+    let restriction_rank = eig
+        .eigenvalues
+        .iter()
+        .filter(|value| **value > tolerance)
+        .count();
+    if restriction_rank == 0 {
+        return None;
+    }
+
+    let contrast_cov_inverse = symmetric_pseudoinverse(&contrast_cov, tolerance);
+    let quadratic = (estimate.transpose() * contrast_cov_inverse * estimate)[(0, 0)];
+    if !quadratic.is_finite() {
+        return None;
+    }
+    let statistic = if quadratic < 0.0 && quadratic.abs() <= tolerance {
+        0.0
+    } else {
+        quadratic / restriction_rank as f64
+    };
+    (statistic.is_finite() && statistic >= 0.0).then_some(FixedEffectBootstrapStatistic {
+        statistic,
+        restriction_rank,
+    })
+}
+
+fn scalar_contrast_estimate(
+    model: &LinearMixedModel,
+    hypothesis: &FixedEffectHypothesis,
+) -> Option<f64> {
+    if hypothesis.n_contrasts() != 1 || hypothesis.n_coefficients() != model.coef_names().len() {
+        return None;
+    }
+    let estimate = (&hypothesis.l.values * model.coef() - &hypothesis.rhs.values)[0];
+    estimate.is_finite().then_some(estimate)
+}
+
+fn bootstrap_scalar_intervals(
+    label: &str,
+    statistics: &[f64],
+    observed: f64,
+    levels: &[f64],
+) -> Result<Vec<BootstrapInterval>> {
+    let mut finite = statistics
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    if finite.is_empty() {
+        return Err(MixedModelError::InvalidArgument(
+            "full-model bootstrap intervals require at least one finite replicate statistic"
+                .to_string(),
+        ));
+    }
+    finite.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    let mut intervals = Vec::with_capacity(levels.len() * 2);
+    for &level in levels {
+        validate_level(level)?;
+        let alpha = (1.0 - level) / 2.0;
+        let percentile_lower = quantile_sorted(&finite, alpha);
+        let percentile_upper = quantile_sorted(&finite, 1.0 - alpha);
+        intervals.push(BootstrapInterval {
+            parameter: label.to_string(),
+            level,
+            lower: percentile_lower,
+            upper: percentile_upper,
+            n: finite.len(),
+            method: BootstrapIntervalMethod::Percentile,
+        });
+        intervals.push(BootstrapInterval {
+            parameter: label.to_string(),
+            level,
+            lower: 2.0 * observed - percentile_upper,
+            upper: 2.0 * observed - percentile_lower,
+            n: finite.len(),
+            method: BootstrapIntervalMethod::Basic,
+        });
+    }
+
+    Ok(intervals)
+}
+
 fn fixed_effect_test_to_inference_row(
     kind: FixedEffectInferenceRowKind,
     test: FixedEffectTest,
@@ -7353,8 +8500,11 @@ fn fixed_effect_test_to_inference_row(
         method: fixed_effect_inference_method(&test.method),
         status: fixed_effect_inference_status(&test.status),
         reliability: test.reliability,
+        reliability_reason: test.reliability_reason,
         estimability: EstimabilityAssessment::FixedContrast(test.estimability),
         reason,
+        reason_code: test.reason_code,
+        reason_detail: test.reason_detail,
         details,
         notes: test.notes,
     }
@@ -7447,6 +8597,7 @@ fn attach_bootstrap_details(
         seed: payload.metadata.seed_record.seed,
         finite_statistic_count: payload.metadata.finite_statistic_count,
         mcse: payload.metadata.mcse,
+        replicate_statistics: bootstrap_replicate_statistics_for_details(payload),
         null_target: null_target.map(|target| FixedEffectNullTargetSummary {
             covariance_policy: fixed_effect_null_covariance_policy_label(target.covariance_policy)
                 .to_string(),
@@ -7458,10 +8609,23 @@ fn attach_bootstrap_details(
     });
 }
 
+fn bootstrap_replicate_statistics_for_details(
+    payload: &BootstrapRunPayload,
+) -> Option<Vec<Option<f64>>> {
+    payload.replicate_statistics.as_ref().map(|statistics| {
+        statistics
+            .iter()
+            .map(|value| value.is_finite().then_some(*value))
+            .collect()
+    })
+}
+
 fn bootstrap_target_kind_label(kind: BootstrapTargetKind) -> &'static str {
     match kind {
         BootstrapTargetKind::FullModelDistribution => "full_model_distribution",
         BootstrapTargetKind::FixedEffectNull => "fixed_effect_null",
+        BootstrapTargetKind::LikelihoodRatio => "likelihood_ratio",
+        BootstrapTargetKind::ClusterResample => "cluster_resample",
     }
 }
 
@@ -7550,6 +8714,7 @@ fn fixed_effect_test_asymptotic_wald_z(
     standard_errors: Vec<Option<f64>>,
     statistics: Vec<Option<f64>>,
     estimability: FixedContrastEstimability,
+    reliability_reason: FixedEffectReliabilityReasonCode,
 ) -> FixedEffectTest {
     use statrs::distribution::{ContinuousCDF, Normal};
 
@@ -7569,6 +8734,11 @@ fn fixed_effect_test_asymptotic_wald_z(
         p_values,
         method: InferenceMethod::AsymptoticWaldZ,
         reliability: ReliabilityGrade::Low,
+        reliability_reason: if p_value_available {
+            reliability_reason
+        } else {
+            FixedEffectReliabilityReasonCode::StandardErrorUnavailable
+        },
         status: if p_value_available {
             InferenceStatus::Available
         } else {
@@ -7577,6 +8747,8 @@ fn fixed_effect_test_asymptotic_wald_z(
                     .to_string(),
             }
         },
+        reason_code: None,
+        reason_detail: None,
         estimability,
         notes: vec![
             "asymptotic Wald z is a labeled fallback, not a finite-sample correction".to_string(),
@@ -7604,7 +8776,10 @@ fn fixed_effect_test_p_value_unavailable(
             reason: reason.clone(),
         },
         reliability: ReliabilityGrade::NotAvailable,
+        reliability_reason: FixedEffectReliabilityReasonCode::InferenceUnavailableByPolicy,
         status: InferenceStatus::PValueUnavailable { reason },
+        reason_code: None,
+        reason_detail: None,
         estimability,
         notes: Vec::new(),
     }
@@ -7619,7 +8794,38 @@ fn fixed_effect_test_not_assessed_with_method(
     estimability: FixedContrastEstimability,
     reason: String,
 ) -> FixedEffectTest {
+    fixed_effect_test_not_assessed_with_method_and_reason(
+        hypothesis,
+        estimates,
+        standard_errors,
+        statistics,
+        method,
+        estimability,
+        reason,
+        None,
+        None,
+    )
+}
+
+fn fixed_effect_test_not_assessed_with_method_and_reason(
+    hypothesis: FixedEffectHypothesis,
+    estimates: Vec<f64>,
+    standard_errors: Vec<Option<f64>>,
+    statistics: Vec<Option<f64>>,
+    method: InferenceMethod,
+    estimability: FixedContrastEstimability,
+    reason: String,
+    reason_code: Option<FixedEffectInferenceReasonCode>,
+    reason_detail: Option<String>,
+) -> FixedEffectTest {
     let n = hypothesis.n_contrasts();
+    let reliability_reason = reliability_reason_for_method_unavailable(method.clone());
+    let mut notes = Vec::new();
+    if let Some(detail) = &reason_detail {
+        notes.push(detail.clone());
+    } else {
+        notes.push(reason.clone());
+    }
     FixedEffectTest {
         hypothesis,
         estimates,
@@ -7630,11 +8836,36 @@ fn fixed_effect_test_not_assessed_with_method(
         p_values: vec![None; n],
         method,
         reliability: ReliabilityGrade::NotAvailable,
+        reliability_reason,
         status: InferenceStatus::NotAssessed {
             reason: reason.clone(),
         },
+        reason_code,
+        reason_detail,
         estimability,
-        notes: vec![reason],
+        notes,
+    }
+}
+
+fn reliability_reason_for_method_unavailable(
+    method: InferenceMethod,
+) -> FixedEffectReliabilityReasonCode {
+    match method {
+        InferenceMethod::Satterthwaite => {
+            FixedEffectReliabilityReasonCode::SatterthwaiteFiniteDifferenceApproximation
+        }
+        InferenceMethod::KenwardRoger => {
+            FixedEffectReliabilityReasonCode::KenwardRogerApproximation
+        }
+        InferenceMethod::ParametricBootstrap => {
+            FixedEffectReliabilityReasonCode::BootstrapMonteCarloReplicates
+        }
+        InferenceMethod::AsymptoticWaldZ => {
+            FixedEffectReliabilityReasonCode::AsymptoticWaldZAtBoundary
+        }
+        InferenceMethod::NotComputed { .. } => {
+            FixedEffectReliabilityReasonCode::InferenceUnavailableByPolicy
+        }
     }
 }
 
@@ -7661,7 +8892,15 @@ fn fixed_effect_test_unavailable(
         p_values: vec![None; n],
         method: InferenceMethod::NotComputed { reason },
         reliability: ReliabilityGrade::NotAvailable,
+        reliability_reason: match &status {
+            InferenceStatus::NotEstimable { .. } => {
+                FixedEffectReliabilityReasonCode::ContrastNotEstimable
+            }
+            _ => FixedEffectReliabilityReasonCode::InferenceUnavailableByPolicy,
+        },
         status,
+        reason_code: None,
+        reason_detail: None,
         estimability,
         notes: Vec::new(),
     }
@@ -8139,7 +9378,7 @@ fn create_al(reterms: &[ReMat], xy: &FeMat) -> Result<(Vec<MatrixBlock>, Vec<Mat
 
     // FE × FE block: [X|y]' [X|y]
     let wtxy = &xy.wtxy;
-    let feblock = MatrixBlock::Dense(wtxy.transpose() * wtxy);
+    let feblock = MatrixBlock::Dense(compute_wtxy_cross_product(wtxy));
     a.push(feblock.clone());
     l.push(feblock);
 
@@ -8391,8 +9630,30 @@ pub(crate) fn create_structural_al(
 
 /// Compute Z_i' Z_j for two random effects terms.
 fn compute_re_cross_product(a: &ReMat, b: &ReMat) -> MatrixBlock {
+    compute_re_cross_product_impl(a, b, false)
+}
+
+/// Compute Z_i' Z_j for GLMM IRLS updates.
+///
+/// IRLS rebuilds the same scalar nested/crossed structures many times. For
+/// that path we keep reverse-nested scalar blocks sparse as well as truly
+/// crossed blocks, avoiding repeated dense fill-in for observation-level RE
+/// terms. Ordinary LMM construction keeps the historical dense reverse-nested
+/// path because singular zero-residual LMM fixtures are sensitive to the
+/// alternate sparse factorization.
+fn compute_re_cross_product_for_irls(a: &ReMat, b: &ReMat) -> MatrixBlock {
+    compute_re_cross_product_impl(a, b, true)
+}
+
+fn compute_re_cross_product_impl(
+    a: &ReMat,
+    b: &ReMat,
+    sparse_reverse_nested_scalar: bool,
+) -> MatrixBlock {
     let nranef_a = a.n_ranef();
     let nranef_b = b.n_ranef();
+    let has_observation_level_scalar =
+        is_observation_level_scalar(a) || is_observation_level_scalar(b);
 
     if std::ptr::eq(a, b) && a.vsize == 1 {
         // Scalar RE: diagonal result
@@ -8421,12 +9682,14 @@ fn compute_re_cross_product(a: &ReMat, b: &ReMat) -> MatrixBlock {
             }
         }
         MatrixBlock::BlockDiagonal(blocks)
-    } else if a.vsize == 1 && b.vsize == 1 && !is_nested(b, a) {
-        // Truly crossed scalar-intercept terms: keep the raw cross-product sparse.
-        // A partially crossed random-intercept block can be enormous in shape
-        // while having only O(n_obs) structural nonzeros.
-        let mut entries = BTreeMap::<(usize, usize), f64>::new();
+    } else if (!is_nested(b, a) || (sparse_reverse_nested_scalar && has_observation_level_scalar))
+        && (a.vsize == 1 || b.vsize == 1 || a.vsize.max(b.vsize) >= 3)
+    {
+        // Truly crossed terms: keep the raw cross-product sparse. Partially
+        // crossed blocks can be enormous while having only O(n_obs * s_i * s_j)
+        // structural entries.
         let n = a.refs.len();
+        let mut entries = Vec::<((usize, usize), f64)>::with_capacity(n * a.vsize * b.vsize);
 
         for obs in 0..n {
             let ri = a.refs[obs] as usize;
@@ -8435,15 +9698,22 @@ fn compute_re_cross_product(a: &ReMat, b: &ReMat) -> MatrixBlock {
                 for sj in 0..b.vsize {
                     let value = a.wtz[(si, obs)] * b.wtz[(sj, obs)];
                     if value != 0.0 {
-                        *entries
-                            .entry((ri * a.vsize + si, rj * b.vsize + sj))
-                            .or_insert(0.0) += value;
+                        entries.push(((ri * a.vsize + si, rj * b.vsize + sj), value));
                     }
                 }
             }
         }
         let mut result = CooMatrix::new(nranef_a, nranef_b);
-        for ((row, col), value) in entries {
+        entries.sort_by_key(|((row, col), _)| (*row, *col));
+
+        let mut idx = 0;
+        while idx < entries.len() {
+            let (row, col) = entries[idx].0;
+            let mut value = 0.0;
+            while idx < entries.len() && entries[idx].0 == (row, col) {
+                value += entries[idx].1;
+                idx += 1;
+            }
             if value != 0.0 {
                 result.push(row, col, value);
             }
@@ -8470,8 +9740,11 @@ fn compute_re_cross_product(a: &ReMat, b: &ReMat) -> MatrixBlock {
     }
 }
 
+fn is_observation_level_scalar(re: &ReMat) -> bool {
+    re.vsize == 1 && re.n_levels() == re.n_obs()
+}
+
 /// Compute [X|y]' Z_j.
-#[cfg(test)]
 fn compute_fe_re_cross_product(xy: &FeMat, re: &ReMat) -> MatrixBlock {
     let pp1 = xy.wtxy.ncols(); // p + 1
     let nranef = re.n_ranef();
@@ -8490,6 +9763,28 @@ fn compute_fe_re_cross_product(xy: &FeMat, re: &ReMat) -> MatrixBlock {
     }
 
     MatrixBlock::Dense(result)
+}
+
+fn compute_wtxy_cross_product(wtxy: &DMatrix<f64>) -> DMatrix<f64> {
+    let pp1 = wtxy.ncols();
+    let mut result = DMatrix::zeros(pp1, pp1);
+
+    for obs in 0..wtxy.nrows() {
+        for row in 0..pp1 {
+            let row_value = wtxy[(obs, row)];
+            for col in 0..=row {
+                result[(row, col)] += row_value * wtxy[(obs, col)];
+            }
+        }
+    }
+
+    for row in 0..pp1 {
+        for col in 0..row {
+            result[(col, row)] = result[(row, col)];
+        }
+    }
+
+    result
 }
 
 /// Compute `[X|y]' Z_j` using fixed-design backend cross-products.
@@ -8704,6 +9999,98 @@ fn subtract_left_block_product(dst: &mut DMatrix<f64>, lhs: &MatrixBlock, rhs: &
                     }
                     dst[(row, col)] -= sum;
                 }
+            }
+        }
+    }
+}
+
+fn subtract_left_block_vector_product(
+    dst: &mut DVector<f64>,
+    lhs: &MatrixBlock,
+    rhs: &DVector<f64>,
+) {
+    debug_assert_eq!(dst.len(), lhs.nrows());
+    debug_assert_eq!(rhs.len(), lhs.ncols());
+
+    match lhs {
+        MatrixBlock::Diagonal(diag) => {
+            for row in 0..diag.len() {
+                dst[row] -= diag[row] * rhs[row];
+            }
+        }
+        MatrixBlock::BlockDiagonal(blocks) => {
+            let mut row_offset = 0;
+            let mut col_offset = 0;
+            for block in blocks {
+                for row in 0..block.nrows() {
+                    let mut sum = 0.0;
+                    for col in 0..block.ncols() {
+                        sum += block[(row, col)] * rhs[col_offset + col];
+                    }
+                    dst[row_offset + row] -= sum;
+                }
+                row_offset += block.nrows();
+                col_offset += block.ncols();
+            }
+        }
+        MatrixBlock::Sparse(mat) => {
+            for (row, col, value) in mat.triplet_iter() {
+                dst[row] -= value * rhs[col];
+            }
+        }
+        MatrixBlock::Dense(mat) => {
+            for row in 0..mat.nrows() {
+                let mut sum = 0.0;
+                for col in 0..mat.ncols() {
+                    sum += mat[(row, col)] * rhs[col];
+                }
+                dst[row] -= sum;
+            }
+        }
+    }
+}
+
+fn subtract_left_block_transpose_vector_product(
+    dst: &mut DVector<f64>,
+    lhs: &MatrixBlock,
+    rhs: &DVector<f64>,
+) {
+    debug_assert_eq!(dst.len(), lhs.ncols());
+    debug_assert_eq!(rhs.len(), lhs.nrows());
+
+    match lhs {
+        MatrixBlock::Diagonal(diag) => {
+            for col in 0..diag.len() {
+                dst[col] -= diag[col] * rhs[col];
+            }
+        }
+        MatrixBlock::BlockDiagonal(blocks) => {
+            let mut row_offset = 0;
+            let mut col_offset = 0;
+            for block in blocks {
+                for col in 0..block.ncols() {
+                    let mut sum = 0.0;
+                    for row in 0..block.nrows() {
+                        sum += block[(row, col)] * rhs[row_offset + row];
+                    }
+                    dst[col_offset + col] -= sum;
+                }
+                row_offset += block.nrows();
+                col_offset += block.ncols();
+            }
+        }
+        MatrixBlock::Sparse(mat) => {
+            for (row, col, value) in mat.triplet_iter() {
+                dst[col] -= value * rhs[row];
+            }
+        }
+        MatrixBlock::Dense(mat) => {
+            for col in 0..mat.ncols() {
+                let mut sum = 0.0;
+                for row in 0..mat.nrows() {
+                    sum += mat[(row, col)] * rhs[row];
+                }
+                dst[col] -= sum;
             }
         }
     }
@@ -8991,6 +10378,29 @@ pub(crate) fn profile_response_matrix_with_l_blocks(
 
 // === Block Cholesky helper functions ===
 
+#[inline]
+fn lambda_is_diagonal(lambda: &DMatrix<f64>) -> bool {
+    if lambda.nrows() != lambda.ncols() {
+        return false;
+    }
+    for row in 0..lambda.nrows() {
+        for col in 0..lambda.ncols() {
+            if row != col && lambda[(row, col)] != 0.0 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn zero_dense_lower_triangle(mat: &mut DMatrix<f64>) {
+    let n = mat.nrows();
+    let values = mat.as_mut_slice();
+    for col in 0..n {
+        values[(col * n + col)..((col + 1) * n)].fill(0.0);
+    }
+}
+
 /// Copy A to L and scale blockwise: L_jj = Λ_j' A_jj Λ_j + I
 ///
 /// A is (nranef × nranef) where nranef = vsize * nlevels.
@@ -9047,6 +10457,60 @@ fn copy_scale_inflate(l: &mut MatrixBlock, a: &MatrixBlock, re: &ReMat) {
                             }
                         }
                     };
+
+                    if lambda_is_diagonal(lambda) {
+                        if s >= 3 {
+                            zero_dense_lower_triangle(result);
+                            for (level, src_blk) in a_blocks.iter().enumerate() {
+                                let base = level * s;
+                                for row in 0..s {
+                                    let row_scale = lambda[(row, row)];
+                                    for col in 0..=row {
+                                        result[(base + row, base + col)] =
+                                            row_scale * src_blk[(row, col)] * lambda[(col, col)];
+                                    }
+                                    result[(base + row, base + row)] += 1.0;
+                                }
+                            }
+                            return;
+                        }
+
+                        result.fill(0.0);
+                        for (level, src_blk) in a_blocks.iter().enumerate() {
+                            let base = level * s;
+                            for row in 0..s {
+                                let row_scale = lambda[(row, row)];
+                                for col in 0..s {
+                                    result[(base + row, base + col)] =
+                                        row_scale * src_blk[(row, col)] * lambda[(col, col)];
+                                }
+                                result[(base + row, base + row)] += 1.0;
+                            }
+                        }
+                        return;
+                    }
+
+                    if s >= 3 {
+                        zero_dense_lower_triangle(result);
+                        for (level, src_blk) in a_blocks.iter().enumerate() {
+                            let base = level * s;
+                            for row in 0..s {
+                                for col in 0..=row {
+                                    let mut sum = 0.0;
+                                    for inner_row in 0..s {
+                                        for inner_col in 0..s {
+                                            sum += lambda[(inner_row, row)]
+                                                * src_blk[(inner_row, inner_col)]
+                                                * lambda[(inner_col, col)];
+                                        }
+                                    }
+                                    result[(base + row, base + col)] = sum;
+                                }
+                                result[(base + row, base + row)] += 1.0;
+                            }
+                        }
+                        return;
+                    }
 
                     if s == 2 {
                         let l00 = lambda[(0, 0)];
@@ -9126,6 +10590,20 @@ fn copy_scale_inflate(l: &mut MatrixBlock, a: &MatrixBlock, re: &ReMat) {
                     }
                 };
 
+                if lambda_is_diagonal(lambda) {
+                    for (dst_blk, src_blk) in l_blocks.iter_mut().zip(a_blocks.iter()) {
+                        for row in 0..s {
+                            let row_scale = lambda[(row, row)];
+                            for col in 0..s {
+                                dst_blk[(row, col)] =
+                                    row_scale * src_blk[(row, col)] * lambda[(col, col)];
+                            }
+                            dst_blk[(row, row)] += 1.0;
+                        }
+                    }
+                    return;
+                }
+
                 if s == 2 {
                     let l00 = lambda[(0, 0)];
                     let l01 = lambda[(0, 1)];
@@ -9183,6 +10661,25 @@ fn copy_scale_inflate(l: &mut MatrixBlock, a: &MatrixBlock, re: &ReMat) {
                             }
                         }
                     };
+
+                    if lambda_is_diagonal(lambda) {
+                        for bk in 0..nlevels {
+                            for bl in 0..nlevels {
+                                for row in 0..s {
+                                    let row_scale = lambda[(row, row)];
+                                    for col in 0..s {
+                                        result[(bk * s + row, bl * s + col)] = row_scale
+                                            * a_dense[(bk * s + row, bl * s + col)]
+                                            * lambda[(col, col)];
+                                    }
+                                }
+                            }
+                        }
+                        for i in 0..nranef {
+                            result[(i, i)] += 1.0;
+                        }
+                        return;
+                    }
 
                     for bk in 0..nlevels {
                         for bl in 0..nlevels {
@@ -9246,11 +10743,17 @@ fn copy_and_scale_offdiag(l: &mut MatrixBlock, a: &MatrixBlock, re_i: &ReMat, re
         }
     }
 
+    if let MatrixBlock::Sparse(a_sparse) = a {
+        copy_and_scale_sparse_offdiag(l, a_sparse, re_i, re_j);
+        return;
+    }
+
     with_dense_block(a, |a_dense| {
         let nranef_i = a_dense.nrows();
         let nranef_j = a_dense.ncols();
         let nlevels_i = nranef_i / si;
         let nlevels_j = nranef_j / sj;
+        let lambda_i = &re_i.lambda;
         let lambda_j = &re_j.lambda;
         let result = match l {
             MatrixBlock::Dense(result) if result.shape() == (nranef_i, nranef_j) => result,
@@ -9262,6 +10765,22 @@ fn copy_and_scale_offdiag(l: &mut MatrixBlock, a: &MatrixBlock, re_i: &ReMat, re
                 }
             }
         };
+
+        if lambda_is_diagonal(lambda_i) && lambda_is_diagonal(lambda_j) {
+            for bi in 0..nlevels_i {
+                for bj in 0..nlevels_j {
+                    for row in 0..si {
+                        let row_scale = lambda_i[(row, row)];
+                        for col in 0..sj {
+                            result[(bi * si + row, bj * sj + col)] = row_scale
+                                * a_dense[(bi * si + row, bj * sj + col)]
+                                * lambda_j[(col, col)];
+                        }
+                    }
+                }
+            }
+            return;
+        }
 
         if si == 2 && sj == 2 {
             let li00 = re_i.lambda[(0, 0)];
@@ -9316,6 +10835,296 @@ fn copy_and_scale_offdiag(l: &mut MatrixBlock, a: &MatrixBlock, re_i: &ReMat, re
             }
         }
     });
+}
+
+fn copy_and_scale_sparse_offdiag(
+    l: &mut MatrixBlock,
+    a: &CscMatrix<f64>,
+    re_i: &ReMat,
+    re_j: &ReMat,
+) {
+    let si = re_i.vsize;
+    let sj = re_j.vsize;
+    let nblocks_i = a.nrows() / si;
+    let nblocks_j = a.ncols() / sj;
+    let diagonal_lambdas = lambda_is_diagonal(&re_i.lambda) && lambda_is_diagonal(&re_j.lambda);
+
+    if let MatrixBlock::Sparse(result) = l {
+        if result.nrows() == a.nrows()
+            && result.ncols() == a.ncols()
+            && result.col_offsets() == a.col_offsets()
+            && result.row_indices() == a.row_indices()
+            && sparse_complete_local_block_pattern(a, si, sj)
+        {
+            fill_scaled_complete_sparse_offdiag_values(
+                result.values_mut(),
+                a,
+                si,
+                sj,
+                &re_i.lambda,
+                &re_j.lambda,
+                diagonal_lambdas,
+            );
+            return;
+        }
+    }
+
+    let mut source_blocks = vec![None; nblocks_i * nblocks_j];
+
+    for (row, col, value) in a.triplet_iter() {
+        let bi = row / si;
+        let bj = col / sj;
+        let local_row = row % si;
+        let local_col = col % sj;
+        let block_index = bi * nblocks_j + bj;
+        source_blocks[block_index].get_or_insert_with(|| vec![0.0; si * sj])
+            [local_row * sj + local_col] += *value;
+    }
+
+    if let MatrixBlock::Sparse(result) = l {
+        if result.nrows() == a.nrows()
+            && result.ncols() == a.ncols()
+            && sparse_complete_block_pattern_matches(
+                result,
+                &source_blocks,
+                nblocks_i,
+                nblocks_j,
+                si,
+                sj,
+            )
+        {
+            fill_scaled_sparse_offdiag_values(
+                result.values_mut(),
+                &source_blocks,
+                nblocks_i,
+                nblocks_j,
+                si,
+                sj,
+                &re_i.lambda,
+                &re_j.lambda,
+                diagonal_lambdas,
+            );
+            return;
+        }
+    }
+
+    let mut coo = CooMatrix::new(a.nrows(), a.ncols());
+    for bj in 0..nblocks_j {
+        for col in 0..sj {
+            for bi in 0..nblocks_i {
+                let Some(src) = &source_blocks[bi * nblocks_j + bj] else {
+                    continue;
+                };
+                for row in 0..si {
+                    coo.push(
+                        bi * si + row,
+                        bj * sj + col,
+                        scaled_sparse_offdiag_value(
+                            src,
+                            row,
+                            col,
+                            si,
+                            sj,
+                            &re_i.lambda,
+                            &re_j.lambda,
+                            diagonal_lambdas,
+                        ),
+                    );
+                }
+            }
+        }
+    }
+    *l = MatrixBlock::Sparse(CscMatrix::from(&coo));
+}
+
+fn sparse_complete_local_block_pattern(matrix: &CscMatrix<f64>, si: usize, sj: usize) -> bool {
+    if si == 0 || sj == 0 || matrix.nrows() % si != 0 || matrix.ncols() % sj != 0 {
+        return false;
+    }
+
+    let nblocks_j = matrix.ncols() / sj;
+    let col_offsets = matrix.col_offsets();
+    let row_indices = matrix.row_indices();
+    for bj in 0..nblocks_j {
+        let base_col = bj * sj;
+        let base_start = col_offsets[base_col];
+        let base_end = col_offsets[base_col + 1];
+        let block_len = base_end - base_start;
+        if block_len % si != 0 {
+            return false;
+        }
+        for chunk_start in (0..block_len).step_by(si) {
+            let first_row = row_indices[base_start + chunk_start];
+            if first_row % si != 0 {
+                return false;
+            }
+            for local_row in 0..si {
+                if row_indices[base_start + chunk_start + local_row] != first_row + local_row {
+                    return false;
+                }
+            }
+        }
+
+        for local_col in 1..sj {
+            let col = base_col + local_col;
+            let col_start = col_offsets[col];
+            let col_end = col_offsets[col + 1];
+            if col_end - col_start != block_len {
+                return false;
+            }
+            for pos in 0..block_len {
+                if row_indices[col_start + pos] != row_indices[base_start + pos] {
+                    return false;
+                }
+            }
+        }
+    }
+
+    true
+}
+
+fn fill_scaled_complete_sparse_offdiag_values(
+    values: &mut [f64],
+    source: &CscMatrix<f64>,
+    si: usize,
+    sj: usize,
+    lambda_i: &DMatrix<f64>,
+    lambda_j: &DMatrix<f64>,
+    diagonal_lambdas: bool,
+) {
+    let nblocks_j = source.ncols() / sj;
+    let col_offsets = source.col_offsets();
+    let source_values = source.values();
+    let mut src = vec![0.0; si * sj];
+
+    for bj in 0..nblocks_j {
+        let base_col = bj * sj;
+        let base_start = col_offsets[base_col];
+        let base_end = col_offsets[base_col + 1];
+        for chunk_start in (0..(base_end - base_start)).step_by(si) {
+            for local_col in 0..sj {
+                let col_start = col_offsets[base_col + local_col];
+                for local_row in 0..si {
+                    src[local_row * sj + local_col] =
+                        source_values[col_start + chunk_start + local_row];
+                }
+            }
+            for local_col in 0..sj {
+                let col_start = col_offsets[base_col + local_col];
+                for local_row in 0..si {
+                    values[col_start + chunk_start + local_row] = scaled_sparse_offdiag_value(
+                        &src,
+                        local_row,
+                        local_col,
+                        si,
+                        sj,
+                        lambda_i,
+                        lambda_j,
+                        diagonal_lambdas,
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn sparse_complete_block_pattern_matches(
+    matrix: &CscMatrix<f64>,
+    source_blocks: &[Option<Vec<f64>>],
+    nblocks_i: usize,
+    nblocks_j: usize,
+    si: usize,
+    sj: usize,
+) -> bool {
+    if matrix.nrows() != nblocks_i * si || matrix.ncols() != nblocks_j * sj {
+        return false;
+    }
+
+    for bj in 0..nblocks_j {
+        for local_col in 0..sj {
+            let col = bj * sj + local_col;
+            let matrix_col = matrix.col(col);
+            let rows = matrix_col.row_indices();
+            let mut offset = 0;
+            for bi in 0..nblocks_i {
+                if source_blocks[bi * nblocks_j + bj].is_none() {
+                    continue;
+                }
+                for local_row in 0..si {
+                    if rows.get(offset).copied() != Some(bi * si + local_row) {
+                        return false;
+                    }
+                    offset += 1;
+                }
+            }
+            if offset != rows.len() {
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
+fn fill_scaled_sparse_offdiag_values(
+    values: &mut [f64],
+    source_blocks: &[Option<Vec<f64>>],
+    nblocks_i: usize,
+    nblocks_j: usize,
+    si: usize,
+    sj: usize,
+    lambda_i: &DMatrix<f64>,
+    lambda_j: &DMatrix<f64>,
+    diagonal_lambdas: bool,
+) {
+    let mut offset = 0;
+    for bj in 0..nblocks_j {
+        for col in 0..sj {
+            for bi in 0..nblocks_i {
+                let Some(src) = &source_blocks[bi * nblocks_j + bj] else {
+                    continue;
+                };
+                for row in 0..si {
+                    values[offset] = scaled_sparse_offdiag_value(
+                        src,
+                        row,
+                        col,
+                        si,
+                        sj,
+                        lambda_i,
+                        lambda_j,
+                        diagonal_lambdas,
+                    );
+                    offset += 1;
+                }
+            }
+        }
+    }
+}
+
+fn scaled_sparse_offdiag_value(
+    src: &[f64],
+    row: usize,
+    col: usize,
+    si: usize,
+    sj: usize,
+    lambda_i: &DMatrix<f64>,
+    lambda_j: &DMatrix<f64>,
+    diagonal_lambdas: bool,
+) -> f64 {
+    if diagonal_lambdas {
+        return lambda_i[(row, row)] * src[row * sj + col] * lambda_j[(col, col)];
+    }
+
+    let mut sum = 0.0;
+    for inner_row in 0..si {
+        for inner_col in 0..sj {
+            sum += lambda_i[(inner_row, row)]
+                * src[inner_row * sj + inner_col]
+                * lambda_j[(inner_col, col)];
+        }
+    }
+    sum
 }
 
 /// Copy and right-multiply blockwise by Λ: L_kj = A_kj Λ_j
@@ -9388,6 +11197,18 @@ fn copy_and_rmul_lambda(l: &mut MatrixBlock, a: &MatrixBlock, re_j: &ReMat) {
                 }
             }
         };
+
+        if lambda_is_diagonal(lambda_j) {
+            for b in 0..nblocks {
+                let col_base = b * sj;
+                for i in 0..nrows {
+                    for j in 0..sj {
+                        result[(i, col_base + j)] = a_dense[(i, col_base + j)] * lambda_j[(j, j)];
+                    }
+                }
+            }
+            return;
+        }
 
         if sj == 2 {
             let l00 = lambda_j[(0, 0)];
@@ -9487,16 +11308,32 @@ fn rank_k_downdate(c: &mut MatrixBlock, a: &DMatrix<f64>) {
 fn rank_k_downdate_sparse(c: &mut MatrixBlock, a: &CscMatrix<f64>) {
     match c {
         MatrixBlock::Dense(c_mat) => {
+            let c_nrows = c_mat.nrows();
+            let c_values = c_mat.as_mut_slice();
             for col_idx in 0..a.ncols() {
                 let col = a.col(col_idx);
                 let rows = col.row_indices();
                 let values = col.values();
+                let rows_ptr = rows.as_ptr();
+                let values_ptr = values.as_ptr();
                 for left in 0..rows.len() {
-                    let row_i = rows[left];
-                    let value_i = values[left];
-                    for right in 0..rows.len() {
-                        let row_j = rows[right];
-                        c_mat[(row_i, row_j)] -= value_i * values[right];
+                    // `left` and `right` are bounded by `rows.len()`, and CSC
+                    // columns keep row/value slices at identical lengths.
+                    let row_i = unsafe { *rows_ptr.add(left) };
+                    let value_i = unsafe { *values_ptr.add(left) };
+                    for right in 0..=left {
+                        let row_j = unsafe { *rows_ptr.add(right) };
+                        let (row, col) = if row_i >= row_j {
+                            (row_i, row_j)
+                        } else {
+                            (row_j, row_i)
+                        };
+                        let target = row + col * c_nrows;
+                        // CSC row indices and the square target block dimensions
+                        // guarantee this lower-triangle slot is in bounds.
+                        unsafe {
+                            *c_values.get_unchecked_mut(target) -= value_i * *values_ptr.add(right);
+                        }
                     }
                 }
             }
@@ -9508,16 +11345,33 @@ fn rank_k_downdate_sparse(c: &mut MatrixBlock, a: &CscMatrix<f64>) {
         }
         _ => {
             let mut dense = c.as_dense();
+            let dense_nrows = dense.nrows();
+            let dense_values = dense.as_mut_slice();
             for col_idx in 0..a.ncols() {
                 let col = a.col(col_idx);
                 let rows = col.row_indices();
                 let values = col.values();
+                let rows_ptr = rows.as_ptr();
+                let values_ptr = values.as_ptr();
                 for left in 0..rows.len() {
-                    let row_i = rows[left];
-                    let value_i = values[left];
-                    for right in 0..rows.len() {
-                        let row_j = rows[right];
-                        dense[(row_i, row_j)] -= value_i * values[right];
+                    // `left` and `right` are bounded by `rows.len()`, and CSC
+                    // columns keep row/value slices at identical lengths.
+                    let row_i = unsafe { *rows_ptr.add(left) };
+                    let value_i = unsafe { *values_ptr.add(left) };
+                    for right in 0..=left {
+                        let row_j = unsafe { *rows_ptr.add(right) };
+                        let (row, col) = if row_i >= row_j {
+                            (row_i, row_j)
+                        } else {
+                            (row_j, row_i)
+                        };
+                        let target = row + col * dense_nrows;
+                        // CSC row indices and the square target block dimensions
+                        // guarantee this lower-triangle slot is in bounds.
+                        unsafe {
+                            *dense_values.get_unchecked_mut(target) -=
+                                value_i * *values_ptr.add(right);
+                        }
                     }
                 }
             }
@@ -9666,6 +11520,12 @@ fn cholesky_block_with_tolerance(
         }
         MatrixBlock::Dense(mat) => {
             let n = mat.nrows();
+            if n >= 256 {
+                if faer_cholesky_lower_in_place(mat) {
+                    return Ok(());
+                }
+                return Err(MixedModelError::PosDefException);
+            }
             let tol = cholesky_zero_pad_abs_tolerance(
                 diagonal_abs_max_matrix(mat),
                 cholesky_zero_pad_tolerance,
@@ -9710,6 +11570,33 @@ fn cholesky_block_with_tolerance(
             cholesky_block_with_tolerance(block, cholesky_zero_pad_tolerance)
         }
     }
+}
+
+fn faer_cholesky_lower_in_place(mat: &mut DMatrix<f64>) -> bool {
+    let n = mat.nrows();
+    if n != mat.ncols() {
+        return false;
+    }
+
+    let mut faer_mat = MatMut::from_column_major_slice_mut(mat.as_mut_slice(), n, n);
+    let mut mem = MemBuffer::new(cholesky_in_place_scratch::<f64>(n, Par::Seq, default()));
+    let mut stack = MemStack::new(&mut mem);
+    if cholesky_in_place(
+        faer_mat.rb_mut(),
+        LltRegularization::default(),
+        Par::Seq,
+        &mut stack,
+        default(),
+    )
+    .is_err()
+    {
+        return false;
+    }
+    let values = mat.as_mut_slice();
+    for col in 0..n {
+        values[(col * n)..(col * n + col)].fill(0.0);
+    }
+    true
 }
 
 /// Right-divide by lower triangular transpose: A = A * L^{-T}
@@ -9825,7 +11712,14 @@ fn rdiv_lower_transpose(a: &mut MatrixBlock, l: &MatrixBlock) {
                         col_offset += s;
                     }
                 }
-                MatrixBlock::BlockDiagonal(_) | MatrixBlock::Sparse(_) => {
+                MatrixBlock::Sparse(a_sparse) => {
+                    if !sparse_rdiv_lower_transpose_blockdiag_in_place(a_sparse, l_blocks) {
+                        *a = MatrixBlock::Sparse(sparse_rdiv_lower_transpose_blockdiag(
+                            a_sparse, l_blocks,
+                        ));
+                    }
+                }
+                MatrixBlock::BlockDiagonal(_) => {
                     // Both block-diagonal: promote A to dense, then solve
                     let mut a_dense = a.as_dense();
                     let mut col_offset = 0;
@@ -9957,6 +11851,136 @@ fn rdiv_lower_transpose(a: &mut MatrixBlock, l: &MatrixBlock) {
     }
 }
 
+fn sparse_rdiv_lower_transpose_blockdiag(
+    a: &CscMatrix<f64>,
+    l_blocks: &[DMatrix<f64>],
+) -> CscMatrix<f64> {
+    let mut starts = Vec::with_capacity(l_blocks.len());
+    let mut offset = 0usize;
+    for block in l_blocks {
+        starts.push(offset);
+        offset += block.ncols();
+    }
+
+    let mut row_block_values = BTreeMap::<(usize, usize), Vec<f64>>::new();
+    for (row, col, value) in a.triplet_iter() {
+        let block_idx = starts
+            .partition_point(|&start| start <= col)
+            .saturating_sub(1);
+        let local_col = col - starts[block_idx];
+        row_block_values
+            .entry((row, block_idx))
+            .or_insert_with(|| vec![0.0; l_blocks[block_idx].ncols()])[local_col] += *value;
+    }
+
+    let mut coo = CooMatrix::new(a.nrows(), a.ncols());
+    for ((row, block_idx), values) in row_block_values {
+        let l_blk = &l_blocks[block_idx];
+        let start = starts[block_idx];
+        let s = l_blk.ncols();
+        let mut solved = vec![0.0; s];
+
+        for col in 0..s {
+            let denom = l_blk[(col, col)];
+            if denom.abs() < BLOCK_TRIANGULAR_SOLVE_ZERO_TOLERANCE {
+                solved[col] = 0.0;
+                continue;
+            }
+            let mut value = values[col];
+            for prev in 0..col {
+                value -= solved[prev] * l_blk[(col, prev)];
+            }
+            solved[col] = value / denom;
+        }
+
+        for col in 0..s {
+            let value = solved[col];
+            if value != 0.0 {
+                coo.push(row, start + col, value);
+            }
+        }
+    }
+
+    CscMatrix::from(&coo)
+}
+
+fn sparse_rdiv_lower_transpose_blockdiag_in_place(
+    a: &mut CscMatrix<f64>,
+    l_blocks: &[DMatrix<f64>],
+) -> bool {
+    let mut starts = Vec::with_capacity(l_blocks.len());
+    let mut offset = 0usize;
+    for block in l_blocks {
+        if block.nrows() != block.ncols() {
+            return false;
+        }
+        starts.push(offset);
+        offset += block.ncols();
+    }
+    if offset != a.ncols() {
+        return false;
+    }
+
+    let col_offsets = a.col_offsets().to_vec();
+    let row_indices = a.row_indices().to_vec();
+    for (block_idx, l_blk) in l_blocks.iter().enumerate() {
+        let start = starts[block_idx];
+        let s = l_blk.ncols();
+        if s == 0 {
+            continue;
+        }
+        let base_start = col_offsets[start];
+        let base_end = col_offsets[start + 1];
+        for local_col in 1..s {
+            let col = start + local_col;
+            let col_start = col_offsets[col];
+            let col_end = col_offsets[col + 1];
+            if col_end - col_start != base_end - base_start {
+                return false;
+            }
+            for pos in 0..(base_end - base_start) {
+                if row_indices[col_start + pos] != row_indices[base_start + pos] {
+                    return false;
+                }
+            }
+        }
+    }
+
+    let values = a.values_mut();
+    let mut solved = Vec::new();
+    for (block_idx, l_blk) in l_blocks.iter().enumerate() {
+        let start = starts[block_idx];
+        let s = l_blk.ncols();
+        if s == 0 {
+            continue;
+        }
+        solved.resize(s, 0.0);
+        let block_nnz = col_offsets[start + 1] - col_offsets[start];
+        for pos in 0..block_nnz {
+            for col in 0..s {
+                solved[col] = values[col_offsets[start + col] + pos];
+            }
+            for col in 0..s {
+                let denom = l_blk[(col, col)];
+                if denom.abs() < BLOCK_TRIANGULAR_SOLVE_ZERO_TOLERANCE {
+                    solved[col] = 0.0;
+                    continue;
+                }
+                let mut value = solved[col];
+                for prev in 0..col {
+                    value -= solved[prev] * l_blk[(col, prev)];
+                }
+                solved[col] = value / denom;
+            }
+            for col in 0..s {
+                values[col_offsets[start + col] + pos] = solved[col];
+            }
+        }
+    }
+
+    true
+}
+
 /// Log-determinant of a Cholesky block (sum of log of diagonal elements).
 fn logdet_block(block: &MatrixBlock) -> f64 {
     match block {
@@ -10053,6 +12077,8 @@ pub struct MixedModelBootstrap {
 pub enum BootstrapIntervalMethod {
     /// Equal-tail percentile interval.
     Percentile,
+    /// Basic bootstrap interval, reflected around the observed statistic.
+    Basic,
     /// Shortest contiguous interval covering the requested level.
     Shortest,
 }
@@ -10095,6 +12121,8 @@ pub const BOOTSTRAP_RUN_SCHEMA_VERSION: &str = "1.0.0";
 pub enum BootstrapTargetKind {
     FullModelDistribution,
     FixedEffectNull,
+    LikelihoodRatio,
+    ClusterResample,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -10118,6 +12146,22 @@ impl BootstrapTarget {
             kind: BootstrapTargetKind::FixedEffectNull,
             label: label.into(),
             contrast_label: Some(contrast_label.into()),
+        }
+    }
+
+    pub fn likelihood_ratio(label: impl Into<String>) -> Self {
+        Self {
+            kind: BootstrapTargetKind::LikelihoodRatio,
+            label: label.into(),
+            contrast_label: None,
+        }
+    }
+
+    pub fn cluster_resample(label: impl Into<String>) -> Self {
+        Self {
+            kind: BootstrapTargetKind::ClusterResample,
+            label: label.into(),
+            contrast_label: None,
         }
     }
 }
@@ -10216,6 +12260,18 @@ pub struct BootstrapRunPayload {
     pub replicates: MixedModelBootstrap,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicate_statistics: Option<Vec<f64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intervals: Option<Vec<BootstrapInterval>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BootstrapLikelihoodRatioTest {
+    #[serde(with = "json_f64")]
+    pub observed_statistic: f64,
+    pub p_value: Option<f64>,
+    pub mcse: Option<f64>,
+    pub payload: BootstrapRunPayload,
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -10421,9 +12477,10 @@ impl MixedModelBootstrap {
             statistic_values.map(|values| values.iter().filter(|value| value.is_finite()).count());
         let boundary_rate = (successful_replicates > 0)
             .then_some(boundary_count as f64 / successful_replicates as f64);
+        let mcse_replicates = finite_statistic_count.unwrap_or(successful_replicates);
         let mcse = p_value.and_then(|p| {
-            (p.is_finite() && (0.0..=1.0).contains(&p) && successful_replicates > 0)
-                .then_some((p * (1.0 - p) / successful_replicates as f64).sqrt())
+            (p.is_finite() && (0.0..=1.0).contains(&p) && mcse_replicates > 0)
+                .then_some((p * (1.0 - p) / mcse_replicates as f64).sqrt())
         });
 
         let mut notes = Vec::new();
@@ -10476,6 +12533,7 @@ impl MixedModelBootstrap {
             metadata,
             replicates: self,
             replicate_statistics: None,
+            intervals: None,
         }
     }
 
@@ -10488,6 +12546,21 @@ impl MixedModelBootstrap {
             metadata,
             replicates: self,
             replicate_statistics: Some(replicate_statistics),
+            intervals: None,
+        }
+    }
+
+    pub fn into_run_payload_with_statistics_and_intervals(
+        self,
+        metadata: BootstrapRunMetadata,
+        replicate_statistics: Vec<f64>,
+        intervals: Vec<BootstrapInterval>,
+    ) -> BootstrapRunPayload {
+        BootstrapRunPayload {
+            metadata,
+            replicates: self,
+            replicate_statistics: Some(replicate_statistics),
+            intervals: Some(intervals),
         }
     }
 
@@ -12373,6 +14446,161 @@ mod tests {
     }
 
     #[test]
+    fn test_crossed_vsize2_re_cross_product_uses_dense_fast_path() {
+        let data = correlated_crossed_slope_data();
+        let formula = parse_formula("y ~ 1 + x + (1 + x | g) + (1 + x | h)").unwrap();
+        let model = LinearMixedModel::new(formula, &data, None).unwrap();
+
+        assert!(
+            matches!(model.a_blocks[block_index(1, 0)], MatrixBlock::Dense(_)),
+            "crossed vsize=2 random-slope blocks should stay on the dense path"
+        );
+    }
+
+    #[test]
+    fn test_crossed_vsize3_re_cross_product_uses_sparse_path() {
+        let cnames = vec![
+            "(Intercept)".to_string(),
+            "x1".to_string(),
+            "x2".to_string(),
+        ];
+        let re_i = ReMat::new(
+            "g".to_string(),
+            vec![0, 0, 1, 1, 2, 2],
+            vec!["g1".to_string(), "g2".to_string(), "g3".to_string()],
+            cnames.clone(),
+            DMatrix::from_row_slice(
+                3,
+                6,
+                &[
+                    1.0, 1.0, 1.0, 1.0, 1.0, 1.0, -0.2, 0.3, 0.7, -0.5, 0.1, 0.4, 0.6, -0.1, 0.2,
+                    0.8, -0.4, 0.5,
+                ],
+            ),
+        );
+        let re_j = ReMat::new(
+            "h".to_string(),
+            vec![0, 1, 0, 1, 0, 1],
+            vec!["h1".to_string(), "h2".to_string()],
+            cnames,
+            DMatrix::from_row_slice(
+                3,
+                6,
+                &[
+                    1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.4, -0.3, 0.2, 0.5, -0.6, 0.1, -0.2, 0.7, -0.5,
+                    0.3, 0.6, -0.4,
+                ],
+            ),
+        );
+
+        assert!(!is_nested(&re_i, &re_j));
+        assert!(!is_nested(&re_j, &re_i));
+        assert!(
+            matches!(
+                compute_re_cross_product(&re_i, &re_j),
+                MatrixBlock::Sparse(_)
+            ),
+            "crossed vsize=3 random-slope blocks should stay sparse"
+        );
+    }
+
+    #[test]
+    fn test_crossed_vsize4_sparse_scale_and_solve_match_dense() {
+        let mut re_i = ReMat::new(
+            "g".to_string(),
+            vec![0, 1, 2, 0, 1, 2, 0, 1],
+            vec!["g1".to_string(), "g2".to_string(), "g3".to_string()],
+            vec![
+                "(Intercept)".to_string(),
+                "x1".to_string(),
+                "x2".to_string(),
+                "x3".to_string(),
+            ],
+            DMatrix::from_row_slice(
+                4,
+                8,
+                &[
+                    1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.2, -0.4, 0.6, 0.8, -0.1, 0.3, -0.7,
+                    0.5, 0.1, 0.5, -0.2, 0.4, 0.9, -0.3, 0.7, -0.6, -0.5, 0.2, 0.3, -0.8, 0.6, 0.1,
+                    -0.4, 0.9,
+                ],
+            ),
+        );
+        let mut re_j = ReMat::new(
+            "h".to_string(),
+            vec![0, 0, 1, 1, 2, 2, 3, 3],
+            vec![
+                "h1".to_string(),
+                "h2".to_string(),
+                "h3".to_string(),
+                "h4".to_string(),
+            ],
+            vec![
+                "(Intercept)".to_string(),
+                "x1".to_string(),
+                "x2".to_string(),
+                "x3".to_string(),
+            ],
+            DMatrix::from_row_slice(
+                4,
+                8,
+                &[
+                    1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, -0.3, 0.4, -0.5, 0.6, -0.7, 0.8, -0.9,
+                    0.2, 0.6, -0.1, 0.2, -0.4, 0.5, -0.7, 0.9, -0.8, 0.3, 0.7, -0.6, 0.1, -0.2,
+                    0.4, -0.5, 0.8,
+                ],
+            ),
+        );
+        re_i.set_theta(&[0.7, 0.02, 0.03, -0.01, 0.5, 0.04, 0.02, 0.4, -0.03, 0.3])
+            .unwrap();
+        re_j.set_theta(&[0.6, -0.01, 0.02, 0.01, 0.45, -0.02, 0.03, 0.35, 0.04, 0.25])
+            .unwrap();
+
+        let sparse_a = compute_re_cross_product(&re_i, &re_j);
+        assert!(matches!(sparse_a, MatrixBlock::Sparse(_)));
+        let dense_a = MatrixBlock::Dense(sparse_a.as_dense());
+
+        let mut sparse_scaled = sparse_a.clone();
+        let mut dense_scaled = dense_a.clone();
+        copy_and_scale_offdiag(&mut sparse_scaled, &sparse_a, &re_i, &re_j);
+        copy_and_scale_offdiag(&mut dense_scaled, &dense_a, &re_i, &re_j);
+        for row in 0..sparse_scaled.nrows() {
+            for col in 0..sparse_scaled.ncols() {
+                assert_relative_eq!(
+                    sparse_scaled.as_dense()[(row, col)],
+                    dense_scaled.as_dense()[(row, col)],
+                    epsilon = 1e-10
+                );
+            }
+        }
+
+        let solve_block = MatrixBlock::BlockDiagonal(vec![
+            DMatrix::from_row_slice(
+                4,
+                4,
+                &[
+                    1.3, 0.0, 0.0, 0.0, 0.2, 1.1, 0.0, 0.0, -0.1, 0.3, 1.4, 0.0, 0.4, -0.2, 0.1,
+                    1.2,
+                ],
+            );
+            re_j.n_levels()
+        ]);
+        rdiv_lower_transpose(&mut sparse_scaled, &solve_block);
+        rdiv_lower_transpose(&mut dense_scaled, &solve_block);
+        let sparse_dense = sparse_scaled.as_dense();
+        let dense_dense = dense_scaled.as_dense();
+        for row in 0..sparse_dense.nrows() {
+            for col in 0..sparse_dense.ncols() {
+                assert_relative_eq!(
+                    sparse_dense[(row, col)],
+                    dense_dense[(row, col)],
+                    epsilon = 1e-10
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_cholesky_block_diagonal() {
         let mut block = MatrixBlock::Diagonal(DVector::from_vec(vec![4.0, 9.0, 16.0]));
         cholesky_block(&mut block).unwrap();
@@ -12895,6 +15123,161 @@ mod tests {
         assert_eq!(rhs, vec![0.0, 2.0]);
     }
 
+    fn assert_vector_product_helpers_match_dense(block: MatrixBlock) {
+        let dense = block.as_dense();
+        let rhs = DVector::from_iterator(
+            block.ncols(),
+            (0..block.ncols()).map(|idx| 0.5 + idx as f64),
+        );
+        let dst = DVector::from_iterator(
+            block.nrows(),
+            (0..block.nrows()).map(|idx| 3.0 - idx as f64),
+        );
+        let expected = &dst - &dense * &rhs;
+        let mut actual = dst.clone();
+
+        subtract_left_block_vector_product(&mut actual, &block, &rhs);
+
+        for idx in 0..actual.len() {
+            assert_relative_eq!(actual[idx], expected[idx], epsilon = 1e-12);
+        }
+
+        let transpose_rhs = DVector::from_iterator(
+            block.nrows(),
+            (0..block.nrows()).map(|idx| 1.0 + idx as f64),
+        );
+        let transpose_dst = DVector::from_iterator(
+            block.ncols(),
+            (0..block.ncols()).map(|idx| -2.0 + idx as f64),
+        );
+        let transpose_expected = &transpose_dst - dense.transpose() * &transpose_rhs;
+        let mut transpose_actual = transpose_dst.clone();
+
+        subtract_left_block_transpose_vector_product(&mut transpose_actual, &block, &transpose_rhs);
+
+        for idx in 0..transpose_actual.len() {
+            assert_relative_eq!(
+                transpose_actual[idx],
+                transpose_expected[idx],
+                epsilon = 1e-12
+            );
+        }
+    }
+
+    #[test]
+    fn test_block_vector_subtractions_match_dense_equivalents() {
+        assert_vector_product_helpers_match_dense(MatrixBlock::Dense(DMatrix::from_row_slice(
+            3,
+            2,
+            &[1.0, -0.5, 0.0, 2.0, 3.0, 0.25],
+        )));
+
+        assert_vector_product_helpers_match_dense(MatrixBlock::Diagonal(DVector::from_vec(vec![
+            2.0, 0.5, -1.5,
+        ])));
+
+        assert_vector_product_helpers_match_dense(MatrixBlock::BlockDiagonal(vec![
+            DMatrix::from_row_slice(1, 2, &[1.25, -0.75]),
+            DMatrix::from_row_slice(2, 1, &[0.5, 3.0]),
+        ]));
+
+        let mut coo = CooMatrix::new(4, 3);
+        coo.push(0, 0, 1.5);
+        coo.push(1, 2, -2.0);
+        coo.push(2, 1, 0.25);
+        coo.push(3, 0, 4.0);
+        coo.push(3, 2, -0.5);
+        assert_vector_product_helpers_match_dense(MatrixBlock::Sparse(CscMatrix::from(&coo)));
+    }
+
+    #[test]
+    fn test_wtxy_cross_product_matches_dense_multiply() {
+        let wtxy = DMatrix::from_row_slice(
+            4,
+            3,
+            &[
+                1.0, 0.5, -2.0, 0.0, 3.0, 1.5, -1.0, 2.0, 0.25, 4.0, -0.5, 2.5,
+            ],
+        );
+        let expected = wtxy.transpose() * &wtxy;
+        let actual = compute_wtxy_cross_product(&wtxy);
+
+        for row in 0..actual.nrows() {
+            for col in 0..actual.ncols() {
+                assert_relative_eq!(actual[(row, col)], expected[(row, col)], epsilon = 1e-12);
+            }
+        }
+    }
+
+    fn assert_subtract_product_from_blocks_matches_dense(a: MatrixBlock, b: MatrixBlock) {
+        let a_dense = a.as_dense();
+        let b_dense = b.as_dense();
+        let initial = DMatrix::from_fn(a.nrows(), b.nrows(), |row, col| {
+            10.0 + row as f64 * 0.75 - col as f64 * 0.25
+        });
+        let expected = &initial - a_dense * b_dense.transpose();
+        let mut actual = MatrixBlock::Dense(initial);
+
+        subtract_product_from_blocks(&mut actual, &a, &b);
+
+        let MatrixBlock::Dense(actual_dense) = actual else {
+            panic!("expected dense target after subtract_product_from_blocks");
+        };
+        for row in 0..actual_dense.nrows() {
+            for col in 0..actual_dense.ncols() {
+                assert_relative_eq!(
+                    actual_dense[(row, col)],
+                    expected[(row, col)],
+                    epsilon = 1e-12
+                );
+            }
+        }
+    }
+
+    fn sparse_block_for_product_tests() -> CscMatrix<f64> {
+        let mut coo = CooMatrix::new(4, 3);
+        coo.push(0, 0, 1.0);
+        coo.push(2, 0, -0.5);
+        coo.push(1, 1, 2.0);
+        coo.push(3, 1, 1.5);
+        coo.push(0, 2, -3.0);
+        coo.push(3, 2, 0.25);
+        CscMatrix::from(&coo)
+    }
+
+    #[test]
+    fn test_sparse_subtract_product_paths_match_dense_equivalents() {
+        let a_sparse = MatrixBlock::Sparse(sparse_block_for_product_tests());
+
+        let mut coo_b = CooMatrix::new(5, 3);
+        coo_b.push(0, 0, 0.5);
+        coo_b.push(4, 0, -1.0);
+        coo_b.push(2, 1, 3.0);
+        coo_b.push(3, 2, -0.25);
+        let b_sparse = MatrixBlock::Sparse(CscMatrix::from(&coo_b));
+
+        let b_dense = MatrixBlock::Dense(DMatrix::from_row_slice(
+            5,
+            3,
+            &[
+                0.5, 0.0, 0.0, -1.0, 0.25, 0.0, 0.0, 3.0, 0.5, 1.25, 0.0, -0.25, -0.75, 0.5, 2.0,
+            ],
+        ));
+
+        assert_subtract_product_from_blocks_matches_dense(a_sparse.clone(), b_sparse.clone());
+        assert_subtract_product_from_blocks_matches_dense(a_sparse, b_dense);
+        assert_subtract_product_from_blocks_matches_dense(
+            MatrixBlock::Dense(DMatrix::from_row_slice(
+                4,
+                3,
+                &[
+                    1.0, 0.0, -3.0, 0.0, 2.0, 0.0, -0.5, 0.0, 0.0, 0.0, 1.5, 0.25,
+                ],
+            )),
+            b_sparse,
+        );
+    }
+
     #[test]
     fn test_copy_scale_inflate_vsize2_matches_reference() {
         let mut re = make_vector_remat_for_kernel_tests(2);
@@ -12924,6 +15307,150 @@ mod tests {
                         max_relative = 1e-12
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn test_copy_scale_inflate_dense_vsize4_lower_triangle_matches_reference_cholesky() {
+        let mut re = ReMat::new(
+            "subj".to_string(),
+            vec![0, 1],
+            vec!["S001".to_string(), "S002".to_string()],
+            vec![
+                "(Intercept)".to_string(),
+                "x1".to_string(),
+                "x2".to_string(),
+                "x3".to_string(),
+            ],
+            DMatrix::from_row_slice(4, 2, &[1.0, 1.0, 0.2, -0.4, 0.5, 0.7, -0.1, 0.3]),
+        );
+        re.set_theta(&[1.1, -0.2, 0.9, 0.3, -0.4, 0.8, 0.1, 0.2, -0.3, 0.7])
+            .unwrap();
+
+        let src_blocks = vec![
+            DMatrix::from_row_slice(
+                4,
+                4,
+                &[
+                    3.0, 0.2, -0.1, 0.4, 0.2, 2.5, 0.3, -0.2, -0.1, 0.3, 1.7, 0.5, 0.4, -0.2, 0.5,
+                    2.1,
+                ],
+            ),
+            DMatrix::from_row_slice(
+                4,
+                4,
+                &[
+                    2.2, -0.3, 0.4, 0.1, -0.3, 1.9, -0.2, 0.6, 0.4, -0.2, 2.8, -0.5, 0.1, 0.6,
+                    -0.5, 1.6,
+                ],
+            ),
+        ];
+        let a = MatrixBlock::BlockDiagonal(src_blocks.clone());
+        let mut optimized = MatrixBlock::Dense(DMatrix::from_element(8, 8, 99.0));
+        copy_scale_inflate(&mut optimized, &a, &re);
+        cholesky_block(&mut optimized).unwrap();
+
+        let mut expected_full = DMatrix::zeros(8, 8);
+        for (level, src) in src_blocks.iter().enumerate() {
+            let block = re.lambda.transpose() * src * &re.lambda + DMatrix::identity(4, 4);
+            let base = level * 4;
+            for row in 0..4 {
+                for col in 0..4 {
+                    expected_full[(base + row, base + col)] = block[(row, col)];
+                }
+            }
+        }
+        let mut expected = MatrixBlock::Dense(expected_full);
+        cholesky_block(&mut expected).unwrap();
+
+        let MatrixBlock::Dense(optimized) = optimized else {
+            panic!("expected dense optimized result");
+        };
+        let MatrixBlock::Dense(expected) = expected else {
+            panic!("expected dense reference result");
+        };
+        for row in 0..8 {
+            for col in 0..=row {
+                assert_relative_eq!(
+                    optimized[(row, col)],
+                    expected[(row, col)],
+                    epsilon = 1e-10,
+                    max_relative = 1e-10
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_sparse_rank_k_downdate_ignores_poisoned_upper_triangle() {
+        let mut coo = CooMatrix::new(4, 3);
+        for (row, col, value) in [
+            (0, 0, 0.40),
+            (2, 0, -0.20),
+            (1, 1, 0.30),
+            (2, 1, 0.10),
+            (3, 1, -0.50),
+            (0, 2, 0.20),
+            (3, 2, 0.25),
+        ] {
+            coo.push(row, col, value);
+        }
+        let sparse = CscMatrix::from(&coo);
+
+        let mut lower_only = DMatrix::from_element(4, 4, 99.0);
+        let mut symmetric_reference = DMatrix::zeros(4, 4);
+        for row in 0..4 {
+            for col in 0..=row {
+                let value = if row == col {
+                    10.0 + row as f64
+                } else {
+                    0.05 * (row + col + 1) as f64
+                };
+                lower_only[(row, col)] = value;
+                symmetric_reference[(row, col)] = value;
+                symmetric_reference[(col, row)] = value;
+            }
+        }
+
+        let dense_sparse = MatrixBlock::Sparse(sparse.clone()).as_dense();
+        symmetric_reference.gemm(-1.0, &dense_sparse, &dense_sparse.transpose(), 1.0);
+
+        let mut optimized = MatrixBlock::Dense(lower_only);
+        rank_k_downdate_sparse(&mut optimized, &sparse);
+        let MatrixBlock::Dense(optimized_lower) = &optimized else {
+            panic!("expected dense downdate result");
+        };
+        for row in 0..4 {
+            for col in 0..=row {
+                assert_relative_eq!(
+                    optimized_lower[(row, col)],
+                    symmetric_reference[(row, col)],
+                    epsilon = 1e-12,
+                    max_relative = 1e-12
+                );
+            }
+        }
+
+        let mut optimized_cholesky = optimized;
+        let mut reference_cholesky = MatrixBlock::Dense(symmetric_reference);
+        cholesky_block(&mut optimized_cholesky).unwrap();
+        cholesky_block(&mut reference_cholesky).unwrap();
+
+        let MatrixBlock::Dense(optimized_factor) = optimized_cholesky else {
+            panic!("expected dense optimized factor");
+        };
+        let MatrixBlock::Dense(reference_factor) = reference_cholesky else {
+            panic!("expected dense reference factor");
+        };
+        for row in 0..4 {
+            for col in 0..=row {
+                assert_relative_eq!(
+                    optimized_factor[(row, col)],
+                    reference_factor[(row, col)],
+                    epsilon = 1e-12,
+                    max_relative = 1e-12
+                );
             }
         }
     }
@@ -12971,6 +15498,144 @@ mod tests {
                 assert_relative_eq!(
                     result[(row, col)],
                     expected[(row, col)],
+                    epsilon = 1e-12,
+                    max_relative = 1e-12
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_diagonal_lambda_vsize3_kernels_match_reference() {
+        let mut re_i = ReMat::new(
+            "g".to_string(),
+            vec![0, 1],
+            vec!["g1".to_string(), "g2".to_string()],
+            vec![
+                "(Intercept)".to_string(),
+                "x1".to_string(),
+                "x2".to_string(),
+            ],
+            DMatrix::from_fn(3, 2, |row, col| 1.0 + row as f64 * 0.25 + col as f64 * 0.1),
+        );
+        let mut re_j = ReMat::new(
+            "h".to_string(),
+            vec![0, 1, 2],
+            vec!["h1".to_string(), "h2".to_string(), "h3".to_string()],
+            vec![
+                "(Intercept)".to_string(),
+                "x1".to_string(),
+                "x2".to_string(),
+            ],
+            DMatrix::from_fn(3, 3, |row, col| 0.5 + row as f64 * 0.2 + col as f64 * 0.15),
+        );
+        re_i.set_theta(&[1.1, 0.0, 0.0, 0.7, 0.0, 0.4]).unwrap();
+        re_j.set_theta(&[0.8, 0.0, 0.0, 1.3, 0.0, 0.5]).unwrap();
+
+        let diag_i = [1.1, 0.7, 0.4];
+        let diag_j = [0.8, 1.3, 0.5];
+        assert!(lambda_is_diagonal(&re_i.lambda));
+        assert!(lambda_is_diagonal(&re_j.lambda));
+
+        let src_blocks = vec![
+            DMatrix::from_row_slice(3, 3, &[2.0, 0.2, -0.1, 0.2, 1.5, 0.4, -0.1, 0.4, 1.2]),
+            DMatrix::from_row_slice(3, 3, &[1.7, -0.3, 0.5, -0.3, 2.1, 0.6, 0.5, 0.6, 1.4]),
+        ];
+        let a_blockdiag = MatrixBlock::BlockDiagonal(src_blocks.clone());
+        let mut l_blockdiag = MatrixBlock::BlockDiagonal(vec![DMatrix::zeros(3, 3); 2]);
+        copy_scale_inflate(&mut l_blockdiag, &a_blockdiag, &re_i);
+        let MatrixBlock::BlockDiagonal(result_blocks) = l_blockdiag else {
+            panic!("expected block-diagonal result");
+        };
+        for (result, src) in result_blocks.iter().zip(src_blocks.iter()) {
+            for row in 0..3 {
+                for col in 0..3 {
+                    let mut expected = diag_i[row] * src[(row, col)] * diag_i[col];
+                    if row == col {
+                        expected += 1.0;
+                    }
+                    assert_relative_eq!(
+                        result[(row, col)],
+                        expected,
+                        epsilon = 1e-12,
+                        max_relative = 1e-12
+                    );
+                }
+            }
+        }
+
+        let a_dense = DMatrix::from_fn(6, 9, |row, col| {
+            ((row + 2 * col) as f64).sin() * 0.4 + ((2 * row + col) as f64).cos() * 0.2
+        });
+        let mut dense_scaled = MatrixBlock::Dense(DMatrix::zeros(6, 9));
+        copy_and_scale_offdiag(
+            &mut dense_scaled,
+            &MatrixBlock::Dense(a_dense.clone()),
+            &re_i,
+            &re_j,
+        );
+        let MatrixBlock::Dense(dense_result) = dense_scaled else {
+            panic!("expected dense result");
+        };
+        for bi in 0..2 {
+            for bj in 0..3 {
+                for row in 0..3 {
+                    for col in 0..3 {
+                        let global_row = bi * 3 + row;
+                        let global_col = bj * 3 + col;
+                        assert_relative_eq!(
+                            dense_result[(global_row, global_col)],
+                            diag_i[row] * a_dense[(global_row, global_col)] * diag_j[col],
+                            epsilon = 1e-12,
+                            max_relative = 1e-12
+                        );
+                    }
+                }
+            }
+        }
+
+        let mut coo = CooMatrix::new(6, 9);
+        for bi in 0..2 {
+            for bj in 0..3 {
+                if (bi + bj) % 2 == 0 {
+                    for row in 0..3 {
+                        for col in 0..3 {
+                            let global_row = bi * 3 + row;
+                            let global_col = bj * 3 + col;
+                            coo.push(global_row, global_col, a_dense[(global_row, global_col)]);
+                        }
+                    }
+                }
+            }
+        }
+        let sparse_a = MatrixBlock::Sparse(CscMatrix::from(&coo));
+        let mut sparse_scaled = sparse_a.clone();
+        copy_and_scale_offdiag(&mut sparse_scaled, &sparse_a, &re_i, &re_j);
+        let sparse_result = sparse_scaled.as_dense();
+        let sparse_source = sparse_a.as_dense();
+        for row in 0..6 {
+            for col in 0..9 {
+                let expected = diag_i[row % 3] * sparse_source[(row, col)] * diag_j[col % 3];
+                assert_relative_eq!(
+                    sparse_result[(row, col)],
+                    expected,
+                    epsilon = 1e-12,
+                    max_relative = 1e-12
+                );
+            }
+        }
+
+        let rhs = DMatrix::from_fn(4, 9, |row, col| row as f64 - col as f64 * 0.3 + 0.25);
+        let mut scaled_rhs = MatrixBlock::Dense(DMatrix::zeros(4, 9));
+        copy_and_rmul_lambda(&mut scaled_rhs, &MatrixBlock::Dense(rhs.clone()), &re_j);
+        let MatrixBlock::Dense(rhs_result) = scaled_rhs else {
+            panic!("expected dense RHS result");
+        };
+        for row in 0..4 {
+            for col in 0..9 {
+                assert_relative_eq!(
+                    rhs_result[(row, col)],
+                    rhs[(row, col)] * diag_j[col % 3],
                     epsilon = 1e-12,
                     max_relative = 1e-12
                 );
@@ -13151,8 +15816,71 @@ mod tests {
 
         assert_eq!(model.n_theta(), 9);
         assert_eq!(model.optsum.optimizer, Optimizer::NloptNewuoa);
+        assert!(
+            matches!(
+                model.optsum.return_value.as_str(),
+                "FTOL_REACHED" | "XTOL_REACHED"
+            ),
+            "large-theta NEWUOA should stop by tolerance, got {}",
+            model.optsum.return_value
+        );
+        assert!(
+            model.optsum.feval <= 700,
+            "large-theta NEWUOA used too many evaluations: {}",
+            model.optsum.feval
+        );
         assert!(model.objective_value().is_finite());
         assert!(model.sigma().is_finite());
+    }
+
+    #[cfg(feature = "nlopt")]
+    #[test]
+    fn test_large_theta_newuoa_default_matches_strict_tolerance_fit() {
+        let data = simulate_large_theta_crossed(123);
+        let formula = parse_formula(
+            "reaction ~ 1 + days + (1 + days | subj) + (1 + days | item) + (1 + days | site)",
+        )
+        .unwrap();
+
+        let mut default_model = LinearMixedModel::new(formula.clone(), &data, None).unwrap();
+        default_model.optsum.max_feval = 3000;
+        default_model.fit(true).unwrap();
+
+        let mut strict_model = LinearMixedModel::new(formula, &data, None).unwrap();
+        strict_model.optsum.max_feval = 3000;
+        strict_model.optsum.ftol_rel = 1e-12;
+        strict_model.fit(true).unwrap();
+
+        assert_eq!(default_model.optsum.optimizer, Optimizer::NloptNewuoa);
+        assert_eq!(strict_model.optsum.optimizer, Optimizer::NloptNewuoa);
+        assert!(
+            default_model.optsum.feval <= strict_model.optsum.feval,
+            "default large-theta tolerance should not use more evaluations than strict tolerance"
+        );
+        assert_relative_eq!(
+            default_model.objective_value(),
+            strict_model.objective_value(),
+            epsilon = 6e-3,
+            max_relative = 1e-6
+        );
+        assert_relative_eq!(
+            default_model.sigma(),
+            strict_model.sigma(),
+            epsilon = 6e-3,
+            max_relative = 4e-4
+        );
+
+        let default_beta = default_model.beta();
+        let strict_beta = strict_model.beta();
+        assert_eq!(default_beta.len(), strict_beta.len());
+        for idx in 0..default_beta.len() {
+            assert_relative_eq!(
+                default_beta[idx],
+                strict_beta[idx],
+                epsilon = 6e-3,
+                max_relative = 4e-4
+            );
+        }
     }
 
     #[cfg(feature = "nlopt")]
@@ -15613,6 +18341,186 @@ mod tests {
     }
 
     #[test]
+    fn test_fixed_effect_covariance_matrix_payload_available() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let payload = model.fixed_effect_covariance_matrix_payload();
+
+        assert_eq!(
+            payload.schema_name,
+            "mixedmodels.fixed_effect_covariance_matrix"
+        );
+        assert_eq!(payload.schema_version, "1.0.0");
+        assert_eq!(payload.status, FixedEffectCovarianceStatus::Available);
+        assert_eq!(payload.reliability, ReliabilityGrade::High);
+        assert_eq!(payload.reason, None);
+        assert_eq!(payload.coef_names, model.coef_names());
+        assert_eq!(payload.details.basis, "user_order");
+        assert_eq!(payload.details.rank, model.feterm.rank);
+        assert!(payload.details.aliased.is_empty());
+        assert_eq!(payload.details.symmetric, Some(true));
+        assert_eq!(payload.details.positive_semidefinite, Some(true));
+        assert!(payload
+            .details
+            .condition_number
+            .is_some_and(|value| value >= 1.0));
+
+        let matrix = payload.matrix.as_ref().expect("matrix should be available");
+        let p = model.coef_names().len();
+        let vcov = model.vcov();
+        assert_eq!(matrix.len(), p);
+        assert!(matrix.iter().all(|row| row.len() == p));
+        for row in 0..p {
+            for col in 0..p {
+                assert!(matrix[row][col].is_finite());
+                assert_relative_eq!(matrix[row][col], matrix[col][row], epsilon = 1e-12);
+                assert_relative_eq!(matrix[row][col], vcov[(row, col)], epsilon = 1e-12);
+            }
+        }
+
+        let se = model.stderror();
+        for index in 0..p {
+            assert_relative_eq!(matrix[index][index], se[index] * se[index], epsilon = 1e-10);
+        }
+        assert_relative_eq!(matrix[0][0], 43.98734111515782, epsilon = 0.1);
+        assert_relative_eq!(matrix[0][1], -1.3705104024204062, epsilon = 0.05);
+        assert_relative_eq!(matrix[1][0], -1.3705104024204062, epsilon = 0.05);
+        assert_relative_eq!(matrix[1][1], 2.2567213856181176, epsilon = 0.05);
+
+        let artifact_payload = model
+            .compiler_artifact()
+            .fixed_effect_covariance_matrix
+            .as_ref()
+            .expect("fitted artifact should carry covariance payload");
+        assert_eq!(artifact_payload, &payload);
+        let bridge_value = model
+            .compiler_artifact()
+            .table_by_name("fixed_effect_covariance_matrix")
+            .unwrap()
+            .expect("covariance matrix bridge table should be available");
+        assert_eq!(
+            bridge_value["schema_name"],
+            "mixedmodels.fixed_effect_covariance_matrix"
+        );
+
+        let value = serde_json::to_value(&payload).unwrap();
+        assert!(value["matrix"].is_array());
+        for row in value["matrix"].as_array().unwrap() {
+            for cell in row.as_array().unwrap() {
+                assert!(cell.is_number(), "matrix cells must all be JSON numbers");
+            }
+        }
+    }
+
+    #[test]
+    fn test_fixed_effect_covariance_matrix_payload_weighted_model() {
+        let (df, w1) = weighted_lmm_fixture();
+        let formula = parse_formula("a ~ 1 + b + (1 | c)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &df, Some(&w1)).unwrap();
+        model.fit(false).unwrap();
+
+        let payload = model.fixed_effect_covariance_matrix_payload();
+
+        assert_eq!(payload.status, FixedEffectCovarianceStatus::Available);
+        assert_eq!(payload.coef_names, model.coef_names());
+        let matrix = payload
+            .matrix
+            .as_ref()
+            .expect("weighted model covariance should be available");
+        let vcov = model.vcov();
+        assert_eq!(matrix.len(), 2);
+        assert_relative_eq!(matrix[0][0], vcov[(0, 0)], epsilon = 1e-12);
+        assert_relative_eq!(matrix[0][1], vcov[(0, 1)], epsilon = 1e-12);
+        assert_relative_eq!(matrix[1][0], vcov[(1, 0)], epsilon = 1e-12);
+        assert_relative_eq!(matrix[1][1], vcov[(1, 1)], epsilon = 1e-12);
+        assert_relative_eq!(matrix[0][0], 0.9293281284592235, epsilon = 0.01);
+        assert_relative_eq!(matrix[0][1], -2.5575260810649962, epsilon = 0.05);
+        assert_relative_eq!(matrix[1][1], 13.18393695723575, epsilon = 0.1);
+    }
+
+    #[test]
+    fn test_fixed_effect_covariance_matrix_payload_rank_deficient_unavailable() {
+        let n = 100usize;
+        let x: Vec<f64> = (0..n).map(|i| (i as f64 % 10.0) / 9.0).collect();
+        let x2: Vec<f64> = x.iter().map(|&v| 1.5 * v).collect();
+        let y: Vec<f64> = (0..n).map(|i| ((i * 7 + 3) % 17) as f64 * 0.1).collect();
+        let z: Vec<String> = (0..n)
+            .map(|i| format!("{}", (b'A' + (i % 20) as u8) as char))
+            .collect();
+
+        let mut df = DataFrame::new();
+        df.add_numeric("y", y).unwrap();
+        df.add_numeric("x", x).unwrap();
+        df.add_numeric("x2", x2).unwrap();
+        df.add_categorical("z", z).unwrap();
+
+        let formula = parse_formula("y ~ x + x2 + (1 | z)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &df, None).unwrap();
+        model.fit(false).unwrap();
+
+        let payload = model.fixed_effect_covariance_matrix_payload();
+
+        assert_eq!(payload.status, FixedEffectCovarianceStatus::Unavailable);
+        assert_eq!(payload.reliability, ReliabilityGrade::NotAvailable);
+        assert!(payload.matrix.is_none());
+        assert_eq!(payload.coef_names, model.coef_names());
+        assert_eq!(payload.details.rank, 2);
+        assert_eq!(payload.details.aliased.len(), 1);
+        assert!(payload
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("rank-deficient"));
+        assert!(payload
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("aliased coefficients"));
+        assert_eq!(payload.details.symmetric, None);
+        assert_eq!(payload.details.positive_semidefinite, None);
+        assert_eq!(payload.details.condition_number, None);
+        assert!(payload
+            .notes
+            .iter()
+            .any(|note| note.contains("does not encode missing or aliased covariance cells")));
+
+        let value = serde_json::to_value(&payload).unwrap();
+        assert!(value["matrix"].is_null());
+        assert_eq!(
+            model
+                .compiler_artifact()
+                .fixed_effect_covariance_matrix
+                .as_ref(),
+            Some(&payload)
+        );
+    }
+
+    #[test]
+    fn test_fixed_effect_covariance_matrix_payload_non_finite_unavailable() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+        model.optsum.sigma = Some(f64::NAN);
+
+        let payload = model.fixed_effect_covariance_matrix_payload();
+
+        assert_eq!(payload.status, FixedEffectCovarianceStatus::Unavailable);
+        assert_eq!(payload.reliability, ReliabilityGrade::NotAvailable);
+        assert!(payload.matrix.is_none());
+        assert!(payload
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("non-finite entries"));
+        let value = serde_json::to_value(&payload).unwrap();
+        assert!(value["matrix"].is_null());
+    }
+
+    #[test]
     fn test_sleepstudy_re_std_devs_match_julia() {
         // Mirrors pls.jl "sleep":
         //   first(std(fm)) ≈ [23.78066438213187, 5.7168446983832775]
@@ -17017,11 +19925,24 @@ mod tests {
         assert!(matches!(test.status, InferenceStatus::Available));
         assert_eq!(test.p_values.len(), 1);
         assert!(test.p_values[0].unwrap() < 0.01);
+        assert_eq!(
+            test.reliability_reason,
+            FixedEffectReliabilityReasonCode::InteriorConvergedWellSpecified
+        );
         assert_eq!(test.estimability.status, EstimabilityStatus::Estimable);
         assert!(test
             .notes
             .iter()
             .any(|note| note.contains("asymptotic Wald z")));
+    }
+
+    fn assert_no_engine_vocabulary(reason: &str) {
+        for token in ["central finite-difference", "varpar[", "theta["] {
+            assert!(
+                !reason.contains(token),
+                "public inference reason should not expose engine token {token:?}: {reason}"
+            );
+        }
     }
 
     #[test]
@@ -17049,6 +19970,10 @@ mod tests {
         assert_eq!(test.method, InferenceMethod::Satterthwaite);
         assert_eq!(test.status, InferenceStatus::Available);
         assert_eq!(test.reliability, ReliabilityGrade::Low);
+        assert_eq!(
+            test.reliability_reason,
+            FixedEffectReliabilityReasonCode::SatterthwaiteFiniteDifferenceApproximation
+        );
         assert!(test.denominator_df.unwrap().is_finite());
         assert!(test.denominator_df.unwrap() > 0.0);
         assert!(test.p_values[0].unwrap().is_finite());
@@ -17153,15 +20078,53 @@ mod tests {
             model.coef_names().len(),
         )
         .unwrap();
+        let wald = model
+            .test_contrast_with_method(hypothesis.clone(), FixedEffectTestMethod::AsymptoticWaldZ);
+        assert_eq!(
+            wald.reliability_reason,
+            FixedEffectReliabilityReasonCode::AsymptoticWaldZAtBoundary
+        );
+        assert_eq!(wald.status, InferenceStatus::Available);
+
+        let auto = model.test_contrast(hypothesis.clone());
+        assert_eq!(
+            auto.reliability_reason,
+            FixedEffectReliabilityReasonCode::DegreesOfFreedomUnavailableSoZSubstituted
+        );
+        assert_eq!(auto.status, InferenceStatus::Available);
+
         let test =
             model.test_contrast_with_method(hypothesis, FixedEffectTestMethod::Satterthwaite);
 
         assert_eq!(test.method, InferenceMethod::Satterthwaite);
-        assert!(
-            matches!(test.status, InferenceStatus::NotAssessed { ref reason }
-            if reason.contains("lower bound"))
+        assert!(matches!(test.status, InferenceStatus::NotAssessed { .. }));
+        assert_eq!(
+            test.reliability_reason,
+            FixedEffectReliabilityReasonCode::SatterthwaiteFiniteDifferenceApproximation
         );
+        assert_eq!(
+            test.reason_code,
+            Some(FixedEffectInferenceReasonCode::SatterthwaiteUnavailableAtBoundary)
+        );
+        let public_reason = test.p_value_unavailable_reason().unwrap();
+        assert_no_engine_vocabulary(public_reason);
+        assert!(test
+            .reason_detail
+            .as_deref()
+            .is_some_and(|detail| detail != public_reason));
         assert_eq!(test.p_values, vec![None]);
+        let row =
+            fixed_effect_test_to_inference_row(FixedEffectInferenceRowKind::Term, test.clone());
+        assert_eq!(
+            row.reason_code,
+            Some(FixedEffectInferenceReasonCode::SatterthwaiteUnavailableAtBoundary)
+        );
+        assert_eq!(
+            row.reliability_reason,
+            FixedEffectReliabilityReasonCode::SatterthwaiteFiniteDifferenceApproximation
+        );
+        assert_eq!(row.reason.as_deref(), Some(public_reason));
+        assert_eq!(row.reason_detail, test.reason_detail);
 
         let n = 30usize;
         let x: Vec<f64> = (0..n).map(|i| (i % 5) as f64).collect();
@@ -17230,6 +20193,10 @@ mod tests {
             assert_eq!(row.method, FixedEffectInferenceMethod::Satterthwaite);
             assert_eq!(row.status, FixedEffectInferenceStatus::Available);
             assert_eq!(row.reliability, ReliabilityGrade::Low);
+            assert_eq!(
+                row.reliability_reason,
+                FixedEffectReliabilityReasonCode::SatterthwaiteFiniteDifferenceApproximation
+            );
             assert_eq!(row.statistic_name, Some(FixedEffectStatisticName::T));
             assert!(row.estimate.is_some());
             assert!(row.std_error.is_some());
@@ -17247,13 +20214,72 @@ mod tests {
                 .iter()
                 .any(|note| note.contains("Satterthwaite denominator df")));
         }
+        let artifact_table = model
+            .compiler_artifact()
+            .fixed_effect_inference_table
+            .as_ref()
+            .expect("fit should attach a fixed-effect inference table");
         assert_eq!(
-            model
-                .compiler_artifact()
-                .fixed_effect_inference_table
-                .as_ref(),
-            Some(&table)
+            artifact_table
+                .rows
+                .iter()
+                .map(|row| row.method)
+                .collect::<Vec<_>>(),
+            vec![FixedEffectInferenceMethod::AsymptoticWaldZ; names.len()]
         );
+    }
+
+    #[test]
+    fn test_lmm_fixed_effect_inference_table_with_method_returns_kenward_roger_rows() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(true).unwrap();
+
+        let table =
+            model.fixed_effect_inference_table_with_method(FixedEffectTestMethod::KenwardRoger);
+        let names = model.coef_names();
+
+        assert_eq!(table.rows.len(), names.len());
+        assert_eq!(
+            table
+                .rows
+                .iter()
+                .map(|row| row.label.clone())
+                .collect::<Vec<_>>(),
+            names
+        );
+        assert!(table.rows.iter().all(|row| {
+            row.kind == FixedEffectInferenceRowKind::Coefficient
+                && row.method == FixedEffectInferenceMethod::KenwardRoger
+                && row.status == FixedEffectInferenceStatus::Available
+                && row.statistic_name == Some(FixedEffectStatisticName::T)
+                && row.denominator_df.is_some()
+                && row
+                    .details
+                    .as_ref()
+                    .and_then(|details| details.kenward_roger.as_ref())
+                    .is_some()
+        }));
+
+        let reference = model.fixed_effect_contrast_inference_table(
+            model.coefficient_hypotheses(),
+            FixedEffectTestMethod::KenwardRoger,
+        );
+        for (row, reference_row) in table.rows.iter().zip(reference.rows.iter()) {
+            assert_eq!(row.label, reference_row.label);
+            assert_eq!(row.method, reference_row.method);
+            assert_relative_eq!(
+                row.denominator_df.unwrap(),
+                reference_row.denominator_df.unwrap(),
+                epsilon = 1e-10
+            );
+            assert_relative_eq!(
+                row.p_value.unwrap(),
+                reference_row.p_value.unwrap(),
+                epsilon = 1e-12
+            );
+        }
     }
 
     #[test]
@@ -17283,6 +20309,10 @@ mod tests {
 
         assert_eq!(dropped.method, FixedEffectInferenceMethod::NotComputed);
         assert_eq!(dropped.reliability, ReliabilityGrade::NotAvailable);
+        assert_eq!(
+            dropped.reliability_reason,
+            FixedEffectReliabilityReasonCode::ContrastNotEstimable
+        );
         assert!(dropped.p_value.is_none());
         assert!(dropped.reason.as_deref().unwrap().contains("aliased"));
     }
@@ -17302,6 +20332,8 @@ mod tests {
         assert!(table.rows.iter().all(|row| {
             row.status == FixedEffectInferenceStatus::PValueUnavailable
                 && row.method == FixedEffectInferenceMethod::NotComputed
+                && row.reliability_reason
+                    == FixedEffectReliabilityReasonCode::InferenceUnavailableByPolicy
                 && row.p_value.is_none()
                 && row
                     .reason
@@ -17337,6 +20369,8 @@ mod tests {
         assert!(table.rows.iter().all(|row| {
             row.status == FixedEffectInferenceStatus::PValueUnavailable
                 && row.method == FixedEffectInferenceMethod::NotComputed
+                && row.reliability_reason
+                    == FixedEffectReliabilityReasonCode::InferenceUnavailableByPolicy
                 && row.p_value.is_none()
                 && row
                     .reason
@@ -17373,6 +20407,8 @@ mod tests {
         assert!(table.rows.iter().all(|row| {
             row.status == FixedEffectInferenceStatus::PValueUnavailable
                 && row.method == FixedEffectInferenceMethod::NotComputed
+                && row.reliability_reason
+                    == FixedEffectReliabilityReasonCode::InferenceUnavailableByPolicy
                 && row.p_value.is_none()
                 && row
                     .reason
@@ -17977,7 +21013,9 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let bsamp = MixedModelBootstrap { fits };
-        let replicate_statistics = vec![0.5; bsamp.len()];
+        let mut replicate_statistics = vec![0.5; bsamp.len()];
+        replicate_statistics[39] = f64::NAN;
+        let expected_p_value = 1.0 / 40.0;
         let metadata = bsamp.run_metadata_for_model(
             &model,
             BootstrapTarget::fixed_effect_null(
@@ -17990,7 +21028,7 @@ mod tests {
             BootstrapRefitOptions::from_model(&model),
             Some("abs_t".to_string()),
             Some(&replicate_statistics),
-            Some(1.0 / 41.0),
+            Some(expected_p_value),
         );
         let payload = bsamp.into_run_payload_with_statistics(metadata, replicate_statistics);
 
@@ -18003,9 +21041,43 @@ mod tests {
         assert_eq!(row.method, FixedEffectInferenceMethod::Bootstrap);
         assert_eq!(row.status, FixedEffectInferenceStatus::Available);
         assert_eq!(row.statistic_name, Some(FixedEffectStatisticName::T));
-        assert_relative_eq!(row.p_value.unwrap(), 1.0 / 41.0, epsilon = 1e-12);
+        assert_relative_eq!(row.p_value.unwrap(), expected_p_value, epsilon = 1e-12);
         let details = row.details.expect("contrast row should carry details");
-        assert!(details.bootstrap.is_some());
+        let bootstrap = details
+            .bootstrap
+            .as_ref()
+            .expect("contrast row should carry bootstrap details");
+        let serialized_statistics = bootstrap
+            .replicate_statistics
+            .as_ref()
+            .expect("bootstrap row should expose replicate statistics");
+        assert_eq!(serialized_statistics.len(), 40);
+        assert_eq!(
+            serialized_statistics
+                .iter()
+                .filter(|value| value.is_some())
+                .count(),
+            39
+        );
+        assert!(serialized_statistics[39].is_none());
+        let finite_statistics = serialized_statistics
+            .iter()
+            .filter_map(|value| *value)
+            .collect::<Vec<_>>();
+        let reconstructed_extreme = finite_statistics
+            .iter()
+            .filter(|&&value| value >= row.statistic.unwrap())
+            .count();
+        let reconstructed_p =
+            (reconstructed_extreme as f64 + 1.0) / (finite_statistics.len() as f64 + 1.0);
+        let reconstructed_mcse =
+            (reconstructed_p * (1.0 - reconstructed_p) / finite_statistics.len() as f64).sqrt();
+        assert_relative_eq!(reconstructed_p, row.p_value.unwrap(), epsilon = 1e-12);
+        assert_relative_eq!(bootstrap.mcse.unwrap(), reconstructed_mcse, epsilon = 1e-12);
+        let json = serde_json::to_string(bootstrap).unwrap();
+        let decoded: crate::compiler::BootstrapInferenceDetails =
+            serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.replicate_statistics, bootstrap.replicate_statistics);
         let family = details
             .contrast_family
             .expect("contrast row should carry contrast-family details");
@@ -18013,6 +21085,87 @@ mod tests {
         assert_eq!(
             family.numerator_df_semantics,
             "scalar_contrast_no_numerator_df"
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_fixed_effect_multi_df_row_uses_joint_payload_statistics() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let l = DMatrix::identity(2, model.coef_names().len());
+        let hypothesis =
+            FixedEffectHypothesis::zero_rhs("intercept_and_days = 0", ContrastMatrix { values: l });
+        let observed = fixed_effect_bootstrap_statistic(&model, &hypothesis)
+            .expect("joint bootstrap statistic should be available for full-rank L");
+        assert_eq!(observed.restriction_rank, 2);
+        assert!(observed.statistic.is_finite());
+
+        let fits = (0..40)
+            .map(|i| BootstrapReplicate {
+                objective: i as f64 + 1.0,
+                sigma: model.sigma(),
+                beta: model.beta(),
+                se: DVector::from_element(model.feterm.rank, 1.0),
+                theta: model.theta(),
+            })
+            .collect::<Vec<_>>();
+        let bsamp = MixedModelBootstrap { fits };
+        let mut replicate_statistics = vec![observed.statistic / 2.0; bsamp.len()];
+        replicate_statistics[39] = f64::NAN;
+        let expected_p_value = 1.0 / 40.0;
+        let metadata = bsamp.run_metadata_for_model(
+            &model,
+            BootstrapTarget::fixed_effect_null(
+                "intercept_and_days fixed-effect null",
+                "intercept_and_days = 0",
+            ),
+            40,
+            BootstrapFailedRefitPolicy::Exclude,
+            BootstrapSeedRecord::std_rng(20260504),
+            BootstrapRefitOptions::from_model(&model),
+            Some("wald_f".to_string()),
+            Some(&replicate_statistics),
+            Some(expected_p_value),
+        );
+        let payload = bsamp.into_run_payload_with_statistics(metadata, replicate_statistics);
+
+        let row = model.fixed_effect_bootstrap_inference_row(
+            FixedEffectInferenceRowKind::Term,
+            hypothesis,
+            &payload,
+        );
+
+        assert_eq!(row.kind, FixedEffectInferenceRowKind::Term);
+        assert_eq!(row.method, FixedEffectInferenceMethod::Bootstrap);
+        assert_eq!(row.status, FixedEffectInferenceStatus::Available);
+        assert_eq!(row.statistic_name, Some(FixedEffectStatisticName::F));
+        assert_eq!(row.numerator_df, Some(2.0));
+        assert_relative_eq!(row.statistic.unwrap(), observed.statistic, epsilon = 1e-12);
+        assert_relative_eq!(row.p_value.unwrap(), expected_p_value, epsilon = 1e-12);
+        let details = row.details.expect("multi-df row should carry details");
+        let family = details
+            .contrast_family
+            .expect("multi-df row should carry contrast-family details");
+        assert_eq!(family.restriction_rows, 2);
+        assert_eq!(family.effective_rank, Some(2));
+        assert_eq!(family.numerator_df, Some(2.0));
+        assert_eq!(family.numerator_df_semantics, "effective_restriction_rank");
+        let bootstrap = details
+            .bootstrap
+            .expect("multi-df row should carry bootstrap details");
+        assert_eq!(bootstrap.finite_statistic_count, Some(39));
+        assert_eq!(
+            bootstrap
+                .replicate_statistics
+                .as_ref()
+                .expect("multi-df row should expose replicate statistics")
+                .iter()
+                .filter(|value| value.is_some())
+                .count(),
+            39
         );
     }
 
@@ -18190,6 +21343,243 @@ mod tests {
         assert_eq!(bootstrap.requested_replicates, 2);
         assert_eq!(bootstrap.seed, Some(20260503));
         assert!(bootstrap.null_target.is_some());
+        let replicate_statistics = bootstrap
+            .replicate_statistics
+            .as_ref()
+            .expect("bridge row should expose generated replicate statistics");
+        assert_eq!(replicate_statistics.len(), bootstrap.completed_replicates);
+    }
+
+    #[test]
+    fn test_full_model_bootstrap_contrast_payload_returns_intervals() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let days_index = model
+            .coef_names()
+            .iter()
+            .position(|name| name == "days")
+            .unwrap();
+        let coefficient =
+            FixedEffectHypothesis::single_coefficient("days", days_index, model.coef_names().len())
+                .unwrap();
+        let coefficient_payload = model
+            .full_model_bootstrap_contrast_payload(
+                &coefficient,
+                &FixedEffectBootstrapOptions {
+                    requested_replicates: 8,
+                    failed_refit_policy: BootstrapFailedRefitPolicy::Exclude,
+                    seed: Some(20260504),
+                },
+                &[0.80],
+            )
+            .unwrap();
+
+        assert_eq!(
+            coefficient_payload.metadata.target.kind,
+            BootstrapTargetKind::FullModelDistribution
+        );
+        assert_eq!(
+            coefficient_payload
+                .metadata
+                .target
+                .contrast_label
+                .as_deref(),
+            Some("days")
+        );
+        assert!(coefficient_payload.metadata.mcse.is_none());
+        assert!(coefficient_payload
+            .metadata
+            .notes
+            .iter()
+            .any(|note| note.contains("do not certify fixed-effect hypothesis-test")));
+        assert_eq!(
+            coefficient_payload
+                .replicate_statistics
+                .as_ref()
+                .unwrap()
+                .len(),
+            coefficient_payload.metadata.completed_replicates
+        );
+        let intervals = coefficient_payload
+            .intervals
+            .as_ref()
+            .expect("full-model payload should expose intervals");
+        assert_eq!(intervals.len(), 2);
+        assert!(intervals.iter().all(|interval| {
+            interval.parameter == "days"
+                && interval.level == 0.80
+                && interval.lower.is_finite()
+                && interval.upper.is_finite()
+                && interval.lower <= interval.upper
+        }));
+        assert!(intervals
+            .iter()
+            .any(|interval| interval.method == BootstrapIntervalMethod::Percentile));
+        assert!(intervals
+            .iter()
+            .any(|interval| interval.method == BootstrapIntervalMethod::Basic));
+
+        let l = DMatrix::from_row_slice(1, model.coef_names().len(), &[1.0, 1.0]);
+        let contrast =
+            FixedEffectHypothesis::zero_rhs("intercept_plus_days", ContrastMatrix { values: l });
+        let contrast_payload = model
+            .full_model_bootstrap_contrast_payload(
+                &contrast,
+                &FixedEffectBootstrapOptions {
+                    requested_replicates: 8,
+                    failed_refit_policy: BootstrapFailedRefitPolicy::Exclude,
+                    seed: Some(20260505),
+                },
+                &[0.80],
+            )
+            .unwrap();
+        assert_eq!(
+            contrast_payload.metadata.target.contrast_label.as_deref(),
+            Some("intercept_plus_days")
+        );
+        assert_eq!(contrast_payload.intervals.as_ref().unwrap().len(), 2);
+        let json = serde_json::to_string(&contrast_payload).unwrap();
+        let decoded: BootstrapRunPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            decoded.intervals.as_ref().unwrap(),
+            contrast_payload.intervals.as_ref().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_likelihood_ratio_test_returns_audited_payload() {
+        let data = sleepstudy_fixture();
+        let formula0 = parse_formula("reaction ~ 1 + (1 | subj)").unwrap();
+        let formula1 = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut reduced = LinearMixedModel::new(formula0, &data, None).unwrap();
+        let mut alternative = LinearMixedModel::new(formula1, &data, None).unwrap();
+        reduced.fit(false).unwrap();
+        alternative.fit(false).unwrap();
+
+        let result = reduced
+            .bootstrap_likelihood_ratio_test(
+                &alternative,
+                &FixedEffectBootstrapOptions {
+                    requested_replicates: 5,
+                    failed_refit_policy: BootstrapFailedRefitPolicy::Exclude,
+                    seed: Some(20260505),
+                },
+            )
+            .unwrap();
+
+        assert!(result.observed_statistic.is_finite());
+        assert!(result.observed_statistic >= 0.0);
+        assert!(result
+            .p_value
+            .is_some_and(|p_value| (0.0..=1.0).contains(&p_value)));
+        assert_eq!(
+            result.payload.metadata.target.kind,
+            BootstrapTargetKind::LikelihoodRatio
+        );
+        assert_eq!(result.payload.metadata.requested_replicates, 5);
+        assert_eq!(result.payload.metadata.completed_replicates, 5);
+        let statistics = result
+            .payload
+            .replicate_statistics
+            .as_ref()
+            .expect("bootstrap LRT should expose replicate statistics");
+        assert_eq!(statistics.len(), 5);
+        let finite = statistics
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            result.payload.metadata.finite_statistic_count,
+            Some(finite.len())
+        );
+        let extreme = finite
+            .iter()
+            .filter(|&&value| value >= result.observed_statistic)
+            .count();
+        let reconstructed_p = (extreme as f64 + 1.0) / (finite.len() as f64 + 1.0);
+        assert_relative_eq!(result.p_value.unwrap(), reconstructed_p, epsilon = 1e-12);
+        let json = serde_json::to_string(&result).unwrap();
+        let decoded: BootstrapLikelihoodRatioTest = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            decoded.payload.metadata.target.kind,
+            BootstrapTargetKind::LikelihoodRatio
+        );
+    }
+
+    #[test]
+    fn test_bootstrap_likelihood_ratio_test_refuses_reml_comparisons() {
+        let data = sleepstudy_fixture();
+        let formula0 = parse_formula("reaction ~ 1 + (1 | subj)").unwrap();
+        let formula1 = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+        let mut reduced = LinearMixedModel::new(formula0, &data, None).unwrap();
+        let mut alternative = LinearMixedModel::new(formula1, &data, None).unwrap();
+        reduced.fit(true).unwrap();
+        alternative.fit(true).unwrap();
+
+        let error = reduced
+            .bootstrap_likelihood_ratio_test(&alternative, &FixedEffectBootstrapOptions::default())
+            .unwrap_err();
+        match error {
+            MixedModelError::InvalidArgument(message) => {
+                assert!(message.contains("requires ML-fitted models"));
+            }
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_cluster_resample_full_model_contrast_payload_returns_intervals() {
+        let data = dyestuff_fixture();
+        let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let hypothesis =
+            FixedEffectHypothesis::single_coefficient("intercept", 0, model.coef_names().len())
+                .unwrap();
+        let payload = model
+            .cluster_resample_full_model_contrast_payload(
+                &data,
+                "batch",
+                &hypothesis,
+                &FixedEffectBootstrapOptions {
+                    requested_replicates: 3,
+                    failed_refit_policy: BootstrapFailedRefitPolicy::Exclude,
+                    seed: Some(20260506),
+                },
+                &[0.80],
+            )
+            .unwrap();
+
+        assert_eq!(
+            payload.metadata.target.kind,
+            BootstrapTargetKind::ClusterResample
+        );
+        assert_eq!(payload.metadata.requested_replicates, 3);
+        assert_eq!(payload.metadata.completed_replicates, 3);
+        assert!(payload.metadata.mcse.is_none());
+        assert!(payload
+            .metadata
+            .notes
+            .iter()
+            .any(|note| note.contains("cluster_resample group=batch")));
+        let statistics = payload
+            .replicate_statistics
+            .as_ref()
+            .expect("cluster payload should expose replicate statistics");
+        assert_eq!(statistics.len(), 3);
+        let intervals = payload
+            .intervals
+            .as_ref()
+            .expect("cluster payload should expose intervals");
+        assert_eq!(intervals.len(), 2);
+        assert!(intervals
+            .iter()
+            .all(|interval| interval.parameter == "intercept" && interval.lower.is_finite()));
     }
 
     #[test]

@@ -91,7 +91,7 @@ impl ModelPrint {
     /// Build a [`ModelPrint`] from a compiled artifact.
     pub fn from_artifact(artifact: &CompiledModelArtifact) -> Self {
         let fit_status = artifact.optimizer_certificate.as_ref().map(|c| c.status);
-        let mut diagnostics: Vec<Diagnostic> = artifact.diagnostics.clone();
+        let mut diagnostics = display_diagnostics(artifact);
         diagnostics.sort_by_key(|d| diagnostic_priority(d.severity));
         let diagnostic_total = diagnostics.len();
         let top_diagnostics = diagnostics
@@ -115,6 +115,22 @@ impl ModelPrint {
             verdict: ConvergenceVerdict::for_artifact(artifact),
         }
     }
+}
+
+fn display_diagnostics(artifact: &CompiledModelArtifact) -> Vec<Diagnostic> {
+    let mut diagnostics = artifact.diagnostics.clone();
+    if let Some(certificate) = &artifact.optimizer_certificate {
+        for diagnostic in &certificate.diagnostics {
+            if !diagnostics.iter().any(|existing| {
+                existing.code == diagnostic.code
+                    && existing.message == diagnostic.message
+                    && existing.affected_terms == diagnostic.affected_terms
+            }) {
+                diagnostics.push(diagnostic.clone());
+            }
+        }
+    }
+    diagnostics
 }
 
 impl fmt::Display for ModelPrint {

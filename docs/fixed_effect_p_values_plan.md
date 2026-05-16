@@ -53,6 +53,11 @@ Implemented Rust pieces:
 - `LinearMixedModel::fixed_effect_contrast_inference_table(hypotheses, method)`
   builds non-bootstrap contrast rows from the Rust contrast-testing path,
   including row `details`, method labels, status, reliability, and reasons.
+- `LinearMixedModel::fixed_effect_inference_table_with_method(method)` builds a
+  full coefficient table for an explicit method without requiring downstream
+  callers to issue one contrast request per coefficient; Satterthwaite
+  variance-parameter derivative context and Kenward-Roger adjusted covariance
+  are computed once per table.
 - `LinearMixedModel::fixed_effect_term_hypotheses()` and
   `fixed_effect_term_inference_table(method)` expose Rust-owned term tests for
   R `test_effect()` / single-model `anova()` callers.
@@ -455,6 +460,9 @@ notes = ["asymptotic Wald z is a labeled fallback, not a finite-sample correctio
     `fixed_effect_contrast_inference_table(hypotheses, method)` helper so
     bridge callers do not reconstruct `FixedEffectInferenceRow` from
     `FixedEffectTest`.
+16. [x] Add `fixed_effect_inference_table_with_method(method)` for full
+    coefficient tables with explicit methods. This avoids downstream N-call
+    coefficient loops and reuses per-table Satterthwaite/Kenward-Roger setup.
 
 ## Mote Work Breakdown
 

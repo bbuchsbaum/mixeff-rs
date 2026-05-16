@@ -45,6 +45,13 @@ family = "Binomial"
 link = "Logit"
 estimator = "AGQ"
 
+[[fits]]
+# Bernoulli-family harness coverage for the same per-row 0/1 response.
+formula = "predation ~ ttt + (1 | block)"
+family = "Bernoulli"
+link = "Logit"
+estimator = "Laplace"
+
 [tags]
 structure = ["random_intercept", "scalar_re", "glmm", "block_design", "binomial_glmm"]
 family = "binomial"

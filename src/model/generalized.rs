@@ -16,7 +16,9 @@ use std::rc::Rc;
 
 use crate::compiler::{
     CompiledModelArtifact, CompilerPolicy, Diagnostic, DiagnosticCode, DiagnosticSeverity,
-    DiagnosticStage, ModelAuditReport, ModelBoundary, ObjectiveApproximation, OptimizerCertificate,
+    DiagnosticStage, FixedEffectCovarianceMatrixDetails, FixedEffectCovarianceMatrixPayload,
+    FixedEffectCovarianceStatus, ModelAuditReport, ModelBoundary, ObjectiveApproximation,
+    OptimizerCertificate, ReliabilityGrade,
 };
 use crate::error::{MixedModelError, Result};
 use crate::formula::Formula;
@@ -25,6 +27,26 @@ use crate::model::linear::LinearMixedModel;
 use crate::model::traits::{Family, LinkFunction, MixedModelFit, RandomEffectTermInfo};
 use crate::stats::{BlockDescription, ModelSummary, VarCorr};
 use crate::types::{FitLogEntry, MatrixBlock, OptSummary, Optimizer, ReMat};
+
+const JOINT_BETA_BOX_BOUND: f64 = 30.0;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GlmmFitMode {
+    /// Optimize θ only; β is profiled by PIRLS at each objective evaluation.
+    FastThetaOnly,
+    /// Optimize `[β; θ]`; PIRLS holds β fixed and updates only random effects.
+    JointBetaTheta,
+}
+
+impl GlmmFitMode {
+    fn from_fast_flag(fast: bool) -> Self {
+        if fast {
+            GlmmFitMode::FastThetaOnly
+        } else {
+            GlmmFitMode::JointBetaTheta
+        }
+    }
+}
 
 /// A generalized linear mixed-effects model.
 #[derive(Debug, Clone)]
@@ -303,18 +325,30 @@ impl GeneralizedLinearMixedModel {
         let x = self.lmm.feterm.full_rank_x();
 
         // η = offset + X * β
-        self.eta = &self.offset + x * &self.beta;
+        for obs in 0..n {
+            let mut value = self.offset[obs];
+            for col in 0..self.beta.len() {
+                value += x[(obs, col)] * self.beta[col];
+            }
+            self.eta[obs] = value;
+        }
 
         // Add random effects: η += Z_i * b_i
         for (i, rt) in self.lmm.reterms.iter().enumerate() {
             // b_i = λ_i * u_i
             self.b[i] = &rt.lambda * &self.u[i];
             // Multiply Z * vec(b) using refs for sparse multiplication
-            let bvec = DVector::from_column_slice(self.b[i].as_slice());
-            for (obs, &ref_idx) in rt.refs.iter().enumerate() {
-                let r = ref_idx as usize;
-                for s in 0..rt.vsize {
-                    self.eta[obs] += rt.z[(s, obs)] * bvec[r * rt.vsize + s];
+            let bvec = self.b[i].as_slice();
+            if rt.vsize == 1 {
+                for (obs, &ref_idx) in rt.refs.iter().enumerate() {
+                    self.eta[obs] += rt.z[(0, obs)] * bvec[ref_idx as usize];
+                }
+            } else {
+                for (obs, &ref_idx) in rt.refs.iter().enumerate() {
+                    let r = ref_idx as usize;
+                    for s in 0..rt.vsize {
+                        self.eta[obs] += rt.z[(s, obs)] * bvec[r * rt.vsize + s];
+                    }
                 }
             }
         }
@@ -424,12 +458,10 @@ impl GeneralizedLinearMixedModel {
 
         let n = self.y.len();
 
-        // Initialise u to zero; keep existing β.
+        // Initialise u to zero; keep existing β. Refit/bootstrap entry points
+        // also reset state before reaching this path.
         for u in self.u.iter_mut() {
             u.fill(0.0);
-        }
-        for (i, rt) in self.lmm.reterms.iter().enumerate() {
-            self.b[i] = &rt.lambda * &self.u[i];
         }
         self.update_eta();
 
@@ -475,10 +507,13 @@ impl GeneralizedLinearMixedModel {
             if vary_beta {
                 self.beta = self.lmm.beta();
             }
-            let new_u = self.lmm.ranef_u();
-            for (i, rt) in self.lmm.reterms.iter().enumerate() {
+            let new_u = if vary_beta {
+                self.lmm.ranef_u()
+            } else {
+                self.lmm.ranef_u_given_beta(&self.beta)
+            };
+            for (i, _) in self.lmm.reterms.iter().enumerate() {
                 self.u[i].copy_from(&new_u[i]);
-                self.b[i] = &rt.lambda * &self.u[i];
             }
             self.update_eta();
             let mut obj = self.laplace_objective();
@@ -493,9 +528,6 @@ impl GeneralizedLinearMixedModel {
                 }
                 if vary_beta {
                     self.beta = 0.5 * (&self.beta + &beta_prev);
-                }
-                for (i, rt) in self.lmm.reterms.iter().enumerate() {
-                    self.b[i] = &rt.lambda * &self.u[i];
                 }
                 self.update_eta();
                 obj = self.laplace_objective();
@@ -845,11 +877,11 @@ impl GeneralizedLinearMixedModel {
 
     /// Fit with options.
     ///
-    /// `fast` selects the supported MixedModels.jl-style fast path, which
-    /// profiles over θ and updates β through PIRLS. `fast = false` is not
-    /// implemented yet because it requires a distinct joint `[β; θ]`
-    /// optimizer path; passing `false` returns [`MixedModelError::Unsupported`]
-    /// rather than silently using the fast path.
+    /// `fast` selects the MixedModels.jl-style fast path, which profiles over θ
+    /// and updates β through PIRLS. `fast = false` follows the default
+    /// MixedModels.jl/lme4-style path: the outer optimizer works on `[β; θ]`,
+    /// and PIRLS holds β fixed while updating the conditional modes of the
+    /// random effects.
     ///
     /// `n_agq` selects the deviance approximation: `1` (or `0`) means the
     /// Laplace approximation; values `>= 2` request `n_agq`-point adaptive
@@ -862,13 +894,6 @@ impl GeneralizedLinearMixedModel {
         n_agq: usize,
         verbose: bool,
     ) -> Result<&mut Self> {
-        if !fast {
-            return Err(MixedModelError::Unsupported(
-                "GLMM fit_with_options(fast = false) is not implemented; \
-                 use fast = true for the current profiled-θ PIRLS path"
-                    .to_string(),
-            ));
-        }
         if let Err(error) = self.validate_agq(n_agq) {
             self.record_invalid_agq_diagnostic(n_agq, &error.to_string());
             return Err(error);
@@ -876,7 +901,7 @@ impl GeneralizedLinearMixedModel {
         if self.lmm.optsum.feval > 0 {
             return Err(MixedModelError::AlreadyFitted);
         }
-        self.fit_with_options_impl(n_agq, verbose)
+        self.fit_with_options_impl(GlmmFitMode::from_fast_flag(fast), n_agq, verbose)
     }
 
     fn reset_for_refit(&mut self, new_y: Option<&[f64]>) -> Result<()> {
@@ -913,7 +938,7 @@ impl GeneralizedLinearMixedModel {
             self.lmm.recompute_a_blocks();
         }
 
-        let initial_theta = self.lmm.optsum.initial.clone();
+        let initial_theta = self.initial_theta_from_optsum()?;
         self.lmm.set_theta(&initial_theta)?;
         self.lmm.update_l()?;
         self.theta = initial_theta.clone();
@@ -935,21 +960,28 @@ impl GeneralizedLinearMixedModel {
         self.update_eta();
 
         self.lmm.optsum.finitial = f64::INFINITY;
-        self.lmm.optsum.final_params = initial_theta;
+        self.lmm.optsum.final_params = self.lmm.optsum.initial.clone();
         self.lmm.optsum.fmin = f64::INFINITY;
         self.lmm.optsum.feval = 0;
         self.lmm.optsum.return_value.clear();
         self.lmm.optsum.fit_log.clear();
         self.lmm.compiler_artifact.optimizer_certificate = None;
+        self.lmm.compiler_artifact.fixed_effect_covariance_matrix = None;
+        self.lmm.compiler_artifact.fixed_effect_inference_table = None;
         self.lmm.compiler_artifact.effective_covariance.clear();
         Ok(())
     }
 
     #[cfg(not(feature = "nlopt"))]
-    fn fit_with_options_impl(&mut self, n_agq: usize, _verbose: bool) -> Result<&mut Self> {
+    fn fit_with_options_impl(
+        &mut self,
+        mode: GlmmFitMode,
+        n_agq: usize,
+        _verbose: bool,
+    ) -> Result<&mut Self> {
         match self.lmm.optsum.optimizer {
-            Optimizer::PatternSearch => self.fit_native_pattern_search(n_agq),
-            Optimizer::Cobyla => self.fit_native_cobyla(n_agq),
+            Optimizer::PatternSearch => self.fit_native_pattern_search(mode, n_agq),
+            Optimizer::Cobyla => self.fit_native_cobyla(mode, n_agq),
             Optimizer::NloptBobyqa | Optimizer::NloptNewuoa => Err(MixedModelError::Optimization(
                 "NLopt GLMM optimizers require the `nlopt` feature; rebuild with `--features nlopt` or pick a native optimizer"
                     .to_string(),
@@ -964,12 +996,18 @@ impl GeneralizedLinearMixedModel {
     }
 
     #[cfg(feature = "nlopt")]
-    fn fit_with_options_impl(&mut self, n_agq: usize, _verbose: bool) -> Result<&mut Self> {
+    fn fit_with_options_impl(
+        &mut self,
+        mode: GlmmFitMode,
+        n_agq: usize,
+        _verbose: bool,
+    ) -> Result<&mut Self> {
         use nlopt::{Algorithm as NloptAlgorithm, Nlopt, Target as NloptTarget};
 
-        let n_theta = self.theta.len();
-        let lb = self.lmm.lower_bounds();
-        let initial_theta = self.lmm.optsum.initial.clone();
+        let initial_params = self.initial_optimizer_params(mode)?;
+        let lb = self.optimizer_lower_bounds(mode);
+        self.lmm.optsum.initial = initial_params.clone();
+        self.lmm.optsum.final_params = initial_params.clone();
         self.lmm.optsum.optimizer = Optimizer::NloptBobyqa;
         self.lmm.optsum.backend = Optimizer::NloptBobyqa.canonical_backend();
 
@@ -982,12 +1020,12 @@ impl GeneralizedLinearMixedModel {
         let obj_fn = {
             let model_ptr = self as *mut GeneralizedLinearMixedModel;
             let fit_log = Rc::clone(&fit_log);
-            move |theta: &[f64], _grad: Option<&mut [f64]>, _data: &mut ()| -> f64 {
+            move |params: &[f64], _grad: Option<&mut [f64]>, _data: &mut ()| -> f64 {
                 let model = unsafe { &mut *model_ptr };
                 unsafe { *feval_ptr += 1 };
-                let objective = model.penalized_pirls_deviance_at_theta(theta, n_agq);
+                let objective = model.penalized_pirls_deviance_at_params(params, mode, n_agq);
                 fit_log.borrow_mut().push(FitLogEntry {
-                    theta: theta.to_vec(),
+                    theta: params.to_vec(),
                     objective,
                 });
                 objective
@@ -996,7 +1034,7 @@ impl GeneralizedLinearMixedModel {
 
         let mut optimizer = Nlopt::new(
             NloptAlgorithm::Bobyqa,
-            n_theta,
+            initial_params.len(),
             obj_fn,
             NloptTarget::Minimize,
             (),
@@ -1014,25 +1052,26 @@ impl GeneralizedLinearMixedModel {
         // Mirror the LMM cobyla initial step default; without an explicit
         // initial step BOBYQA falls back to per-axis defaults that may be
         // too small for parameters near the lower bound.
-        let initial_step = vec![0.75; n_theta];
+        let initial_step = vec![0.75; initial_params.len()];
         optimizer.set_initial_step(&initial_step).ok();
 
-        let mut theta = initial_theta;
-        let nlopt_result = optimizer.optimize(&mut theta);
+        let mut params = initial_params;
+        let nlopt_result = optimizer.optimize(&mut params);
         drop(optimizer);
 
-        self.finalize_theta_after_optimizer(&mut theta, n_agq)?;
+        self.finalize_params_after_optimizer(&mut params, mode, n_agq)?;
         self.lmm.optsum.return_value = match nlopt_result {
             Ok((status, _fmin)) => format!("{status:?}"),
             Err((status, _fmin)) => format!("FAILED:{status:?}"),
         };
         self.lmm.optsum.feval = feval_count;
         self.lmm.optsum.fit_log = rc_refcell_into_inner_or_clone(fit_log);
+        let certificate_params = self.optimizer_certificate_params(mode);
         self.lmm.compiler_artifact.optimizer_certificate =
             Some(OptimizerCertificate::from_opt_summary_with_context(
                 &self.lmm.optsum,
-                &self.theta,
-                &self.lmm.lower_bounds(),
+                &certificate_params,
+                &lb,
                 Some(self.lmm.dims.n),
             ));
         self.refresh_binomial_separation_diagnostics();
@@ -1042,13 +1081,15 @@ impl GeneralizedLinearMixedModel {
     }
 
     #[cfg(not(feature = "nlopt"))]
-    fn fit_native_cobyla(&mut self, n_agq: usize) -> Result<&mut Self> {
-        let lb = self.lmm.lower_bounds();
-        let initial_theta = self.lmm.optsum.initial.clone();
+    fn fit_native_cobyla(&mut self, mode: GlmmFitMode, n_agq: usize) -> Result<&mut Self> {
+        let lb = self.optimizer_lower_bounds(mode);
+        let initial_params = self.initial_optimizer_params(mode)?;
+        self.lmm.optsum.initial = initial_params.clone();
+        self.lmm.optsum.final_params = initial_params.clone();
         self.lmm.optsum.optimizer = Optimizer::Cobyla;
         self.lmm.optsum.backend = Optimizer::Cobyla.canonical_backend();
 
-        let best_theta: Rc<RefCell<Vec<f64>>> = Rc::new(RefCell::new(initial_theta.clone()));
+        let best_params: Rc<RefCell<Vec<f64>>> = Rc::new(RefCell::new(initial_params.clone()));
         let best_fmin: Rc<Cell<f64>> = Rc::new(Cell::new(f64::INFINITY));
         let feval_count: Rc<Cell<i64>> = Rc::new(Cell::new(0i64));
         let fit_log: Rc<RefCell<Vec<FitLogEntry>>> = Rc::new(RefCell::new(Vec::with_capacity(
@@ -1057,34 +1098,41 @@ impl GeneralizedLinearMixedModel {
 
         let objective_fn = {
             let model_ptr = self as *mut GeneralizedLinearMixedModel;
-            let best_theta = Rc::clone(&best_theta);
+            let best_params = Rc::clone(&best_params);
             let best_fmin = Rc::clone(&best_fmin);
             let feval_count = Rc::clone(&feval_count);
             let fit_log = Rc::clone(&fit_log);
-            move |theta: &[f64], _data: &mut ()| -> f64 {
+            move |params: &[f64], _data: &mut ()| -> f64 {
                 feval_count.set(feval_count.get() + 1);
-                let objective =
-                    unsafe { (&mut *model_ptr).penalized_pirls_deviance_at_theta(theta, n_agq) };
+                let objective = unsafe {
+                    (&mut *model_ptr).penalized_pirls_deviance_at_params(params, mode, n_agq)
+                };
                 fit_log.borrow_mut().push(FitLogEntry {
-                    theta: theta.to_vec(),
+                    theta: params.to_vec(),
                     objective,
                 });
                 if objective < best_fmin.get() {
                     best_fmin.set(objective);
-                    *best_theta.borrow_mut() = theta.to_vec();
+                    *best_params.borrow_mut() = params.to_vec();
                 }
                 objective
             }
         };
 
-        let bounds: Vec<(f64, f64)> = lb.iter().map(|&lo| (lo, f64::INFINITY)).collect();
-        let constraint_fns: Vec<Box<dyn cobyla::Func<()>>> = lb
+        let bounds = self.optimizer_bounds(mode);
+        let constraint_fns: Vec<Box<dyn cobyla::Func<()>>> = bounds
             .iter()
             .enumerate()
-            .filter(|(_, &lo)| lo > f64::NEG_INFINITY)
-            .map(|(i, &lo)| {
-                Box::new(move |x: &[f64], _: &mut ()| -> f64 { x[i] - lo })
-                    as Box<dyn cobyla::Func<()>>
+            .flat_map(|(i, &(lo, hi))| {
+                let lower = (lo > f64::NEG_INFINITY).then(|| {
+                    Box::new(move |x: &[f64], _: &mut ()| -> f64 { x[i] - lo })
+                        as Box<dyn cobyla::Func<()>>
+                });
+                let upper = hi.is_finite().then(|| {
+                    Box::new(move |x: &[f64], _: &mut ()| -> f64 { hi - x[i] })
+                        as Box<dyn cobyla::Func<()>>
+                });
+                lower.into_iter().chain(upper)
             })
             .collect();
         let cons_refs: Vec<&dyn cobyla::Func<()>> =
@@ -1098,13 +1146,13 @@ impl GeneralizedLinearMixedModel {
             ftol_rel: self.lmm.optsum.ftol_rel,
             ftol_abs: self.lmm.optsum.ftol_abs,
             xtol_rel: self.lmm.optsum.xtol_rel,
-            xtol_abs: self.lmm.optsum.xtol_abs.clone(),
+            xtol_abs: optimizer_abs_tolerances(&self.lmm.optsum.xtol_abs, initial_params.len()),
             ..cobyla::StopTols::default()
         };
 
         let result = cobyla::minimize(
             objective_fn,
-            &initial_theta,
+            &initial_params,
             &bounds,
             &cons_refs,
             (),
@@ -1113,23 +1161,23 @@ impl GeneralizedLinearMixedModel {
             Some(stop_tol),
         );
 
-        let (mut theta, return_value) = match result {
+        let (mut params, return_value) = match result {
             Ok((status, x_opt, fmin)) if fmin.is_finite() => {
                 (x_opt, Self::cobyla_success_status_label(status))
             }
             Ok((status, _x_opt, _fmin)) => (
-                best_theta.borrow().clone(),
+                best_params.borrow().clone(),
                 Self::cobyla_success_status_label(status),
             ),
             Err((status @ cobyla::FailStatus::RoundoffLimited, _x_opt, _fmin)) => (
-                best_theta.borrow().clone(),
+                best_params.borrow().clone(),
                 Self::cobyla_fail_status_label(status),
             ),
             Err((status, x_opt, fmin)) if fmin.is_finite() => {
                 (x_opt, Self::cobyla_fail_status_label(status))
             }
             Err((status, _x_opt, _fmin)) if best_fmin.get().is_finite() => (
-                best_theta.borrow().clone(),
+                best_params.borrow().clone(),
                 Self::cobyla_fail_status_label(status),
             ),
             Err((_status, _x_opt, _fmin)) => {
@@ -1139,15 +1187,16 @@ impl GeneralizedLinearMixedModel {
             }
         };
 
-        self.finalize_theta_after_optimizer(&mut theta, n_agq)?;
+        self.finalize_params_after_optimizer(&mut params, mode, n_agq)?;
         self.lmm.optsum.return_value = return_value;
         self.lmm.optsum.feval = feval_count.get();
         self.lmm.optsum.fit_log = rc_refcell_into_inner_or_clone(fit_log);
+        let certificate_params = self.optimizer_certificate_params(mode);
         self.lmm.compiler_artifact.optimizer_certificate =
             Some(OptimizerCertificate::from_opt_summary_with_context(
                 &self.lmm.optsum,
-                &self.theta,
-                &self.lmm.lower_bounds(),
+                &certificate_params,
+                &lb,
                 Some(self.lmm.dims.n),
             ));
         self.refresh_binomial_separation_diagnostics();
@@ -1157,36 +1206,39 @@ impl GeneralizedLinearMixedModel {
     }
 
     #[cfg(not(feature = "nlopt"))]
-    fn fit_native_pattern_search(&mut self, n_agq: usize) -> Result<&mut Self> {
-        let lower_bounds = self.lmm.lower_bounds();
-        let n_theta = self.theta.len();
+    fn fit_native_pattern_search(&mut self, mode: GlmmFitMode, n_agq: usize) -> Result<&mut Self> {
+        let bounds = self.optimizer_bounds(mode);
+        let lower_bounds = self.optimizer_lower_bounds(mode);
+        let mut params = self.initial_optimizer_params(mode)?;
+        self.lmm.optsum.initial = params.clone();
+        self.lmm.optsum.final_params = params.clone();
+        let n_params = params.len();
         let maxeval = if self.lmm.optsum.max_feval > 0 {
             self.lmm.optsum.max_feval
         } else {
             500
         };
         let mut step_tol = self.lmm.optsum.xtol_abs.clone();
-        if step_tol.len() != n_theta {
-            step_tol = vec![1e-5; n_theta];
+        if step_tol.len() != n_params {
+            step_tol = vec![1e-5; n_params];
         }
         for tol in &mut step_tol {
             *tol = tol.max(1e-5);
         }
         let mut step = self.lmm.optsum.initial_step.clone();
-        if step.len() != n_theta {
-            step = vec![0.75; n_theta];
+        if step.len() != n_params {
+            step = vec![0.75; n_params];
         }
         for (value, tol) in step.iter_mut().zip(step_tol.iter()) {
             *value = value.abs().max(*tol);
         }
 
-        let mut theta = self.lmm.optsum.initial.clone();
-        project_theta_to_bounds(&mut theta, &lower_bounds);
-        let mut best_theta = theta.clone();
+        project_params_to_bounds(&mut params, &bounds);
+        let mut best_params = params.clone();
         let mut best_fmin = f64::INFINITY;
         let mut feval_count = 0i64;
         let mut fit_log = Vec::with_capacity(self.lmm.optsum.fit_log.capacity());
-        let mut preferred_sign = vec![-1.0; n_theta];
+        let mut preferred_sign = vec![-1.0; n_params];
         for (idx, lower) in lower_bounds.iter().enumerate() {
             if !lower.is_finite() {
                 preferred_sign[idx] = 1.0;
@@ -1195,40 +1247,42 @@ impl GeneralizedLinearMixedModel {
 
         let mut current_f = record_pattern_search_eval(
             self,
-            &theta,
+            &params,
+            mode,
             n_agq,
             &mut feval_count,
             &mut fit_log,
-            &mut best_theta,
+            &mut best_params,
             &mut best_fmin,
         );
         self.lmm.optsum.finitial = current_f;
 
         while feval_count < maxeval && !steps_are_small(&step, &step_tol) {
-            let base_theta = theta.clone();
+            let base_params = params.clone();
             let base_f = current_f;
             let mut moved = false;
 
-            for idx in 0..n_theta {
+            for idx in 0..n_params {
                 let mut accepted = false;
                 for dir in [preferred_sign[idx], -preferred_sign[idx]] {
-                    let mut trial = theta.clone();
+                    let mut trial = params.clone();
                     trial[idx] += dir * step[idx];
-                    project_theta_to_bounds(&mut trial, &lower_bounds);
-                    if (trial[idx] - theta[idx]).abs() <= step_tol[idx] * 0.5 {
+                    project_params_to_bounds(&mut trial, &bounds);
+                    if (trial[idx] - params[idx]).abs() <= step_tol[idx] * 0.5 {
                         continue;
                     }
                     let ftrial = record_pattern_search_eval(
                         self,
                         &trial,
+                        mode,
                         n_agq,
                         &mut feval_count,
                         &mut fit_log,
-                        &mut best_theta,
+                        &mut best_params,
                         &mut best_fmin,
                     );
                     if ftrial + self.lmm.optsum.ftol_abs < current_f {
-                        theta = trial;
+                        params = trial;
                         current_f = ftrial;
                         preferred_sign[idx] = dir;
                         step[idx] = (step[idx] * 1.1).max(step_tol[idx]);
@@ -1250,23 +1304,24 @@ impl GeneralizedLinearMixedModel {
             }
 
             if moved && feval_count < maxeval {
-                let mut pattern = theta.clone();
-                for idx in 0..n_theta {
-                    pattern[idx] += theta[idx] - base_theta[idx];
+                let mut pattern = params.clone();
+                for idx in 0..n_params {
+                    pattern[idx] += params[idx] - base_params[idx];
                 }
-                project_theta_to_bounds(&mut pattern, &lower_bounds);
-                if pattern != theta {
+                project_params_to_bounds(&mut pattern, &bounds);
+                if pattern != params {
                     let fpattern = record_pattern_search_eval(
                         self,
                         &pattern,
+                        mode,
                         n_agq,
                         &mut feval_count,
                         &mut fit_log,
-                        &mut best_theta,
+                        &mut best_params,
                         &mut best_fmin,
                     );
                     if fpattern + self.lmm.optsum.ftol_abs < current_f {
-                        theta = pattern;
+                        params = pattern;
                         current_f = fpattern;
                     }
                 }
@@ -1286,7 +1341,7 @@ impl GeneralizedLinearMixedModel {
 
         self.lmm.optsum.optimizer = Optimizer::PatternSearch;
         self.lmm.optsum.backend = Optimizer::PatternSearch.canonical_backend();
-        self.finalize_theta_after_optimizer(&mut best_theta, n_agq)?;
+        self.finalize_params_after_optimizer(&mut best_params, mode, n_agq)?;
         self.lmm.optsum.return_value = if feval_count >= maxeval {
             "MAXEVAL_REACHED".to_string()
         } else {
@@ -1294,11 +1349,12 @@ impl GeneralizedLinearMixedModel {
         };
         self.lmm.optsum.feval = feval_count;
         self.lmm.optsum.fit_log = fit_log;
+        let certificate_params = self.optimizer_certificate_params(mode);
         self.lmm.compiler_artifact.optimizer_certificate =
             Some(OptimizerCertificate::from_opt_summary_with_context(
                 &self.lmm.optsum,
-                &self.theta,
-                &self.lmm.lower_bounds(),
+                &certificate_params,
+                &lower_bounds,
                 Some(self.lmm.dims.n),
             ));
         self.refresh_binomial_separation_diagnostics();
@@ -1322,7 +1378,219 @@ impl GeneralizedLinearMixedModel {
         self.lmm.optsum.n_agq = n_agq;
         self.lmm.optsum.fmin = self.deviance(n_agq);
         self.lmm.optsum.final_params = theta.clone();
+        self.refresh_glmm_fixed_effect_contract_payloads();
         Ok(())
+    }
+
+    fn finalize_params_after_optimizer(
+        &mut self,
+        params: &mut Vec<f64>,
+        mode: GlmmFitMode,
+        n_agq: usize,
+    ) -> Result<()> {
+        match mode {
+            GlmmFitMode::FastThetaOnly => self.finalize_theta_after_optimizer(params, n_agq),
+            GlmmFitMode::JointBetaTheta => {
+                let p = self.beta.len();
+                let n_theta = self.theta.len();
+                if params.len() != p + n_theta {
+                    return Err(MixedModelError::DimensionMismatch(format!(
+                        "GLMM final joint optimizer vector length {} does not match beta+theta length {}",
+                        params.len(),
+                        p + n_theta
+                    )));
+                }
+                LinearMixedModel::rectify_theta_columns(
+                    &mut params[p..],
+                    &self.lmm.parmap,
+                    self.lmm.reterms.len(),
+                );
+
+                if let Err(error) = self.update_pirls_at_beta_theta(params) {
+                    self.record_pirls_failure_diagnostic(&params[p..], &error.to_string());
+                    return Err(error);
+                }
+                self.refresh_dispersion();
+
+                self.lmm.optsum.n_agq = n_agq;
+                self.lmm.optsum.fmin = self.deviance(n_agq);
+                self.lmm.optsum.final_params = params.clone();
+                self.refresh_glmm_fixed_effect_contract_payloads();
+                Ok(())
+            }
+        }
+    }
+
+    fn refresh_glmm_fixed_effect_contract_payloads(&mut self) {
+        self.lmm.compiler_artifact.fixed_effect_covariance_matrix =
+            Some(self.glmm_fixed_effect_covariance_matrix_unavailable_payload());
+    }
+
+    pub fn fixed_effect_covariance_matrix_payload(&self) -> FixedEffectCovarianceMatrixPayload {
+        self.glmm_fixed_effect_covariance_matrix_unavailable_payload()
+    }
+
+    fn glmm_fixed_effect_covariance_matrix_unavailable_payload(
+        &self,
+    ) -> FixedEffectCovarianceMatrixPayload {
+        let coef_names = self.coef_names();
+        let full_p = coef_names.len();
+        let rank = self.lmm.feterm.rank;
+        let aliased = self.aliased_fixed_effect_names(&coef_names);
+        let sigma = self.dispersion.is_finite().then_some(self.dispersion);
+        let approximation = if self.lmm.optsum.n_agq > 1 {
+            format!(
+                "adaptive Gauss-Hermite approximation with n_agq={}",
+                self.lmm.optsum.n_agq
+            )
+        } else {
+            "Laplace/PIRLS approximation".to_string()
+        };
+        let reason = format!(
+            "GLMM fixed-effect covariance matrix is unavailable in compiler v0 because a full model-based covariance for the {} / {} {} has not been certified; schema 1.0.0 requires matrix=null for unavailable covariance",
+            family_label(self.family),
+            link_label(self.link),
+            approximation
+        );
+        let mut notes = vec![
+            "finite-sample LMM methods such as Satterthwaite and Kenward-Roger are unsupported for GLMMs".to_string(),
+            "do not reconstruct a dense covariance matrix from fixed-effect standard errors; downstream L V L' workflows require a certified V_beta payload".to_string(),
+        ];
+        if rank < full_p || !aliased.is_empty() {
+            notes.push(format!(
+                "fixed-effect design rank is {rank} of {full_p}; aliased coefficients: {}",
+                if aliased.is_empty() {
+                    "<none reported>".to_string()
+                } else {
+                    aliased.join(", ")
+                }
+            ));
+        }
+
+        FixedEffectCovarianceMatrixPayload::model_based(
+            coef_names,
+            None,
+            FixedEffectCovarianceStatus::Unavailable,
+            ReliabilityGrade::NotAvailable,
+            Some(reason),
+            FixedEffectCovarianceMatrixDetails {
+                basis: "user_order".to_string(),
+                sigma,
+                rank,
+                aliased,
+                symmetric: None,
+                positive_semidefinite: None,
+                condition_number: None,
+            },
+            notes,
+        )
+    }
+
+    fn aliased_fixed_effect_names(&self, coef_names: &[String]) -> Vec<String> {
+        self.lmm
+            .feterm
+            .piv
+            .iter()
+            .skip(self.lmm.feterm.rank)
+            .filter_map(|&original_index| coef_names.get(original_index).cloned())
+            .collect()
+    }
+
+    fn initial_theta_from_optsum(&self) -> Result<Vec<f64>> {
+        let p = self.beta.len();
+        let n_theta = self.theta.len();
+        let initial = &self.lmm.optsum.initial;
+        if initial.len() == n_theta {
+            return Ok(initial.clone());
+        }
+        if initial.len() == p + n_theta {
+            return Ok(initial[p..].to_vec());
+        }
+        Err(MixedModelError::DimensionMismatch(format!(
+            "GLMM optimizer initial vector length {} is neither theta length {} nor beta+theta length {}",
+            initial.len(),
+            n_theta,
+            p + n_theta
+        )))
+    }
+
+    fn initial_optimizer_params(&mut self, mode: GlmmFitMode) -> Result<Vec<f64>> {
+        let initial_theta = self.initial_theta_from_optsum()?;
+        match mode {
+            GlmmFitMode::FastThetaOnly => Ok(initial_theta),
+            GlmmFitMode::JointBetaTheta => {
+                // Use one profiled PIRLS pass at the starting theta to get a
+                // reasonable β start for the joint optimizer. The subsequent
+                // objective evaluations hold β fixed, matching MixedModels.jl
+                // `fast=false` semantics.
+                self.update_pirls_at_theta(&initial_theta, true)?;
+                let mut params = self.beta.iter().copied().collect::<Vec<_>>();
+                params.extend(initial_theta);
+                Ok(params)
+            }
+        }
+    }
+
+    fn optimizer_lower_bounds(&self, mode: GlmmFitMode) -> Vec<f64> {
+        match mode {
+            GlmmFitMode::FastThetaOnly => self.lmm.lower_bounds(),
+            GlmmFitMode::JointBetaTheta => {
+                let mut lower_bounds = vec![-JOINT_BETA_BOX_BOUND; self.beta.len()];
+                lower_bounds.extend(self.lmm.lower_bounds());
+                lower_bounds
+            }
+        }
+    }
+
+    #[cfg(not(feature = "nlopt"))]
+    fn optimizer_bounds(&self, mode: GlmmFitMode) -> Vec<(f64, f64)> {
+        match mode {
+            GlmmFitMode::FastThetaOnly => self
+                .lmm
+                .lower_bounds()
+                .into_iter()
+                .map(|lo| (lo, f64::INFINITY))
+                .collect(),
+            GlmmFitMode::JointBetaTheta => {
+                let mut bounds =
+                    vec![(-JOINT_BETA_BOX_BOUND, JOINT_BETA_BOX_BOUND); self.beta.len()];
+                bounds.extend(
+                    self.lmm
+                        .lower_bounds()
+                        .into_iter()
+                        .map(|lo| (lo, f64::INFINITY)),
+                );
+                bounds
+            }
+        }
+    }
+
+    fn optimizer_certificate_params(&self, mode: GlmmFitMode) -> Vec<f64> {
+        match mode {
+            GlmmFitMode::FastThetaOnly => self.theta.clone(),
+            GlmmFitMode::JointBetaTheta => self.lmm.optsum.final_params.clone(),
+        }
+    }
+
+    fn split_joint_params<'a>(&self, params: &'a [f64]) -> Result<(DVector<f64>, &'a [f64])> {
+        let p = self.beta.len();
+        let n_theta = self.theta.len();
+        if params.len() != p + n_theta {
+            return Err(MixedModelError::DimensionMismatch(format!(
+                "GLMM joint optimizer vector length {} does not match beta+theta length {}",
+                params.len(),
+                p + n_theta
+            )));
+        }
+        if !params.iter().all(|value| value.is_finite()) {
+            return Err(MixedModelError::InvalidArgument(
+                "GLMM joint optimizer values must be finite".to_string(),
+            ));
+        }
+        Ok((
+            DVector::from_column_slice(&params[..p]),
+            &params[p..(p + n_theta)],
+        ))
     }
 
     fn update_pirls_at_theta(&mut self, theta: &[f64], vary_beta: bool) -> Result<()> {
@@ -1341,10 +1609,17 @@ impl GeneralizedLinearMixedModel {
         self.lmm.set_theta(theta)?;
         self.lmm.update_l()?;
         self.theta = theta.to_vec();
-        for u in self.u.iter_mut() {
-            u.fill(0.0);
-        }
         self.pirls(vary_beta, false)?;
+        Ok(())
+    }
+
+    fn update_pirls_at_beta_theta(&mut self, params: &[f64]) -> Result<()> {
+        let (beta, theta) = self.split_joint_params(params)?;
+        self.beta = beta;
+        self.lmm.set_theta(theta)?;
+        self.lmm.update_l()?;
+        self.theta = theta.to_vec();
+        self.pirls(false, false)?;
         Ok(())
     }
 
@@ -1377,8 +1652,32 @@ impl GeneralizedLinearMixedModel {
         total
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     fn penalized_pirls_deviance_at_theta(&mut self, theta: &[f64], n_agq: usize) -> f64 {
         match self.update_pirls_at_theta(theta, true) {
+            Ok(()) => {
+                let deviance = self.deviance(n_agq);
+                if deviance.is_finite() {
+                    deviance
+                } else {
+                    f64::INFINITY
+                }
+            }
+            Err(_) => f64::INFINITY,
+        }
+    }
+
+    fn penalized_pirls_deviance_at_params(
+        &mut self,
+        params: &[f64],
+        mode: GlmmFitMode,
+        n_agq: usize,
+    ) -> f64 {
+        let result = match mode {
+            GlmmFitMode::FastThetaOnly => self.update_pirls_at_theta(params, true),
+            GlmmFitMode::JointBetaTheta => self.update_pirls_at_beta_theta(params),
+        };
+        match result {
             Ok(()) => {
                 let deviance = self.deviance(n_agq);
                 if deviance.is_finite() {
@@ -1594,10 +1893,13 @@ fn rc_refcell_into_inner_or_clone<T: Clone>(value: Rc<RefCell<Vec<T>>>) -> Vec<T
 }
 
 #[cfg(not(feature = "nlopt"))]
-fn project_theta_to_bounds(theta: &mut [f64], lower_bounds: &[f64]) {
-    for (value, lower) in theta.iter_mut().zip(lower_bounds.iter()) {
-        if lower.is_finite() && *value < *lower {
-            *value = *lower;
+fn project_params_to_bounds(params: &mut [f64], bounds: &[(f64, f64)]) {
+    for (value, (lower, upper)) in params.iter_mut().zip(bounds.iter().copied()) {
+        if lower.is_finite() && *value < lower {
+            *value = lower;
+        }
+        if upper.is_finite() && *value > upper {
+            *value = upper;
         }
     }
 }
@@ -1610,24 +1912,34 @@ fn steps_are_small(step: &[f64], step_tol: &[f64]) -> bool {
 }
 
 #[cfg(not(feature = "nlopt"))]
+fn optimizer_abs_tolerances(configured: &[f64], n_params: usize) -> Vec<f64> {
+    if configured.len() == n_params {
+        configured.to_vec()
+    } else {
+        vec![1e-10; n_params]
+    }
+}
+
+#[cfg(not(feature = "nlopt"))]
 fn record_pattern_search_eval(
     model: &mut GeneralizedLinearMixedModel,
-    theta: &[f64],
+    params: &[f64],
+    mode: GlmmFitMode,
     n_agq: usize,
     feval_count: &mut i64,
     fit_log: &mut Vec<FitLogEntry>,
-    best_theta: &mut Vec<f64>,
+    best_params: &mut Vec<f64>,
     best_fmin: &mut f64,
 ) -> f64 {
     *feval_count += 1;
-    let objective = model.penalized_pirls_deviance_at_theta(theta, n_agq);
+    let objective = model.penalized_pirls_deviance_at_params(params, mode, n_agq);
     fit_log.push(FitLogEntry {
-        theta: theta.to_vec(),
+        theta: params.to_vec(),
         objective,
     });
     if objective < *best_fmin {
         *best_fmin = objective;
-        *best_theta = theta.to_vec();
+        *best_params = params.to_vec();
     }
     objective
 }
@@ -2540,21 +2852,25 @@ mod tests {
     }
 
     #[test]
-    fn test_glmm_fast_parameter_documented_or_implemented() {
+    fn test_glmm_fast_false_joint_beta_theta_fit_is_implemented() {
         let data = contra_fixture();
         let formula = parse_formula("use_num ~ 1 + (1 | urban_dist)").unwrap();
         let mut model =
             GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
 
-        let err = model.fit_with_options(false, 1, false).unwrap_err();
+        model.fit_with_options(false, 1, false).unwrap();
 
-        match err {
-            MixedModelError::Unsupported(message) => {
-                assert!(message.contains("fast = false"));
-                assert!(message.contains("not implemented"));
-            }
-            other => panic!("expected Unsupported error, got {other:?}"),
-        }
+        assert_eq!(
+            model.lmm.optsum.final_params.len(),
+            model.beta.len() + model.theta.len(),
+            "fast=false must optimize and record the joint beta+theta vector"
+        );
+        assert_eq!(
+            &model.lmm.optsum.final_params[..model.beta.len()],
+            model.beta.as_slice()
+        );
+        assert!(model.objective().is_finite());
+        assert!(model.lmm.optsum.feval > 0);
     }
 
     fn constant_response_fixture(y: Vec<f64>) -> DataFrame {

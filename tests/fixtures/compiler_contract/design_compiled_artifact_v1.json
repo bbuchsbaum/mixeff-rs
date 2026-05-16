@@ -338,6 +338,73 @@
           "diagnostics": []
         }
       ],
+      "contrast_bases": [
+        {
+          "variable": "group",
+          "levels": [
+            "g1",
+            "g2",
+            "g3",
+            "g4",
+            "g5",
+            "g6"
+          ],
+          "column_names": [
+            "group: g2",
+            "group: g3",
+            "group: g4",
+            "group: g5",
+            "group: g6"
+          ],
+          "source": "treatment",
+          "ordered": false,
+          "explicit": false,
+          "contrast_matrix": [
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              1.0,
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              1.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              1.0,
+              0.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              1.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ]
+          ]
+        }
+      ],
       "aliased_columns": [],
       "empty_cells": [],
       "diagnostics": []
@@ -496,7 +563,7 @@
       "min_observations_per_supported_level": 2,
       "effective_rank_relative_tolerance": 1e-6,
       "effective_rank_absolute_tolerance": 1e-10,
-      "convergence_derivative_nparmax": 10
+      "convergence_derivative_nparmax": 4
     },
     "apply_design_time_reductions": true
   },
@@ -698,7 +765,7 @@
       ],
       [
         "convergence_derivative_nparmax",
-        "10"
+        "4"
       ],
       [
         "apply_design_time_reductions",

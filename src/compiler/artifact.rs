@@ -23,6 +23,10 @@ pub const MODEL_STATE_SUMMARY_SCHEMA_VERSION: u32 = 1;
 pub const FIXED_EFFECT_INFERENCE_TABLE_SCHEMA: &str = "mixedmodels.fixed_effect_inference_table";
 pub const FIXED_EFFECT_INFERENCE_TABLE_SCHEMA_VERSION: &str = "1.0.0";
 pub const FIXED_EFFECT_INFERENCE_TABLE_NAME: &str = "fixed_effect_inference";
+pub const FIXED_EFFECT_COVARIANCE_MATRIX_SCHEMA: &str =
+    "mixedmodels.fixed_effect_covariance_matrix";
+pub const FIXED_EFFECT_COVARIANCE_MATRIX_SCHEMA_VERSION: &str = "1.0.0";
+pub const FIXED_EFFECT_COVARIANCE_MATRIX_NAME: &str = "fixed_effect_covariance_matrix";
 
 /// Threshold above which a single basis column is treated as carrying the
 /// full mass of a reduced-rank covariance direction. A direction with one
@@ -221,6 +225,77 @@ impl FixedEffectInferenceTable {
     }
 }
 
+/// Versioned fixed-effect covariance matrix stored on fitted artifacts.
+///
+/// In schema 1.0.0, `matrix` is either a fully numeric, finite, symmetric
+/// `p x p` covariance matrix in `coef_names` order, or `null` with explicit
+/// unavailable status and reason. Do not encode missing/aliased entries inside
+/// an otherwise numeric matrix.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FixedEffectCovarianceMatrixPayload {
+    pub schema_name: String,
+    pub schema_version: String,
+    pub crate_version: Option<String>,
+    pub method: FixedEffectCovarianceMethod,
+    pub coef_names: Vec<String>,
+    pub matrix: Option<Vec<Vec<f64>>>,
+    pub status: FixedEffectCovarianceStatus,
+    pub reliability: ReliabilityGrade,
+    pub reason: Option<String>,
+    pub details: FixedEffectCovarianceMatrixDetails,
+    pub notes: Vec<String>,
+}
+
+impl FixedEffectCovarianceMatrixPayload {
+    pub fn model_based(
+        coef_names: Vec<String>,
+        matrix: Option<Vec<Vec<f64>>>,
+        status: FixedEffectCovarianceStatus,
+        reliability: ReliabilityGrade,
+        reason: Option<String>,
+        details: FixedEffectCovarianceMatrixDetails,
+        notes: Vec<String>,
+    ) -> Self {
+        Self {
+            schema_name: FIXED_EFFECT_COVARIANCE_MATRIX_SCHEMA.to_string(),
+            schema_version: FIXED_EFFECT_COVARIANCE_MATRIX_SCHEMA_VERSION.to_string(),
+            crate_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            method: FixedEffectCovarianceMethod::ModelBased,
+            coef_names,
+            matrix,
+            status,
+            reliability,
+            reason,
+            details,
+            notes,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FixedEffectCovarianceMethod {
+    ModelBased,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FixedEffectCovarianceStatus {
+    Available,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FixedEffectCovarianceMatrixDetails {
+    pub basis: String,
+    pub sigma: Option<f64>,
+    pub rank: usize,
+    pub aliased: Vec<String>,
+    pub symmetric: Option<bool>,
+    pub positive_semidefinite: Option<bool>,
+    pub condition_number: Option<f64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FixedEffectInferenceRow {
     pub label: String,
@@ -235,11 +310,38 @@ pub struct FixedEffectInferenceRow {
     pub method: FixedEffectInferenceMethod,
     pub status: FixedEffectInferenceStatus,
     pub reliability: ReliabilityGrade,
+    pub reliability_reason: FixedEffectReliabilityReasonCode,
     pub estimability: EstimabilityAssessment,
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<FixedEffectInferenceReasonCode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<FixedEffectInferenceDetails>,
     pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FixedEffectInferenceReasonCode {
+    SatterthwaiteUnavailableAtBoundary,
+    SatterthwaiteVarparDevianceUnavailable,
+    SatterthwaiteVarparCovarianceUnavailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FixedEffectReliabilityReasonCode {
+    InteriorConvergedWellSpecified,
+    AsymptoticWaldZAtBoundary,
+    DegreesOfFreedomUnavailableSoZSubstituted,
+    SatterthwaiteFiniteDifferenceApproximation,
+    KenwardRogerApproximation,
+    BootstrapMonteCarloReplicates,
+    InferenceUnavailableByPolicy,
+    ContrastNotEstimable,
+    StandardErrorUnavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -274,6 +376,8 @@ pub struct BootstrapInferenceDetails {
     pub seed: Option<u64>,
     pub finite_statistic_count: Option<usize>,
     pub mcse: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicate_statistics: Option<Vec<Option<f64>>>,
     pub null_target: Option<FixedEffectNullTargetSummary>,
 }
 
@@ -347,12 +451,14 @@ pub enum FixedEffectInferenceStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArtifactTable {
     FixedEffectInference,
+    FixedEffectCovarianceMatrix,
 }
 
 impl ArtifactTable {
     pub fn as_str(self) -> &'static str {
         match self {
             ArtifactTable::FixedEffectInference => FIXED_EFFECT_INFERENCE_TABLE_NAME,
+            ArtifactTable::FixedEffectCovarianceMatrix => FIXED_EFFECT_COVARIANCE_MATRIX_NAME,
         }
     }
 }
@@ -365,8 +471,11 @@ impl std::str::FromStr for ArtifactTable {
             FIXED_EFFECT_INFERENCE_TABLE_NAME | "fixed_effect_inference_table" => {
                 Ok(ArtifactTable::FixedEffectInference)
             }
+            FIXED_EFFECT_COVARIANCE_MATRIX_NAME | "fixed_effect_covariance" => {
+                Ok(ArtifactTable::FixedEffectCovarianceMatrix)
+            }
             other => Err(format!(
-                "unsupported artifact table `{other}`; supported tables: {FIXED_EFFECT_INFERENCE_TABLE_NAME}"
+                "unsupported artifact table `{other}`; supported tables: {FIXED_EFFECT_INFERENCE_TABLE_NAME}, {FIXED_EFFECT_COVARIANCE_MATRIX_NAME}"
             )),
         }
     }
@@ -697,6 +806,8 @@ pub struct CompiledModelArtifact {
     pub model_boundary: ModelBoundary,
     #[serde(default)]
     pub fixed_effect_inference_table: Option<FixedEffectInferenceTable>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixed_effect_covariance_matrix: Option<FixedEffectCovarianceMatrixPayload>,
     pub requested_formula: String,
     pub semantic_model: SemanticModel,
     pub effective_formula: Option<String>,
@@ -738,6 +849,7 @@ impl CompiledModelArtifact {
             schema: SchemaMetadata::compiled_model_artifact(),
             model_boundary: ModelBoundary::lmm(),
             fixed_effect_inference_table: None,
+            fixed_effect_covariance_matrix: None,
             requested_formula: requested_formula.into(),
             diagnostics: semantic_model.diagnostics.clone(),
             semantic_model,
@@ -834,6 +946,11 @@ impl CompiledModelArtifact {
                 .fixed_effect_inference_table
                 .as_ref()
                 .map(|table| serde_json::to_value(table).expect("inference table serializes")),
+            ArtifactTable::FixedEffectCovarianceMatrix => {
+                self.fixed_effect_covariance_matrix.as_ref().map(|payload| {
+                    serde_json::to_value(payload).expect("covariance matrix serializes")
+                })
+            }
         }
     }
 
@@ -1652,10 +1769,13 @@ mod tests {
                 method: FixedEffectInferenceMethod::AsymptoticWaldZ,
                 status: FixedEffectInferenceStatus::Available,
                 reliability: ReliabilityGrade::Low,
+                reliability_reason: FixedEffectReliabilityReasonCode::AsymptoticWaldZAtBoundary,
                 estimability: EstimabilityAssessment::FixedContrast(
                     super::super::estimability::FixedContrastEstimability::estimable("x", 1, 1),
                 ),
                 reason: None,
+                reason_code: None,
+                reason_detail: None,
                 details: None,
                 notes: vec![
                     "asymptotic Wald z is a labeled fallback, not a finite-sample correction"

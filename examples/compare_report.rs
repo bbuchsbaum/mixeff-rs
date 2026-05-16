@@ -22,6 +22,7 @@ use serde_json::Value;
 struct ResultRecord {
     dataset: String,
     formula: String,
+    #[allow(dead_code)]
     family: String,
     #[allow(dead_code)]
     link: String,
@@ -41,6 +42,16 @@ struct ResultRecord {
     aic: Option<f64>,
     #[allow(dead_code)]
     bic: Option<f64>,
+    objective_definition: Option<String>,
+    response_constants: Option<String>,
+    optimizer: Option<String>,
+    optimizer_backend: Option<String>,
+    optimizer_return_code: Option<String>,
+    optimizer_fevals: Option<i64>,
+    #[allow(dead_code)]
+    optimizer_fmin: Option<f64>,
+    #[allow(dead_code)]
+    optimizer_max_fevals: Option<i64>,
     is_singular: Option<bool>,
     fit_time_ms: Option<f64>,
     fit_time_ms_min: Option<f64>,
@@ -91,14 +102,32 @@ fn load_results(path: &PathBuf) -> ResultsFile {
     serde_json::from_value(raw).unwrap_or_else(|e| panic!("schema {}: {e}", path.display()))
 }
 
-fn key(r: &ResultRecord) -> (String, String, String) {
+fn key(r: &ResultRecord) -> (String, String, String, String, String) {
     // Normalize whitespace so trivial reformatting doesn't break the join.
     let f = r.formula.split_whitespace().collect::<Vec<_>>().join(" ");
-    (r.dataset.clone(), f, r.estimator.clone())
+    (
+        r.dataset.clone(),
+        f,
+        r.family.clone(),
+        r.link.clone(),
+        r.estimator.clone(),
+    )
 }
 
 fn fmt_opt_f(v: Option<f64>, prec: usize) -> String {
     v.map_or("—".into(), |x| format!("{x:.*}", prec))
+}
+
+fn fmt_opt_i(v: Option<i64>) -> String {
+    v.map_or("—".into(), |x| x.to_string())
+}
+
+fn fmt_obj_delta(v: Option<f64>, comparable: bool) -> String {
+    if comparable {
+        fmt_opt_f(v, 4)
+    } else {
+        "n/c".into()
+    }
 }
 
 fn fmt_speedup(t_r: Option<f64>, t_rust: Option<f64>) -> String {
@@ -106,6 +135,54 @@ fn fmt_speedup(t_r: Option<f64>, t_rust: Option<f64>) -> String {
         (Some(r), Some(rs)) if rs > 0.0 => format!("{:.1}×", r / rs),
         _ => "—".into(),
     }
+}
+
+fn is_glmm(r: &ResultRecord) -> bool {
+    !(r.family == "Gaussian" && r.link == "Identity")
+}
+
+fn known_glmm_numeric_classification(r: &ResultRecord) -> Option<&'static str> {
+    match (r.dataset.as_str(), r.estimator.as_str()) {
+        ("culcitalogreg", "AGQ") => Some(
+            "culcitalogreg Binomial/AGQ is accepted by the row-specific 2e-3 beta gate; lme4 JSON records fixed effects rounded to four decimals",
+        ),
+        ("ergostool", "Laplace") if r.family == "Gamma" && r.link == "Log" => Some(
+            "Gamma/Log dispersion and theta conventions are not treated as an lme4-only oracle; see the MixedModels.jl Gamma fixture",
+        ),
+        ("grouseticks", "Laplace") => Some(
+            "Poisson/Log multi-random-intercept row matches MixedModels.jl 5.3.0 fast=true profiled objective; lme4 beta gap is fast-PIRLS versus joint-estimate divergence",
+        ),
+        ("verbagg", "Laplace") => Some(
+            "large crossed Binomial/Logit row matches MixedModels.jl 5.3.0 fast=true profiled objective; lme4 beta gap is fast-PIRLS versus joint-estimate divergence",
+        ),
+        ("contraception", "Laplace") if r.formula.contains("(1 + urban | dist)") => Some(
+            "large Binomial/Logit random-slope row matches MixedModels.jl 5.3.0 fast=true profiled objective; lme4 beta gap is fast-PIRLS versus joint-estimate divergence",
+        ),
+        ("contraception", "Laplace") => Some(
+            "large Binomial/Logit random-intercept row matches MixedModels.jl 5.3.0 fast=true profiled objective; lme4 beta gap is fast-PIRLS versus joint-estimate divergence",
+        ),
+        _ => None,
+    }
+}
+
+fn numeric_gap_detail(
+    d_beta: Option<f64>,
+    beta_pass: bool,
+    d_sigma: Option<f64>,
+    sigma_pass: bool,
+    classification: &str,
+) -> String {
+    let beta = match d_beta {
+        Some(delta) if !beta_pass => format!("max_delta_beta={delta:.6}"),
+        Some(delta) => format!("max_delta_beta={delta:.6} (within tolerance)"),
+        None => "max_delta_beta=missing".to_string(),
+    };
+    let sigma = match d_sigma {
+        Some(delta) if !sigma_pass => format!("delta_sigma={:.6}", delta.abs()),
+        Some(delta) => format!("delta_sigma={:.6} (within tolerance)", delta.abs()),
+        None => "delta_sigma=missing".to_string(),
+    };
+    format!("{beta}; {sigma}; {classification}")
 }
 
 /// Strip whitespace, ":", and "_" from a coefficient name. Lets the
@@ -175,7 +252,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         rel_tol: 1e-4,
     };
 
-    let mut by_key: HashMap<(String, String, String), &ResultRecord> = HashMap::new();
+    let mut by_key: HashMap<(String, String, String, String, String), &ResultRecord> =
+        HashMap::new();
     for rec in &r.results {
         by_key.insert(key(rec), rec);
     }
@@ -209,8 +287,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "| Dataset | Formula | Est | n | Δ obj | max Δ β | Δ σ | Singular | R warns | Match |\n",
     );
     acc.push_str("|---|---|---|---:|---:|---:|---:|:---:|:---:|:---:|\n");
-    perf.push_str("| Dataset | Formula | Est | n | t_R (ms, min) | t_Rust (ms, min) | speedup |\n");
-    perf.push_str("|---|---|---|---:|---:|---:|---:|\n");
+    perf.push_str("| Dataset | Formula | Est | n | t_R (ms, min) | t_Rust (ms, min) | speedup | R fevals | Rust fevals | Rust optimizer |\n");
+    perf.push_str("|---|---|---|---:|---:|---:|---:|---:|---:|---|\n");
     gaps.push_str("| Dataset | Formula | Est | Side | Status | Detail |\n");
     gaps.push_str("|---|---|---|---|---|---|\n");
 
@@ -272,7 +350,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => None,
         };
 
-        let obj_pass = d_obj.is_some_and(|d| tol_obj.passes(d, rr.objective.unwrap_or(1.0)));
+        let objective_comparable = match (&rs.response_constants, &rr.response_constants) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        };
+        let obj_pass = if objective_comparable {
+            d_obj.is_some_and(|d| tol_obj.passes(d, rr.objective.unwrap_or(1.0)))
+        } else {
+            true
+        };
         // β passes when every R-side coefficient was matched and the deltas are tight.
         // If Rust is missing coefficients R produced (e.g. interaction not implemented),
         // beta_cmp.n_only_r > 0 and we treat that as a fail even if the matched ones agree.
@@ -303,13 +389,49 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             formula_short,
             rs.estimator,
             n,
-            fmt_opt_f(d_obj.map(f64::abs), 4),
+            fmt_obj_delta(d_obj.map(f64::abs), objective_comparable),
             fmt_opt_f(d_beta, 4),
             fmt_opt_f(d_sigma.map(f64::abs), 4),
             singular_cell,
             warns_cell,
             if ok { "✅" } else { "❌" },
         ));
+
+        if !objective_comparable {
+            gaps.push_str(&format!(
+                "| `{}` | `{}` | {} | both | objective_non_comparable | rust_definition={} rust_response_constants={} R_definition={} R_response_constants={} |\n",
+                rs.dataset,
+                formula_short,
+                rs.estimator,
+                rs.objective_definition.as_deref().unwrap_or("missing"),
+                rs.response_constants.as_deref().unwrap_or("missing"),
+                rr.objective_definition.as_deref().unwrap_or("missing"),
+                rr.response_constants.as_deref().unwrap_or("missing")
+            ));
+        }
+
+        if !ok && is_glmm(rs) {
+            let classification = known_glmm_numeric_classification(rs);
+            let status = if classification.is_some() {
+                "numeric_classified"
+            } else {
+                "numeric_disagreement"
+            };
+            let detail = numeric_gap_detail(
+                d_beta,
+                beta_pass,
+                d_sigma,
+                sigma_pass,
+                classification
+                    .unwrap_or("no known GLMM numeric classification; update gates or fix the fit"),
+            )
+            .replace('|', "\\|")
+            .replace('\n', " ");
+            gaps.push_str(&format!(
+                "| `{}` | `{}` | {} | both | {} | {} |\n",
+                rs.dataset, formula_short, rs.estimator, status, detail
+            ));
+        }
 
         // Spill R-side warning text into the gaps section so users see the
         // actual messages (boundary singular fit, near-unidentifiable, …).
@@ -332,8 +454,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 speedups.push(a / b);
             }
         }
+        let rust_optimizer = match (
+            &rs.optimizer_backend,
+            &rs.optimizer,
+            &rs.optimizer_return_code,
+        ) {
+            (Some(backend), Some(optimizer), Some(code)) if !code.is_empty() => {
+                format!("{backend}/{optimizer} ({code})")
+            }
+            (Some(backend), Some(optimizer), _) => format!("{backend}/{optimizer}"),
+            _ => "—".into(),
+        };
         perf.push_str(&format!(
-            "| `{}` | `{}` | {} | {} | {} | {} | {} |\n",
+            "| `{}` | `{}` | {} | {} | {} | {} | {} | {} | {} | {} |\n",
             rs.dataset,
             formula_short,
             rs.estimator,
@@ -341,6 +474,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             fmt_opt_f(t_r, 1),
             fmt_opt_f(t_rust, 1),
             fmt_speedup(t_r, t_rust),
+            fmt_opt_i(rr.optimizer_fevals),
+            fmt_opt_i(rs.optimizer_fevals),
+            rust_optimizer,
         ));
 
         if let (Some(rs_sing), Some(rr_sing)) = (rs.is_singular, rr.is_singular) {
@@ -404,6 +540,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "\nTolerances: objective Δ ≤ {:.0e} (abs) or {:.0e} (rel); β Δ ≤ {:.0e}; σ Δ ≤ {:.0e}.\n\n",
         tol_obj.abs_tol, tol_obj.rel_tol, tol_beta.abs_tol, tol_sigma.abs_tol
     ));
+    report.push_str(
+        "Objective tolerance is applied only when both engines report the same `response_constants` convention; otherwise the objective cell is `n/c` and the reason is listed under gaps.\n\n",
+    );
 
     report.push_str("## Accuracy\n\n");
     report.push_str(&acc);

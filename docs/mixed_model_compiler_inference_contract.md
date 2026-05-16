@@ -506,9 +506,38 @@ pub struct FixedEffectTest {
     pub p_value: Option<f64>,
     pub method: InferenceMethod,
     pub reliability: ReliabilityGrade,
+    pub reliability_reason: FixedEffectReliabilityReasonCode,
     pub status: InferenceStatus,
 }
 ```
+
+`reliability` is the coarse grade for consumers that only need a traffic-light
+signal. `reliability_reason` is the stable vocabulary for why that grade was
+assigned:
+
+- `interior_converged_well_specified`: asymptotic Wald z used on an interior,
+  well-specified fit.
+- `asymptotic_wald_z_at_boundary`: asymptotic Wald z used despite a boundary or
+  reduced-covariance fit.
+- `degrees_of_freedom_unavailable_so_z_substituted`: finite-sample degrees of
+  freedom were requested but unavailable, so Wald z was used as the labeled
+  fallback.
+- `satterthwaite_finite_difference_approximation`: Satterthwaite inference was
+  computed from finite-difference variance-parameter derivatives.
+- `kenward_roger_approximation`: Kenward-Roger inference was used.
+- `bootstrap_monte_carlo_replicates`: parametric bootstrap inference was used.
+- `inference_unavailable_by_policy`: p-values were withheld because the fit
+  intent or reduction policy makes ordinary fixed-effect p-values invalid.
+- `contrast_not_estimable`: the requested contrast touches aliased or otherwise
+  non-estimable coefficient directions.
+- `standard_error_unavailable`: the statistic or p-value is unavailable because
+  the fixed-effect standard error is unavailable.
+
+Low grouping-level support remains a model/audit diagnostic in schema `1.0.0`,
+not a fixed-effect row `reliability_reason`. It can explain why covariance
+support is weak or why ordinary p-values are withheld by policy, but the row
+reason should name the inference rule that actually produced or withheld the
+row value.
 
 For single-df contrasts:
 

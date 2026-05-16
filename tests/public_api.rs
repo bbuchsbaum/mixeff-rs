@@ -2,24 +2,34 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+use mixedmodels::compiler::{
+    FixedEffectCovarianceMatrixDetails, FixedEffectCovarianceMatrixPayload,
+    FixedEffectCovarianceMethod, FixedEffectCovarianceStatus, FIXED_EFFECT_COVARIANCE_MATRIX_NAME,
+    FIXED_EFFECT_COVARIANCE_MATRIX_SCHEMA, FIXED_EFFECT_COVARIANCE_MATRIX_SCHEMA_VERSION,
+};
 use mixedmodels::model::{
-    parametricbootstrap, BatchOptimizerControl, BatchOptions, BatchThetaGrouping, BatchWarmStart, BootstrapFailedRefitPolicy, BootstrapInterval, BootstrapIntervalMethod,
-    BootstrapQuantile, BootstrapRefitOptions, BootstrapReplicate, BootstrapRunMetadata,
-    BootstrapRunPayload, BootstrapSeedRecord, BootstrapTarget, BootstrapTargetKind,
-    CategoricalColumn, Column, ConvergenceVerificationOptions, DataFrame, Family,
+    parametricbootstrap, parametricbootstrap_glmm, BatchOptimizerControl, BatchOptions,
+    BatchThetaGrouping, BatchWarmStart, BootstrapFailedRefitPolicy, BootstrapInterval,
+    BootstrapIntervalMethod, BootstrapLikelihoodRatioTest, BootstrapQuantile,
+    BootstrapRefitOptions, BootstrapReplicate, BootstrapRunMetadata, BootstrapRunPayload,
+    BootstrapSeedRecord, BootstrapTarget, BootstrapTargetKind, CategoricalColumn,
+    ClusterResampleDraw, Column, ConvergenceVerificationOptions, DataFrame, Family,
     FixedEffectNullBootstrapTarget, FixedEffectNullCovariancePolicy, GeneralizedLinearMixedModel,
-    KenwardRogerAdjustedVcov, KenwardRogerLbDdf, KenwardRogerSigmaG, LinearMixedModel, LinearMixedModelBatch,
-    LinkFunction, MixedModelBootstrap, MixedModelFit, ModelDims, NewReLevels, RandomEffectTermInfo, ResponseBatchFit, ResponseBatchMode,
+    KenwardRogerAdjustedVcov, KenwardRogerLbDdf, KenwardRogerSigmaG, LinearMixedModel,
+    LinearMixedModelBatch, LinkFunction, MixedModelBootstrap, MixedModelFit, ModelDims,
+    NewReLevels, RandomEffectTermInfo, ResponseBatchFit, ResponseBatchMode,
     ResponseColumnDiagnostic, ResponseDiagnosticReason, ResponseFitStatus, ResponseMatrixProfile,
     ThetaBatch, VcovVarparEstimate, BOOTSTRAP_RUN_SCHEMA, BOOTSTRAP_RUN_SCHEMA_VERSION,
 };
 use mixedmodels::stats::{
-    assess_model_comparison_sequence, coeftable_to_markdown, profile, profile_beta, profile_betas,
-    profile_sigma, profile_theta, profile_theta_scalar, restore_replicates, restorereplicates,
-    save_replicates, savereplicates, shortest_cov_int, BlockDescription, CoefTable,
-    CoefTablePValuePolicy, ConfintRow, FixedEffectComparison, LikelihoodRatioTest, LinearModelFit,
-    MixedModelProfile, ModelComparisonAlternative, ModelComparisonAssessment, ModelComparisonClass,
-    ModelSummary, ModelSummaryRow, ProfileRow, RandomEffectComparison, VarCorr, VarCorrComponent,
+    assess_model_comparison_sequence, coeftable_to_markdown,
+    parametricbootstrap_glmm as stats_parametricbootstrap_glmm, profile, profile_beta,
+    profile_betas, profile_sigma, profile_theta, profile_theta_scalar, restore_replicates,
+    restorereplicates, save_replicates, savereplicates, shortest_cov_int, BlockDescription,
+    CoefTable, CoefTablePValuePolicy, ConfintRow, FixedEffectComparison, LikelihoodRatioTest,
+    LinearModelFit, MixedModelProfile, ModelComparisonAlternative, ModelComparisonAssessment,
+    ModelComparisonClass, ModelSummary, ModelSummaryRow, ProfileRow, RandomEffectComparison,
+    VarCorr, VarCorrComponent,
 };
 use mixedmodels::types::MatrixBlock;
 
@@ -157,8 +167,14 @@ fn intended_model_barrel_exports_compile_for_downstream_users() {
     assert_type::<BootstrapRefitOptions>();
     assert_type::<BootstrapRunMetadata>();
     assert_type::<BootstrapRunPayload>();
+    assert_type::<BootstrapLikelihoodRatioTest>();
+    assert_type::<ClusterResampleDraw>();
     assert_type::<FixedEffectNullCovariancePolicy>();
     assert_type::<FixedEffectNullBootstrapTarget>();
+    assert_type::<FixedEffectCovarianceMatrixPayload>();
+    assert_type::<FixedEffectCovarianceMatrixDetails>();
+    assert_type::<FixedEffectCovarianceMethod>();
+    assert_type::<FixedEffectCovarianceStatus>();
     assert_type::<RandomEffectTermInfo>();
     assert_type::<Family>();
     assert_type::<LinkFunction>();
@@ -166,7 +182,12 @@ fn intended_model_barrel_exports_compile_for_downstream_users() {
 
     let _ = BOOTSTRAP_RUN_SCHEMA;
     let _ = BOOTSTRAP_RUN_SCHEMA_VERSION;
+    let _ = FIXED_EFFECT_COVARIANCE_MATRIX_NAME;
+    let _ = FIXED_EFFECT_COVARIANCE_MATRIX_SCHEMA;
+    let _ = FIXED_EFFECT_COVARIANCE_MATRIX_SCHEMA_VERSION;
     let _ = parametricbootstrap::<rand::rngs::StdRng>;
+    let _ = parametricbootstrap_glmm::<rand::rngs::StdRng>;
+    let _ = stats_parametricbootstrap_glmm::<rand::rngs::StdRng>;
 }
 
 #[test]

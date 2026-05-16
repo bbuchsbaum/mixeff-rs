@@ -25,6 +25,14 @@
       "weights": "size"
     },
     {
+      "dataset": "cbpp",
+      "estimator": "AGQ",
+      "family": "Binomial",
+      "formula": "incidence / size ~ 1 + period + (1 | herd)",
+      "link": "Logit",
+      "weights": "size"
+    },
+    {
       "dataset": "contraception",
       "estimator": "Laplace",
       "family": "Binomial",
@@ -52,6 +60,14 @@
       "dataset": "culcitalogreg",
       "estimator": "AGQ",
       "family": "Binomial",
+      "formula": "predation ~ ttt + (1 | block)",
+      "link": "Logit",
+      "weights": null
+    },
+    {
+      "dataset": "culcitalogreg",
+      "estimator": "Laplace",
+      "family": "Bernoulli",
       "formula": "predation ~ ttt + (1 | block)",
       "link": "Logit",
       "weights": null
@@ -94,6 +110,14 @@
       "family": "Gaussian",
       "formula": "effort ~ 1 + Type + (1 | Subject)",
       "link": "Identity",
+      "weights": null
+    },
+    {
+      "dataset": "ergostool",
+      "estimator": "Laplace",
+      "family": "Gamma",
+      "formula": "effort ~ 1 + Type + (1 | Subject)",
+      "link": "Log",
       "weights": null
     },
     {

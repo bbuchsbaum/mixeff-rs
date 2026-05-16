@@ -21,6 +21,8 @@ indexmap = "2"
 log = "0.4"
 nlopt = { version = "0.8.1", optional = true }
 csv = "1"
+faer = { version = "0.24", default-features = false, features = ["std"] }
+dyn-stack = "0.13"
 toml = { version = "0.8", default-features = false, features = ["parse"] }
 minilp = "0.2"
 
@@ -35,6 +37,19 @@ nlopt = ["dep:nlopt"]
 # This first slice wires bounded LMM theta optimization through PRIMA BOBYQA
 # only. The feature expects a system PRIMA C library visible to the linker.
 prima = []
+
+[profile.dev]
+# The LMM engine is dominated by numeric kernels whose unoptimized debug
+# performance can be tens of times slower than release. Keep debuginfo and
+# normal dev runtime checks while enabling enough optimization for local parity
+# and R bridge smoke tests to use realistic engine timings.
+opt-level = 3
+
+[profile.test]
+# Keep Rust unit-test numerics on the standard debug profile. Several parity
+# tests assert tight optimizer and finite-difference values that are sensitive
+# to optimized test-profile floating-point trajectories.
+opt-level = 0
 
 [dev-dependencies]
 approx = "0.5"

@@ -15,6 +15,7 @@ suppressPackageStartupMessages({
 })
 
 TIMING_REPEATS <- 3L
+include_stress <- nzchar(Sys.getenv("MIXEDMODELS_INCLUDE_STRESS", unset = ""))
 
 find_repo_root <- function(start = getwd()) {
   d <- normalizePath(start, mustWork = TRUE)
@@ -50,6 +51,15 @@ adapt_formula_for_glmer <- function(f, weights_col) {
 read_dataset <- function(name) {
   csv <- file.path(repo_root, "datasets", name, "data.csv")
   utils::read.csv(csv, stringsAsFactors = FALSE)
+}
+
+dataset_difficulty <- function(name) {
+  meta_path <- file.path(repo_root, "datasets", name, "meta.toml")
+  if (!file.exists(meta_path)) return(NA_character_)
+  text <- readLines(meta_path, warn = FALSE)
+  line <- grep('^difficulty *=', text, value = TRUE)
+  if (!length(line)) return(NA_character_)
+  sub('^difficulty *= *"([^"]+)".*', '\\1', line[1])
 }
 
 apply_canonical_factor_levels <- function(df, name) {
@@ -135,10 +145,20 @@ fit_one <- function(entry) {
     beta = NULL, coef_names = NULL, sigma = NA_real_,
     theta = NULL, objective = NA_real_, loglik = NA_real_,
     aic = NA_real_, bic = NA_real_,
+    objective_definition = NA_character_, response_constants = NA_character_,
+    optimizer = NA_character_, optimizer_backend = NA_character_,
+    optimizer_return_code = NA_character_, optimizer_fevals = NA_integer_,
+    optimizer_fmin = NA_real_, optimizer_max_fevals = NA_integer_,
     is_singular = NA, fit_time_ms = NA_real_,
     fit_time_ms_min = NA_real_, fit_time_ms_repeats = NA_integer_,
     warnings = I(character())
   )
+
+  if (identical(dataset_difficulty(ds_name), "stress") && !include_stress) {
+    result$status <- "skipped_stress"
+    result$error <- "stress fixture; set MIXEDMODELS_INCLUDE_STRESS=1 to fit"
+    return(result)
+  }
 
   fit_call <- if (is_lmm) {
     quote(lme4::lmer(stats::as.formula(formula_str), data = df,
@@ -148,12 +168,16 @@ fit_one <- function(entry) {
     NULL  # unknown estimator for Gaussian
   } else {
     fam_fn <- switch(tolower(family),
+                     bernoulli = stats::binomial(link = tolower(link)),
                      binomial = stats::binomial(link = tolower(link)),
                      poisson  = stats::poisson(link = tolower(link)),
+                     gamma    = stats::Gamma(link = tolower(link)),
                      NULL)
     if (is.null(fam_fn)) NULL else {
       formula_str <- adapt_formula_for_glmer(formula_str, weights_col)
+      n_agq <- if (identical(est, "AGQ")) 7L else 1L
       quote(lme4::glmer(stats::as.formula(formula_str), data = df, family = fam_fn,
+                       nAGQ = n_agq,
                        control = lme4::glmerControl(calc.derivs = FALSE)))
     }
   }
@@ -212,15 +236,32 @@ fit_one <- function(entry) {
     } else {
       as.numeric(deviance(m, REML = FALSE))
     }
+    result$objective_definition <- if (identical(est, "REML")) "restricted_deviance" else "deviance"
+    result$response_constants <- "not_applicable"
   } else {
     # GLMM: dispersion is fixed at 1; objective is -2 * logLik (Laplace).
     result$sigma <- attr(lme4::VarCorr(m), "sc")
     result$objective <- as.numeric(-2 * stats::logLik(m))
+    result$objective_definition <- "minus_two_loglik"
+    result$response_constants <- "included"
   }
   result$theta <- I(as.numeric(getME(m, "theta")))
   result$loglik <- as.numeric(stats::logLik(m))
   result$aic <- as.numeric(stats::AIC(m))
   result$bic <- as.numeric(stats::BIC(m))
+  optinfo <- m@optinfo
+  result$optimizer_backend <- "lme4"
+  if (!is.null(optinfo$optimizer)) {
+    result$optimizer <- paste(as.character(optinfo$optimizer), collapse = ",")
+  }
+  if (!is.null(optinfo$conv$opt)) {
+    result$optimizer_return_code <- as.character(optinfo$conv$opt)
+  } else if (!is.null(optinfo$conv$lme4$code)) {
+    result$optimizer_return_code <- as.character(optinfo$conv$lme4$code)
+  }
+  if (!is.null(optinfo$feval)) {
+    result$optimizer_fevals <- as.integer(optinfo$feval)
+  }
   result$is_singular <- isTRUE(lme4::isSingular(m, tol = 1e-4))
   result$fit_time_ms <- fit$cold_ms
   result$fit_time_ms_min <- fit$min_ms
@@ -254,6 +295,6 @@ out <- list(
 )
 out_path <- file.path(repo_root, "comparison", "lme4_results.json")
 dir.create(dirname(out_path), showWarnings = FALSE, recursive = TRUE)
-writeLines(jsonlite::toJSON(out, auto_unbox = TRUE, pretty = TRUE, na = "null"),
+writeLines(jsonlite::toJSON(out, auto_unbox = TRUE, pretty = TRUE, na = "null", null = "null"),
            con = out_path)
 cat(sprintf("\nwrote %d results to %s\n", n, out_path))

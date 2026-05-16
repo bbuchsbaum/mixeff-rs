@@ -31,6 +31,14 @@ family = "Gaussian"
 link = "Identity"
 estimator = "REML"
 
+[[fits]]
+# Positive-response Gamma/Log GLMM harness coverage on the same balanced
+# repeated-measures structure.
+formula = "effort ~ 1 + Type + (1 | Subject)"
+family = "Gamma"
+link = "Log"
+estimator = "Laplace"
+
 [tags]
 structure = ["random_intercept", "scalar_re", "balanced"]
 difficulty = "easy"
