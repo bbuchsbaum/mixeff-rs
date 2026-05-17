@@ -1338,7 +1338,7 @@ fn optimizer_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
             AuditReportStatus::Warning
         },
         detail: format!(
-            "return_code={}; acceptable={}; budget_exhausted={}; fevals={}; objective_delta={}",
+            "return_code={}; acceptable={}; budget_exhausted={}; fevals={}; final_trust_radius={}; objective_delta={}",
             certificate
                 .evidence
                 .optimizer_stop
@@ -1348,6 +1348,7 @@ fn optimizer_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
             certificate.evidence.optimizer_stop.acceptable_stop,
             certificate.evidence.optimizer_stop.budget_exhausted,
             option_usize(certificate.evidence.optimizer_stop.function_evaluations),
+            option_f64(certificate.evidence.optimizer_stop.final_trust_radius),
             option_f64(certificate.evidence.optimizer_stop.objective_delta)
         ),
     });
@@ -1884,6 +1885,9 @@ fn optimizer_summary(
         bump(&mut level, ConvergenceLevel::Failed);
         clauses.push("optimizer stop unacceptable".to_string());
         actions.push(NextActionKind::BudgetOrAlternate);
+    } else if optimizer_recovered(certificate) {
+        bump(&mut level, ConvergenceLevel::Ok);
+        clauses.push("recovered convergence".to_string());
     }
 
     match certificate.status {
@@ -2182,11 +2186,29 @@ fn optimizer_stop_detail(certificate: &super::audit::OptimizerCertificate) -> St
         .return_code
         .as_deref()
         .unwrap_or("unknown");
+    let radius = certificate
+        .evidence
+        .optimizer_stop
+        .final_trust_radius
+        .map(|value| format!("; final_trust_radius={value:.6e}"))
+        .unwrap_or_default();
     if certificate.evidence.optimizer_stop.acceptable_stop {
-        format!("optimizer returned acceptable stop code {code}")
+        if optimizer_recovered(certificate) {
+            return format!("optimizer recovered with acceptable stop code {code}{radius}");
+        }
+        format!("optimizer returned acceptable stop code {code}{radius}")
     } else {
-        format!("optimizer stop code {code} is not acceptable")
+        format!("optimizer stop code {code} is not acceptable{radius}")
     }
+}
+
+fn optimizer_recovered(certificate: &super::audit::OptimizerCertificate) -> bool {
+    certificate
+        .evidence
+        .optimizer_stop
+        .return_code
+        .as_deref()
+        .is_some_and(|code| code.starts_with("KKT_BOUNDARY_RESTART("))
 }
 
 fn convergence_regime(
@@ -3369,6 +3391,7 @@ fn diagnostic_code_label(code: &DiagnosticCode) -> &'static str {
         DiagnosticCode::PirlsFailure => "pirls_failure",
         DiagnosticCode::OptimizerNotAssessed => "optimizer_not_assessed",
         DiagnosticCode::OptimizerNonconvergence => "optimizer_nonconvergence",
+        DiagnosticCode::OptimizerRecovery => "optimizer_recovery",
         DiagnosticCode::InferenceUnavailable => "inference_unavailable",
         DiagnosticCode::SerializationNotAssessed => "serialization_not_assessed",
         DiagnosticCode::Unsupported => "unsupported",

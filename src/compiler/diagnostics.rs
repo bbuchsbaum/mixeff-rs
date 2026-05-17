@@ -81,6 +81,7 @@ pub enum DiagnosticCode {
     PirlsFailure,
     OptimizerNotAssessed,
     OptimizerNonconvergence,
+    OptimizerRecovery,
     InferenceUnavailable,
     SerializationNotAssessed,
     Unsupported,
@@ -175,6 +176,7 @@ mod tests {
                 DiagnosticCode::OptimizerNonconvergence,
                 "\"optimizer_nonconvergence\"",
             ),
+            (DiagnosticCode::OptimizerRecovery, "\"optimizer_recovery\""),
         ];
 
         for (code, expected) in cases {

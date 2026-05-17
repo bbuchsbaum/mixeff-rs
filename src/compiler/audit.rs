@@ -3584,6 +3584,8 @@ pub struct OptimizerStopEvidence {
     pub function_evaluations: Option<usize>,
     pub max_function_evaluations: Option<usize>,
     pub max_time_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_trust_radius: Option<f64>,
     pub initial_objective: Option<f64>,
     pub final_objective: Option<f64>,
     pub objective_delta: Option<f64>,
@@ -3811,6 +3813,37 @@ impl OptimizerCertificate {
             checks.push(CertificateCheck::NotAssessed {
                 reason: "active-subspace Hessian check requires derivative support".to_string(),
             });
+            if let Some(reason) = optimizer_recovery_reason(&optsum.return_value) {
+                let mut diagnostic = Diagnostic::new(
+                    DiagnosticCode::OptimizerRecovery,
+                    DiagnosticSeverity::Info,
+                    DiagnosticStage::Certification,
+                    format!("optimizer recovered after covariance KKT-guided restart ({reason})"),
+                )
+                .with_suggested_actions(vec![
+                    "treat this as recovered convergence, not first-pass clean convergence"
+                        .to_string(),
+                    "inspect the optimizer trace and covariance certificate if the boundary direction is scientifically central"
+                        .to_string(),
+                ]);
+                diagnostic.payload.insert(
+                    "return_code".to_string(),
+                    serde_json::json!(optsum.return_value),
+                );
+                diagnostic
+                    .payload
+                    .insert("recovery_reason".to_string(), serde_json::json!(reason));
+                diagnostic.payload.insert(
+                    "function_evaluations".to_string(),
+                    serde_json::json!(optsum.feval.max(0) as usize),
+                );
+                if let Some(radius) = optsum.final_trust_radius {
+                    diagnostic
+                        .payload
+                        .insert("final_trust_radius".to_string(), serde_json::json!(radius));
+                }
+                diagnostics.push(diagnostic);
+            }
         } else {
             checks.push(CertificateCheck::Failed {
                 code: optsum.return_value.clone(),
@@ -4207,6 +4240,7 @@ impl ConvergenceEvidence {
                 function_evaluations: None,
                 max_function_evaluations: None,
                 max_time_seconds: None,
+                final_trust_radius: None,
                 initial_objective: None,
                 final_objective: None,
                 objective_delta: None,
@@ -4257,6 +4291,7 @@ impl ConvergenceEvidence {
                     .then(|| usize::try_from(optsum.max_feval).ok())
                     .flatten(),
                 max_time_seconds: (optsum.max_time > 0.0).then_some(optsum.max_time),
+                final_trust_radius: optsum.final_trust_radius,
                 initial_objective,
                 final_objective,
                 objective_delta: initial_objective
@@ -4332,6 +4367,9 @@ impl HessianEvidence {
 }
 
 fn optimizer_stop_is_acceptable(return_value: &str) -> bool {
+    if let Some(final_code) = optimizer_recovery_final_code(return_value) {
+        return optimizer_stop_is_acceptable(final_code);
+    }
     matches!(
         return_value,
         "SUCCESS" | "FTOL_REACHED" | "XTOL_REACHED" | "STOPVAL_REACHED"
@@ -4339,9 +4377,31 @@ fn optimizer_stop_is_acceptable(return_value: &str) -> bool {
 }
 
 fn optimizer_budget_exhausted(optsum: &OptSummary) -> bool {
+    if optimizer_recovery_final_code(&optsum.return_value)
+        .map(optimizer_stop_is_acceptable)
+        .unwrap_or(false)
+    {
+        return false;
+    }
     optsum.return_value == "MAXEVAL_REACHED"
         || optsum.return_value == "MAXTIME_REACHED"
         || (optsum.max_feval > 0 && optsum.feval >= optsum.max_feval)
+}
+
+fn optimizer_recovery_final_code(return_value: &str) -> Option<&str> {
+    return_value
+        .starts_with("KKT_BOUNDARY_RESTART(")
+        .then(|| return_value.rsplit_once(": ").map(|(_, code)| code.trim()))
+        .flatten()
+        .filter(|code| !code.is_empty())
+}
+
+fn optimizer_recovery_reason(return_value: &str) -> Option<&str> {
+    return_value
+        .strip_prefix("KKT_BOUNDARY_RESTART(")?
+        .split_once(')')
+        .map(|(reason, _)| reason)
+        .filter(|reason| !reason.is_empty())
 }
 
 fn boundary_parameter_indices(

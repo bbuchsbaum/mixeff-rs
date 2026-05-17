@@ -165,6 +165,11 @@ pub struct OptSummary {
     /// Maximum wall-clock time (seconds). Default `-1.0` (unlimited).
     pub max_time: f64,
 
+    /// Final trust-region radius for optimizers that expose one.
+    ///
+    /// `None` for optimizers that do not use or report a trust radius.
+    pub final_trust_radius: Option<f64>,
+
     // ---- Optimizer ----
     /// Which optimizer to use.
     pub optimizer: Optimizer,
@@ -231,6 +236,7 @@ impl OptSummary {
             initial_step: vec![0.75; n],
             max_feval: -1,
             max_time: -1.0,
+            final_trust_radius: None,
 
             optimizer: Optimizer::Cobyla,
             backend: OptimizerBackend::Native,

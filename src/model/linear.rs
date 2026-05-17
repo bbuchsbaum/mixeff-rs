@@ -2506,6 +2506,7 @@ impl LinearMixedModel {
 
         let previous_optsum = self.optsum.clone();
         let previous_feval = previous_optsum.feval.max(0);
+        let previous_max_feval = previous_optsum.max_feval.max(0);
         let previous_fit_log = previous_optsum.fit_log.clone();
         let optimizer = previous_optsum.optimizer;
         let n_theta = self.n_theta();
@@ -2566,6 +2567,9 @@ impl LinearMixedModel {
         let restart_return = self.optsum.return_value.clone();
         if previous_feval > 0 {
             self.optsum.feval += previous_feval;
+        }
+        if self.optsum.max_feval > 0 && previous_max_feval > 0 {
+            self.optsum.max_feval += previous_max_feval;
         }
         if !previous_fit_log.is_empty() {
             let mut fit_log = previous_fit_log;
@@ -4443,6 +4447,7 @@ impl LinearMixedModel {
         self.optsum.feval = feval_count;
         self.optsum.return_value = return_value.unwrap_or_else(|| "SUCCESS".to_string());
         self.optsum.fit_log = fit_log;
+        self.optsum.final_trust_radius = None;
 
         Ok(self)
     }
@@ -4993,7 +4998,9 @@ impl LinearMixedModel {
             fit_log.into_inner(),
             Optimizer::TrustBq,
             return_value,
-        )
+        )?;
+        self.optsum.final_trust_radius = Some(result.final_radius);
+        Ok(self)
     }
 
     fn fit_cobyla_with_maxeval(
@@ -13262,10 +13269,11 @@ mod tests {
 
     use crate::compiler::{
         CertificateCheck, CompiledModelArtifact, CompilerPolicy, ContrastMatrix, ContrastRhs,
-        DiagnosticCode, EffectiveRankStatus, EvidenceMethod, EvidenceQuality, FitIntent, FitStatus,
-        FixedEffectCovarianceMethod, FixedEffectCovarianceStatus, FixedEffectHypothesis,
-        InferenceStatus, InformationBudgetStatus, ModelChangeStatus, ModelStateStatus,
-        RandomStrategy, RankStatus, ReductionRecord, ReductionTrigger, ThetaMap,
+        ConvergenceLevel, ConvergenceVerdict, DiagnosticCode, EffectiveRankStatus, EvidenceMethod,
+        EvidenceQuality, FitIntent, FitStatus, FixedEffectCovarianceMethod,
+        FixedEffectCovarianceStatus, FixedEffectHypothesis, InferenceStatus,
+        InformationBudgetStatus, ModelChangeStatus, ModelStateStatus, RandomStrategy, RankStatus,
+        ReductionRecord, ReductionTrigger, ThetaMap,
     };
     use crate::formula::parse_formula;
     use crate::model::data::{Column, DataFrame};
@@ -15086,6 +15094,28 @@ mod tests {
             CovarianceKktClassification::InteriorConverged
         );
         assert!(model.optsum.return_value.contains("KKT_BOUNDARY_RESTART"));
+        model.refresh_optimizer_certificate();
+        let optimizer_certificate = model.optimizer_certificate().unwrap();
+        assert!(
+            optimizer_certificate
+                .evidence
+                .optimizer_stop
+                .acceptable_stop
+        );
+        assert!(
+            !optimizer_certificate
+                .evidence
+                .optimizer_stop
+                .budget_exhausted
+        );
+        assert_eq!(optimizer_certificate.status, FitStatus::ConvergedInterior);
+        assert!(optimizer_certificate.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == DiagnosticCode::OptimizerRecovery
+                && diagnostic.message.contains("covariance KKT-guided restart")
+        }));
+        let verdict = ConvergenceVerdict::for_artifact(model.compiler_artifact());
+        assert_eq!(verdict.level, ConvergenceLevel::Ok);
+        assert!(verdict.headline.contains("recovered convergence"));
     }
 
     #[test]
@@ -15113,6 +15143,46 @@ mod tests {
             certificate.blocks[0]
         );
         assert!(model.optsum.return_value.contains("KKT_BOUNDARY_RESTART"));
+        model.refresh_optimizer_certificate();
+        let optimizer_certificate = model.optimizer_certificate().unwrap();
+        assert!(
+            optimizer_certificate
+                .evidence
+                .optimizer_stop
+                .acceptable_stop
+        );
+        assert!(
+            !optimizer_certificate
+                .evidence
+                .optimizer_stop
+                .budget_exhausted
+        );
+        assert!(optimizer_certificate
+            .evidence
+            .optimizer_stop
+            .final_trust_radius
+            .is_some());
+        assert!(matches!(
+            optimizer_certificate.status,
+            FitStatus::ConvergedInterior
+                | FitStatus::ConvergedBoundary
+                | FitStatus::ConvergedReducedRank
+        ));
+        let recovery = optimizer_certificate
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == DiagnosticCode::OptimizerRecovery)
+            .expect("recovered fit should carry optimizer recovery diagnostic");
+        assert_eq!(
+            recovery.payload.get("recovery_reason"),
+            Some(&serde_json::json!("2x2 block 0"))
+        );
+        let verdict = ConvergenceVerdict::for_artifact(model.compiler_artifact());
+        assert!(matches!(
+            verdict.level,
+            ConvergenceLevel::Ok | ConvergenceLevel::Caution
+        ));
+        assert!(verdict.headline.contains("recovered convergence"));
     }
 
     #[test]
