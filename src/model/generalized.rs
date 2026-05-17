@@ -4200,6 +4200,21 @@ mod tests {
             }
             other => panic!("expected Unsupported error, got {other:?}"),
         }
+
+        let data = contra_fixture();
+        let formula = parse_formula("use_num ~ 1 + (1 | urban_dist)").unwrap();
+        let mut model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+        let err = model.fit_with_options(false, 7, false).unwrap_err();
+        match err {
+            MixedModelError::Unsupported(message) => {
+                assert!(message.contains("fast = false"));
+                assert!(message.contains("nlopt"));
+            }
+            other => panic!(
+                "expected Unsupported error for valid AGQ shape without nlopt, got {other:?}"
+            ),
+        }
     }
 
     #[cfg(feature = "nlopt")]
@@ -4789,6 +4804,23 @@ mod tests {
         assert_eq!(
             model2.lmm.optsum.feval, feval_before,
             "no objective evaluations should have happened on the rejected fit",
+        );
+
+        let mut model3 = {
+            let data = contra_fixture();
+            let formula =
+                parse_formula("use_num ~ 1 + age2 + urban + livch + (1 + age | urban_dist)")
+                    .unwrap();
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap()
+        };
+        let feval_before = model3.lmm.optsum.feval;
+        let err = model3
+            .fit_with_options(false, 7, false)
+            .expect_err("fast=false AGQ must reject invalid RE shape before fitting");
+        assert!(matches!(err, MixedModelError::InvalidArgument(_)));
+        assert_eq!(
+            model3.lmm.optsum.feval, feval_before,
+            "fast=false invalid AGQ request must not run the joint optimizer",
         );
     }
 
