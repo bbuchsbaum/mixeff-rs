@@ -522,6 +522,40 @@ fn comparison_backed_scenarios_compute_certification_times_and_metrics() {
     }
 }
 
+/// Extract the source of the test function named `name` from a `#[cfg(test)]`
+/// module. The block runs from `fn {name}` up to the next test-module item
+/// (`\n    fn ` or `\n    #[`), which is enough to capture the fixture/formula
+/// setup at the top of every unit test we point at. Returns `None` if the
+/// function is not present.
+fn test_source_block<'a>(src: &'a str, name: &str) -> Option<&'a str> {
+    let start = src.find(&format!("fn {name}"))?;
+    let rest = &src[start..];
+    // Skip past the signature so the boundary scan doesn't stop on it.
+    let after_sig = rest.find('{').map(|i| i + 1).unwrap_or(0);
+    let end = rest[after_sig..]
+        .find("\n    fn ")
+        .or_else(|| rest[after_sig..].find("\n    #["))
+        .map(|i| after_sig + i)
+        .unwrap_or(rest.len());
+    Some(&rest[..end])
+}
+
+/// A unit-test scenario is consistent with the test it points at only when
+/// the test actually constructs the declared formula and family. This is the
+/// guard that comparison-backed rows get for free (by key-matching the
+/// results JSON) but unit-test rows previously lacked.
+fn unit_scenario_matches_test(block: &str, formula: &str, family: &str) -> bool {
+    if !block.contains(formula) {
+        return false;
+    }
+    if family == "Gaussian" {
+        // Gaussian/Identity unit tests drive the LMM directly.
+        block.contains("LinearMixedModel")
+    } else {
+        block.contains(&format!("Family::{family}"))
+    }
+}
+
 #[test]
 fn unit_test_backed_recovery_scenarios_point_to_existing_tests() {
     let scoreboard = difficult_scoreboard();
@@ -541,12 +575,28 @@ fn unit_test_backed_recovery_scenarios_point_to_existing_tests() {
             .unit_test_name
             .as_deref()
             .unwrap_or_else(|| panic!("{}: unit_test_name is required", scenario.id));
-        let needle = format!("fn {test_name}");
+
+        let block = test_source_block(&linear_rs, test_name)
+            .or_else(|| test_source_block(&generalized_rs, test_name))
+            .unwrap_or_else(|| {
+                panic!(
+                    "{}: unit-test backed scenario points to missing test {test_name}",
+                    scenario.id
+                )
+            });
+
+        // The core anti-drift guard: the referenced test must actually fit
+        // the formula/family the manifest claims for this scenario, not just
+        // happen to share a function name.
         assert!(
-            linear_rs.contains(&needle) || generalized_rs.contains(&needle),
-            "{}: unit-test backed scenario points to missing test {test_name}",
-            scenario.id
+            unit_scenario_matches_test(block, &scenario.formula, &scenario.family),
+            "{}: unit-test {test_name} does not construct the declared scenario \
+             (formula `{}`, family `{}`); the manifest and the test have drifted",
+            scenario.id,
+            scenario.formula,
+            scenario.family
         );
+
         assert!(
             scenario
                 .required_metrics
@@ -561,4 +611,38 @@ fn unit_test_backed_recovery_scenarios_point_to_existing_tests() {
         unit_rows > 0,
         "at least one unit-test-backed recovery row is required"
     );
+}
+
+/// Acceptance guard for bd-01KRVGFDKGK71KXHA0X5CAANVE: a deliberately drifted
+/// unit-test scenario must be rejected by the contract above. This pins the
+/// detector itself so the guard cannot silently regress to a name-only check.
+#[test]
+fn drifted_unit_test_scenario_is_rejected() {
+    let synthetic = "    fn t_block() {\n        \
+        let formula = parse_formula(\"y ~ 1 + x + (1 | group)\").unwrap();\n        \
+        let model = GeneralizedLinearMixedModel::new(formula, &data, Family::Gamma, None);\n    }\n    \
+        fn next_test() {}\n";
+    let block = test_source_block(synthetic, "t_block").expect("block found");
+
+    // Exact declared scenario: accepted.
+    assert!(unit_scenario_matches_test(
+        block,
+        "y ~ 1 + x + (1 | group)",
+        "Gamma"
+    ));
+    // Drifted formula (the bd-01KRVA2201SY7W2TSZEANCERG5 Finding 1 case): rejected.
+    assert!(!unit_scenario_matches_test(
+        block,
+        "y ~ 1 + x + (1 | g)",
+        "Gamma"
+    ));
+    // Drifted family: rejected.
+    assert!(!unit_scenario_matches_test(
+        block,
+        "y ~ 1 + x + (1 | group)",
+        "Poisson"
+    ));
+    // Missing function: no block, so the real test would panic with a clear
+    // missing-test message.
+    assert!(test_source_block(synthetic, "absent_test").is_none());
 }

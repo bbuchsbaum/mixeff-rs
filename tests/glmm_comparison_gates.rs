@@ -9,6 +9,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 
+use mixeff_rs::datasets;
+use mixeff_rs::formula::parse_formula;
+use mixeff_rs::model::data::DataFrame;
+use mixeff_rs::model::generalized::GeneralizedLinearMixedModel;
+use mixeff_rs::model::traits::{Family as ModelFamily, LinkFunction, MixedModelFit};
 use serde_json::Value;
 
 const BETA_ABS_TOL: f64 = 1e-3;
@@ -308,6 +313,82 @@ fn within_tol(delta: f64, reference_scale: f64, abs_tol: f64, rel_tol: f64) -> b
     delta <= abs_tol || delta <= reference_scale.abs().max(f64::EPSILON) * rel_tol
 }
 
+fn construct_poisson_log_model(row: ExpectedGlmmRow) -> GeneralizedLinearMixedModel {
+    assert_eq!(row.family, "Poisson");
+    assert_eq!(row.link, "Log");
+    assert_eq!(row.estimator, "Laplace");
+    let (data, _) = datasets::load(row.dataset).expect("load GLMM fixture dataset");
+    let (formula, offset) = if row.dataset == "gopherdat2" {
+        let area = data
+            .numeric("Area")
+            .expect("gopherdat2 must expose numeric Area for offset");
+        (
+            "shells ~ year + prev + (1 | Site)".to_string(),
+            Some(area.iter().map(|value| value.ln()).collect::<Vec<_>>()),
+        )
+    } else {
+        (row.formula.to_string(), None)
+    };
+    let formula = parse_formula(&formula).expect("parse GLMM fixture formula");
+    match offset {
+        Some(offset) => GeneralizedLinearMixedModel::new_with_offset(
+            formula,
+            &data,
+            ModelFamily::Poisson,
+            Some(LinkFunction::Log),
+            offset,
+        ),
+        None => GeneralizedLinearMixedModel::new(
+            formula,
+            &data,
+            ModelFamily::Poisson,
+            Some(LinkFunction::Log),
+        ),
+    }
+    .expect("construct GLMM fixture model")
+}
+
+fn fit_poisson_log_fast_path(row: ExpectedGlmmRow) -> GeneralizedLinearMixedModel {
+    let mut model = construct_poisson_log_model(row);
+    model
+        .fit_with_options(true, 1, false)
+        .expect("fit GLMM fixture model");
+    model
+}
+
+fn synthetic_overdispersed_poisson_model() -> GeneralizedLinearMixedModel {
+    let mut data = DataFrame::new();
+    let mut y = Vec::new();
+    let mut x = Vec::new();
+    let mut group = Vec::new();
+    let mut obs = Vec::new();
+    let group_effects = [-0.7, 0.2, 0.8, -0.3];
+    for (g, effect) in group_effects.iter().enumerate() {
+        for j in 0..6 {
+            let xv = j as f64 - 2.5;
+            let eta = 0.4 + 0.18 * xv + effect;
+            let base = eta.exp();
+            let overdispersion_bump = if j % 3 == 0 { 2.0 } else { 0.0 };
+            y.push((base + overdispersion_bump).round().max(0.0));
+            x.push(xv);
+            group.push(format!("g{}", g + 1));
+            obs.push(format!("o{}_{}", g + 1, j + 1));
+        }
+    }
+    data.add_numeric("y", y).unwrap();
+    data.add_numeric("x", x).unwrap();
+    data.add_categorical("group", group).unwrap();
+    data.add_categorical("obs", obs).unwrap();
+    let formula = parse_formula("y ~ 1 + x + (1 | group) + (1 | obs)").unwrap();
+    GeneralizedLinearMixedModel::new(
+        formula,
+        &data,
+        ModelFamily::Poisson,
+        Some(LinkFunction::Log),
+    )
+    .expect("construct synthetic Poisson GLMM")
+}
+
 fn assert_ok_glmm_payload(record: &Value, label: &str, key: &str) {
     let beta = numeric_array(record, "beta", key);
     let coef_names = record
@@ -493,6 +574,39 @@ fn glmm_lme4_matching_rows_stay_within_numeric_gates() {
 }
 
 #[test]
+fn glmm_included_response_constant_objective_matches_lme4_for_poisson_parity_rows() {
+    let r = read_json("comparison/lme4_results.json");
+    let r_by_key = results_by_key(&r, "lme4_results.json");
+
+    for row in [ARABIDOPSIS, GOPHERDAT2] {
+        let key = expected_row_key(row);
+        let mut model = fit_poisson_log_fast_path(row);
+        let dropped = model.deviance(1);
+        let offset = model.response_constants_offset();
+        let included = model.deviance_with_response_constants(1);
+        assert!(
+            offset > 0.0,
+            "{key}: Poisson response-constant offset should be positive"
+        );
+        assert!(
+            (included - (dropped + offset)).abs() <= 1e-8,
+            "{key}: included objective must equal dropped objective plus response constants"
+        );
+
+        let r_record = r_by_key
+            .get(&key)
+            .unwrap_or_else(|| panic!("lme4_results.json missing GLMM row {key}"));
+        assert_eq!(field_str(r_record, "response_constants", &key), "included");
+        let lme4_objective = field_f64(r_record, "objective", &key);
+        let delta = (included - lme4_objective).abs();
+        assert!(
+            delta <= 0.02,
+            "{key}: Rust included-constants objective {included:.6} should match lme4 -2logLik {lme4_objective:.6}; delta={delta:.6}"
+        );
+    }
+}
+
+#[test]
 fn glmm_fast_path_gaps_match_mixedmodels_jl_fast_oracle() {
     let fixture = read_json("tests/fixtures/parity/glmm_fast_oracles.json");
     assert_eq!(
@@ -581,6 +695,199 @@ fn glmm_fast_path_gaps_match_mixedmodels_jl_fast_oracle() {
     assert_eq!(
         covered, expected_covered,
         "fast-oracle fixture must cover every fast-PIRLS known gap"
+    );
+}
+
+#[test]
+fn grouseticks_joint_oracle_pins_fast_false_target_without_promoting_current_fast_path() {
+    let fixture = read_json("tests/fixtures/parity/glmm_joint_oracles.json");
+    assert_eq!(
+        fixture.get("schema_version").and_then(Value::as_str),
+        Some("1.0.0")
+    );
+    let rows = fixture
+        .get("rows")
+        .and_then(Value::as_array)
+        .expect("glmm joint oracle fixture must contain rows[]");
+    assert_eq!(
+        rows.len(),
+        1,
+        "joint oracle fixture currently pins grouseticks"
+    );
+
+    let oracle = &rows[0];
+    let key = expected_key(
+        field_str(oracle, "dataset", "glmm_joint_oracles.json"),
+        field_str(oracle, "formula", "glmm_joint_oracles.json"),
+        field_str(oracle, "family", "glmm_joint_oracles.json"),
+        field_str(oracle, "link", "glmm_joint_oracles.json"),
+        field_str(oracle, "estimator", "glmm_joint_oracles.json"),
+    );
+    assert_eq!(key, expected_row_key(GROUSETICKS));
+    assert!(
+        field_str(oracle, "classification", &key).contains("future fast=false"),
+        "{key}: fixture classification must keep this as a future joint target"
+    );
+
+    let mm_fast_true = oracle
+        .get("mixedmodels_jl_fast_true")
+        .unwrap_or_else(|| panic!("{key}: missing MixedModels.jl fast=true oracle"));
+    let mm_fast_false = oracle
+        .get("mixedmodels_jl_fast_false")
+        .unwrap_or_else(|| panic!("{key}: missing MixedModels.jl fast=false oracle"));
+    let lme4 = oracle
+        .get("lme4_glmer")
+        .unwrap_or_else(|| panic!("{key}: missing lme4 oracle"));
+    let tolerances = oracle
+        .get("tolerances")
+        .unwrap_or_else(|| panic!("{key}: missing tolerances"));
+
+    assert_eq!(field_str(mm_fast_true, "fit_mode", &key), "fast=true");
+    assert_eq!(field_str(mm_fast_false, "fit_mode", &key), "fast=false");
+    assert_eq!(field_str(lme4, "fit_mode", &key), "joint");
+    assert_eq!(
+        field_str(mm_fast_true, "response_constants", &key),
+        "dropped"
+    );
+    assert_eq!(
+        field_str(mm_fast_false, "response_constants", &key),
+        "dropped"
+    );
+    assert_eq!(field_str(lme4, "response_constants", &key), "included");
+
+    let rust = read_json("comparison/rust_results.json");
+    let rust_by_key = results_by_key(&rust, "rust_results.json");
+    let rust_record = rust_by_key
+        .get(&key)
+        .unwrap_or_else(|| panic!("rust_results.json missing GLMM row {key}"));
+    assert_eq!(
+        status(rust_record),
+        "ok",
+        "{key}: current Rust fast path must fit"
+    );
+
+    let objective_delta = (field_f64(rust_record, "objective", &key)
+        - field_f64(mm_fast_true, "objective", &key))
+    .abs();
+    assert!(
+        objective_delta <= field_f64(tolerances, "rust_fast_true_objective_abs_tol", &key),
+        "{key}: Rust fast=true objective must match MixedModels.jl fast=true oracle, got {objective_delta:.8}"
+    );
+
+    let rust_beta = numeric_array(rust_record, "beta", &key);
+    let fast_true_beta = numeric_array(mm_fast_true, "beta", &key);
+    let fast_true_beta_delta = max_abs_delta(
+        &rust_beta,
+        &fast_true_beta,
+        &format!("{key}: fast=true beta"),
+    );
+    assert!(
+        fast_true_beta_delta <= field_f64(tolerances, "rust_fast_true_beta_abs_tol", &key),
+        "{key}: Rust fast=true beta must match MixedModels.jl fast=true oracle, got {fast_true_beta_delta:.8}"
+    );
+
+    let rust_theta_abs = numeric_array(rust_record, "theta", &key)
+        .into_iter()
+        .map(f64::abs)
+        .collect::<Vec<_>>();
+    let fast_true_theta_abs = numeric_array(mm_fast_true, "theta", &key)
+        .into_iter()
+        .map(f64::abs)
+        .collect::<Vec<_>>();
+    let fast_true_theta_delta = max_abs_delta(
+        &rust_theta_abs,
+        &fast_true_theta_abs,
+        &format!("{key}: fast=true abs(theta)"),
+    );
+    assert!(
+        fast_true_theta_delta <= field_f64(tolerances, "rust_fast_true_theta_abs_tol", &key),
+        "{key}: Rust fast=true theta must match MixedModels.jl fast=true oracle, got {fast_true_theta_delta:.8}"
+    );
+
+    let fast_false_beta = numeric_array(mm_fast_false, "beta", &key);
+    let lme4_beta = numeric_array(lme4, "beta", &key);
+    let fast_false_lme4_beta_delta = max_abs_delta(
+        &fast_false_beta,
+        &lme4_beta,
+        &format!("{key}: fast=false/lme4 beta"),
+    );
+    assert!(
+        fast_false_lme4_beta_delta <= field_f64(tolerances, "fast_false_lme4_beta_abs_tol", &key),
+        "{key}: MixedModels.jl fast=false must reproduce the lme4 beta target, got {fast_false_lme4_beta_delta:.8}"
+    );
+
+    let fast_false_theta_abs = numeric_array(mm_fast_false, "theta", &key)
+        .into_iter()
+        .map(f64::abs)
+        .collect::<Vec<_>>();
+    let lme4_theta_abs = numeric_array(lme4, "theta", &key)
+        .into_iter()
+        .map(f64::abs)
+        .collect::<Vec<_>>();
+    let fast_false_lme4_theta_delta = max_abs_delta(
+        &fast_false_theta_abs,
+        &lme4_theta_abs,
+        &format!("{key}: fast=false/lme4 abs(theta)"),
+    );
+    assert!(
+        fast_false_lme4_theta_delta <= field_f64(tolerances, "fast_false_lme4_theta_abs_tol", &key),
+        "{key}: MixedModels.jl fast=false must reproduce the lme4 theta scale target, got {fast_false_lme4_theta_delta:.8}"
+    );
+
+    let beta_gap_current_to_joint = max_abs_delta(
+        &rust_beta,
+        &lme4_beta,
+        &format!("{key}: current Rust vs joint beta"),
+    );
+    assert!(
+        beta_gap_current_to_joint > 0.1,
+        "{key}: fixture must keep the current fast-PIRLS beta gap visible until fast=false lands"
+    );
+}
+
+#[cfg(feature = "nlopt")]
+#[test]
+fn experimental_joint_laplace_improves_included_objective_without_changing_public_fast_false() {
+    let key = "synthetic overdispersed Poisson GLMM";
+
+    let mut profiled = synthetic_overdispersed_poisson_model();
+    profiled
+        .fit_with_options(true, 1, false)
+        .expect("profiled synthetic fit");
+    let profiled_objective = profiled.deviance_with_response_constants(1);
+
+    let mut joint = synthetic_overdispersed_poisson_model();
+    joint
+        .fit_experimental_joint_laplace_with_response_constants(false)
+        .expect("experimental joint fit");
+    let joint_objective = joint.deviance_with_response_constants(1);
+    assert!(
+        joint_objective < profiled_objective - 1.0e-3,
+        "{key}: experimental joint fit should reduce included objective vs profiled start; \
+         profiled={profiled_objective:.6}, joint={joint_objective:.6}"
+    );
+    assert!(
+        joint
+            .opt_summary()
+            .return_value
+            .contains("EXPERIMENTAL_JOINT"),
+        "{key}: opt summary must label the path experimental"
+    );
+
+    assert!(
+        MixedModelFit::coef(&joint)
+            .iter()
+            .all(|value| value.is_finite()),
+        "{key}: experimental joint beta must stay finite"
+    );
+
+    let mut public_fast_false = synthetic_overdispersed_poisson_model();
+    let error = public_fast_false
+        .fit_with_options(false, 1, false)
+        .expect_err("stable fast=false must remain unsupported");
+    assert!(
+        error.to_string().contains("fast = false") && error.to_string().contains("not implemented"),
+        "{key}: public fast=false must remain an explicit unsupported path, got {error}"
     );
 }
 

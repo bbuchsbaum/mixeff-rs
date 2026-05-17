@@ -1,0 +1,80 @@
+{
+  "schema_version": "1.0.0",
+  "generated_at": "2026-05-17",
+  "source": "Local R/lme4 and Julia/MixedModels.jl oracle run for the grouseticks GLMM fast=false certification path.",
+  "rows": [
+    {
+      "dataset": "grouseticks",
+      "formula": "TICKS ~ 1 + YEAR + cHEIGHT + (1 | BROOD) + (1 | INDEX) + (1 | LOCATION)",
+      "family": "Poisson",
+      "link": "Log",
+      "estimator": "Laplace",
+      "n_obs": 403,
+      "coef_names": ["(Intercept)", "YEAR96", "YEAR97", "cHEIGHT"],
+      "mixedmodels_jl_fast_true": {
+        "engine": "MixedModels.jl",
+        "engine_version": "5.3.0",
+        "fit_mode": "fast=true",
+        "objective": 851.4046370786074,
+        "objective_definition": "profiled_glmm_deviance",
+        "response_constants": "dropped",
+        "beta": [0.5293132307464635, 1.107297375422252, -0.9184126698895163, -0.022191955068623922],
+        "theta": [0.5369701510299283, 0.7362810985100142, -0.557282622553529],
+        "coef_names": ["(Intercept)", "year: 1996", "year: 1997", "ch"],
+        "optimizer": "LN_NEWUOA",
+        "optimizer_backend": "nlopt",
+        "optimizer_return_code": "FTOL_REACHED",
+        "optimizer_fevals": 69,
+        "warnings": []
+      },
+      "mixedmodels_jl_fast_false": {
+        "engine": "MixedModels.jl",
+        "engine_version": "5.3.0",
+        "fit_mode": "fast=false",
+        "objective": 849.5439804696667,
+        "objective_definition": "joint_laplace_deviance",
+        "response_constants": "dropped",
+        "beta": [0.37286377886737854, 1.1803055006019116, -0.978790101678297, -0.02376056820609365],
+        "theta": [0.5415058119872868, 0.7500421425979881, -0.5287168398240549],
+        "coef_names": ["(Intercept)", "year: 1996", "year: 1997", "ch"],
+        "optimizer": "LN_NEWUOA",
+        "optimizer_backend": "nlopt",
+        "optimizer_return_code": "FTOL_REACHED",
+        "optimizer_fevals": 1097,
+        "warnings": []
+      },
+      "lme4_glmer": {
+        "engine": "lme4",
+        "engine_version": "2.0.1",
+        "fit_mode": "joint",
+        "objective": 1780.5427069877064,
+        "loglik": -890.2713534938532,
+        "aic": 1794.5427069877064,
+        "bic": 1822.5352629213332,
+        "objective_definition": "minus_two_loglik",
+        "response_constants": "included",
+        "beta": [0.37279081475425835, 1.1803976195675934, -0.9786949591951263, -0.023760341211147014],
+        "theta": [0.5415086508305316, 0.7500282279378601, 0.5287323222170209],
+        "coef_names": ["(Intercept)", "YEAR96", "YEAR97", "cHEIGHT"],
+        "optimizer": "Nelder_Mead",
+        "optimizer_backend": "lme4",
+        "optimizer_return_code": "0",
+        "optimizer_fevals": 992,
+        "is_singular": false,
+        "warnings": []
+      },
+      "tolerances": {
+        "rust_fast_true_objective_abs_tol": 0.001,
+        "rust_fast_true_beta_abs_tol": 0.0005,
+        "rust_fast_true_theta_abs_tol": 0.002,
+        "fast_false_lme4_beta_abs_tol": 0.001,
+        "fast_false_lme4_theta_abs_tol": 0.001
+      },
+      "classification": "grouseticks tiebreaker oracle: current Rust fast=true must match MixedModels.jl fast=true; future fast=false must target the MixedModels.jl fast=false/lme4 joint beta solution, while objective values remain non-comparable until response constants are included."
+    }
+  ],
+  "notes": [
+    "MixedModels.jl fast=false and lme4 agree on the joint-estimation beta target but use different objective constant conventions.",
+    "The MixedModels.jl theta sign for the third scalar random effect is a Cholesky sign convention; tests compare absolute theta values for cross-engine scalar scales."
+  ]
+}

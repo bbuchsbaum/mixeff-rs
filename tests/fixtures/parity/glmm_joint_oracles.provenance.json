@@ -1,0 +1,9 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-05-17T00:00:00Z",
+  "crate_commit": null,
+  "regenerator": "manual Rscript and julia --project=MixedModels.jl oracle commands recorded in mote bd-01KRVGV5Q0Z8P0H045AN9HRGBC",
+  "source_case": "datasets/grouseticks/data.csv",
+  "reference_engine": "MixedModels.jl 5.3.0; lme4 2.0.1",
+  "notes": "Julia 1.12.4 with MixedModels.jl 5.3.0; R 4.5.1 with lme4 2.0.1. Julia command created ch = height - mean(height) to match checked-in cHEIGHT. R command used checked-in cHEIGHT and factor levels YEAR=c('95','96','97')."
+}

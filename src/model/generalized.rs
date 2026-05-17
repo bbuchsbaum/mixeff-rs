@@ -9,6 +9,7 @@
 //! the conditional modes, with optional adaptive Gauss-Hermite quadrature.
 
 use nalgebra::{DMatrix, DVector};
+use statrs::function::gamma::ln_gamma;
 #[cfg(not(feature = "nlopt"))]
 use std::cell::Cell;
 use std::cell::RefCell;
@@ -861,6 +862,95 @@ impl GeneralizedLinearMixedModel {
         dev + u_penalty + self.lmm_logdet()
     }
 
+    fn u_penalty(&self) -> f64 {
+        self.u
+            .iter()
+            .map(|u| u.iter().map(|x| x * x).sum::<f64>())
+            .sum()
+    }
+
+    fn minus_two_loglik_observation(&self, index: usize) -> f64 {
+        let y = self.y[index];
+        let mu = self.mu[index].max(f64::MIN_POSITIVE);
+        match self.family {
+            Family::Bernoulli | Family::Binomial => {
+                let trials = self.case_weight(index).max(0.0);
+                let successes = (trials * y).clamp(0.0, trials);
+                let failures = trials - successes;
+                let p = mu.clamp(1.0e-15, 1.0 - 1.0e-15);
+                let log_choose = if trials == 0.0 {
+                    0.0
+                } else {
+                    ln_gamma(trials + 1.0) - ln_gamma(successes + 1.0) - ln_gamma(failures + 1.0)
+                };
+                let success_term = if successes == 0.0 {
+                    0.0
+                } else {
+                    successes * p.ln()
+                };
+                let failure_term = if failures == 0.0 {
+                    0.0
+                } else {
+                    failures * (1.0 - p).ln()
+                };
+                -2.0 * (log_choose + success_term + failure_term)
+            }
+            Family::Poisson => {
+                let count_term = if y == 0.0 { 0.0 } else { y * mu.ln() };
+                -2.0 * (count_term - mu - ln_gamma(y + 1.0))
+            }
+            Family::Gamma => {
+                let phi = self.dispersion(true).max(f64::MIN_POSITIVE);
+                let shape = 1.0 / phi;
+                let scale = mu * phi;
+                -2.0 * ((shape - 1.0) * y.ln() - y / scale - shape * scale.ln() - ln_gamma(shape))
+            }
+            Family::Normal => {
+                let variance = self.dispersion(true).max(f64::MIN_POSITIVE);
+                let residual = y - mu;
+                (2.0 * std::f64::consts::PI * variance).ln() + residual * residual / variance
+            }
+            Family::InverseGaussian => {
+                let phi = self.dispersion(true).max(f64::MIN_POSITIVE);
+                (2.0 * std::f64::consts::PI * phi * y.powi(3)).ln()
+                    + (y - mu).powi(2) / (phi * y * mu * mu)
+            }
+        }
+    }
+
+    /// Additive difference between the current dropped-constant Laplace
+    /// objective and the same conditional objective with response constants
+    /// retained.
+    ///
+    /// For Poisson and binomial-family GLMMs this is an observation-only
+    /// constant. Dispersion families also depend on the current scale
+    /// convention, so callers should treat those values as explicit metadata
+    /// rather than as a cross-engine parity claim.
+    pub fn response_constants_offset(&self) -> f64 {
+        let dropped: f64 = (0..self.y.len())
+            .map(|i| self.case_weight(i) * self.dev_resid_component(self.y[i], self.mu[i]))
+            .sum();
+        let included: f64 = (0..self.y.len())
+            .map(|i| self.minus_two_loglik_observation(i))
+            .sum();
+        included - dropped
+    }
+
+    /// Laplace objective with response normalising constants retained.
+    ///
+    /// This is the objective convention needed for meaningful comparison to
+    /// `lme4`'s `-2 logLik` scale. It deliberately lives alongside
+    /// [`laplace_objective`](Self::laplace_objective) so current fast-PIRLS
+    /// fitting and comparison artifacts keep their existing dropped-constant
+    /// semantics until the certified joint GLMM path lands.
+    pub fn laplace_objective_with_response_constants(&self) -> f64 {
+        (0..self.y.len())
+            .map(|i| self.minus_two_loglik_observation(i))
+            .sum::<f64>()
+            + self.u_penalty()
+            + self.lmm_logdet()
+    }
+
     /// Deviance of the GLMM.
     ///
     /// For `n_agq <= 1`, returns the Laplace approximation
@@ -963,6 +1053,19 @@ impl GeneralizedLinearMixedModel {
         let log_mult: f64 = mult.iter().map(|m| m.ln()).sum();
         let log_sd: f64 = sd.iter().map(|s| s.ln()).sum();
         sum_devc0 - 2.0 * (log_mult + log_sd)
+    }
+
+    /// Deviance with response normalising constants retained.
+    ///
+    /// For `n_agq <= 1`, this is the Laplace objective on the `-2 logLik`
+    /// scale. For AGQ, the quadrature objective is shifted by the same
+    /// response-constant offset used by the Laplace path.
+    pub fn deviance_with_response_constants(&mut self, n_agq: usize) -> f64 {
+        if n_agq <= 1 {
+            return self.laplace_objective_with_response_constants();
+        }
+        let offset = self.response_constants_offset();
+        self.deviance(n_agq) + offset
     }
 
     fn case_weight(&self, obs: usize) -> f64 {
@@ -1203,6 +1306,132 @@ impl GeneralizedLinearMixedModel {
             return Err(MixedModelError::AlreadyFitted);
         }
         self.fit_with_options_impl(n_agq, verbose)
+    }
+
+    /// Experimental opt-in joint GLMM Laplace fit.
+    ///
+    /// This prototype optimizes `[β; θ]` against the included-response-
+    /// constants Laplace objective. It is intentionally not wired to the
+    /// stable `fast = false` public option: the certified joint optimizer still
+    /// needs stationarity, covariance-state, fallback, and scorecard evidence
+    /// before it can be a supported path.
+    #[cfg(feature = "nlopt")]
+    pub fn fit_experimental_joint_laplace_with_response_constants(
+        &mut self,
+        verbose: bool,
+    ) -> Result<&mut Self> {
+        if self.lmm.optsum.feval > 0 {
+            return Err(MixedModelError::AlreadyFitted);
+        }
+        self.validate_agq(1)?;
+
+        // Use the supported fast path as the deterministic start. This keeps
+        // the prototype focused on whether joint [β; θ] can improve the same
+        // included-constants objective, without changing default behavior.
+        self.fit_with_options_impl(1, verbose)?;
+        let start_beta = self.beta.as_slice().to_vec();
+        let start_theta = self.theta.clone();
+        let profiled_start_objective = self.deviance_with_response_constants(1);
+        self.fit_experimental_joint_laplace_from_start(
+            start_beta,
+            start_theta,
+            profiled_start_objective,
+        )
+    }
+
+    #[cfg(feature = "nlopt")]
+    fn fit_experimental_joint_laplace_from_start(
+        &mut self,
+        start_beta: Vec<f64>,
+        start_theta: Vec<f64>,
+        profiled_start_objective: f64,
+    ) -> Result<&mut Self> {
+        use nlopt::{Algorithm as NloptAlgorithm, Nlopt, Target as NloptTarget};
+
+        let n_beta = self.beta.len();
+        let n_theta = self.theta.len();
+        let n_params = n_beta + n_theta;
+        let mut initial = start_beta;
+        initial.extend(start_theta);
+        debug_assert_eq!(initial.len(), n_params);
+
+        let mut lower_bounds = vec![f64::NEG_INFINITY; n_beta];
+        lower_bounds.extend(self.lmm.lower_bounds());
+        self.lmm.optsum.optimizer = Optimizer::NloptBobyqa;
+        self.lmm.optsum.backend = Optimizer::NloptBobyqa.canonical_backend();
+        self.lmm.optsum.finitial = profiled_start_objective;
+
+        let feval_count = std::cell::Cell::new(0i64);
+        let fit_log: Rc<RefCell<Vec<FitLogEntry>>> = Rc::new(RefCell::new(Vec::new()));
+        let model = std::cell::RefCell::new(self);
+        let obj_fn = |params: &[f64], _grad: Option<&mut [f64]>, _data: &mut ()| -> f64 {
+            feval_count.set(feval_count.get() + 1);
+            let objective = model
+                .borrow_mut()
+                .joint_laplace_deviance_at_params(params, n_beta);
+            fit_log.borrow_mut().push(FitLogEntry {
+                theta: params.to_vec(),
+                objective,
+            });
+            objective
+        };
+
+        let mut optimizer = Nlopt::new(
+            NloptAlgorithm::Bobyqa,
+            n_params,
+            obj_fn,
+            NloptTarget::Minimize,
+            (),
+        );
+        optimizer.set_lower_bounds(&lower_bounds).ok();
+        optimizer.set_ftol_rel(1e-10).ok();
+        optimizer.set_ftol_abs(1e-7).ok();
+        optimizer.set_maxeval(200).ok();
+        let mut initial_step = vec![0.1; n_beta];
+        initial_step.extend(vec![0.5; n_theta]);
+        optimizer.set_initial_step(&initial_step).ok();
+
+        let mut params = initial;
+        let nlopt_result = optimizer.optimize(&mut params);
+        drop(optimizer);
+
+        let me = model.into_inner();
+        let final_objective = me.joint_laplace_deviance_at_params(&params, n_beta);
+        me.refresh_dispersion();
+        me.lmm.optsum.return_value = match nlopt_result {
+            Ok((status, _fmin)) => format!("EXPERIMENTAL_JOINT:{status:?}"),
+            Err((status, _fmin)) => format!("EXPERIMENTAL_JOINT_FAILED:{status:?}"),
+        };
+        me.lmm.optsum.feval = feval_count.get();
+        me.lmm.optsum.fit_log = rc_refcell_into_inner_or_clone(fit_log);
+        me.lmm.optsum.fmin = final_objective;
+        me.lmm.optsum.final_params = params;
+        me.lmm.compiler_artifact.optimizer_certificate = None;
+        me.refresh_binomial_separation_diagnostics();
+        me.refresh_near_unit_random_effect_correlation_diagnostics();
+        Ok(me)
+    }
+
+    #[cfg(feature = "nlopt")]
+    fn joint_laplace_deviance_at_params(&mut self, params: &[f64], n_beta: usize) -> f64 {
+        if params.len() != n_beta + self.theta.len()
+            || !params.iter().all(|value| value.is_finite())
+        {
+            return f64::INFINITY;
+        }
+        self.beta = DVector::from_column_slice(&params[..n_beta]);
+        let theta = &params[n_beta..];
+        match self.update_pirls_at_theta(theta, false) {
+            Ok(()) => {
+                let deviance = self.deviance_with_response_constants(1);
+                if deviance.is_finite() {
+                    deviance
+                } else {
+                    f64::INFINITY
+                }
+            }
+            Err(_) => f64::INFINITY,
+        }
     }
 
     fn reset_for_refit(&mut self, new_y: Option<&[f64]>) -> Result<()> {
@@ -2576,8 +2805,7 @@ mod tests {
         for grp in 0..5 {
             for obs in 0..8 {
                 let xv = obs as f64 - 3.5;
-                let eta =
-                    0.6 + 0.05 * xv + 0.01 * xv * xv + [-0.2, 0.1, 0.0, 0.15, -0.05][grp];
+                let eta = 0.6 + 0.05 * xv + 0.01 * xv * xv + [-0.2, 0.1, 0.0, 0.15, -0.05][grp];
                 y.push(eta.exp().round().max(1.0));
                 x.push(xv);
                 g.push(format!("g{}", grp + 1));
@@ -2589,10 +2817,7 @@ mod tests {
         data.add_categorical("g", g).unwrap();
 
         let formula = parse_formula("y ~ 1 + x + I(x^2) + (1 | g)").unwrap();
-        assert!(formula
-            .derived
-            .iter()
-            .any(|d| d.label == "I(x^2)"));
+        assert!(formula.derived.iter().any(|d| d.label == "I(x^2)"));
         let mut model =
             GeneralizedLinearMixedModel::new(formula, &data, Family::Poisson, None).unwrap();
         model.fit().unwrap();
