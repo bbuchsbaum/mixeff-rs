@@ -4252,8 +4252,7 @@ mod tests {
 
     #[cfg(feature = "nlopt")]
     #[test]
-    #[ignore = "phase-6 diagnostic probe"]
-    fn probe_cbpp_joint_objective_at_lme4_parameters() {
+    fn experimental_joint_cbpp_objective_still_differs_from_lme4() {
         let (data, _) = crate::datasets::load("cbpp").unwrap();
         let incidence = data.numeric("incidence").unwrap();
         let size = data.numeric("size").unwrap();
@@ -4279,13 +4278,23 @@ mod tests {
             weights,
         )
         .unwrap();
-        let params = vec![-1.3983, -0.9919, -1.1282, -1.5797, 0.6421];
+        let params = vec![
+            -1.398342864233420,
+            -0.991924975185999,
+            -1.128216216147423,
+            -1.579745413889423,
+            0.642069926557109,
+        ];
         let objective = model.joint_laplace_deviance_at_params(&params, 4);
-        println!("cbpp lme4 params in Rust joint objective: {objective:.9}");
-        println!(
-            "cbpp conditional theta={:?}; beta={:?}",
-            model.theta,
-            model.beta.as_slice()
+        let lme4_objective = 184.053132779073508;
+        let delta = (objective - lme4_objective).abs();
+        assert!(
+            delta > 0.05,
+            "cbpp now matches lme4's joint objective at the lme4 optimum; update the phase-6 promotion gate"
+        );
+        assert!(
+            delta < 0.2,
+            "cbpp objective-convention diagnostic drifted unexpectedly: rust={objective:.9}, lme4={lme4_objective:.9}, delta={delta:.9}"
         );
     }
 

@@ -1,6 +1,8 @@
 # Certified Joint GLMM Optimizer Contract
 
-Status: forward-looking design contract. Not implemented. No public API yet.
+Status: forward-looking design contract. A private experimental Laplace
+prototype exists, but it is not certified and is not wired to the public
+`fast = false` API.
 
 This note specifies what a future *certified joint GLMM optimizer* must expose
 before any GLMM row may be promoted from `documented_divergence` to
@@ -31,6 +33,13 @@ The fast-PIRLS profiled path:
 A certified joint optimizer removes the *objective* and *β-estimation*
 mismatch. It must therefore satisfy every requirement below before its rows
 re-enter the `lme4` parity gate.
+
+Current blocker: the experimental joint prototype is useful diagnostic
+machinery, but it is not yet the same objective convention as `lme4`. The
+`cbpp` guard evaluates Rust's current joint objective at the exact local
+`lme4` optimum and still differs by about 0.092 deviance units. Therefore the
+remaining phase-6 work is objective-formulation parity, not merely a larger
+optimizer budget or a scorecard edit.
 
 ## Required surface
 
