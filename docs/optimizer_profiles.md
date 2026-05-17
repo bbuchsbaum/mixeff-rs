@@ -64,6 +64,29 @@ Certificate-aware stopping is
 available for scalar and 2x2 covariance certificates, but it refuses
 invalid-boundary and weak-identification classifications.
 
+### Start Ladder Policy
+
+TrustBQ currently keeps the default start simple: it optimizes from the fitted
+model's existing initial theta and relies on the centralized policy above for
+budget, stall, reuse, cross-term, and certificate-stop behavior. A
+simple-to-complex start ladder is documented but not enabled by default because
+the hard-case benchmark evidence so far points to stopping/budget policy as
+the reliable speed win, while unvalidated restarts risk changing objectives or
+masking boundary diagnostics.
+
+The candidate ladder for future opt-in experiments is:
+
+| Target family | Candidate warm start | Default status | Promotion requirement |
+| --- | --- | --- | --- |
+| Crossed scalar intercepts | fit the largest single grouping term, then add remaining scalar terms | off | lower `time_to_certified_fit` on crossed sparse rows with unchanged objective tolerance |
+| Random intercept/slope blocks | diagonal/zero-correlation block before the full block | off | fewer fevals on vector-RE rows without losing valid rank-deficient certificates |
+| Over-specified random slopes | certified lower-rank face from the covariance KKT certificate | off | active-face benchmark improves fevals or diagnostic stability and records active rank |
+| Badly scaled predictors | internally scaled theta step/radius, not data mutation | off | no ordinary-case slowdown and no coefficient/objective drift |
+
+Until one of those ladders has benchmark-backed evidence, downstream users
+should treat the current TrustBQ profile as single-start, certificate-aware,
+and policy-tuned rather than restart-driven.
+
 TrustBQ stop reasons are also mapped to a stable trace classification inside
 `src/optimizer/trust_bq.rs`:
 
