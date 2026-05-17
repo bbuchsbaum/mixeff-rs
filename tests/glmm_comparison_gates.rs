@@ -362,6 +362,45 @@ fn fit_poisson_log_fast_path(row: ExpectedGlmmRow) -> GeneralizedLinearMixedMode
 }
 
 #[cfg(feature = "nlopt")]
+fn construct_binomial_logit_model(row: ExpectedGlmmRow) -> GeneralizedLinearMixedModel {
+    assert_eq!(row.family, "Binomial");
+    assert_eq!(row.link, "Logit");
+    let (data, _) = datasets::load(row.dataset).expect("load binomial GLMM fixture dataset");
+    if row.dataset == "cbpp" {
+        let incidence = data.numeric("incidence").expect("cbpp incidence column");
+        let size = data.numeric("size").expect("cbpp size column");
+        let proportion: Vec<f64> = incidence
+            .iter()
+            .zip(size.iter())
+            .map(|(&y, &n)| y / n)
+            .collect();
+        let weights = size.to_vec();
+        let mut data = data.clone();
+        data.add_numeric("proportion", proportion)
+            .expect("add cbpp proportion response");
+        let formula =
+            parse_formula("proportion ~ 1 + period + (1 | herd)").expect("parse cbpp formula");
+        return GeneralizedLinearMixedModel::new_with_weights(
+            formula,
+            &data,
+            ModelFamily::Binomial,
+            Some(LinkFunction::Logit),
+            weights,
+        )
+        .expect("construct cbpp binomial GLMM");
+    }
+
+    let formula = parse_formula(row.formula).expect("parse binomial GLMM formula");
+    GeneralizedLinearMixedModel::new(
+        formula,
+        &data,
+        ModelFamily::Binomial,
+        Some(LinkFunction::Logit),
+    )
+    .expect("construct binomial GLMM")
+}
+
+#[cfg(feature = "nlopt")]
 fn synthetic_overdispersed_poisson_model() -> GeneralizedLinearMixedModel {
     let mut data = DataFrame::new();
     let mut y = Vec::new();
@@ -929,6 +968,63 @@ fn experimental_joint_laplace_improves_included_objective_without_changing_publi
     assert!(
         error.to_string().contains("fast = false") && error.to_string().contains("not implemented"),
         "{key}: public fast=false must remain an explicit unsupported path, got {error}"
+    );
+}
+
+#[cfg(feature = "nlopt")]
+#[test]
+fn experimental_joint_binomial_rows_stay_below_promotion_gate() {
+    let rows = [
+        CBPP,
+        CULCITA_BINOMIAL_LAPLACE,
+        CONTRACEPTION_INTERCEPT,
+        CONTRACEPTION_SLOPE,
+    ];
+    let lme4 = read_json("comparison/lme4_results.json");
+    let lme4_by_key = results_by_key(&lme4, "lme4_results.json");
+    let mut passed = Vec::new();
+    let mut missed_objective_gate = Vec::new();
+    for row in rows {
+        let key = expected_row_key(row);
+        let lme4_record = lme4_by_key
+            .get(&key)
+            .unwrap_or_else(|| panic!("lme4_results.json missing GLMM row {key}"));
+
+        let mut joint = construct_binomial_logit_model(row);
+        joint
+            .fit_experimental_joint_laplace_with_response_constants(false)
+            .unwrap_or_else(|err| panic!("{key}: fit experimental joint failed: {err}"));
+
+        let objective = joint.deviance_with_response_constants(1);
+        let lme4_objective = field_f64(lme4_record, "objective", &key);
+        let beta = MixedModelFit::coef(&joint);
+        let theta = joint.theta();
+        let lme4_beta = numeric_array(lme4_record, "beta", &key);
+        let lme4_theta = numeric_array(lme4_record, "theta", &key);
+        let objective_delta = (objective - lme4_objective).abs();
+        let beta_delta = max_abs_delta(beta.as_slice(), &lme4_beta, &format!("{key}: beta"));
+        let theta_delta = max_abs_delta(&theta, &lme4_theta, &format!("{key}: theta"));
+        let status = joint.opt_summary().return_value.clone();
+        let pass = objective_delta <= 1e-4 && beta_delta <= 1e-3 && theta_delta <= 2e-3;
+
+        println!(
+            "promotion probe {key}: pass={pass}; status={status}; objective={objective:.9}; lme4={lme4_objective:.9}; objective_delta={objective_delta:.9}; beta_delta={beta_delta:.9}; theta_delta={theta_delta:.9}; theta={theta:?}; beta={:?}",
+            beta.as_slice()
+        );
+        if pass {
+            passed.push(key);
+        } else if objective_delta > 1e-4 {
+            missed_objective_gate.push(key);
+        }
+    }
+
+    assert!(
+        passed.is_empty(),
+        "binomial GLMM rows now satisfy experimental joint promotion tolerance; promote these rows through the scorecard gate: {passed:?}"
+    );
+    assert!(
+        !missed_objective_gate.is_empty(),
+        "at least one probed binomial row should record why phase 6 is still blocked"
     );
 }
 
