@@ -149,9 +149,6 @@ fn known_glmm_numeric_classification(r: &ResultRecord) -> Option<&'static str> {
         ("cbpp", "Laplace") => Some(
             "small Binomial/Logit row uses the current fast-PIRLS profiled path; lme4 beta gap is tracked until the joint GLMM path is restored",
         ),
-        ("culcitalogreg", "Laplace") => Some(
-            "small Binomial/Logit row uses the current fast-PIRLS profiled path; lme4 beta gap is tracked until the joint GLMM path is restored",
-        ),
         ("culcitalogreg", "AGQ") => Some(
             "Binomial/AGQ row uses the current fast-PIRLS profiled path with AGQ quadrature; lme4 beta gap is tracked until the joint GLMM path is restored",
         ),

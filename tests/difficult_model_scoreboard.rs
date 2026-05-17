@@ -251,6 +251,11 @@ fn comparison_backed<'a>(
         .unwrap_or_else(|| panic!("{label} missing difficult scenario row {key}"))
 }
 
+fn uses_joint_laplace_gate(scenario: &DifficultScenario) -> bool {
+    scenario.rust_certification == "certified_joint_laplace"
+        && scenario.scorecard_class == "release_blocking_parity"
+}
+
 #[test]
 fn difficult_scoreboard_covers_required_axes_and_reuses_parity_scorecard() {
     let scoreboard = difficult_scoreboard();
@@ -378,6 +383,38 @@ fn comparison_backed_scenarios_compute_certification_times_and_metrics() {
     {
         let key = scenario_key(scenario);
         let rust_row = comparison_backed(scenario, &rust, "rust_results.json");
+        if uses_joint_laplace_gate(scenario) {
+            assert!(
+                scenario.required_metrics.iter().any(|m| m == "objective_delta")
+                    && scenario.required_metrics.iter().any(|m| m == "beta_delta")
+                    && scenario.required_metrics.iter().any(|m| m == "theta_delta")
+                    && scenario
+                        .required_metrics
+                        .iter()
+                        .any(|m| m == "certification_status"),
+                "{}: certified joint GLMM rows must declare the metrics verified by glmm_comparison_gates",
+                scenario.id
+            );
+            let lme4_row = comparison_backed(scenario, &lme4, "lme4_results.json");
+            assert_eq!(
+                field_str(lme4_row, "status", &key),
+                "ok",
+                "{}: certified joint GLMM rows still require an ok lme4 reference artifact",
+                scenario.id
+            );
+            assert_eq!(
+                field_str(rust_row, "objective_definition", &key),
+                "joint_glmm_laplace_deviance",
+                "{}: certified joint GLMM row must use the joint objective artifact",
+                scenario.id
+            );
+            assert_eq!(
+                field_str(rust_row, "response_constants", &key),
+                "included",
+                "{}: certified joint GLMM row must retain response constants",
+                scenario.id
+            );
+        }
         assert_eq!(
             field_str(rust_row, "status", &key),
             "ok",

@@ -90,7 +90,7 @@ existing status is insufficient.
 | Difficult-model corpus | Partly represented by comparison fixtures and pathology tests. | Expand through the corpus/scoreboard mote, not by inventing new statuses. |
 | Time-to-certified-fit scoreboard | Implemented as a comparison-backed manifest for selected difficult rows and unit-test recovery cases. | Extend the manifest when adding new pathology classes or comparator workflows. |
 | Public docs | Compiler verdict docs explain how covariance KKT certificates, KKT-guided recovery, and recovered-convergence wording feed the existing verdict surface. | Keep public wording aligned with the existing certificate vocabulary as hard-model support expands. |
-| Certified joint GLMM optimizer | Not implemented; GLMM hard rows stay `documented_divergence`. The prerequisites (objective convention, derivative/stationarity evidence, covariance-certificate compatibility, fallback policy) are specified in `docs/certified_joint_glmm_optimizer_contract.md`. | Build the joint path to extend this certificate stack; only promote a GLMM row when it passes that gate plus the lockstep scorecard/test change. |
+| Certified joint GLMM optimizer | Labelled joint Laplace is available for `fast=false, n_agq <= 1` with the NLopt backend, with labelled fast-PIRLS fallback when certification fails. Certification is row-scoped: `culcitalogreg` Laplace is promoted; other difficult binomial rows stay non-parity until they pass objective, derivative/stationarity, covariance-certificate, fallback, and lockstep scorecard gates. | Keep extending the joint path through the existing certificate stack; promote rows only when they pass the gate in `docs/certified_joint_glmm_optimizer_contract.md` plus the scorecard/test change. |
 
 ## Release Claim
 

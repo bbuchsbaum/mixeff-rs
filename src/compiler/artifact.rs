@@ -163,8 +163,8 @@ impl ModelBoundary {
 /// Post-fit GLMM estimation metadata for downstream wrappers.
 ///
 /// This is intentionally separate from optimizer certificates: it records which
-/// GLMM objective family was actually returned, even when a failed experimental
-/// joint attempt falls back to the supported fast-PIRLS path.
+/// GLMM objective family was actually returned, even when a failed joint
+/// attempt falls back to the supported fast-PIRLS path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GlmmFitMetadata {
     pub estimation_method: String,
@@ -181,8 +181,11 @@ pub struct GlmmFitMetadata {
 impl GlmmFitMetadata {
     pub fn from_opt_summary(opt: &OptSummary) -> Self {
         let status = opt.return_value.as_str();
-        let is_fallback = status.starts_with("EXPERIMENTAL_JOINT_FALLBACK_FAST_PIRLS");
-        let is_joint = status.starts_with("EXPERIMENTAL_JOINT:")
+        let is_fallback = status.starts_with("JOINT_LAPLACE_FALLBACK_FAST_PIRLS")
+            || status.starts_with("EXPERIMENTAL_JOINT_FALLBACK_FAST_PIRLS");
+        let is_joint = status.starts_with("JOINT_LAPLACE:")
+            || status.starts_with("JOINT_LAPLACE_FAILED:")
+            || status.starts_with("EXPERIMENTAL_JOINT:")
             || status.starts_with("EXPERIMENTAL_JOINT_FAILED:");
         let (estimation_method, objective_definition, response_constants, fallback_status) =
             if is_fallback {
@@ -194,7 +197,7 @@ impl GlmmFitMetadata {
                 )
             } else if is_joint {
                 (
-                    "experimental_joint_laplace",
+                    "joint_laplace",
                     "joint_glmm_laplace_deviance",
                     "included",
                     None,

@@ -23,6 +23,7 @@ required_axes = [
 
 certification_statuses = [
   "release_blocking_parity",
+  "certified_joint_laplace",
   "certified_fit",
   "certified_boundary",
   "diagnostic_contract",
@@ -240,9 +241,9 @@ comparator_time_multiplier = 1.0
 comparator_extra_ms = 0.0
 
 [[scenario]]
-id = "culcitalogreg_rare_event_separation"
+id = "culcitalogreg_joint_laplace_parity"
 axis = "glmm_rare_event_separation"
-description = "Small-N binomial GLMM with separation-like, near-non-existent fixed-effect MLE under the fast-PIRLS profiled path."
+description = "Small-N binomial GLMM whose fast-PIRLS path diverges but whose certified fast=false joint Laplace path matches lme4."
 data_source = "datasets/culcitalogreg"
 generator = "checked-in fixture"
 dataset = "culcitalogreg"
@@ -251,12 +252,12 @@ family = "Binomial"
 link = "Logit"
 estimator = "Laplace"
 comparator_engines = ["lme4"]
-release_relevance = "Separation-like binary GLMMs must stay an explicit inference-impacting non-parity diagnostic, never a soft pass, until a certified joint GLMM optimizer lands."
-scorecard_class = "documented_divergence"
-certification_status = "documented_divergence"
-certification_claim = "Rust returns a fast-PIRLS profiled fit with a roughly one-logit-unit fixed-effect gap from lme4; this is inference-impacting non-parity, not optimizer failure."
-required_metrics = ["beta_delta", "theta_delta", "optimizer_status", "singular_status", "warnings", "wall_time_ms", "fevals", "time_to_certified_fit_ms"]
-rust_certification = "fast_pirls_profiled_glmm_non_parity"
+release_relevance = "This is the first certified fast=false GLMM parity row: it proves the joint Laplace path can repair an inference-impacting fast-PIRLS beta gap."
+scorecard_class = "release_blocking_parity"
+certification_status = "certified_joint_laplace"
+certification_claim = "Rust fast=false joint Laplace matches lme4 objective, beta, and theta tolerances with a stationarity certificate and shared covariance-state reporting."
+required_metrics = ["objective_delta", "beta_delta", "theta_delta", "optimizer_status", "certification_status", "warnings", "wall_time_ms", "fevals", "time_to_certified_fit_ms"]
+rust_certification = "certified_joint_laplace"
 comparator_certification = "single_fit"
 rust_time_multiplier = 1.0
 comparator_time_multiplier = 1.0

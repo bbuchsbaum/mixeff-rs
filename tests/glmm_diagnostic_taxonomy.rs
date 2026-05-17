@@ -165,7 +165,9 @@ fn five_glmm_failure_modes_map_to_distinct_artifact_signals() {
     assert_eq!(not_identifiable, "\"not_identifiable\"");
     assert_ne!(penalised, interior);
     assert_ne!(not_identifiable, interior);
-    signals.insert(format!("separation={separation}+{penalised}+{not_identifiable}"));
+    signals.insert(format!(
+        "separation={separation}+{penalised}+{not_identifiable}"
+    ));
 
     // The taxonomy is only useful if the five modes are mutually distinct.
     assert_eq!(
@@ -180,8 +182,8 @@ fn response_constant_convention_is_a_mode_not_a_failure() {
     // The convention difference must coexist with an ok optimizer status: it
     // is a convention, not a fit failure or identification problem.
     let rust = results_by_key("comparison/rust_results.json");
-    let key = "culcitalogreg\nLaplace".to_string();
-    let rust_row = rust.get(&key).expect("rust culcitalogreg Laplace row");
+    let key = "culcitalogreg\nAGQ".to_string();
+    let rust_row = rust.get(&key).expect("rust culcitalogreg AGQ row");
     assert_eq!(
         rust_row.get("response_constants").and_then(Value::as_str),
         Some("dropped")

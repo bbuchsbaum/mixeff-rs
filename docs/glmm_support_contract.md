@@ -37,24 +37,26 @@ Laplace fit. It is faster, but it can be less accurate for inference when the
 profiled approximation is stressed, especially overdispersed Poisson/binomial
 models and observation-level random-effect models.
 
-`fast = false` is reserved for a future joint optimizer path and must return
-an explicit unsupported error rather than silently selecting another
-algorithm. The prerequisites that a future certified joint GLMM optimizer must
-satisfy — objective convention, derivative/stationarity evidence,
-covariance-certificate compatibility, and fallback policy — are specified in
-`docs/certified_joint_glmm_optimizer_contract.md`. No GLMM row may move from
-`documented_divergence` to `release_blocking_parity` until a row passes that
-gate.
+`fast = false` selects a labelled joint Laplace attempt for `n_agq <= 1` when
+the NLopt backend is enabled. It estimates `[β; θ]` on a joint objective with
+response constants retained, records stationarity and covariance evidence when
+the joint path certifies, and otherwise returns a labelled fast-PIRLS fallback.
+Without NLopt, or for `n_agq > 1`, it remains an explicit unsupported request
+rather than silently selecting another algorithm. The prerequisites for
+promoting any GLMM row — objective convention, derivative/stationarity
+evidence, covariance-certificate compatibility, fallback policy, and lockstep
+scorecard tests — are specified in
+`docs/certified_joint_glmm_optimizer_contract.md`.
 
 Fit-summary payloads and compiler artifacts must expose the effective GLMM
 mode rather than requiring wrappers to infer it. The stable summary fields are:
 
-- `estimation_method`: `fast_pirls_profiled`, `experimental_joint_laplace`, or
+- `estimation_method`: `fast_pirls_profiled`, `joint_laplace`, or
   `fallback_fast_pirls`.
 - `objective_definition`: `profiled_glmm_deviance` for the supported fast
-  path, `joint_glmm_laplace_deviance` for an experimental joint attempt.
+  path, `joint_glmm_laplace_deviance` for the joint Laplace path.
 - `response_constants`: `dropped` for the supported fast path and labelled
-  fallback, `included` for the experimental joint objective.
+  fallback, `included` for the joint Laplace objective.
 - `n_agq`: the requested/effective quadrature count.
 - `fallback_status`: `fallback_fast_pirls` only when an uncertified joint
   attempt returned the deterministic fast-PIRLS fallback.
@@ -81,22 +83,24 @@ the generated comparison report must use the same distinctions:
   by design and must carry a stable reason.
 
 Tests must fail if a GLMM documented-divergence row is presented as ordinary
-`lme4` parity. `fast=false` remains outside the supported contract until a
-certified joint optimizer supplies its own parity fixtures.
+`lme4` parity. `fast=false` parity is row-scoped: only rows that pass the
+joint objective/certificate/scorecard gate may be marked
+`release_blocking_parity`.
 
 The current documented-divergence rows are deliberate release exclusions, not
 soft passes:
 
-- `cbpp`, `contraception`, `culcitalogreg`, and `verbagg` are fast-PIRLS /
+- `cbpp`, `contraception`, `culcitalogreg` AGQ, and `verbagg` are fast-PIRLS /
   profiled-objective rows. Some large rows match the MixedModels.jl
   `fast=true` objective, but they are not `lme4` joint-estimation parity rows.
-  The `culcitalogreg` Laplace and AGQ rows have large fixed-effect gaps of
-  roughly one logit unit on the intercept and treatment contrasts. This is an
+  The `culcitalogreg` AGQ row still has large fixed-effect gaps of roughly one
+  logit unit on the intercept and treatment contrasts. This is an
   **inference-impacting non-parity**: it materially changes fitted
   probabilities, contrasts, and any downstream Wald/profile inference, so the
-  rows must remain non-parity — not a soft pass — until a certified joint GLMM
-  optimizer lands (see
-  `docs/certified_joint_glmm_optimizer_contract.md`).
+  row must remain non-parity — not a soft pass — until certified joint AGQ
+  lands (see `docs/certified_joint_glmm_optimizer_contract.md`). The
+  `culcitalogreg` Laplace row is promoted separately through the labelled
+  `fast=false` joint Laplace gate.
 - `gopherdat2` has coefficient parity, but Rust records a near-zero covariance
   parameter without lme4's singular flag. This is a diagnostic threshold /
   convention gap plus the normal GLMM objective-constant difference.

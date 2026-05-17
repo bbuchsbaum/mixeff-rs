@@ -798,10 +798,12 @@ impl GeneralizedLinearMixedModel {
             self.lmm.update_l()?;
 
             // --- Propose new β / u from the LMM solution ---
-            if vary_beta {
+            let new_u = if vary_beta {
                 self.beta = self.lmm.beta();
-            }
-            let new_u = self.lmm.ranef_u();
+                self.lmm.ranef_u()
+            } else {
+                self.ranef_u_given_beta(&self.beta)
+            };
             for (i, rt) in self.lmm.reterms.iter().enumerate() {
                 self.u[i].copy_from(&new_u[i]);
                 self.b[i] = &rt.lambda * &self.u[i];
@@ -847,6 +849,113 @@ impl GeneralizedLinearMixedModel {
         self.refresh_dispersion();
 
         Ok(())
+    }
+
+    /// Conditional modes of the random effects with β held fixed.
+    ///
+    /// `LinearMixedModel::ranef_u()` intentionally profiles β before forming
+    /// residuals. The joint GLMM objective needs the lme4-style
+    /// `nAGQ > 0` surface where the candidate β is part of the outer parameter
+    /// vector, so the inner PIRLS step must solve only for `u` conditional on
+    /// that β.
+    fn ranef_u_given_beta(&self, beta: &DVector<f64>) -> Vec<DMatrix<f64>> {
+        let k = self.lmm.reterms.len();
+        let p = self.lmm.feterm.rank;
+        let n = self.lmm.dims.n;
+        let wtxy = &self.lmm.xy_mat.wtxy;
+
+        let mut wr = vec![0.0f64; n];
+        for obs in 0..n {
+            let mut val = wtxy[(obs, p)];
+            for q in 0..p {
+                val -= wtxy[(obs, q)] * beta[q];
+            }
+            wr[obs] = val;
+        }
+
+        let mut c_vecs = Vec::with_capacity(k);
+        for re in &self.lmm.reterms {
+            let vs = re.vsize;
+            let nranef = re.n_ranef();
+            let n_levels = re.n_levels();
+
+            let mut c = vec![0.0; nranef];
+            for (obs, &wr_obs) in wr.iter().enumerate() {
+                let r = re.refs[obs] as usize;
+                for s in 0..vs {
+                    c[r * vs + s] += re.wtz[(s, obs)] * wr_obs;
+                }
+            }
+
+            let lambda = &re.lambda;
+            let mut c_scaled = vec![0.0; nranef];
+            for lev in 0..n_levels {
+                for i in 0..vs {
+                    let mut val = 0.0;
+                    for row in i..vs {
+                        val += lambda[(row, i)] * c[lev * vs + row];
+                    }
+                    c_scaled[lev * vs + i] = val;
+                }
+            }
+            c_vecs.push(DVector::from_vec(c_scaled));
+        }
+
+        let mut v_vecs: Vec<DVector<f64>> = Vec::with_capacity(k);
+        for j in 0..k {
+            let nranef_j = self.lmm.reterms[j].n_ranef();
+            let mut rhs = c_vecs[j].clone();
+
+            for (m, v_m) in v_vecs.iter().enumerate().take(j) {
+                let l_jm = self.lmm.l_blocks[glmm_block_index(j, m)].as_dense();
+                for row in 0..nranef_j {
+                    let mut dot = 0.0;
+                    for col in 0..v_m.len() {
+                        dot += l_jm[(row, col)] * v_m[col];
+                    }
+                    rhs[row] -= dot;
+                }
+            }
+
+            let mut v_j = rhs.as_slice().to_vec();
+            solve_dense_lower_against_rhs(
+                &self.lmm.l_blocks[glmm_block_index(j, j)].as_dense(),
+                &mut v_j,
+            );
+            v_vecs.push(DVector::from_vec(v_j));
+        }
+
+        let mut u_vecs: Vec<DVector<f64>> = vec![DVector::zeros(0); k];
+        for j in (0..k).rev() {
+            let nranef_j = self.lmm.reterms[j].n_ranef();
+            let mut rhs = v_vecs[j].clone();
+
+            for m in (j + 1)..k {
+                let l_mj = self.lmm.l_blocks[glmm_block_index(m, j)].as_dense();
+                let u_m = &u_vecs[m];
+                for row in 0..nranef_j {
+                    let mut dot = 0.0;
+                    for col in 0..u_m.len() {
+                        dot += l_mj[(col, row)] * u_m[col];
+                    }
+                    rhs[row] -= dot;
+                }
+            }
+
+            let mut u_j = rhs.as_slice().to_vec();
+            solve_dense_upper_from_lower_transpose_against_rhs(
+                &self.lmm.l_blocks[glmm_block_index(j, j)].as_dense(),
+                &mut u_j,
+            );
+            u_vecs[j] = DVector::from_vec(u_j);
+        }
+
+        self.lmm
+            .reterms
+            .iter()
+            .zip(u_vecs)
+            .map(|(rt, u)| DMatrix::from_column_slice(rt.vsize, rt.n_levels(), u.as_slice()))
+            .collect()
     }
 
     /// Laplace approximation objective: deviance residuals + u penalty + log|L|.
@@ -945,7 +1054,7 @@ impl GeneralizedLinearMixedModel {
     /// `lme4`'s `-2 logLik` scale. It deliberately lives alongside
     /// [`laplace_objective`](Self::laplace_objective) so current fast-PIRLS
     /// fitting and comparison artifacts keep their existing dropped-constant
-    /// semantics until the certified joint GLMM path lands.
+    /// semantics while certified joint GLMM parity is promoted row by row.
     pub fn laplace_objective_with_response_constants(&self) -> f64 {
         (0..self.y.len())
             .map(|i| self.minus_two_loglik_observation(i))
@@ -1277,11 +1386,12 @@ impl GeneralizedLinearMixedModel {
 
     /// Fit with options.
     ///
-    /// `fast` selects the supported MixedModels.jl-style fast path, which
-    /// profiles over θ and updates β through PIRLS. `fast = false` is not
-    /// implemented yet because it requires a distinct joint `[β; θ]`
-    /// optimizer path; passing `false` returns [`MixedModelError::Unsupported`]
-    /// rather than silently using the fast path.
+    /// `fast` selects the MixedModels.jl-style fast path, which profiles over
+    /// θ and updates β through PIRLS. `fast = false` selects the certified
+    /// joint Laplace path for `n_agq <= 1` when the NLopt backend is enabled;
+    /// without NLopt, or for `n_agq > 1`, it returns an explicit
+    /// [`MixedModelError::Unsupported`] rather than silently using another
+    /// algorithm.
     ///
     /// `n_agq` selects the deviance approximation: `1` (or `0`) means the
     /// Laplace approximation; values `>= 2` request `n_agq`-point adaptive
@@ -1295,11 +1405,24 @@ impl GeneralizedLinearMixedModel {
         verbose: bool,
     ) -> Result<&mut Self> {
         if !fast {
-            return Err(MixedModelError::Unsupported(
-                "GLMM fit_with_options(fast = false) is not implemented; \
+            if n_agq > 1 {
+                return Err(MixedModelError::Unsupported(format!(
+                    "GLMM fit_with_options(fast = false, n_agq = {n_agq}) is not implemented; \
+                     certified joint AGQ is tracked separately"
+                )));
+            }
+            #[cfg(feature = "nlopt")]
+            {
+                return self.fit_experimental_joint_laplace_with_response_constants(verbose);
+            }
+            #[cfg(not(feature = "nlopt"))]
+            {
+                return Err(MixedModelError::Unsupported(
+                    "GLMM fit_with_options(fast = false) requires the nlopt backend; \
                  use fast = true for the current profiled-θ PIRLS path"
-                    .to_string(),
-            ));
+                        .to_string(),
+                ));
+            }
         }
         if let Err(error) = self.validate_agq(n_agq) {
             self.record_invalid_agq_diagnostic(n_agq, &error.to_string());
@@ -1311,13 +1434,12 @@ impl GeneralizedLinearMixedModel {
         self.fit_with_options_impl(n_agq, verbose)
     }
 
-    /// Experimental opt-in joint GLMM Laplace fit.
+    /// Labelled joint GLMM Laplace fit.
     ///
-    /// This prototype optimizes `[β; θ]` against the included-response-
-    /// constants Laplace objective. It is intentionally not wired to the
-    /// stable `fast = false` public option: the certified joint optimizer still
-    /// needs stationarity, covariance-state, fallback, and scorecard evidence
-    /// before it can be a supported path.
+    /// This path optimizes `[β; θ]` against the included-response-constants
+    /// Laplace objective. The public `fast = false` path delegates here for
+    /// `n_agq <= 1` when NLopt is enabled, while summaries keep it distinct
+    /// from the fast-PIRLS profiled path and from labelled fallback results.
     #[cfg(feature = "nlopt")]
     pub fn fit_experimental_joint_laplace_with_response_constants(
         &mut self,
@@ -1409,13 +1531,13 @@ impl GeneralizedLinearMixedModel {
         let status_label = match &nlopt_result {
             Ok((status, _fmin)) => {
                 format!(
-                    "EXPERIMENTAL_JOINT:{}",
+                    "JOINT_LAPLACE:{}",
                     experimental_nlopt_status_label(&format!("{status:?}"))
                 )
             }
             Err((status, _fmin)) => {
                 format!(
-                    "EXPERIMENTAL_JOINT_FAILED:{}",
+                    "JOINT_LAPLACE_FAILED:{}",
                     experimental_nlopt_status_label(&format!("{status:?}"))
                 )
             }
@@ -2352,6 +2474,31 @@ fn lower_triangle_pair(offset: usize) -> (usize, usize) {
     (row, remaining)
 }
 
+fn glmm_block_index(row: usize, col: usize) -> usize {
+    debug_assert!(row >= col);
+    row * (row + 1) / 2 + col
+}
+
+fn solve_dense_lower_against_rhs(l: &DMatrix<f64>, rhs: &mut [f64]) {
+    for i in 0..rhs.len() {
+        let mut sum = rhs[i];
+        for j in 0..i {
+            sum -= l[(i, j)] * rhs[j];
+        }
+        rhs[i] = sum / l[(i, i)];
+    }
+}
+
+fn solve_dense_upper_from_lower_transpose_against_rhs(l: &DMatrix<f64>, rhs: &mut [f64]) {
+    for i in (0..rhs.len()).rev() {
+        let mut sum = rhs[i];
+        for j in (i + 1)..rhs.len() {
+            sum -= l[(j, i)] * rhs[j];
+        }
+        rhs[i] = sum / l[(i, i)];
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct BinaryColumnSplit {
     low: f64,
@@ -2561,13 +2708,13 @@ fn uncertified_joint_fallback(
     let mut fallback = fallback_fast_pirls?;
     let fast_return_code = fallback.lmm.optsum.return_value.clone();
     fallback.lmm.optsum.return_value = format!(
-        "EXPERIMENTAL_JOINT_FALLBACK_FAST_PIRLS(joint={joint_return_code}; fast={fast_return_code})"
+        "JOINT_LAPLACE_FALLBACK_FAST_PIRLS(joint={joint_return_code}; fast={fast_return_code})"
     );
     let mut diagnostic = Diagnostic::new(
         DiagnosticCode::OptimizerRecovery,
         DiagnosticSeverity::Warning,
         DiagnosticStage::Certification,
-        "experimental joint GLMM did not certify; returning labelled fast-PIRLS fallback",
+        "joint GLMM did not certify; returning labelled fast-PIRLS fallback",
     )
     .with_suggested_actions(vec![
         "treat this as a documented-divergence fast-PIRLS GLMM result, not a certified joint fit"
@@ -3179,8 +3326,8 @@ mod tests {
             model
                 .opt_summary()
                 .return_value
-                .starts_with("EXPERIMENTAL_JOINT"),
-            "forced failure must keep an experimental return-code namespace"
+                .starts_with("JOINT_LAPLACE"),
+            "forced failure must keep a joint-Laplace return-code namespace"
         );
         assert!(
             model.opt_summary().return_value.contains("MAXEVAL_REACHED"),
@@ -3213,7 +3360,7 @@ mod tests {
             model
                 .opt_summary()
                 .return_value
-                .starts_with("EXPERIMENTAL_JOINT_FALLBACK_FAST_PIRLS"),
+                .starts_with("JOINT_LAPLACE_FALLBACK_FAST_PIRLS"),
             "fallback result must label the returned estimates, got {}",
             model.opt_summary().return_value
         );
@@ -4008,8 +4155,9 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "nlopt"))]
     #[test]
-    fn test_glmm_fast_parameter_documented_or_implemented() {
+    fn test_glmm_fast_false_requires_nlopt_backend() {
         let data = contra_fixture();
         let formula = parse_formula("use_num ~ 1 + (1 | urban_dist)").unwrap();
         let mut model =
@@ -4020,9 +4168,47 @@ mod tests {
         match err {
             MixedModelError::Unsupported(message) => {
                 assert!(message.contains("fast = false"));
-                assert!(message.contains("not implemented"));
+                assert!(message.contains("nlopt"));
             }
             other => panic!("expected Unsupported error, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "nlopt")]
+    #[test]
+    fn test_glmm_fast_false_uses_labelled_joint_or_fallback_path() {
+        let data = contra_fixture();
+        let formula = parse_formula("use_num ~ 1 + (1 | urban_dist)").unwrap();
+        let mut model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+
+        model.fit_with_options(false, 1, false).unwrap();
+
+        assert!(model.lmm.optsum.return_value.contains("JOINT_LAPLACE"));
+        let metadata = model
+            .lmm
+            .compiler_artifact
+            .glmm_fit_metadata
+            .as_ref()
+            .expect("fast=false fit should record GLMM metadata");
+        assert!(
+            matches!(
+                metadata.estimation_method.as_str(),
+                "joint_laplace" | "fallback_fast_pirls"
+            ),
+            "fast=false must record either certified joint Laplace or a labelled fallback, got {:?}",
+            metadata
+        );
+        if metadata.estimation_method == "joint_laplace" {
+            assert_eq!(metadata.objective_definition, "joint_glmm_laplace_deviance");
+            assert_eq!(metadata.response_constants, "included");
+        } else {
+            assert_eq!(metadata.objective_definition, "profiled_glmm_deviance");
+            assert_eq!(metadata.response_constants, "dropped");
+            assert_eq!(
+                metadata.fallback_status.as_deref(),
+                Some("fallback_fast_pirls")
+            );
         }
     }
 
@@ -4252,7 +4438,7 @@ mod tests {
 
     #[cfg(feature = "nlopt")]
     #[test]
-    fn experimental_joint_cbpp_objective_still_differs_from_lme4() {
+    fn experimental_joint_cbpp_objective_matches_lme4_at_lme4_parameters() {
         let (data, _) = crate::datasets::load("cbpp").unwrap();
         let incidence = data.numeric("incidence").unwrap();
         let size = data.numeric("size").unwrap();
@@ -4279,22 +4465,18 @@ mod tests {
         )
         .unwrap();
         let params = vec![
-            -1.398342864233420,
-            -0.991924975185999,
-            -1.128216216147423,
-            -1.579745413889423,
-            0.642069926557109,
+            -1.398_342_864_233_42,
+            -0.991_924_975_185_999,
+            -1.128_216_216_147_423,
+            -1.579_745_413_889_423,
+            0.642_069_926_557_109,
         ];
         let objective = model.joint_laplace_deviance_at_params(&params, 4);
-        let lme4_objective = 184.053132779073508;
+        let lme4_objective = 184.053_132_779_073_5;
         let delta = (objective - lme4_objective).abs();
         assert!(
-            delta > 0.05,
-            "cbpp now matches lme4's joint objective at the lme4 optimum; update the phase-6 promotion gate"
-        );
-        assert!(
-            delta < 0.2,
-            "cbpp objective-convention diagnostic drifted unexpectedly: rust={objective:.9}, lme4={lme4_objective:.9}, delta={delta:.9}"
+            delta <= 1.0e-3,
+            "cbpp joint objective should match lme4 at the exact lme4 optimum; rust={objective:.9}, lme4={lme4_objective:.9}, delta={delta:.9}"
         );
     }
 

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use serde_json::Value;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RowKey {
     dataset: &'static str,
     formula: &'static str,
@@ -282,7 +282,6 @@ fn glmm_fast_pirls_divergences_are_quantified_and_kept_non_lme4() {
             "MixedModels.jl fast=true",
         ),
         (CONTRACEPTION_SLOPE, 0.03, 0.04, "MixedModels.jl fast=true"),
-        (CULCITA_LAPLACE, 0.8, 1.1, "fast_pirls_profiled_glmm"),
         (CULCITA_AGQ, 0.8, 1.0, "fast_pirls_profiled_glmm_agq"),
         (VERBAGG, 0.08, 0.09, "MixedModels.jl fast=true"),
     ];
@@ -318,7 +317,7 @@ fn glmm_fast_pirls_divergences_are_quantified_and_kept_non_lme4() {
             "{key}: lme4 GLMM objective convention"
         );
         assert!(
-            field_str(rust_row, "optimizer_return_code", &key).contains("Reached")
+            field_str(rust_row, "optimizer_return_code", &key).contains("REACHED")
                 || field_str(rust_row, "optimizer_return_code", &key).contains("SUCCESS"),
             "{key}: Rust optimizer status must be recorded"
         );
@@ -333,17 +332,35 @@ fn glmm_fast_pirls_divergences_are_quantified_and_kept_non_lme4() {
             "{key}: expected documented lme4 beta gap in [{min_beta_delta}, {max_beta_delta}], got {beta_delta}"
         );
 
-        if row.dataset == "culcitalogreg" {
+        if row == CULCITA_AGQ {
             assert!(
                 beta_delta > 0.8 && reason.contains("large beta gap"),
-                "{key}: culcitalogreg must keep its large-gap diagnosis"
+                "{key}: culcitalogreg AGQ must keep its large-gap diagnosis"
             );
             assert!(
                 reason.contains("inference-impacting") && reason.contains("non-parity"),
-                "{key}: culcitalogreg must be explicitly marked inference-impacting non-parity, not a soft pass"
+                "{key}: culcitalogreg AGQ must be explicitly marked inference-impacting non-parity, not a soft pass"
             );
         }
     }
+}
+
+#[test]
+fn culcitalogreg_laplace_is_promoted_to_joint_laplace_parity() {
+    let scorecard = scorecard_by_key();
+    let key = row_key(CULCITA_LAPLACE);
+    let score = scorecard_row(&scorecard, CULCITA_LAPLACE);
+    assert_eq!(score.class_name, "release_blocking_parity", "{key}");
+    assert_eq!(score.reference, "lme4_joint_laplace", "{key}");
+    assert_eq!(
+        score.issue_id.as_deref(),
+        Some("bd-01KRVGT0H37JYNYB5FA2EZD5CW")
+    );
+    let reason = score.reason.as_deref().unwrap_or("");
+    assert!(
+        reason.contains("fast=false") && reason.contains("objective"),
+        "{key}: promoted GLMM row must name the certified joint path and objective evidence"
+    );
 }
 
 #[test]
@@ -372,8 +389,8 @@ fn mixedmodels_fast_oracle_scope_is_explicit_for_large_profiled_rows() {
         "large GLMM fast-profiled divergence rows should carry MixedModels.jl fast=true evidence"
     );
     assert!(
-        !covered.contains(&row_key(CBPP)) && !covered.contains(&row_key(CULCITA_LAPLACE)),
-        "small binomial rows without MixedModels.jl fixture coverage must stay on the certified-joint-optimizer follow-up path"
+        !covered.contains(&row_key(CBPP)),
+        "cbpp remains outside the MixedModels.jl fast-oracle fixture scope"
     );
 }
 

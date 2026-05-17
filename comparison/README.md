@@ -23,10 +23,11 @@ not a blanket raw-speed or universal superiority claim.
 Documented divergence rows are not soft parity passes. They are release-visible
 decisions with tests in `tests/parity_divergence_contract.rs`:
 
-- GLMM fast-PIRLS rows (`cbpp`, `contraception`, `culcitalogreg`, `verbagg`)
-  remain non-`lme4` claims until a certified joint GLMM optimizer closes the
-  fixed-effect gaps. The `culcitalogreg` rows are intentionally called out
-  because their beta gaps are large enough to affect inference.
+- GLMM fast-PIRLS rows (`cbpp`, `contraception`, `culcitalogreg` AGQ,
+  `verbagg`) remain non-`lme4` claims unless a row passes the certified joint
+  GLMM gate. `culcitalogreg` Laplace is the first row-scoped promotion: the
+  Rust comparison harness fits it through `fast=false` joint Laplace, while the
+  AGQ row remains an inference-impacting fast-PIRLS divergence.
 - `gopherdat2` keeps coefficient parity but remains divergent because Rust
   estimates a near-zero covariance parameter without lme4's singular flag, and
   GLMM objective constants are not comparable.
@@ -128,10 +129,10 @@ loosen these if you're comparing against a different optimizer baseline.
 - **Categorical predictors in random slopes** are rejected with
   `not found or not numeric`. Surfaced by `kb07` maximal/zerocorr fits and
   `machines :: (Machine | Worker)`.
-- **GLMM objective definitions** differ from lme4 in response-constant
-  handling and fast-PIRLS semantics for some rows. The report classifies these
-  rows explicitly instead of treating every objective delta as an accuracy
-  failure.
+- **GLMM objective definitions** are row-scoped. Fast-PIRLS rows use the
+  profiled deviance with response constants dropped and are classified
+  explicitly. Certified joint Laplace rows use the joint deviance with response
+  constants included so `objective_delta` against `lme4` is meaningful.
 - **Coefficient-name formatting**: Rust uses `"Type: T2"` (space-colon),
   R uses `"TypeT2"`. Cosmetic; doesn't affect numerical match.
 

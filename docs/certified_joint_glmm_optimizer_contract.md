@@ -1,11 +1,12 @@
 # Certified Joint GLMM Optimizer Contract
 
-Status: forward-looking design contract. A private experimental Laplace
-prototype exists, but it is not certified and is not wired to the public
-`fast = false` API.
+Status: row-scoped implementation contract. A labelled joint Laplace path is
+wired to `fit_with_options(fast = false, n_agq <= 1)` when the NLopt backend is
+enabled, but rows are certified only when their objective, stationarity,
+covariance, fallback, and scorecard evidence pass this gate.
 
-This note specifies what a future *certified joint GLMM optimizer* must expose
-before any GLMM row may be promoted from `documented_divergence` to
+This note specifies what a *certified joint GLMM optimizer* must expose before
+any GLMM row may be promoted from `documented_divergence` to
 `release_blocking_parity` against `lme4`. It exists so that the current
 fast-PIRLS / profiled-objective path stays honestly labelled (see
 `docs/glmm_support_contract.md`) and so that the eventual joint path is built
@@ -34,12 +35,12 @@ A certified joint optimizer removes the *objective* and *β-estimation*
 mismatch. It must therefore satisfy every requirement below before its rows
 re-enter the `lme4` parity gate.
 
-Current blocker: the experimental joint prototype is useful diagnostic
-machinery, but it is not yet the same objective convention as `lme4`. The
-`cbpp` guard evaluates Rust's current joint objective at the exact local
-`lme4` optimum and still differs by about 0.092 deviance units. Therefore the
-remaining phase-6 work is objective-formulation parity, not merely a larger
-optimizer budget or a scorecard edit.
+Current evidence: certification is row-scoped. The fixed-beta conditional
+PIRLS solve now evaluates the same included-constants joint Laplace objective
+as `lme4` at the `cbpp` optimum, and `culcitalogreg` Laplace has passed the
+labelled joint-Laplace promotion gate. `cbpp` and `contraception` still remain
+below the promotion line because their fitted estimates miss row tolerances;
+AGQ remains a separate extension.
 
 ## Required surface
 
@@ -111,10 +112,11 @@ The optimizer must define and record a deterministic fallback policy:
   artifact must record which path produced the returned estimates.
 - A fallback result keeps the `documented_divergence` class and the existing
   non-`lme4` wording. It must never be silently promoted to parity.
-- The joint path is opt-in until it passes the external-engine parity gates
-  (`comparison/parity_scorecard.toml` plus the divergence/scoreboard tests
-  changed in lockstep). `fast = false` remains an explicit unsupported error
-  until then, per `docs/glmm_support_contract.md`.
+- The joint path is labelled and row-scoped until it passes the external-engine
+  parity gates (`comparison/parity_scorecard.toml` plus the
+  divergence/scoreboard tests changed in lockstep). `fast = false` requires the
+  NLopt backend for joint Laplace and remains an explicit unsupported request
+  for certified joint AGQ, per `docs/glmm_support_contract.md`.
 - Promotion of any GLMM row from `documented_divergence` to
   `release_blocking_parity` requires: the `included` objective convention on
   both sides, a recorded stationarity certificate, covariance classification
@@ -137,6 +139,6 @@ A GLMM row is certifiable joint parity only when **all** hold:
    contract test are updated together to move the row out of
    `documented_divergence`.
 
-Until this gate exists and a row passes it, the honest claim remains the one
-in `docs/difficult_model_certification.md`: a certified fit *or* a precise
+Rows that have not passed this gate keep the honest claim in
+`docs/difficult_model_certification.md`: a certified fit *or* a precise
 diagnostic, not blanket `lme4` GLMM parity.

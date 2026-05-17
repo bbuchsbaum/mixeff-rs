@@ -250,6 +250,33 @@ fn release_blocking_scorecard_rows_pass_checked_in_comparison_artifacts() {
         let r_row = r_by_key
             .get(&key)
             .unwrap_or_else(|| panic!("lme4_results.json missing release row {key}"));
+        if row.reference == "lme4_joint_laplace" {
+            let reason = row.reason.as_deref().unwrap_or("");
+            assert!(
+                row.issue_id.as_deref() == Some("bd-01KRVGT0H37JYNYB5FA2EZD5CW")
+                    && reason.contains("fast=false")
+                    && reason.contains("objective"),
+                "{key}: joint GLMM release rows must name the certified fast=false evidence and phase-6 issue"
+            );
+            assert_eq!(
+                rust_row.get("objective_definition").and_then(Value::as_str),
+                Some("joint_glmm_laplace_deviance"),
+                "{key}: joint GLMM release row must use the joint objective artifact"
+            );
+            assert_eq!(
+                rust_row.get("response_constants").and_then(Value::as_str),
+                Some("included"),
+                "{key}: joint GLMM release row must retain response constants"
+            );
+            assert!(
+                rust_row
+                    .get("optimizer_return_code")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .starts_with("JOINT_LAPLACE:"),
+                "{key}: joint GLMM release row must carry the labelled joint optimizer status"
+            );
+        }
         assert_eq!(
             rust_row.get("status").and_then(Value::as_str),
             Some("ok"),

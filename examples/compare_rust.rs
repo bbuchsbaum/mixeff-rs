@@ -141,6 +141,12 @@ fn fit_lmm(
         optimizer_fmin: opt.fmin,
         optimizer_max_fevals: opt.max_feval,
         is_singular: MixedModelFit::is_singular(&model),
+        objective_definition: if reml {
+            "restricted_deviance".into()
+        } else {
+            "deviance".into()
+        },
+        response_constants: "not_applicable".into(),
         fit_time_ms: cold_ms,
         fit_time_ms_min: min_ms,
         n_obs: MixedModelFit::nobs(&model),
@@ -163,6 +169,8 @@ struct FitResult {
     optimizer_fmin: f64,
     optimizer_max_fevals: i64,
     is_singular: bool,
+    objective_definition: String,
+    response_constants: String,
     fit_time_ms: f64,
     fit_time_ms_min: f64,
     n_obs: usize,
@@ -465,6 +473,7 @@ fn fit_glmm(
     let cold_ms = times_ms[0];
     let min_ms = times_ms.iter().cloned().fold(f64::INFINITY, f64::min);
     let opt = MixedModelFit::opt_summary(&model);
+    let glmm_metadata = model.compiler_artifact().glmm_fit_metadata.as_ref();
     Ok(FitOutcome::Ok(Box::new(FitResult {
         beta: MixedModelFit::coef(&model).iter().cloned().collect(),
         coef_names: MixedModelFit::coef_names(&model),
@@ -481,19 +490,41 @@ fn fit_glmm(
         optimizer_fmin: opt.fmin,
         optimizer_max_fevals: opt.max_feval,
         is_singular: MixedModelFit::is_singular(&model),
+        objective_definition: glmm_metadata
+            .map(|metadata| metadata.objective_definition.clone())
+            .unwrap_or_else(|| {
+                if fast {
+                    "profiled_glmm_deviance".into()
+                } else {
+                    "joint_glmm_laplace_deviance".into()
+                }
+            }),
+        response_constants: glmm_metadata
+            .map(|metadata| metadata.response_constants.clone())
+            .unwrap_or_else(|| {
+                if fast {
+                    "dropped".into()
+                } else {
+                    "included".into()
+                }
+            }),
         fit_time_ms: cold_ms,
         fit_time_ms_min: min_ms,
         n_obs: MixedModelFit::nobs(&model),
     })))
 }
 
-fn use_fast_glmm_comparison_path(family: &str, n_obs: usize) -> bool {
+fn use_fast_glmm_comparison_path(
+    dataset: &str,
+    estimator: &str,
+    family: &str,
+    n_obs: usize,
+) -> bool {
     let _ = (family, n_obs);
-    // Current main exposes the profiled-θ PIRLS path for GLMM fitting. The
-    // older non-fast joint path from the stash is no longer implemented, so
-    // comparison artifacts must classify lme4 differences against explicit
-    // objective/constant conventions and fast-oracle fixtures.
-    true
+    // The comparison harness stays row-scoped: only rows that have passed the
+    // certified joint gate use `fast=false` here. Other GLMM rows keep the
+    // profiled-PIRLS path and documented-divergence classification.
+    !(dataset == "culcitalogreg" && estimator.eq_ignore_ascii_case("Laplace"))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -600,7 +631,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 print!("fitting {name} :: {} [{}] ... ", fit.formula, fit.estimator);
                 fit_lmm(&df, &fit.formula, reml)
             } else {
-                let fast_glmm = use_fast_glmm_comparison_path(&fit.family, n_obs);
+                let fast_glmm =
+                    use_fast_glmm_comparison_path(&name, &fit.estimator, &fit.family, n_obs);
                 let glmm_mode = if fast_glmm { "fast" } else { "joint" };
                 print!(
                     "fitting {name} :: {} [{} {}/{} {glmm_mode}] ... ",
@@ -640,18 +672,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     rec.loglik = Some(r.loglik);
                     rec.aic = Some(r.aic);
                     rec.bic = Some(r.bic);
-                    if is_gaussian_identity {
-                        rec.objective_definition =
-                            Some(if fit.estimator.eq_ignore_ascii_case("REML") {
-                                "restricted_deviance".into()
-                            } else {
-                                "deviance".into()
-                            });
-                        rec.response_constants = Some("not_applicable".into());
-                    } else {
-                        rec.objective_definition = Some("profiled_glmm_deviance".into());
-                        rec.response_constants = Some("dropped".into());
-                    }
+                    rec.objective_definition = Some(r.objective_definition);
+                    rec.response_constants = Some(r.response_constants);
                     rec.optimizer = Some(r.optimizer);
                     rec.optimizer_backend = Some(r.optimizer_backend);
                     rec.optimizer_return_code = Some(r.optimizer_return_code);

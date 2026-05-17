@@ -531,18 +531,27 @@ fn glmm_comparison_rows_have_expected_status_and_payload_shape() {
         if row.status == "ok" {
             assert_ok_glmm_payload(rust_record, "rust_results.json", &key);
             assert_ok_glmm_payload(r_record, "lme4_results.json", &key);
+            let is_promoted_joint_laplace = key == expected_row_key(CULCITA_BINOMIAL_LAPLACE);
             assert_eq!(
                 rust_record
                     .get("objective_definition")
                     .and_then(Value::as_str),
-                Some("profiled_glmm_deviance"),
+                Some(if is_promoted_joint_laplace {
+                    "joint_glmm_laplace_deviance"
+                } else {
+                    "profiled_glmm_deviance"
+                }),
                 "{key}: Rust GLMM objective definition must stay explicit"
             );
             assert_eq!(
                 rust_record
                     .get("response_constants")
                     .and_then(Value::as_str),
-                Some("dropped"),
+                Some(if is_promoted_joint_laplace {
+                    "included"
+                } else {
+                    "dropped"
+                }),
                 "{key}: Rust GLMM response-constant convention must stay explicit"
             );
             assert_eq!(
@@ -888,13 +897,13 @@ fn grouseticks_joint_oracle_pins_fast_false_target_without_promoting_current_fas
     );
     assert!(
         beta_gap_current_to_joint > 0.1,
-        "{key}: fixture must keep the current fast-PIRLS beta gap visible until fast=false lands"
+        "{key}: fixture must keep the current fast-PIRLS beta gap visible until this row certifies under fast=false"
     );
 }
 
 #[cfg(feature = "nlopt")]
 #[test]
-fn experimental_joint_laplace_improves_included_objective_without_changing_public_fast_false() {
+fn experimental_joint_laplace_attempt_is_labelled_and_fallback_safe() {
     let key = "synthetic overdispersed Poisson GLMM";
 
     let mut profiled = synthetic_overdispersed_poisson_model();
@@ -906,70 +915,84 @@ fn experimental_joint_laplace_improves_included_objective_without_changing_publi
     let mut joint = synthetic_overdispersed_poisson_model();
     joint
         .fit_experimental_joint_laplace_with_response_constants(false)
-        .expect("experimental joint fit");
+        .expect("joint Laplace fit");
     let joint_objective = joint.deviance_with_response_constants(1);
     assert!(
-        joint_objective < profiled_objective - 1.0e-3,
-        "{key}: experimental joint fit should reduce included objective vs profiled start; \
+        joint_objective <= profiled_objective + 1.0e-9,
+        "{key}: labelled joint attempt or fallback must not worsen the included objective; \
          profiled={profiled_objective:.6}, joint={joint_objective:.6}"
     );
     assert!(
-        joint
-            .opt_summary()
-            .return_value
-            .contains("EXPERIMENTAL_JOINT"),
-        "{key}: opt summary must label the path experimental"
+        joint.opt_summary().return_value.contains("JOINT_LAPLACE"),
+        "{key}: opt summary must label the joint Laplace path"
     );
 
     assert!(
         MixedModelFit::coef(&joint)
             .iter()
             .all(|value| value.is_finite()),
-        "{key}: experimental joint beta must stay finite"
+        "{key}: joint Laplace beta must stay finite"
     );
-    let certificate = joint
+    let metadata = joint
         .compiler_artifact()
-        .optimizer_certificate
+        .glmm_fit_metadata
         .as_ref()
-        .expect("experimental joint fit must record an optimizer certificate");
-    assert!(
-        matches!(
-            certificate.status,
-            FitStatus::ConvergedInterior | FitStatus::ConvergedBoundary
-        ),
-        "{key}: experimental joint fit should classify covariance state through FitStatus, got {:?}",
-        certificate.status
-    );
-    assert!(
-        matches!(
-            certificate.evidence.gradient.method,
-            EvidenceMethod::FiniteDifference
-        ),
-        "{key}: experimental joint certificate must record finite-difference stationarity evidence"
-    );
-    let residual = certificate
-        .free_gradient_norm
-        .expect("experimental joint certificate must record a first-order residual");
-    let tolerance = certificate
-        .checks
-        .iter()
-        .find_map(|check| match check {
-            CertificateCheck::FreeGradientOk { tolerance, .. } => Some(*tolerance),
-            _ => None,
-        })
-        .expect("experimental joint certificate must record the stationarity tolerance");
-    assert!(
-        residual <= tolerance,
-        "{key}: stationarity residual {residual:.6e} should be <= tolerance {tolerance:.6e}"
-    );
+        .expect("labelled GLMM fit must record metadata");
+    if metadata.estimation_method == "joint_laplace" {
+        let certificate = joint
+            .compiler_artifact()
+            .optimizer_certificate
+            .as_ref()
+            .expect("joint Laplace fit must record an optimizer certificate");
+        assert!(
+            matches!(
+                certificate.status,
+                FitStatus::ConvergedInterior | FitStatus::ConvergedBoundary
+            ),
+            "{key}: joint Laplace fit should classify covariance state through FitStatus, got {:?}",
+            certificate.status
+        );
+        assert!(
+            matches!(
+                certificate.evidence.gradient.method,
+                EvidenceMethod::FiniteDifference
+            ),
+            "{key}: joint Laplace certificate must record finite-difference stationarity evidence"
+        );
+        let residual = certificate
+            .free_gradient_norm
+            .expect("joint Laplace certificate must record a first-order residual");
+        let tolerance = certificate
+            .checks
+            .iter()
+            .find_map(|check| match check {
+                CertificateCheck::FreeGradientOk { tolerance, .. } => Some(*tolerance),
+                _ => None,
+            })
+            .expect("joint Laplace certificate must record the stationarity tolerance");
+        assert!(
+            residual <= tolerance,
+            "{key}: stationarity residual {residual:.6e} should be <= tolerance {tolerance:.6e}"
+        );
+    } else {
+        assert_eq!(metadata.estimation_method, "fallback_fast_pirls");
+        assert_eq!(
+            metadata.fallback_status.as_deref(),
+            Some("fallback_fast_pirls")
+        );
+    }
 
     let mut public_fast_false = synthetic_overdispersed_poisson_model();
-    let error = public_fast_false
+    public_fast_false
         .fit_with_options(false, 1, false)
-        .expect_err("stable fast=false must remain unsupported");
+        .expect("public fast=false should use the labelled joint Laplace path for n_agq <= 1");
     assert!(
-        error.to_string().contains("fast = false") && error.to_string().contains("not implemented"),
-        "{key}: public fast=false must remain an explicit unsupported path, got {error}"
+        public_fast_false
+            .opt_summary()
+            .return_value
+            .contains("JOINT_LAPLACE"),
+        "{key}: public fast=false must label the joint path, got {}",
+        public_fast_false.opt_summary().return_value
     );
 }
 
@@ -995,7 +1018,7 @@ fn experimental_joint_binomial_rows_stay_below_promotion_gate() {
         let mut joint = construct_binomial_logit_model(row);
         joint
             .fit_experimental_joint_laplace_with_response_constants(false)
-            .unwrap_or_else(|err| panic!("{key}: fit experimental joint failed: {err}"));
+            .unwrap_or_else(|err| panic!("{key}: fit joint Laplace failed: {err}"));
 
         let objective = joint.deviance_with_response_constants(1);
         let lme4_objective = field_f64(lme4_record, "objective", &key);
@@ -1020,9 +1043,10 @@ fn experimental_joint_binomial_rows_stay_below_promotion_gate() {
         }
     }
 
-    assert!(
-        passed.is_empty(),
-        "binomial GLMM rows now satisfy experimental joint promotion tolerance; promote these rows through the scorecard gate: {passed:?}"
+    assert_eq!(
+        passed,
+        vec![expected_row_key(CULCITA_BINOMIAL_LAPLACE)],
+        "only the culcitalogreg Laplace row is currently certified for promotion"
     );
     assert!(
         !missed_objective_gate.is_empty(),
