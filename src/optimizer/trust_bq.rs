@@ -88,6 +88,53 @@ pub(crate) enum TrustBqStopReason {
     CertifiedConvergence,
 }
 
+impl TrustBqStopReason {
+    pub(crate) fn trace_classification(self) -> TrustBqTraceClassification {
+        match self {
+            TrustBqStopReason::RadiusBelowTolerance
+            | TrustBqStopReason::ObjectiveTolerance
+            | TrustBqStopReason::StepBelowTolerance => {
+                TrustBqTraceClassification::SmoothConvergence
+            }
+            TrustBqStopReason::ObjectiveStagnation => TrustBqTraceClassification::StatisticalStall,
+            TrustBqStopReason::CertifiedConvergence => {
+                TrustBqTraceClassification::CertificateAccepted
+            }
+            TrustBqStopReason::MaxEvaluations => TrustBqTraceClassification::BudgetExhaustion,
+        }
+    }
+
+    pub(crate) fn is_acceptable_convergence(self) -> bool {
+        !matches!(
+            self.trace_classification(),
+            TrustBqTraceClassification::BudgetExhaustion
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrustBqTraceClassification {
+    /// Trust-region math reached a standard local convergence stop.
+    SmoothConvergence,
+    /// Objective movement stayed inside the caller's statistical stall band.
+    StatisticalStall,
+    /// The caller-owned certificate accepted the current best point.
+    CertificateAccepted,
+    /// The optimizer exhausted its evaluation budget before convergence.
+    BudgetExhaustion,
+}
+
+impl TrustBqTraceClassification {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            TrustBqTraceClassification::SmoothConvergence => "smooth_convergence",
+            TrustBqTraceClassification::StatisticalStall => "statistical_stall",
+            TrustBqTraceClassification::CertificateAccepted => "certificate_accepted",
+            TrustBqTraceClassification::BudgetExhaustion => "budget_exhaustion",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct TrustBqResult {
     pub(crate) x: Vec<f64>,
@@ -97,6 +144,12 @@ pub(crate) struct TrustBqResult {
     pub(crate) final_radius: f64,
     pub(crate) stop_reason: TrustBqStopReason,
     pub(crate) last_model_sample_count: usize,
+}
+
+impl TrustBqResult {
+    pub(crate) fn trace_classification(&self) -> TrustBqTraceClassification {
+        self.stop_reason.trace_classification()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -809,6 +862,54 @@ mod tests {
     }
 
     #[test]
+    fn trust_bq_trace_classification_labels_are_stable() {
+        let cases = [
+            (
+                TrustBqStopReason::RadiusBelowTolerance,
+                TrustBqTraceClassification::SmoothConvergence,
+                "smooth_convergence",
+                true,
+            ),
+            (
+                TrustBqStopReason::ObjectiveTolerance,
+                TrustBqTraceClassification::SmoothConvergence,
+                "smooth_convergence",
+                true,
+            ),
+            (
+                TrustBqStopReason::StepBelowTolerance,
+                TrustBqTraceClassification::SmoothConvergence,
+                "smooth_convergence",
+                true,
+            ),
+            (
+                TrustBqStopReason::ObjectiveStagnation,
+                TrustBqTraceClassification::StatisticalStall,
+                "statistical_stall",
+                true,
+            ),
+            (
+                TrustBqStopReason::CertifiedConvergence,
+                TrustBqTraceClassification::CertificateAccepted,
+                "certificate_accepted",
+                true,
+            ),
+            (
+                TrustBqStopReason::MaxEvaluations,
+                TrustBqTraceClassification::BudgetExhaustion,
+                "budget_exhaustion",
+                false,
+            ),
+        ];
+
+        for (reason, classification, label, acceptable) in cases {
+            assert_eq!(reason.trace_classification(), classification);
+            assert_eq!(classification.as_str(), label);
+            assert_eq!(reason.is_acceptable_convergence(), acceptable);
+        }
+    }
+
+    #[test]
     fn trust_bq_solves_shifted_quadratic() {
         let (lower, upper) = unbounded(2);
         let result = minimize(
@@ -826,6 +927,7 @@ mod tests {
         .unwrap();
 
         assert_ne!(result.stop_reason, TrustBqStopReason::MaxEvaluations);
+        assert!(result.stop_reason.is_acceptable_convergence());
         assert!(result.fevals > 0);
         assert!(result.last_model_sample_count > 0);
         assert!((result.x[0] - 1.25).abs() < 1e-4, "{result:?}");
@@ -918,6 +1020,10 @@ mod tests {
             TrustBqStopReason::ObjectiveStagnation,
             "{result:?}"
         );
+        assert_eq!(
+            result.trace_classification(),
+            TrustBqTraceClassification::StatisticalStall
+        );
         assert!(result.fevals < 20_000, "{result:?}");
         // The loose band trades a little accuracy for far fewer evaluations,
         // but the descent still reached the basin.
@@ -953,6 +1059,10 @@ mod tests {
             result.stop_reason,
             TrustBqStopReason::CertifiedConvergence,
             "{result:?}"
+        );
+        assert_eq!(
+            result.trace_classification(),
+            TrustBqTraceClassification::CertificateAccepted
         );
         assert!(progress_checks > 0);
         assert!(result.fevals < 400, "{result:?}");

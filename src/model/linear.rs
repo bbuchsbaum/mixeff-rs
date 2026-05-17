@@ -4975,10 +4975,13 @@ impl LinearMixedModel {
             &mut objective_fn,
             &mut certificate_progress,
         )?;
+        let trace_classification = result.trace_classification();
         let _trust_bq_diagnostics = (
             result.iterations,
             result.final_radius,
             result.last_model_sample_count,
+            trace_classification.as_str(),
+            result.stop_reason.is_acceptable_convergence(),
         );
 
         let logged_best_theta = best_theta.into_inner();

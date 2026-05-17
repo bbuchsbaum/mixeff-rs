@@ -64,6 +64,20 @@ Certificate-aware stopping is
 available for scalar and 2x2 covariance certificates, but it refuses
 invalid-boundary and weak-identification classifications.
 
+TrustBQ stop reasons are also mapped to a stable trace classification inside
+`src/optimizer/trust_bq.rs`:
+
+| Trace class | Stop reasons | Interpretation |
+| --- | --- | --- |
+| `smooth_convergence` | radius, objective, or step tolerance | Standard trust-region convergence. |
+| `statistical_stall` | objective stagnation | The model-family policy accepted negligible objective movement inside its statistical stall band. |
+| `certificate_accepted` | certified convergence | The caller-owned model certificate accepted the current best point; for LMMs this is where boundary-certified stops enter TrustBQ. |
+| `budget_exhaustion` | max evaluations | The optimizer ran out of budget before a convergence or certificate stop. |
+
+KKT-guided invalid-boundary restarts are orchestrated above TrustBQ in the LMM
+fit path. They are reported as recovered convergence by the optimizer
+certificate and compiler verdict surfaces rather than as a raw TrustBQ stop.
+
 ## Practical Tradeoff
 
 NLopt remains the default performance profile because it is usually more

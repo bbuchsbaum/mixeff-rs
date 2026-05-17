@@ -15,7 +15,9 @@ pub use crate::error::LinAlgError;
 // routines — so several primitives have no non-test caller. Demoting `linalg`
 // to `pub(crate)` (v1.0 API trim) made that visible as dead_code. Retaining
 // the tested ports is deliberate; whether to wire them in or remove them is
-// tracked as a follow-up rather than silently suppressed here.
+// tracked as a follow-up rather than silently suppressed here. See
+// `docs/linalg_primitive_audit.md` for the current caller map and post-1.0
+// decision boundary.
 #[allow(dead_code)]
 pub mod block_ops;
 #[allow(dead_code)]
