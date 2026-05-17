@@ -115,6 +115,10 @@ name = "profile_pls_kernel"
 required-features = ["unstable-internals"]
 
 [[example]]
+name = "profile_grouseticks_glmm"
+required-features = ["unstable-internals"]
+
+[[example]]
 name = "probe_tungara_glmm"
 required-features = ["unstable-internals"]
 

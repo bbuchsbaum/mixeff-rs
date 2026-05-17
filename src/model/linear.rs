@@ -6915,6 +6915,142 @@ impl LinearMixedModel {
         Ok(bootstrap.into_run_payload_with_statistics(metadata, statistics))
     }
 
+    pub fn cluster_resample_full_model_contrast_payload(
+        &self,
+        data: &DataFrame,
+        group: &str,
+        hypothesis: &FixedEffectHypothesis,
+        options: &FixedEffectBootstrapOptions,
+        levels: &[f64],
+    ) -> Result<BootstrapRunPayload> {
+        if data.nrow() != self.nobs() {
+            return Err(MixedModelError::InvalidArgument(format!(
+                "cluster bootstrap data has {} rows, but the fitted model has {} observations",
+                data.nrow(),
+                self.nobs()
+            )));
+        }
+        if !self.reterms.iter().any(|term| term.grouping_name == group) {
+            return Err(MixedModelError::InvalidArgument(format!(
+                "cluster bootstrap group `{group}` is not a random-effect grouping factor in the fitted model"
+            )));
+        }
+        let n_coefficients = self.coef_names().len();
+        if hypothesis.n_coefficients() != n_coefficients {
+            return Err(MixedModelError::DimensionMismatch(format!(
+                "cluster bootstrap contrast has {} coefficient column(s), but the model has {n_coefficients}",
+                hypothesis.n_coefficients()
+            )));
+        }
+        if hypothesis.n_contrasts() != 1 {
+            return Err(MixedModelError::InvalidArgument(
+                "cluster bootstrap intervals are currently certified only for scalar contrasts"
+                    .to_string(),
+            ));
+        }
+        if levels.is_empty() {
+            return Err(MixedModelError::InvalidArgument(
+                "cluster bootstrap intervals require at least one confidence level".to_string(),
+            ));
+        }
+
+        let mut rng = match options.seed {
+            Some(seed) => rand::rngs::StdRng::seed_from_u64(seed),
+            None => rand::rngs::StdRng::from_entropy(),
+        };
+        let mut fits = Vec::with_capacity(options.requested_replicates);
+        let mut statistics = Vec::with_capacity(options.requested_replicates);
+        let mut distinct_counts = Vec::with_capacity(options.requested_replicates);
+        let mut duplicate_counts = Vec::with_capacity(options.requested_replicates);
+
+        for _ in 0..options.requested_replicates {
+            let (resampled, draw) = data.cluster_resample(group, &mut rng)?;
+            distinct_counts.push(draw.distinct_sampled_level_count);
+            duplicate_counts.push(draw.duplicate_count);
+
+            let mut work = match LinearMixedModel::new(self.formula.clone(), &resampled, None) {
+                Ok(model) => model,
+                Err(_) => {
+                    statistics.push(f64::NAN);
+                    fits.push(failed_bootstrap_replicate_like(self));
+                    if options.failed_refit_policy == BootstrapFailedRefitPolicy::Abort {
+                        break;
+                    }
+                    continue;
+                }
+            };
+
+            match work.fit(self.optsum.reml) {
+                Ok(_) => {
+                    statistics
+                        .push(scalar_contrast_estimate(&work, hypothesis).unwrap_or(f64::NAN));
+                    fits.push(BootstrapReplicate {
+                        objective: work.objective(),
+                        sigma: work.sigma(),
+                        beta: work.beta(),
+                        se: work.stderror(),
+                        theta: work.theta(),
+                    });
+                }
+                Err(_) => {
+                    statistics.push(f64::NAN);
+                    fits.push(failed_bootstrap_replicate_like(self));
+                    if options.failed_refit_policy == BootstrapFailedRefitPolicy::Abort {
+                        break;
+                    }
+                }
+            }
+        }
+
+        let observed = scalar_contrast_estimate(self, hypothesis).ok_or_else(|| {
+            MixedModelError::InvalidArgument(
+                "cluster bootstrap intervals require a finite observed scalar contrast".to_string(),
+            )
+        })?;
+        let intervals = bootstrap_scalar_percentile_intervals(
+            &hypothesis.label,
+            &statistics,
+            observed,
+            levels,
+        )?;
+        let bootstrap = MixedModelBootstrap { fits };
+        let seed_record = options
+            .seed
+            .map(BootstrapSeedRecord::std_rng)
+            .unwrap_or_else(BootstrapSeedRecord::unspecified);
+        let mut metadata = bootstrap.run_metadata_for_model(
+            self,
+            BootstrapTarget::cluster_resample(format!(
+                "{} cluster resample by {group}",
+                hypothesis.label
+            )),
+            options.requested_replicates,
+            options.failed_refit_policy,
+            seed_record,
+            BootstrapRefitOptions::from_model(self),
+            Some(hypothesis.label.clone()),
+            Some(&statistics),
+            None,
+        );
+        metadata.notes.push(
+            "cluster_resample is an estimator-distribution target; it does not certify fixed-effect hypothesis-test p-values"
+                .to_string(),
+        );
+        metadata.notes.push(format!(
+            "cluster_resample group={group}, relabeling_policy=replicate_local_unique_levels"
+        ));
+        if let (Some(min_distinct), Some(max_duplicates)) =
+            (distinct_counts.iter().min(), duplicate_counts.iter().max())
+        {
+            metadata.notes.push(format!(
+                "cluster_resample draw summary: min_distinct_sampled_levels={min_distinct}, max_duplicate_count={max_duplicates}"
+            ));
+        }
+
+        Ok(bootstrap
+            .into_run_payload_with_statistics_and_intervals(metadata, statistics, intervals))
+    }
+
     pub fn fixed_effect_term_hypotheses(&self) -> Vec<FixedEffectHypothesis> {
         let names = self.coef_names();
         let Some(audit) = self.compiler_artifact.design_audit.as_ref() else {
@@ -9308,6 +9444,67 @@ fn fixed_effect_bootstrap_statistic(
     })
 }
 
+fn scalar_contrast_estimate(
+    model: &LinearMixedModel,
+    hypothesis: &FixedEffectHypothesis,
+) -> Option<f64> {
+    if hypothesis.n_contrasts() != 1 || hypothesis.n_coefficients() != model.coef_names().len() {
+        return None;
+    }
+    let estimate = (&hypothesis.l.values * model.coef() - &hypothesis.rhs.values)[0];
+    estimate.is_finite().then_some(estimate)
+}
+
+fn bootstrap_scalar_percentile_intervals(
+    label: &str,
+    statistics: &[f64],
+    observed: f64,
+    levels: &[f64],
+) -> Result<Vec<BootstrapInterval>> {
+    if !observed.is_finite() {
+        return Err(MixedModelError::InvalidArgument(
+            "bootstrap intervals require a finite observed statistic".to_string(),
+        ));
+    }
+    let mut finite = statistics
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    if finite.is_empty() {
+        return Err(MixedModelError::InvalidArgument(
+            "bootstrap intervals require at least one finite replicate statistic".to_string(),
+        ));
+    }
+    finite.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+    levels
+        .iter()
+        .map(|&level| {
+            validate_level(level)?;
+            let alpha = (1.0 - level) / 2.0;
+            Ok(BootstrapInterval {
+                parameter: label.to_string(),
+                level,
+                lower: quantile_sorted(&finite, alpha),
+                upper: quantile_sorted(&finite, 1.0 - alpha),
+                n: finite.len(),
+                method: BootstrapIntervalMethod::Percentile,
+            })
+        })
+        .collect()
+}
+
+fn failed_bootstrap_replicate_like(model: &LinearMixedModel) -> BootstrapReplicate {
+    BootstrapReplicate {
+        objective: f64::NAN,
+        sigma: f64::NAN,
+        beta: model.beta(),
+        se: DVector::from_element(model.feterm.rank, f64::NAN),
+        theta: model.theta(),
+    }
+}
+
 fn fixed_effect_statistic_name_label(name: FixedEffectStatisticName) -> &'static str {
     match name {
         FixedEffectStatisticName::Z => "z",
@@ -9456,6 +9653,7 @@ fn bootstrap_target_kind_label(kind: BootstrapTargetKind) -> &'static str {
     match kind {
         BootstrapTargetKind::FullModelDistribution => "full_model_distribution",
         BootstrapTargetKind::FixedEffectNull => "fixed_effect_null",
+        BootstrapTargetKind::ClusterResample => "cluster_resample",
     }
 }
 
@@ -12281,6 +12479,7 @@ pub const BOOTSTRAP_RUN_SCHEMA_VERSION: &str = "1.0.0";
 pub enum BootstrapTargetKind {
     FullModelDistribution,
     FixedEffectNull,
+    ClusterResample,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12304,6 +12503,14 @@ impl BootstrapTarget {
             kind: BootstrapTargetKind::FixedEffectNull,
             label: label.into(),
             contrast_label: Some(contrast_label.into()),
+        }
+    }
+
+    pub fn cluster_resample(label: impl Into<String>) -> Self {
+        Self {
+            kind: BootstrapTargetKind::ClusterResample,
+            label: label.into(),
+            contrast_label: None,
         }
     }
 }
@@ -12403,6 +12610,8 @@ pub struct BootstrapRunPayload {
     pub replicates: MixedModelBootstrap,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicate_statistics: Option<Vec<f64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intervals: Option<Vec<BootstrapInterval>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -12664,6 +12873,7 @@ impl MixedModelBootstrap {
             metadata,
             replicates: self,
             replicate_statistics: None,
+            intervals: None,
         }
     }
 
@@ -12676,6 +12886,21 @@ impl MixedModelBootstrap {
             metadata,
             replicates: self,
             replicate_statistics: Some(replicate_statistics),
+            intervals: None,
+        }
+    }
+
+    pub fn into_run_payload_with_statistics_and_intervals(
+        self,
+        metadata: BootstrapRunMetadata,
+        replicate_statistics: Vec<f64>,
+        intervals: Vec<BootstrapInterval>,
+    ) -> BootstrapRunPayload {
+        BootstrapRunPayload {
+            metadata,
+            replicates: self,
+            replicate_statistics: Some(replicate_statistics),
+            intervals: Some(intervals),
         }
     }
 
@@ -22249,6 +22474,50 @@ mod tests {
         assert_eq!(family.effective_rank, Some(2));
         assert_eq!(family.numerator_df, Some(2.0));
         assert_eq!(family.numerator_df_semantics, "effective_restriction_rank");
+    }
+
+    #[test]
+    fn test_cluster_resample_full_model_contrast_payload_returns_intervals() {
+        let data = dyestuff_fixture();
+        let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+        let hypothesis =
+            FixedEffectHypothesis::single_coefficient("intercept", 0, model.coef_names().len())
+                .unwrap();
+
+        let payload = model
+            .cluster_resample_full_model_contrast_payload(
+                &data,
+                "batch",
+                &hypothesis,
+                &FixedEffectBootstrapOptions {
+                    requested_replicates: 3,
+                    failed_refit_policy: BootstrapFailedRefitPolicy::Exclude,
+                    seed: Some(20260517),
+                },
+                &[0.95],
+            )
+            .unwrap();
+
+        assert_eq!(
+            payload.metadata.target.kind,
+            BootstrapTargetKind::ClusterResample
+        );
+        assert_eq!(payload.metadata.requested_replicates, 3);
+        assert_eq!(payload.metadata.completed_replicates, 3);
+        assert_eq!(payload.metadata.finite_statistic_count, Some(3));
+        assert!(payload.metadata.mcse.is_none());
+        assert_eq!(payload.replicate_statistics.as_ref().map(Vec::len), Some(3));
+        let intervals = payload.intervals.as_ref().expect("intervals");
+        assert_eq!(intervals.len(), 1);
+        assert_eq!(intervals[0].parameter, "intercept");
+        assert_eq!(intervals[0].method, BootstrapIntervalMethod::Percentile);
+        assert!(payload
+            .metadata
+            .notes
+            .iter()
+            .any(|note| note.contains("estimator-distribution target")));
     }
 
     #[test]

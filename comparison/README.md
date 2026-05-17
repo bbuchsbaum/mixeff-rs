@@ -4,6 +4,12 @@ Three-stage workflow producing `comparison/REPORT.md` — accuracy + performance
 tables for every `[[fits]]` block in `datasets/*/meta.toml`, side-by-side
 against R `lme4`.
 
+This harness is intentionally repo-owned. It reads committed `datasets/*`
+fixtures and `comparison/manifest.json`; it must not depend on downstream
+package fixtures, private paths such as `~/code/mixeff`, or local R-layer
+checkouts. Older stash-era `comparison/mixeff` scripts were discarded for
+crossing that boundary.
+
 ```bash
 cargo run --release --example compare_rust   # writes manifest.json + rust_results.json
 Rscript scripts/compare_lme4.R               # reads manifest.json, writes lme4_results.json
@@ -79,9 +85,10 @@ loosen these if you're comparing against a different optimizer baseline.
 - **Categorical predictors in random slopes** are rejected with
   `not found or not numeric`. Surfaced by `kb07` maximal/zerocorr fits and
   `machines :: (Machine | Worker)`.
-- **GLMMs** (cbpp, verbagg, grouseticks, tungara_single_caller) are emitted to the manifest but
-  marked `not_implemented` until the driver wires up the
-  `GeneralizedLinearMixedModel` path.
+- **GLMM objective definitions** differ from lme4 in response-constant
+  handling and fast-PIRLS semantics for some rows. The report classifies these
+  rows explicitly instead of treating every objective delta as an accuracy
+  failure.
 - **Coefficient-name formatting**: Rust uses `"Type: T2"` (space-colon),
   R uses `"TypeT2"`. Cosmetic; doesn't affect numerical match.
 

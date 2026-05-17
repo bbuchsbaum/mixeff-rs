@@ -219,6 +219,18 @@ pub struct EncodedCategoricalColumn {
     pub explicit_contrast: bool,
 }
 
+/// Audit record for one cluster-resampling draw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusterResampleDraw {
+    pub group: String,
+    pub original_level_count: usize,
+    pub sampled_levels: Vec<String>,
+    pub distinct_sampled_level_count: usize,
+    pub duplicate_count: usize,
+    pub output_rows: usize,
+    pub relabeling_policy: String,
+}
+
 impl CategoricalColumn {
     pub fn new(values: Vec<String>) -> Self {
         let mut levels = Vec::new();
@@ -466,6 +478,123 @@ impl DataFrame {
     pub fn has_column(&self, name: &str) -> bool {
         self.columns.contains_key(name)
     }
+
+    /// Return a row-selected data frame while preserving categorical level order.
+    pub fn select_rows(&self, rows: &[usize]) -> Result<Self> {
+        let mut out = DataFrame::new();
+        for (name, column) in &self.columns {
+            match column {
+                Column::Numeric(values) => {
+                    let selected = rows
+                        .iter()
+                        .map(|&row| {
+                            values.get(row).copied().ok_or_else(|| {
+                                MixedModelError::InvalidArgument(format!(
+                                    "row index {row} is out of bounds for {} rows",
+                                    self.n_rows
+                                ))
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    out.add_numeric(name, selected)?;
+                }
+                Column::Categorical(cat) => {
+                    let selected = rows
+                        .iter()
+                        .map(|&row| {
+                            cat.values.get(row).cloned().ok_or_else(|| {
+                                MixedModelError::InvalidArgument(format!(
+                                    "row index {row} is out of bounds for {} rows",
+                                    self.n_rows
+                                ))
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let mut selected_cat =
+                        CategoricalColumn::with_levels(selected, cat.levels.clone())?;
+                    if let Some(contrast) = &cat.contrast {
+                        selected_cat.set_contrast(contrast.clone())?;
+                    }
+                    out.validate_new_column_len(name, selected_cat.values.len())?;
+                    out.columns
+                        .insert(name.clone(), Column::Categorical(selected_cat));
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Resample a categorical grouping factor by cluster with replacement.
+    ///
+    /// Duplicate sampled clusters are relabeled with draw-local unique levels
+    /// so refitted random effects remain independent bootstrap clusters.
+    pub fn cluster_resample<R: rand::Rng>(
+        &self,
+        group: &str,
+        rng: &mut R,
+    ) -> Result<(Self, ClusterResampleDraw)> {
+        let group_column = self.categorical(group).ok_or_else(|| {
+            MixedModelError::InvalidArgument(format!(
+                "cluster resampling group `{group}` must be an observed categorical column"
+            ))
+        })?;
+        if group_column.levels.is_empty() {
+            return Err(MixedModelError::InvalidArgument(format!(
+                "cluster resampling group `{group}` has no levels"
+            )));
+        }
+
+        let mut rows_by_level = vec![Vec::new(); group_column.levels.len()];
+        for (row, &reference) in group_column.refs.iter().enumerate() {
+            let level = reference as usize;
+            if let Some(rows) = rows_by_level.get_mut(level) {
+                rows.push(row);
+            }
+        }
+
+        let mut sampled_indices = Vec::with_capacity(group_column.levels.len());
+        for _ in 0..group_column.levels.len() {
+            sampled_indices.push(rng.gen_range(0..group_column.levels.len()));
+        }
+        let sampled_levels = sampled_indices
+            .iter()
+            .map(|&level| group_column.levels[level].clone())
+            .collect::<Vec<_>>();
+        let mut counts = vec![0usize; group_column.levels.len()];
+        for &level in &sampled_indices {
+            counts[level] += 1;
+        }
+        let distinct_sampled_level_count = counts.iter().filter(|&&count| count > 0).count();
+        let duplicate_count = sampled_indices
+            .len()
+            .saturating_sub(distinct_sampled_level_count);
+
+        let mut row_indices = Vec::new();
+        let mut resampled_group_values = Vec::new();
+        for (draw_index, &level) in sampled_indices.iter().enumerate() {
+            let relabeled = format!("{}__boot{}", group_column.levels[level], draw_index + 1);
+            for &row in &rows_by_level[level] {
+                row_indices.push(row);
+                resampled_group_values.push(relabeled.clone());
+            }
+        }
+
+        let mut out = self.select_rows(&row_indices)?;
+        out.columns.insert(
+            group.to_string(),
+            Column::Categorical(CategoricalColumn::new(resampled_group_values)),
+        );
+        let draw = ClusterResampleDraw {
+            group: group.to_string(),
+            original_level_count: group_column.levels.len(),
+            sampled_levels,
+            distinct_sampled_level_count,
+            duplicate_count,
+            output_rows: out.nrow(),
+            relabeling_policy: "replicate_local_unique_levels".to_string(),
+        };
+        Ok((out, draw))
+    }
 }
 
 fn validate_contrast_shape(
@@ -702,5 +831,30 @@ mod tests {
 
         assert!(matches!(err, MixedModelError::DimensionMismatch(_)));
         assert!(!df.has_column("group"));
+    }
+
+    #[test]
+    fn test_cluster_resample_relabels_duplicate_clusters() {
+        use rand::SeedableRng;
+
+        let mut df = DataFrame::new();
+        df.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        df.add_categorical(
+            "group",
+            vec!["a".into(), "a".into(), "b".into(), "b".into()],
+        )
+        .unwrap();
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(3);
+        let (resampled, draw) = df.cluster_resample("group", &mut rng).unwrap();
+
+        assert_eq!(draw.original_level_count, 2);
+        assert_eq!(draw.sampled_levels.len(), 2);
+        assert_eq!(draw.output_rows, 4);
+        assert_eq!(draw.relabeling_policy, "replicate_local_unique_levels");
+        let group = resampled.categorical("group").unwrap();
+        assert_eq!(group.values.len(), 4);
+        assert_eq!(group.n_levels(), 2);
+        assert!(group.values.iter().all(|value| value.contains("__boot")));
     }
 }

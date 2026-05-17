@@ -31,8 +31,6 @@ Initial scope:
 
 Later scope:
 
-- multi-df fixed-effect hypotheses
-- model-comparison/bootstrap LRT rows
 - adaptive replicate escalation
 - parallel execution
 - GLMM bootstrap calibration
@@ -42,15 +40,17 @@ Out of scope:
 - naive random-effect p-values
 - R-side reconstruction of p-values from bootstrap replicate files
 - treating full-model bootstrap distributions as null hypothesis tests
+- treating cluster-resample estimator distributions as null hypothesis tests
 
 ## Bootstrap Targets
 
-Rust must distinguish at least two simulation targets.
+Rust must distinguish bootstrap simulation/resampling targets.
 
 | Target | Meaning | May produce fixed-effect p-value? |
 |---|---|---|
 | `full_model_distribution` | Simulate from the fitted model as estimated. Useful for replicate distributions, percentile intervals, diagnostics, and smoke tests. | No |
 | `fixed_effect_null` | Simulate from a constrained model satisfying `L beta = rhs`, with variance parameters and residual scale estimated under the declared null policy. | Yes |
+| `cluster_resample` | Resample observed clusters with replacement, refit the full model, and summarize estimator distributions/intervals. | No |
 
 For `fixed_effect_null`, the payload must record:
 
@@ -63,9 +63,15 @@ For `fixed_effect_null`, the payload must record:
 - whether covariance structure was reused, refit, simplified, or unavailable
 - reason if the null target cannot be constructed
 
-Until `fixed_effect_null` exists, explicit bootstrap fixed-effect test requests
-return `method = bootstrap`, `status = not_assessed`, `p_value = null`, and a
-Rust-owned reason.
+Explicit bootstrap fixed-effect p-values must come from a certified
+`fixed_effect_null` payload. Full-model and cluster-resample payloads may carry
+replicate statistics and intervals, but they do not certify null-hypothesis
+p-values.
+
+Model-comparison bootstrap LRT is a separate model-comparison surface:
+`stats::parametric_bootstrap_lrt` simulates from the smaller/null fitted model
+and refits both nested models. It is intentionally not a fixed-effect
+inference-row payload.
 
 ## Run Payload
 
@@ -88,6 +94,7 @@ The minimum run metadata is:
 | `refit_options` | optimizer/refit settings used for simulated responses |
 | `statistic` | statistic definition and observed value |
 | `replicate_statistics` | finite/non-finite bootstrap statistic values or a durable reference to them |
+| `intervals` | optional bootstrap intervals for estimator-distribution targets |
 | `mcse` | Monte Carlo standard error for p-value when available |
 | `notes` | method caveats and reliability notes |
 
@@ -101,10 +108,12 @@ older replicate-only `MixedModelBootstrap` JSON used by `savereplicates()`.
 The metadata records the target, requested/completed/successful replicate
 counts, failed-refit policy, boundary count/rate, seed record, refit options,
 finite statistic count, MCSE when a p-value is supplied, and notes warning that
-`full_model_distribution` runs do not certify fixed-effect hypothesis-test
-p-values. The payload may also carry `replicate_statistics`; this is required
-for non-coefficient scalar contrasts because the basic replicate collection
-stores coefficient standard errors but not replicate covariance matrices.
+`full_model_distribution` and `cluster_resample` runs do not certify
+fixed-effect hypothesis-test p-values. The payload may also carry
+`replicate_statistics`; this is required for non-coefficient scalar contrasts
+because the basic replicate collection stores coefficient standard errors but
+not replicate covariance matrices. Estimator-distribution targets may also
+carry percentile intervals.
 
 ### Stable Wire Labels
 

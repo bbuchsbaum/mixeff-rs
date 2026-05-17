@@ -24,6 +24,13 @@ release, TrustBQ, GLMM, and inference work on `main`.
   contraception, grouseticks, and verbagg divergences from lme4. It is a
   drift guard for the current implementation mode, not a claim that fast-PIRLS
   is the final GLMM target.
+- Cluster-resample full-model contrast payloads. The useful part of the
+  stash-era bootstrap work was restored as a current-main estimator
+  distribution target: cluster draws resample committed `DataFrame` rows by
+  grouping factor, relabel duplicated sampled clusters, refit the full model,
+  and return replicate statistics plus percentile intervals. Model-comparison
+  bootstrap LRT was not duplicated because current `main` already exposes
+  `stats::parametric_bootstrap_lrt`.
 
 ## Superseded On Main
 
@@ -38,13 +45,31 @@ release, TrustBQ, GLMM, and inference work on `main`.
 
 ## Candidate Later Slices
 
-- Bootstrap LRT and fixed-effect bootstrap payload extensions.
 - Objective/kernel experiments in `src/model/linear.rs`, especially the
   dense/sparse cross-product and `faer`/`dyn-stack` trials. These should be
   evaluated against the isolated per-evaluation benchmark before porting.
 - GLMM grouseticks speed gap. The regenerated speed artifact shows Rust
   `grouseticks` at about 0.90x lme4 on this run, so the speed gate keeps it
   as an explicit known-slow row tracked by `bd-01KRSQYRHF8VK627HZ6Z23CP93`.
+
+## GLMM `fast=false` Joint Optimizer Inspection
+
+The stash's `fast=false` GLMM path is not a small compatibility patch. It adds
+a `GlmmFitMode` switch, changes the outer optimizer vector from θ to `[β; θ]`,
+introduces a fixed beta box bound, threads the mode through NLopt, COBYLA, and
+PatternSearch, and adds joint-parameter finalization/certification paths. It
+also broadens several GLMM internals from crate-private to public and changes
+initial beta handling.
+
+That is potentially useful research material for a future joint GLMM optimizer,
+but it conflicts with the current 1.0 contract in `docs/glmm_support_contract.md`:
+`fast = true` is the supported mode and `fast = false` must return an explicit
+unsupported error. The stash has only a small smoke test for the joint path and
+does not establish parity for the current GLMM comparison rows. Preserve it as
+reference material only; any revival should be a new feature epic with explicit
+numeric fixtures for cbpp/culcita-style rows, no public-internal visibility
+expansion, and no change to the stable unsupported `fast=false` contract until
+the joint path is fully certified.
 
 ## Faer / Objective-Kernel Inspection
 
@@ -65,6 +90,24 @@ experiment against the current isolated per-evaluation benchmark and
 only a narrow kernel change that shows a repeatable per-evaluation win and
 keeps the current public API, optimizer contracts, and comparison artifacts
 unchanged.
+
+Specific candidate routing:
+
+- Sparse-sparse / sparse-dense / dense-sparse transpose subtraction belongs
+  behind a current `subtract_product_from_blocks` microbenchmark first. Use
+  `examples/objective_eval_bench.rs` crossed rows to confirm an end-to-end
+  per-evaluation win before adding any special-case kernel.
+- The stash's broader crossed-block sparsity policy should be tested on
+  crossed scalar/vector rows because it can change memory shape and fill-in.
+  Do not port it as part of a generic cleanup.
+- The `faer` dense Cholesky trial should be evaluated only for large dense
+  diagonal blocks, with `examples/profile_pls_kernel.rs` isolating
+  Cholesky/downdate stages and `objective_eval_bench` confirming the public
+  objective path. A new dependency is acceptable only after a repeatable win
+  survives both checks.
+- Stash profile/Cargo changes are rejected. The current unstable-internals
+  profiling examples stay feature-gated and the release profile remains under
+  current package policy.
 
 ## Do Not Restore
 
