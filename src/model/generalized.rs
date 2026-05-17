@@ -17,14 +17,15 @@ use std::rc::Rc;
 
 use crate::compiler::{
     CompiledModelArtifact, CompilerPolicy, Diagnostic, DiagnosticCode, DiagnosticSeverity,
-    DiagnosticStage, ModelAuditReport, ModelBoundary, ObjectiveApproximation, OptimizerCertificate,
+    DiagnosticStage, EvidenceQuality, ModelAuditReport, ModelBoundary, ObjectiveApproximation,
+    OptimizerCertificate,
 };
 #[cfg(feature = "nlopt")]
 use crate::compiler::{EvidenceMethod, OptimizerDerivativeEvidence};
 use crate::error::{MixedModelError, Result};
 use crate::formula::Formula;
 use crate::model::data::DataFrame;
-use crate::model::linear::LinearMixedModel;
+use crate::model::linear::{CovarianceKktClassification, LinearMixedModel};
 use crate::model::traits::{Family, LinkFunction, MixedModelFit, RandomEffectTermInfo};
 use crate::stats::{BlockDescription, ModelSummary, VarCorr};
 use crate::types::{FitLogEntry, MatrixBlock, OptSummary, Optimizer, ReMat};
@@ -1438,11 +1439,19 @@ impl GeneralizedLinearMixedModel {
         certificate.apply_derivative_evidence(
             OptimizerDerivativeEvidence {
                 method: EvidenceMethod::FiniteDifference,
-                gradient,
+                gradient: gradient.clone(),
                 hessian: None,
             },
             2.0e-2,
             1.0e-6,
+        );
+        annotate_glmm_covariance_status(
+            &mut certificate,
+            &me.lmm.optsum.final_params,
+            n_beta,
+            &lower_bounds,
+            &gradient,
+            2.0e-2,
         );
         me.lmm.compiler_artifact.optimizer_certificate = Some(certificate);
         me.refresh_binomial_separation_diagnostics();
@@ -1654,18 +1663,24 @@ impl GeneralizedLinearMixedModel {
         let me = model.into_inner();
         me.finalize_theta_after_optimizer(&mut theta, n_agq)?;
         me.lmm.optsum.return_value = match nlopt_result {
-            Ok((status, _fmin)) => format!("{status:?}"),
-            Err((status, _fmin)) => format!("FAILED:{status:?}"),
+            Ok((status, _fmin)) => experimental_nlopt_status_label(&format!("{status:?}")),
+            Err((status, _fmin)) => {
+                format!(
+                    "FAILED:{}",
+                    experimental_nlopt_status_label(&format!("{status:?}"))
+                )
+            }
         };
         me.lmm.optsum.feval = feval_count.get();
         me.lmm.optsum.fit_log = rc_refcell_into_inner_or_clone(fit_log);
-        me.lmm.compiler_artifact.optimizer_certificate =
-            Some(OptimizerCertificate::from_opt_summary_with_context(
-                &me.lmm.optsum,
-                &me.theta,
-                &me.lmm.lower_bounds(),
-                Some(me.lmm.dims.n),
-            ));
+        let mut certificate = OptimizerCertificate::from_opt_summary_with_context(
+            &me.lmm.optsum,
+            &me.theta,
+            &me.lmm.lower_bounds(),
+            Some(me.lmm.dims.n),
+        );
+        annotate_glmm_singular_covariance_status(&mut certificate, &me.theta, me.lmm.is_singular());
+        me.lmm.compiler_artifact.optimizer_certificate = Some(certificate);
         me.refresh_binomial_separation_diagnostics();
         me.refresh_near_unit_random_effect_correlation_diagnostics();
 
@@ -1775,13 +1790,14 @@ impl GeneralizedLinearMixedModel {
         me.lmm.optsum.return_value = return_value;
         me.lmm.optsum.feval = feval_count.get();
         me.lmm.optsum.fit_log = rc_refcell_into_inner_or_clone(fit_log);
-        me.lmm.compiler_artifact.optimizer_certificate =
-            Some(OptimizerCertificate::from_opt_summary_with_context(
-                &me.lmm.optsum,
-                &me.theta,
-                &me.lmm.lower_bounds(),
-                Some(me.lmm.dims.n),
-            ));
+        let mut certificate = OptimizerCertificate::from_opt_summary_with_context(
+            &me.lmm.optsum,
+            &me.theta,
+            &me.lmm.lower_bounds(),
+            Some(me.lmm.dims.n),
+        );
+        annotate_glmm_singular_covariance_status(&mut certificate, &me.theta, me.lmm.is_singular());
+        me.lmm.compiler_artifact.optimizer_certificate = Some(certificate);
         me.refresh_binomial_separation_diagnostics();
         me.refresh_near_unit_random_effect_correlation_diagnostics();
 
@@ -1926,13 +1942,18 @@ impl GeneralizedLinearMixedModel {
         };
         self.lmm.optsum.feval = feval_count;
         self.lmm.optsum.fit_log = fit_log;
-        self.lmm.compiler_artifact.optimizer_certificate =
-            Some(OptimizerCertificate::from_opt_summary_with_context(
-                &self.lmm.optsum,
-                &self.theta,
-                &self.lmm.lower_bounds(),
-                Some(self.lmm.dims.n),
-            ));
+        let mut certificate = OptimizerCertificate::from_opt_summary_with_context(
+            &self.lmm.optsum,
+            &self.theta,
+            &self.lmm.lower_bounds(),
+            Some(self.lmm.dims.n),
+        );
+        annotate_glmm_singular_covariance_status(
+            &mut certificate,
+            &self.theta,
+            self.lmm.is_singular(),
+        );
+        self.lmm.compiler_artifact.optimizer_certificate = Some(certificate);
         self.refresh_binomial_separation_diagnostics();
         self.refresh_near_unit_random_effect_correlation_diagnostics();
 
@@ -2365,6 +2386,139 @@ fn experimental_nlopt_status_label(name: &str) -> String {
         "Failure" => "FAILURE".to_string(),
         other => other.to_ascii_uppercase(),
     }
+}
+
+#[cfg(feature = "nlopt")]
+fn annotate_glmm_covariance_status(
+    certificate: &mut OptimizerCertificate,
+    params: &[f64],
+    n_beta: usize,
+    lower_bounds: &[f64],
+    gradient: &[f64],
+    gradient_tolerance: f64,
+) {
+    if !certificate.evidence.optimizer_stop.acceptable_stop || params.len() <= n_beta {
+        return;
+    }
+
+    let boundary_tolerance = 1.0e-8;
+    let theta_params = &params[n_beta..];
+    let theta_lower = lower_bounds.get(n_beta..).unwrap_or(&[]);
+    let theta_gradient = gradient.get(n_beta..).unwrap_or(&[]);
+    let boundary_indices = theta_params
+        .iter()
+        .zip(theta_lower.iter())
+        .enumerate()
+        .filter_map(|(index, (value, lower))| {
+            lower
+                .is_finite()
+                .then_some(())
+                .filter(|_| *value <= *lower + boundary_tolerance)
+                .map(|_| index)
+        })
+        .collect::<Vec<_>>();
+
+    if boundary_indices.is_empty() {
+        certificate.status = crate::compiler::FitStatus::ConvergedInterior;
+        return;
+    }
+
+    let invalid_boundary = boundary_indices.iter().any(|&index| {
+        theta_gradient
+            .get(index)
+            .is_some_and(|value| *value < -gradient_tolerance)
+    });
+    let classification = if invalid_boundary {
+        certificate.status = crate::compiler::FitStatus::NotOptimized;
+        CovarianceKktClassification::InvalidBoundaryStop
+    } else {
+        certificate.status = crate::compiler::FitStatus::ConvergedBoundary;
+        CovarianceKktClassification::ValidZeroVariance
+    };
+
+    let mut diagnostic = Diagnostic::new(
+        DiagnosticCode::BoundaryParameter,
+        DiagnosticSeverity::Info,
+        DiagnosticStage::Certification,
+        format!("GLMM joint covariance state classified as {classification:?}"),
+    )
+    .with_suggested_actions(vec![
+        "interpret zero random-effect scales as boundary covariance estimates, not missing optimizer metadata".to_string(),
+        "use the recorded stationarity residual and scorecard class before promoting a GLMM row to parity".to_string(),
+    ]);
+    diagnostic.payload.insert(
+        "covariance_kkt_classification".to_string(),
+        serde_json::json!(format!("{classification:?}")),
+    );
+    diagnostic.payload.insert(
+        "boundary_theta_indices".to_string(),
+        serde_json::json!(boundary_indices),
+    );
+    diagnostic.payload.insert(
+        "gradient_tolerance".to_string(),
+        serde_json::json!(gradient_tolerance),
+    );
+    certificate.diagnostics.push(diagnostic);
+}
+
+fn annotate_glmm_singular_covariance_status(
+    certificate: &mut OptimizerCertificate,
+    theta: &[f64],
+    is_singular: bool,
+) {
+    let near_zero_theta = theta
+        .iter()
+        .any(|value| value.is_finite() && value.abs() <= 1.0e-4);
+    if !(is_singular || near_zero_theta) {
+        return;
+    }
+    let boundary_roundoff = certificate
+        .evidence
+        .optimizer_stop
+        .return_code
+        .as_deref()
+        .is_some_and(|code| code == "ROUNDOFF_LIMITED" || code == "FAILED:ROUNDOFF_LIMITED");
+    if !certificate.evidence.optimizer_stop.acceptable_stop && !boundary_roundoff {
+        return;
+    }
+    if boundary_roundoff {
+        certificate.evidence.optimizer_stop.acceptable_stop = true;
+        certificate.evidence.certification_quality = EvidenceQuality::Approximate {
+            reason: "roundoff-limited optimizer stop accepted only for a near-zero GLMM covariance boundary"
+                .to_string(),
+        };
+        certificate
+            .checks
+            .retain(|check| !matches!(check, crate::compiler::CertificateCheck::Failed { .. }));
+        certificate
+            .diagnostics
+            .retain(|diagnostic| diagnostic.code != DiagnosticCode::OptimizerNonconvergence);
+    }
+    if matches!(
+        certificate.status,
+        crate::compiler::FitStatus::ConvergedInterior | crate::compiler::FitStatus::NotOptimized
+    ) {
+        certificate.status = crate::compiler::FitStatus::ConvergedBoundary;
+    }
+    let classification = CovarianceKktClassification::ValidZeroVariance;
+    let mut diagnostic = Diagnostic::new(
+        DiagnosticCode::BoundaryParameter,
+        DiagnosticSeverity::Info,
+        DiagnosticStage::Certification,
+        format!("GLMM covariance state classified as {classification:?}"),
+    )
+    .with_suggested_actions(vec![
+        "treat the singular random-effect covariance as an explicit boundary state in downstream summaries".to_string(),
+        "do not promote the GLMM row to external-engine parity without the joint optimizer scorecard gate".to_string(),
+    ]);
+    diagnostic.payload.insert(
+        "covariance_kkt_classification".to_string(),
+        serde_json::json!(format!("{classification:?}")),
+    );
+    diagnostic
+        .payload
+        .insert("is_singular".to_string(), serde_json::json!(true));
+    certificate.diagnostics.push(diagnostic);
 }
 
 fn binary_column_split(values: impl Iterator<Item = f64>) -> Option<BinaryColumnSplit> {
@@ -3606,6 +3760,9 @@ mod tests {
             Some(LinkFunction::Log),
         )
         .unwrap();
+        model.lmm_mut().optsum.optimizer = Optimizer::PatternSearch;
+        model.lmm_mut().optsum.initial = vec![0.0];
+        model.lmm_mut().optsum.max_feval = 1000;
 
         model.fit_with_options(true, 1, false).unwrap();
 
@@ -3639,6 +3796,79 @@ mod tests {
             model.is_singular(),
             "near-zero random-effect axis must surface as a singular/boundary \
              covariance in the artifact, not be inferred from theta alone"
+        );
+        let certificate = model
+            .lmm
+            .compiler_artifact
+            .optimizer_certificate
+            .as_ref()
+            .expect("near-zero Gamma GLMM should retain optimizer certificate");
+        assert_eq!(
+            certificate.status,
+            crate::compiler::FitStatus::ConvergedBoundary,
+            "near-zero Gamma GLMM should classify as a boundary covariance state; return={}",
+            model.lmm.optsum.return_value
+        );
+        assert!(
+            certificate.diagnostics.iter().any(|diagnostic| {
+                diagnostic.payload.get("covariance_kkt_classification")
+                    == Some(&serde_json::json!("ValidZeroVariance"))
+            }),
+            "near-zero Gamma GLMM should expose the existing covariance classification leaf"
+        );
+    }
+
+    #[test]
+    fn test_poisson_glmm_near_zero_random_effect_classifies_boundary() {
+        let mut y = Vec::new();
+        let mut x = Vec::new();
+        let mut group = Vec::new();
+        for g in 0..5 {
+            for obs in 0..6 {
+                let xv = obs as f64 - 2.5;
+                let eta = 0.8 + 0.15 * xv;
+                y.push(eta.exp().round().max(0.0));
+                x.push(xv);
+                group.push(format!("g{}", g + 1));
+            }
+        }
+        let mut data = DataFrame::new();
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_categorical("group", group).unwrap();
+
+        let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
+        let mut model = GeneralizedLinearMixedModel::new(
+            formula,
+            &data,
+            Family::Poisson,
+            Some(LinkFunction::Log),
+        )
+        .unwrap();
+        model.fit_with_options(true, 1, false).unwrap();
+
+        let theta = model.theta();
+        assert!(
+            theta.iter().any(|value| value.abs() <= 1.0e-4),
+            "near-zero Poisson random effect should pin a covariance scale near zero, got {theta:?}"
+        );
+        let certificate = model
+            .lmm
+            .compiler_artifact
+            .optimizer_certificate
+            .as_ref()
+            .expect("near-zero Poisson GLMM should retain optimizer certificate");
+        assert_eq!(
+            certificate.status,
+            crate::compiler::FitStatus::ConvergedBoundary,
+            "near-zero Poisson GLMM should classify as a boundary covariance state"
+        );
+        assert!(
+            certificate.diagnostics.iter().any(|diagnostic| {
+                diagnostic.payload.get("covariance_kkt_classification")
+                    == Some(&serde_json::json!("ValidZeroVariance"))
+            }),
+            "near-zero Poisson GLMM should expose the existing covariance classification leaf"
         );
     }
 

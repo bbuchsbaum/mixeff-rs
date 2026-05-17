@@ -9,12 +9,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 
-use mixeff_rs::compiler::{CertificateCheck, EvidenceMethod};
+#[cfg(feature = "nlopt")]
+use mixeff_rs::compiler::{CertificateCheck, EvidenceMethod, FitStatus};
 use mixeff_rs::datasets;
 use mixeff_rs::formula::parse_formula;
 use mixeff_rs::model::data::DataFrame;
 use mixeff_rs::model::generalized::GeneralizedLinearMixedModel;
-use mixeff_rs::model::traits::{Family as ModelFamily, LinkFunction, MixedModelFit};
+use mixeff_rs::model::traits::{Family as ModelFamily, LinkFunction};
+#[cfg(feature = "nlopt")]
+use mixeff_rs::model::traits::MixedModelFit;
 use serde_json::Value;
 
 const BETA_ABS_TOL: f64 = 1e-3;
@@ -357,6 +360,7 @@ fn fit_poisson_log_fast_path(row: ExpectedGlmmRow) -> GeneralizedLinearMixedMode
     model
 }
 
+#[cfg(feature = "nlopt")]
 fn synthetic_overdispersed_poisson_model() -> GeneralizedLinearMixedModel {
     let mut data = DataFrame::new();
     let mut y = Vec::new();
@@ -886,6 +890,14 @@ fn experimental_joint_laplace_improves_included_objective_without_changing_publi
         .optimizer_certificate
         .as_ref()
         .expect("experimental joint fit must record an optimizer certificate");
+    assert!(
+        matches!(
+            certificate.status,
+            FitStatus::ConvergedInterior | FitStatus::ConvergedBoundary
+        ),
+        "{key}: experimental joint fit should classify covariance state through FitStatus, got {:?}",
+        certificate.status
+    );
     assert!(
         matches!(
             certificate.evidence.gradient.method,
