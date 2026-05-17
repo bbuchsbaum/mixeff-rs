@@ -4370,6 +4370,9 @@ fn optimizer_stop_is_acceptable(return_value: &str) -> bool {
     if let Some(final_code) = optimizer_recovery_final_code(return_value) {
         return optimizer_stop_is_acceptable(final_code);
     }
+    if let Some(final_code) = optimizer_experimental_joint_final_code(return_value) {
+        return optimizer_stop_is_acceptable(final_code);
+    }
     matches!(
         return_value,
         "SUCCESS" | "FTOL_REACHED" | "XTOL_REACHED" | "STOPVAL_REACHED"
@@ -4383,9 +4386,22 @@ fn optimizer_budget_exhausted(optsum: &OptSummary) -> bool {
     {
         return false;
     }
-    optsum.return_value == "MAXEVAL_REACHED"
-        || optsum.return_value == "MAXTIME_REACHED"
+    let return_value = optimizer_experimental_joint_final_code(&optsum.return_value)
+        .or_else(|| {
+            optsum
+                .return_value
+                .strip_prefix("EXPERIMENTAL_JOINT_FAILED:")
+        })
+        .unwrap_or(&optsum.return_value);
+    return_value == "MAXEVAL_REACHED"
+        || return_value == "MAXTIME_REACHED"
         || (optsum.max_feval > 0 && optsum.feval >= optsum.max_feval)
+}
+
+fn optimizer_experimental_joint_final_code(return_value: &str) -> Option<&str> {
+    return_value
+        .strip_prefix("EXPERIMENTAL_JOINT:")
+        .filter(|code| !code.is_empty())
 }
 
 fn optimizer_recovery_final_code(return_value: &str) -> Option<&str> {

@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 
+use mixeff_rs::compiler::{CertificateCheck, EvidenceMethod};
 use mixeff_rs::datasets;
 use mixeff_rs::formula::parse_formula;
 use mixeff_rs::model::data::DataFrame;
@@ -879,6 +880,33 @@ fn experimental_joint_laplace_improves_included_objective_without_changing_publi
             .iter()
             .all(|value| value.is_finite()),
         "{key}: experimental joint beta must stay finite"
+    );
+    let certificate = joint
+        .compiler_artifact()
+        .optimizer_certificate
+        .as_ref()
+        .expect("experimental joint fit must record an optimizer certificate");
+    assert!(
+        matches!(
+            certificate.evidence.gradient.method,
+            EvidenceMethod::FiniteDifference
+        ),
+        "{key}: experimental joint certificate must record finite-difference stationarity evidence"
+    );
+    let residual = certificate
+        .free_gradient_norm
+        .expect("experimental joint certificate must record a first-order residual");
+    let tolerance = certificate
+        .checks
+        .iter()
+        .find_map(|check| match check {
+            CertificateCheck::FreeGradientOk { tolerance, .. } => Some(*tolerance),
+            _ => None,
+        })
+        .expect("experimental joint certificate must record the stationarity tolerance");
+    assert!(
+        residual <= tolerance,
+        "{key}: stationarity residual {residual:.6e} should be <= tolerance {tolerance:.6e}"
     );
 
     let mut public_fast_false = synthetic_overdispersed_poisson_model();

@@ -19,6 +19,8 @@ use crate::compiler::{
     CompiledModelArtifact, CompilerPolicy, Diagnostic, DiagnosticCode, DiagnosticSeverity,
     DiagnosticStage, ModelAuditReport, ModelBoundary, ObjectiveApproximation, OptimizerCertificate,
 };
+#[cfg(feature = "nlopt")]
+use crate::compiler::{EvidenceMethod, OptimizerDerivativeEvidence};
 use crate::error::{MixedModelError, Result};
 use crate::formula::Formula;
 use crate::model::data::DataFrame;
@@ -1336,6 +1338,7 @@ impl GeneralizedLinearMixedModel {
             start_beta,
             start_theta,
             profiled_start_objective,
+            200,
         )
     }
 
@@ -1345,6 +1348,7 @@ impl GeneralizedLinearMixedModel {
         start_beta: Vec<f64>,
         start_theta: Vec<f64>,
         profiled_start_objective: f64,
+        maxeval: u32,
     ) -> Result<&mut Self> {
         use nlopt::{Algorithm as NloptAlgorithm, Nlopt, Target as NloptTarget};
 
@@ -1386,7 +1390,7 @@ impl GeneralizedLinearMixedModel {
         optimizer.set_lower_bounds(&lower_bounds).ok();
         optimizer.set_ftol_rel(1e-10).ok();
         optimizer.set_ftol_abs(1e-7).ok();
-        optimizer.set_maxeval(200).ok();
+        optimizer.set_maxeval(maxeval).ok();
         let mut initial_step = vec![0.1; n_beta];
         initial_step.extend(vec![0.5; n_theta]);
         optimizer.set_initial_step(&initial_step).ok();
@@ -1398,15 +1402,49 @@ impl GeneralizedLinearMixedModel {
         let me = model.into_inner();
         let final_objective = me.joint_laplace_deviance_at_params(&params, n_beta);
         me.refresh_dispersion();
-        me.lmm.optsum.return_value = match nlopt_result {
-            Ok((status, _fmin)) => format!("EXPERIMENTAL_JOINT:{status:?}"),
-            Err((status, _fmin)) => format!("EXPERIMENTAL_JOINT_FAILED:{status:?}"),
+        let status_label = match &nlopt_result {
+            Ok((status, _fmin)) => {
+                format!(
+                    "EXPERIMENTAL_JOINT:{}",
+                    experimental_nlopt_status_label(&format!("{status:?}"))
+                )
+            }
+            Err((status, _fmin)) => {
+                format!(
+                    "EXPERIMENTAL_JOINT_FAILED:{}",
+                    experimental_nlopt_status_label(&format!("{status:?}"))
+                )
+            }
         };
+        me.lmm.optsum.return_value = status_label;
         me.lmm.optsum.feval = feval_count.get();
+        me.lmm.optsum.max_feval = maxeval as i64;
         me.lmm.optsum.fit_log = rc_refcell_into_inner_or_clone(fit_log);
         me.lmm.optsum.fmin = final_objective;
         me.lmm.optsum.final_params = params;
-        me.lmm.compiler_artifact.optimizer_certificate = None;
+        let mut lower_bounds = vec![f64::NEG_INFINITY; n_beta];
+        lower_bounds.extend(me.lmm.lower_bounds());
+        let mut certificate = OptimizerCertificate::from_opt_summary_with_context(
+            &me.lmm.optsum,
+            &me.lmm.optsum.final_params,
+            &lower_bounds,
+            Some(me.lmm.dims.n),
+        );
+        let gradient = me.joint_laplace_finite_difference_gradient(
+            &me.lmm.optsum.final_params.clone(),
+            n_beta,
+            &lower_bounds,
+        );
+        certificate.apply_derivative_evidence(
+            OptimizerDerivativeEvidence {
+                method: EvidenceMethod::FiniteDifference,
+                gradient,
+                hessian: None,
+            },
+            2.0e-2,
+            1.0e-6,
+        );
+        me.lmm.compiler_artifact.optimizer_certificate = Some(certificate);
         me.refresh_binomial_separation_diagnostics();
         me.refresh_near_unit_random_effect_correlation_diagnostics();
         Ok(me)
@@ -1432,6 +1470,37 @@ impl GeneralizedLinearMixedModel {
             }
             Err(_) => f64::INFINITY,
         }
+    }
+
+    #[cfg(feature = "nlopt")]
+    fn joint_laplace_finite_difference_gradient(
+        &mut self,
+        params: &[f64],
+        n_beta: usize,
+        lower_bounds: &[f64],
+    ) -> Vec<f64> {
+        let base = self.joint_laplace_deviance_at_params(params, n_beta);
+        let mut gradient = Vec::with_capacity(params.len());
+        for (index, &value) in params.iter().enumerate() {
+            let h = 1.0e-5 * value.abs().max(1.0);
+            let lower = lower_bounds
+                .get(index)
+                .copied()
+                .unwrap_or(f64::NEG_INFINITY);
+            let mut plus = params.to_vec();
+            plus[index] = value + h;
+            let fp = self.joint_laplace_deviance_at_params(&plus, n_beta);
+            if value - h > lower {
+                let mut minus = params.to_vec();
+                minus[index] = value - h;
+                let fm = self.joint_laplace_deviance_at_params(&minus, n_beta);
+                gradient.push((fp - fm) / (2.0 * h));
+            } else {
+                gradient.push((fp - base) / h);
+            }
+        }
+        let _ = self.joint_laplace_deviance_at_params(params, n_beta);
+        gradient
     }
 
     fn reset_for_refit(&mut self, new_y: Option<&[f64]>) -> Result<()> {
@@ -2280,6 +2349,24 @@ fn random_effect_term_label(reterm: &ReMat) -> String {
     format!("({columns} | {})", reterm.grouping_name)
 }
 
+#[cfg(feature = "nlopt")]
+fn experimental_nlopt_status_label(name: &str) -> String {
+    match name {
+        "Success" => "SUCCESS".to_string(),
+        "StopValReached" => "STOPVAL_REACHED".to_string(),
+        "FtolReached" => "FTOL_REACHED".to_string(),
+        "XtolReached" => "XTOL_REACHED".to_string(),
+        "MaxEvalReached" => "MAXEVAL_REACHED".to_string(),
+        "MaxTimeReached" => "MAXTIME_REACHED".to_string(),
+        "RoundoffLimited" => "ROUNDOFF_LIMITED".to_string(),
+        "InvalidArgs" => "INVALID_ARGS".to_string(),
+        "OutOfMemory" => "OUT_OF_MEMORY".to_string(),
+        "ForcedStop" => "FORCED_STOP".to_string(),
+        "Failure" => "FAILURE".to_string(),
+        other => other.to_ascii_uppercase(),
+    }
+}
+
 fn binary_column_split(values: impl Iterator<Item = f64>) -> Option<BinaryColumnSplit> {
     let mut unique = Vec::new();
     for value in values {
@@ -2790,6 +2877,75 @@ mod tests {
             GeneralizedLinearMixedModel::new(formula, &data, Family::Poisson, None).unwrap();
         model.fit().unwrap();
         model
+    }
+
+    #[cfg(feature = "nlopt")]
+    fn small_joint_poisson_fixture() -> GeneralizedLinearMixedModel {
+        let mut data = DataFrame::new();
+        let mut y = Vec::new();
+        let mut x = Vec::new();
+        let mut group = Vec::new();
+        let mut obs = Vec::new();
+        let group_effects = [-0.7, 0.2, 0.8, -0.3];
+        for (g, effect) in group_effects.iter().enumerate() {
+            for j in 0..6 {
+                let xv = j as f64 - 2.5;
+                let eta = 0.4 + 0.18 * xv + effect;
+                let base = eta.exp();
+                let overdispersion_bump = if j % 3 == 0 { 2.0 } else { 0.0 };
+                y.push((base + overdispersion_bump).round().max(0.0));
+                x.push(xv);
+                group.push(format!("g{}", g + 1));
+                obs.push(format!("o{}_{}", g + 1, j + 1));
+            }
+        }
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_categorical("group", group).unwrap();
+        data.add_categorical("obs", obs).unwrap();
+        let formula = parse_formula("y ~ 1 + x + (1 | group) + (1 | obs)").unwrap();
+        GeneralizedLinearMixedModel::new(formula, &data, Family::Poisson, Some(LinkFunction::Log))
+            .unwrap()
+    }
+
+    #[cfg(feature = "nlopt")]
+    #[test]
+    fn experimental_joint_failed_stop_records_uncertified_certificate() {
+        let mut model = small_joint_poisson_fixture();
+        model.fit_with_options_impl(1, false).unwrap();
+        let start_beta = model.beta.as_slice().to_vec();
+        let start_theta = model.theta.clone();
+        let start_objective = model.deviance_with_response_constants(1);
+
+        model
+            .fit_experimental_joint_laplace_from_start(start_beta, start_theta, start_objective, 1)
+            .unwrap();
+
+        let certificate = model
+            .compiler_artifact()
+            .optimizer_certificate
+            .as_ref()
+            .expect("failed joint attempt should still record an optimizer certificate");
+        assert!(
+            !certificate.evidence.optimizer_stop.acceptable_stop,
+            "forced one-evaluation joint fit must not be certified as an acceptable stop"
+        );
+        assert!(
+            certificate.free_gradient_norm.is_none(),
+            "failed optimizer stop must not report a passing stationarity residual"
+        );
+        assert!(
+            model
+                .opt_summary()
+                .return_value
+                .starts_with("EXPERIMENTAL_JOINT"),
+            "forced failure must keep an experimental return-code namespace"
+        );
+        assert!(
+            model.opt_summary().return_value.contains("MAXEVAL_REACHED"),
+            "forced one-evaluation joint fit must report MAXEVAL_REACHED, got {}",
+            model.opt_summary().return_value
+        );
     }
 
     #[test]
