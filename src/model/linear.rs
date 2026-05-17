@@ -813,6 +813,15 @@ impl LinearMixedModel {
             return Err(MixedModelError::NoRandomEffects);
         }
 
+        // Data-boundary seam: lower the stateless in-formula transforms
+        // (`I(days^2)`, `log(reaction)`, …) into synthetic numeric columns
+        // before any design construction. Above this point everything keeps
+        // seeing "a column by name"; the formula's term/response references
+        // already carry the canonical labels. See
+        // `docs/formula_transform_seam.md`.
+        let materialized = formula.materialize(data)?;
+        let data = &materialized;
+
         let semantic_model = compile_formula_ir(&formula);
         let mut compiler_artifact = CompiledModelArtifact::new_with_policy(
             formula.to_string(),
@@ -8200,6 +8209,13 @@ impl LinearMixedModel {
         new_re_levels: NewReLevels,
     ) -> Result<Vec<Option<f64>>> {
         let n_new = newdata.nrow();
+
+        // Re-run the stateless transform evaluator on `newdata`. Correct by
+        // construction: each transform is a pure pointwise recipe, so there
+        // is no stored basis to diverge from — prediction simply re-evaluates
+        // the same expression. See `docs/formula_transform_seam.md`.
+        let materialized = self.formula.materialize(newdata)?;
+        let newdata = &materialized;
 
         // --- Fixed-effects part ---
         // Realign categorical columns to the training factor encoding so that
@@ -20350,6 +20366,89 @@ mod tests {
                 let pred = result[i].expect("training data should never be None");
                 assert_relative_eq!(pred, fitted[i], epsilon = 1e-8, max_relative = 1e-8);
             }
+        }
+    }
+
+    #[test]
+    fn stateless_transform_end_to_end_fit() {
+        // log(reaction) ~ days + I(days^2) + (1 | subj) fits, and the
+        // transform labels surface as the response name and a coefficient
+        // name byte-identical to what R prints.
+        let data = sleepstudy_fixture();
+        let formula =
+            parse_formula("log(reaction) ~ days + I(days^2) + (1 | subj)").unwrap();
+        assert_eq!(formula.response, "log(reaction)");
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let names = model.coef_names();
+        assert!(
+            names.iter().any(|n| n == "I(days^2)"),
+            "coef_names should contain `I(days^2)`, got {names:?}"
+        );
+        assert!(names.iter().any(|n| n == "days"));
+        // The objective is finite (it actually fit).
+        assert!(model.objective_value().is_finite());
+    }
+
+    #[test]
+    fn stateless_transform_predict_round_trip_is_stateless() {
+        // Proves predict_new re-evaluates the transform recipe on newdata
+        // and that doing so is identical to manually materializing the
+        // transformed columns and predicting with a bare-column formula.
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ days + I(days^2) + (1 | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        // Fresh rows (subjects present in training so RE levels are known).
+        let mut fresh = DataFrame::new();
+        fresh.add_numeric("days", vec![0.0, 3.0, 9.0]).unwrap();
+        fresh
+            .add_categorical("subj", vec!["S308".into(), "S309".into(), "S310".into()])
+            .unwrap();
+        let via_transform = model.predict_new(&fresh, NewReLevels::Error).unwrap();
+
+        // Manually materialize I(days^2) and fit/predict the equivalent
+        // bare-column model; results must match bit-for-bit-ish.
+        let mut bare_data = DataFrame::new();
+        let days_train = data.numeric("days").unwrap().to_vec();
+        bare_data
+            .add_numeric("reaction", data.numeric("reaction").unwrap().to_vec())
+            .unwrap();
+        bare_data.add_numeric("days", days_train.clone()).unwrap();
+        bare_data
+            .add_numeric(
+                "days_sq",
+                days_train.iter().map(|d| d * d).collect::<Vec<_>>(),
+            )
+            .unwrap();
+        bare_data
+            .add_categorical(
+                "subj",
+                data.categorical("subj").unwrap().values.clone(),
+            )
+            .unwrap();
+        let bare_formula =
+            parse_formula("reaction ~ days + days_sq + (1 | subj)").unwrap();
+        let mut bare_model = LinearMixedModel::new(bare_formula, &bare_data, None).unwrap();
+        bare_model.fit(false).unwrap();
+
+        let mut bare_fresh = DataFrame::new();
+        bare_fresh.add_numeric("days", vec![0.0, 3.0, 9.0]).unwrap();
+        bare_fresh
+            .add_numeric("days_sq", vec![0.0, 9.0, 81.0])
+            .unwrap();
+        bare_fresh
+            .add_categorical("subj", vec!["S308".into(), "S309".into(), "S310".into()])
+            .unwrap();
+        let via_bare = bare_model.predict_new(&bare_fresh, NewReLevels::Error).unwrap();
+
+        assert_eq!(via_transform.len(), via_bare.len());
+        for (a, b) in via_transform.iter().zip(via_bare.iter()) {
+            let a = a.expect("known RE level");
+            let b = b.expect("known RE level");
+            assert_relative_eq!(a, b, epsilon = 1e-9, max_relative = 1e-9);
         }
     }
 

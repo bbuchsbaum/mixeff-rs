@@ -1036,8 +1036,11 @@ Deferred:
 - S3 only versus an S4 shell for closer `lme4` method compatibility.
 - Whether to provide opt-in `lmer()`/`glmer()` aliases outside the default
   attach path.
-- How much of R's formula language to pre-evaluate before Rust parsing,
-  especially `I()`, `poly()`, and spline helpers.
+- ~~How much of R's formula language to pre-evaluate before Rust parsing,
+  especially `I()`, `poly()`, and spline helpers.~~ **Decided** — see
+  [`formula_transform_seam.md`](formula_transform_seam.md): the engine owns the
+  stateless pointwise subset; stateful transforms (`poly`/`scale`/splines) are
+  the wrapper's responsibility (ownership model (a), `predvars` above the seam).
 - Whether contrast handling should initially mirror R's `model.matrix()` or
   use explicit contrast payloads exclusively.
 - Matrix transfer format for large sparse internals.

@@ -6,6 +6,10 @@
 
 use std::fmt;
 
+use super::transform::DerivedColumn;
+use crate::error::Result;
+use crate::model::data::DataFrame;
+
 /// A fully parsed mixed-model formula.
 ///
 /// A formula has three parts:
@@ -21,11 +25,24 @@ use std::fmt;
 #[derive(Debug, Clone)]
 pub struct Formula {
     /// Name of the response (outcome) variable.
+    ///
+    /// If the response was an in-formula stateless transform (e.g.
+    /// `log(reaction)`), this holds the canonical R-style label and a
+    /// matching entry exists in [`Formula::derived`]. Above the data
+    /// boundary the response is just "a column by this name".
     pub response: String,
     /// Fixed-effect terms on the RHS.
     pub fixed_terms: Vec<FixedTerm>,
     /// Random-effect specifications `(... | group)`.
     pub random_terms: Vec<RandomTerm>,
+    /// Synthetic numeric columns lowered from stateless in-formula
+    /// transforms (`I(days^2)`, `log(reaction)`, …). Each is keyed by its
+    /// canonical R-style label, which doubles as the column name, the
+    /// coefficient name, and (if it is the response) the response name.
+    /// Materialized into the working [`DataFrame`] at the data boundary
+    /// (LMM/GLMM build and predict) by [`Formula::materialize`]; the layered
+    /// tower above that boundary never sees a transform AST.
+    pub derived: Vec<DerivedColumn>,
 }
 
 /// A single fixed-effect term.
@@ -101,6 +118,87 @@ impl Formula {
             .iter()
             .any(|t| matches!(t, FixedTerm::Intercept))
     }
+
+    /// Lower the stateless in-formula transforms into synthetic numeric
+    /// columns at the data boundary.
+    ///
+    /// Returns a clone of `data` with one numeric column appended per entry
+    /// in [`Formula::derived`], named by its canonical label. This is the
+    /// single seam where transforms become real columns; every layer above
+    /// keeps seeing "a column by name", so `FixedTerm`/`RandomTerm`/
+    /// `FixedDesign`/`predict`/`coef_names` are untouched.
+    ///
+    /// The same call runs at fit time (against training data) and at
+    /// prediction time (against `newdata`): because each transform is a pure
+    /// pointwise recipe there is no stored basis to diverge from.
+    ///
+    /// **Collision policy**: if the caller supplies a column whose name
+    /// byte-equals a derived label (e.g. a raw column literally named
+    /// `"I(x^2)"`), the engine **recomputes** the recipe and asserts
+    /// agreement within a tight tolerance (`1e-10` relative + `1e-12`
+    /// absolute). A mismatch is an error — there must be exactly one source
+    /// of truth for the recipe, and the engine owns it (see
+    /// `docs/formula_transform_seam.md` §"hidden model surgery"). Silently
+    /// accepting a diverging pre-supplied column would recreate the exact
+    /// two-implementations-of-the-recipe failure the seam contract forbids.
+    pub fn materialize(&self, data: &DataFrame) -> Result<DataFrame> {
+        if self.derived.is_empty() {
+            return Ok(data.clone());
+        }
+        let mut out = data.clone();
+        for d in &self.derived {
+            let engine_values = super::transform::materialize_column(d, &out)?;
+
+            if let Some(existing) = out.numeric(&d.label) {
+                // A column with this canonical label already exists.  The
+                // engine owns the recipe, so recompute and verify — silently
+                // trusting a pre-supplied column would create two
+                // implementations of the recipe that could diverge at
+                // prediction time.
+                let existing = existing.to_vec();
+                if existing.len() != engine_values.len() {
+                    return Err(crate::error::MixedModelError::InvalidArgument(format!(
+                        "in-formula transform `{}`: a column with this name already \
+                         exists in the data but has {} rows, expected {} — the engine \
+                         owns this derived column; rename the raw column to avoid \
+                         the collision",
+                        d.label,
+                        existing.len(),
+                        engine_values.len()
+                    )));
+                }
+                for (row, (&supplied, &computed)) in
+                    existing.iter().zip(engine_values.iter()).enumerate()
+                {
+                    // Absolute tolerance for values near zero; relative for
+                    // larger magnitudes. 1e-10 rel / 1e-12 abs matches the
+                    // precision of double-precision arithmetic.
+                    let abs_diff = (supplied - computed).abs();
+                    let rel_diff = if computed.abs() > 1e-12 {
+                        abs_diff / computed.abs()
+                    } else {
+                        abs_diff
+                    };
+                    if abs_diff > 1e-12 && rel_diff > 1e-10 {
+                        return Err(crate::error::MixedModelError::InvalidArgument(format!(
+                            "in-formula transform `{}` at row {}: the engine \
+                             computed {computed} but the pre-supplied column \
+                             contains {supplied} (relative diff {rel_diff:.3e}). \
+                             The engine owns this derived-column recipe; there \
+                             must be exactly one source of truth. Rename the raw \
+                             column to avoid the collision, or remove it and let \
+                             the engine compute it.",
+                            d.label, row
+                        )));
+                    }
+                }
+                // Values agree — the column is already correct; leave it.
+            } else {
+                out.add_numeric(&d.label, engine_values)?;
+            }
+        }
+        Ok(out)
+    }
 }
 
 impl fmt::Display for FixedTerm {
@@ -164,6 +262,7 @@ mod tests {
                 zerocorr: false,
                 source: None,
             }],
+            derived: Vec::new(),
         };
 
         assert_eq!(
@@ -186,6 +285,7 @@ mod tests {
                 zerocorr: true,
                 source: None,
             }],
+            derived: Vec::new(),
         };
 
         assert_eq!(formula.to_string(), "y ~ 0 + x + (1 + x || subject & item)");

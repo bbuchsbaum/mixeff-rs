@@ -24,6 +24,7 @@ use thiserror::Error;
 use super::terms::{
     FixedTerm, Formula, GroupingFactor, RandomTerm, RandomTermExpansion, RandomTermSource,
 };
+use super::transform::{parse_bare_call, parse_transform_arith, DerivedColumn, TransformFn};
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -128,8 +129,51 @@ struct Spanned {
 // Lexer
 // ---------------------------------------------------------------------------
 
-/// Tokenize the raw formula string.
-fn tokenize(input: &str) -> Result<Vec<Spanned>, FormulaError> {
+/// Find the index just past the matching `)` for an opening `(` at
+/// `open_idx`, skipping over backtick-quoted spans (which may legally contain
+/// unbalanced parentheses as part of a column name).
+fn matching_paren(chars: &[char], open_idx: usize) -> Result<usize, FormulaError> {
+    debug_assert_eq!(chars[open_idx], '(');
+    let mut depth = 0i32;
+    let mut j = open_idx;
+    while j < chars.len() {
+        match chars[j] {
+            '`' => {
+                j += 1;
+                while j < chars.len() && chars[j] != '`' {
+                    j += 1;
+                }
+                if j >= chars.len() {
+                    return Err(FormulaError::Other(
+                        "unterminated backtick-quoted identifier inside an \
+                         in-formula transform"
+                            .to_string(),
+                    ));
+                }
+            }
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(j + 1);
+                }
+            }
+            _ => {}
+        }
+        j += 1;
+    }
+    Err(FormulaError::UnmatchedParen)
+}
+
+/// Tokenize the raw formula string, collecting any stateless in-formula
+/// transforms into `derived`. Each transform call (`I(...)` or a whitelisted
+/// pointwise `fn(...)`) is replaced by an `Ident` carrying its canonical
+/// label, so the recursive-descent parser keeps treating it as a plain
+/// column reference (the layered tower above the data boundary is unchanged).
+fn tokenize(
+    input: &str,
+    derived: &mut Vec<DerivedColumn>,
+) -> Result<Vec<Spanned>, FormulaError> {
     let mut tokens = Vec::new();
     let chars: Vec<char> = input.chars().collect();
     let len = chars.len();
@@ -312,10 +356,56 @@ fn tokenize(input: &str) -> Result<Vec<Spanned>, FormulaError> {
                     i += 1;
                 }
                 let word: String = chars[start..i].iter().collect();
-                tokens.push(Spanned {
-                    token: Token::Ident(word),
-                    pos,
-                });
+
+                // Is this identifier *immediately* function-applied, i.e.
+                // `word(…)` with no intervening whitespace? In lme4 formulas
+                // a bare identifier is never called except for an in-formula
+                // transform, so an adjacent `(` is the unambiguous transform
+                // seam. `I(...)` and the whitelisted pointwise functions are
+                // lowered into a derived column; anything else (`poly(`,
+                // `scale(`, `factor(`, …) is refused via the transform
+                // whitelist. A *space* before `(` (e.g. `x1 (1|g)`) is two
+                // terms, matching R — handled by the normal term path.
+                if i < len && chars[i] == '(' {
+                    let k = i;
+                    let end = matching_paren(&chars, k)?;
+                    let inner: String = chars[k + 1..end - 1].iter().collect();
+                    let expr = if word == "I" {
+                        parse_transform_arith(&inner)?
+                    } else if TransformFn::from_name(&word).is_some() {
+                        parse_bare_call(&word, &inner)?
+                    } else {
+                        // Unknown / stateful function: actionable refusal,
+                        // naming the construct and pointing at the host
+                        // wrapper / precompute.
+                        return Err(FormulaError::Other(format!(
+                            "in-formula construct `{word}(...)` at position \
+                             {pos} is not in the engine's stateless transform \
+                             subset (allowed: `I(<+ - * / ^, unary -, parens, \
+                             literals, columns>)` and pointwise \
+                             `log`/`log2`/`log10`/`exp`/`sqrt`/`abs`). \
+                             Stateful transforms (`poly`, `scale`, `ns`, \
+                             `bs`, `cut`, `factor`, `center`, …) carry \
+                             fitting-time state and must be precomputed as \
+                             data columns or handled by the host wrapper."
+                        )));
+                    };
+                    let dc = DerivedColumn::new(expr);
+                    let label = dc.label.clone();
+                    if !derived.iter().any(|d| d.label == label) {
+                        derived.push(dc);
+                    }
+                    tokens.push(Spanned {
+                        token: Token::Ident(label),
+                        pos,
+                    });
+                    i = end;
+                } else {
+                    tokens.push(Spanned {
+                        token: Token::Ident(word),
+                        pos,
+                    });
+                }
             }
             '2'..='9' => {
                 // Digits 2-9 at the start of a token — treat as identifier start
@@ -333,18 +423,25 @@ fn tokenize(input: &str) -> Result<Vec<Spanned>, FormulaError> {
                 });
             }
             '^' | '%' | '=' | '!' | '<' | '>' => {
-                // These show up when a user writes an in-formula
-                // transformation (e.g. `x^2`, `I(x^2)`, `log(x)`,
-                // `scale(x)`, `poly(x, 2)`). Formula-level transformations
-                // are out of scope for 1.0 (tracked post-1.0). Refuse with
-                // an actionable message instead of a bare "unexpected token".
+                // Reached only for an operator that is *not* inside a
+                // transform call (the inner span of `I(...)`/`fn(...)` is
+                // consumed by the identifier branch above and never re-lexed
+                // here). Bare formula-level arithmetic like `y ~ x^2` is not
+                // part of the stateless subset: the subset requires the
+                // explicit `I(...)` wrapper. Refuse with an actionable
+                // message instead of a bare "unexpected token".
                 return Err(FormulaError::Other(format!(
-                    "unexpected '{c}' at position {pos}: in-formula transformations \
-                     (e.g. `x^2`, `I(x^2)`, `log(x)`, `scale(x)`, `poly(x, 2)`) are \
-                     not supported in this version — precompute the transformed value \
-                     as its own data column and reference that column instead. If the \
-                     column name itself contains unusual characters, quote it with \
-                     backticks (e.g. `` `log x` ``)."
+                    "unexpected '{c}' at position {pos}: bare formula-level \
+                     arithmetic is not supported — wrap a stateless \
+                     expression in `I(...)` (e.g. `I(x^2)`, `I(a*b)`, \
+                     `I(1/x)`) or use a pointwise transform \
+                     (`log`/`log2`/`log10`/`exp`/`sqrt`/`abs`, e.g. \
+                     `sqrt(I(x + 1))`). Stateful transforms (`poly`, \
+                     `scale`, `ns`, `bs`, `cut`, `factor`, `center`, …) \
+                     carry fitting-time state and must be precomputed as \
+                     data columns or handled by the host wrapper. If the \
+                     column name itself contains unusual characters, quote \
+                     it with backticks (e.g. `` `log x` ``)."
                 )));
             }
             _ => {
@@ -917,7 +1014,8 @@ pub fn parse_formula(input: &str) -> Result<Formula, FormulaError> {
         return Err(FormulaError::Empty);
     }
 
-    let tokens = tokenize(input)?;
+    let mut derived: Vec<DerivedColumn> = Vec::new();
+    let tokens = tokenize(input, &mut derived)?;
     if tokens.is_empty() {
         return Err(FormulaError::Empty);
     }
@@ -957,10 +1055,45 @@ pub fn parse_formula(input: &str) -> Result<Formula, FormulaError> {
         fixed.retain(|t| !matches!(t, FixedTerm::Intercept | FixedTerm::NoIntercept));
     }
 
+    // Keep only the derived columns actually referenced by the final term
+    // set (a `-`-removed transform term should not materialize a column).
+    let mut referenced: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    referenced.insert(response.as_str());
+    for t in &fixed {
+        match t {
+            FixedTerm::Column(name) => {
+                referenced.insert(name.as_str());
+            }
+            FixedTerm::Interaction(names) => {
+                for n in names {
+                    referenced.insert(n.as_str());
+                }
+            }
+            FixedTerm::Intercept | FixedTerm::NoIntercept => {}
+        }
+    }
+    for rt in &random {
+        for t in &rt.terms {
+            match t {
+                FixedTerm::Column(name) => {
+                    referenced.insert(name.as_str());
+                }
+                FixedTerm::Interaction(names) => {
+                    for n in names {
+                        referenced.insert(n.as_str());
+                    }
+                }
+                FixedTerm::Intercept | FixedTerm::NoIntercept => {}
+            }
+        }
+    }
+    derived.retain(|d| referenced.contains(d.label.as_str()));
+
     Ok(Formula {
         response,
         fixed_terms: fixed,
         random_terms: random,
+        derived,
     })
 }
 
@@ -974,6 +1107,12 @@ mod tests {
     use crate::formula::terms::{FixedTerm, GroupingFactor};
 
     // ---- Tokenizer tests ----
+
+    /// Tokenizer test helper: discards collected derived columns.
+    fn tokenize(input: &str) -> Result<Vec<Spanned>, FormulaError> {
+        let mut derived = Vec::new();
+        super::tokenize(input, &mut derived)
+    }
 
     #[test]
     fn tokenize_simple() {
@@ -1358,6 +1497,9 @@ mod tests {
 
     #[test]
     fn in_formula_transformation_gives_actionable_refusal() {
+        // Bare formula-level arithmetic / comparison operators are still
+        // refused: the stateless subset requires the explicit `I(...)`
+        // wrapper.
         for src in ["y ~ x^2", "y ~ x %in% g", "y ~ x > 0"] {
             let err = parse_formula(src).unwrap_err();
             match err {
@@ -1370,6 +1512,78 @@ mod tests {
                 other => panic!("expected Other for `{src}`, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn stateful_transforms_are_refused_with_actionable_message() {
+        // The line is drawn at *stateless*, by whitelist, not by surface
+        // syntax. Stateful basis transforms and unknown functions carry
+        // fitting-time state and must be refused with an actionable message
+        // (naming the construct, pointing at precompute / host wrapper).
+        for src in [
+            "y ~ poly(x, 2) + (1 | g)",
+            "y ~ scale(x) + (1 | g)",
+            "y ~ ns(x, 3) + (1 | g)",
+            "y ~ bs(x) + (1 | g)",
+            "y ~ factor(g2) + (1 | g)",
+            "y ~ cut(x, 3) + (1 | g)",
+            "y ~ center(x) + (1 | g)",
+            "y ~ frobnicate(x) + (1 | g)",
+            "log(reaction, 2) ~ x + (1 | g)",
+            "y ~ log(x, 2) + (1 | g)",
+        ] {
+            let err = parse_formula(src).unwrap_err();
+            match err {
+                FormulaError::Other(msg) => {
+                    assert!(
+                        (msg.contains("stateless") || msg.contains("stateful"))
+                            && (msg.contains("precompute")
+                                || msg.contains("host wrapper")
+                                || msg.contains("out of scope")),
+                        "expected actionable refusal for `{src}`, got: {msg}"
+                    );
+                }
+                other => panic!("expected Other for `{src}`, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn stateless_subset_parses_with_canonical_labels() {
+        // `I(...)` arithmetic and pointwise calls on both sides.
+        let f = parse_formula("log(reaction) ~ days + I(days^2) + (1 | subj)").unwrap();
+        assert_eq!(f.response, "log(reaction)");
+        assert!(f.fixed_terms.contains(&FixedTerm::Column("I(days^2)".into())));
+        assert!(f.fixed_terms.contains(&FixedTerm::Column("days".into())));
+        // Derived set carries the transformed response and the I() term.
+        let labels: Vec<&str> = f.derived.iter().map(|d| d.label.as_str()).collect();
+        assert!(labels.contains(&"log(reaction)"));
+        assert!(labels.contains(&"I(days^2)"));
+        assert_eq!(f.derived.len(), 2);
+
+        // Canonical-label exactness for the supported shapes.
+        for (src, label) in [
+            ("y ~ I(a*b) + (1|g)", "I(a*b)"),
+            ("y ~ I(1/x) + (1|g)", "I(1/x)"),
+            ("y ~ I(-x) + (1|g)", "I(-x)"),
+            ("y ~ I( x  +  1 ) + (1|g)", "I(x+1)"),
+            ("y ~ sqrt(I(x+1)) + (1|g)", "sqrt(I(x+1))"),
+            ("y ~ I((a+b)*x) + (1|g)", "I((a+b)*x)"),
+        ] {
+            let f = parse_formula(src).unwrap();
+            assert!(
+                f.fixed_terms.contains(&FixedTerm::Column(label.into())),
+                "`{src}` should yield column `{label}`, got {:?}",
+                f.fixed_terms
+            );
+        }
+
+        // Backtick identifiers still work alongside transforms.
+        let f = parse_formula("`reaction time` ~ I(`day of study`^2) + (1 | g)").unwrap();
+        assert_eq!(f.response, "reaction time");
+        assert!(f
+            .fixed_terms
+            .contains(&FixedTerm::Column("I(day of study^2)".into())));
     }
 
     #[test]

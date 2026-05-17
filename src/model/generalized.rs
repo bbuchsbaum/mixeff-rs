@@ -308,6 +308,24 @@ impl GeneralizedLinearMixedModel {
             ));
         }
         validate_supported_glmm_family_link(family, link)?;
+
+        // Data-boundary seam: lower the stateless in-formula transforms into
+        // synthetic numeric columns here too, so the GLMM response-domain
+        // check below sees a transformed response (e.g. `log(reaction)`).
+        // The inner LMM build materializes again but the columns already
+        // exist and are verified to match, so it is a no-op there. See
+        // `docs/formula_transform_seam.md`.
+        //
+        // NOTE FOR FUTURE MAINTAINERS: GLMM currently has no public
+        // `predict_new` path of its own — prediction delegates to the inner
+        // LMM, which already calls `formula.materialize(newdata)` at its
+        // own data boundary. If a direct GLMM `predict_new` is ever added
+        // it MUST call `self.lmm.formula.materialize(newdata)` before
+        // building the fixed-effects matrix; bypassing the seam would
+        // silently omit transform re-evaluation on newdata.
+        let materialized = formula.materialize(data)?;
+        let data = &materialized;
+
         if let Some(y) = data.numeric(&formula.response) {
             validate_glmm_response_domain(family, link, y)?;
             if let Some(&first) = y.first() {
@@ -2543,6 +2561,48 @@ mod tests {
             GeneralizedLinearMixedModel::new(formula, &data, Family::Poisson, None).unwrap();
         model.fit().unwrap();
         model
+    }
+
+    #[test]
+    fn stateless_transform_glmm_end_to_end() {
+        // A transformed predictor `I(x^2)` flows through the GLMM build
+        // (which wraps an internal LMM) — proving the materialization seam
+        // is wired on the GLMM path too.
+        use crate::model::traits::MixedModelFit;
+
+        let mut y = Vec::new();
+        let mut x = Vec::new();
+        let mut g = Vec::new();
+        for grp in 0..5 {
+            for obs in 0..8 {
+                let xv = obs as f64 - 3.5;
+                let eta =
+                    0.6 + 0.05 * xv + 0.01 * xv * xv + [-0.2, 0.1, 0.0, 0.15, -0.05][grp];
+                y.push(eta.exp().round().max(1.0));
+                x.push(xv);
+                g.push(format!("g{}", grp + 1));
+            }
+        }
+        let mut data = DataFrame::new();
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_categorical("g", g).unwrap();
+
+        let formula = parse_formula("y ~ 1 + x + I(x^2) + (1 | g)").unwrap();
+        assert!(formula
+            .derived
+            .iter()
+            .any(|d| d.label == "I(x^2)"));
+        let mut model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Poisson, None).unwrap();
+        model.fit().unwrap();
+
+        let names = model.coef_names();
+        assert!(
+            names.iter().any(|n| n == "I(x^2)"),
+            "GLMM coef_names should contain `I(x^2)`, got {names:?}"
+        );
+        assert!(model.objective().is_finite());
     }
 
     #[test]
