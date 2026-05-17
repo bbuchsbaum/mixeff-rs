@@ -21,6 +21,10 @@ package.
 - **Post-fit inference**: variance components, coefficient tables, likelihood
   ratio tests, profile-likelihood and bootstrap confidence intervals — with
   explicit, typed refusals rather than fabricated statistics.
+- **Difficult-model diagnostics**: boundary, reduced-rank, weak-identification,
+  optimizer-exhaustion, and GLMM approximation-gap cases are reported as
+  certified fits or precise diagnostics, not blanket claims of superiority over
+  `lme4` or MixedModels.jl.
 - **Ergonomic API**: a `prelude`, fluent `LinearMixedModelBuilder` /
   `GeneralizedLinearMixedModelBuilder` with `FitOptions`, built-in contrast
   constructors, and a re-exported `nalgebra` so callers don't pin our version.
@@ -113,6 +117,15 @@ on [docs.rs](https://docs.rs/mixeff-rs).
 (`cbind(y1, y2) ~ …`), Gamma GLMM bootstrap, GLMM profile likelihood, and the
 full `I()` / formula-transformation surface are out of scope for the current
 line and tracked as later work.
+
+**Difficult models.** The release claim is "certified fit or precise
+diagnostic", not "always faster" or "always more convergent" than other
+engines. Boundary and reduced-rank LMMs are interpreted through optimizer
+certificates and covariance KKT checks; GLMM rows marked as documented
+divergence remain non-parity claims until their scorecard row and tests are
+promoted together. See the
+[difficult-model release contract](docs/difficult_model_release_contract.md)
+and [certification note](docs/difficult_model_certification.md).
 
 ## License
 

@@ -31,7 +31,13 @@ where the family semantics define them, including binomial trial weights.
 
 `fast = true` is the supported fitting mode. `fast = false` is reserved for a
 future joint optimizer path and must return an explicit unsupported error
-rather than silently selecting another algorithm.
+rather than silently selecting another algorithm. The prerequisites that a
+future certified joint GLMM optimizer must satisfy — objective convention,
+derivative/stationarity evidence, covariance-certificate compatibility, and
+fallback policy — are specified in
+`docs/certified_joint_glmm_optimizer_contract.md`. No GLMM row may move from
+`documented_divergence` to `release_blocking_parity` until a row passes that
+gate.
 
 ## Parity Claim Classes
 
@@ -64,8 +70,13 @@ soft passes:
 - `cbpp`, `contraception`, `culcitalogreg`, and `verbagg` are fast-PIRLS /
   profiled-objective rows. Some large rows match the MixedModels.jl
   `fast=true` objective, but they are not `lme4` joint-estimation parity rows.
-  The `culcitalogreg` Laplace and AGQ rows have large fixed-effect gaps and
-  must remain non-parity until a certified joint GLMM optimizer lands.
+  The `culcitalogreg` Laplace and AGQ rows have large fixed-effect gaps of
+  roughly one logit unit on the intercept and treatment contrasts. This is an
+  **inference-impacting non-parity**: it materially changes fitted
+  probabilities, contrasts, and any downstream Wald/profile inference, so the
+  rows must remain non-parity — not a soft pass — until a certified joint GLMM
+  optimizer lands (see
+  `docs/certified_joint_glmm_optimizer_contract.md`).
 - `gopherdat2` has coefficient parity, but Rust records a near-zero covariance
   parameter without lme4's singular flag. This is a diagnostic threshold /
   convention gap plus the normal GLMM objective-constant difference.
@@ -120,6 +131,42 @@ where available. The current contract includes:
 
 Separation diagnostics must not fire for rare binary predictors that have both
 outcomes represented at the rare level.
+
+### Distinguishable Failure Modes
+
+A difficult GLMM result must let a downstream client tell these five
+situations apart from the artifact alone. They are different problems with
+different correct responses, so they must not collapse into a single "GLMM
+did not converge":
+
+| Failure mode | Stable signal | What it means |
+| --- | --- | --- |
+| Optimizer failure | `optimizer_nonconvergence` (incl. budget exhaustion) on the optimizer certificate / `ConvergenceVerdict` | The optimizer stopped without an acceptable convergence criterion; the point is not a certified optimum. |
+| Approximation gap | `documented_divergence` class with the fast-PIRLS / profiled reference, plus `response_constants = dropped` | The fit is on the profiled fast-PIRLS objective family, not the joint Laplace/AGQ deviance; coefficient gaps versus `lme4` are an approximation difference, not an optimizer bug. |
+| Weak identification | covariance KKT `WeakIdentification` classification / `FitStatus` not a clean interior or valid boundary | The local information is too weak to certify a clean interior or valid boundary interpretation; the result may still be reportable with caution. |
+| Response-constant convention | `response_constants` field (`dropped` vs `included`) | The objective omits/retains response normalising constants; objective values are only comparable when both engines agree on this field. It is a *convention* difference, never reported as an optimizer or identification failure. |
+| Separation-like behavior | `binomial_separation` diagnostic and/or `ConvergedPenalised` / `NotIdentifiable` `FitStatus` | The fixed-effect MLE is at or near non-existence (quasi-/complete separation); this is a structural data property, not optimizer noise. |
+
+These signals are independent: a single fit can be, for example, a valid
+profiled fast-PIRLS result (approximation gap) on a separation-like dataset
+with the `dropped` convention, and each must remain separately readable.
+Separation-like behavior must never be silently relabelled as optimizer
+nonconvergence, and a `dropped`/`included` convention difference must never be
+reported as a fit failure.
+
+## Recovery Policy
+
+There is no default, silent GLMM recovery. The KKT-guided boundary restart
+documented in `docs/difficult_model_certification.md` is an LMM
+covariance-space mechanism; it is not applied to GLMM fits. Any future GLMM
+recovery behavior (joint-optimizer restart, penalised fallback for
+separation-like rows, etc.) must be **opt-in or explicitly labelled in the
+artifact** and must remain outside the release `lme4` parity gate until it
+passes the external-engine parity gates in
+`comparison/parity_scorecard.toml` and the lockstep contract tests. A
+recovered or fallback GLMM result must record which path produced it and must
+not be promoted to `release_blocking_parity` on the strength of the recovery
+alone.
 
 ## R Layer Awareness
 

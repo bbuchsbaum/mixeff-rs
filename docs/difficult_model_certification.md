@@ -90,6 +90,7 @@ existing status is insufficient.
 | Difficult-model corpus | Partly represented by comparison fixtures and pathology tests. | Expand through the corpus/scoreboard mote, not by inventing new statuses. |
 | Time-to-certified-fit scoreboard | Implemented as a comparison-backed manifest for selected difficult rows and unit-test recovery cases. | Extend the manifest when adding new pathology classes or comparator workflows. |
 | Public docs | Compiler verdict docs explain how covariance KKT certificates, KKT-guided recovery, and recovered-convergence wording feed the existing verdict surface. | Keep public wording aligned with the existing certificate vocabulary as hard-model support expands. |
+| Certified joint GLMM optimizer | Not implemented; GLMM hard rows stay `documented_divergence`. The prerequisites (objective convention, derivative/stationarity evidence, covariance-certificate compatibility, fallback policy) are specified in `docs/certified_joint_glmm_optimizer_contract.md`. | Build the joint path to extend this certificate stack; only promote a GLMM row when it passes that gate plus the lockstep scorecard/test change. |
 
 ## Release Claim
 
@@ -104,3 +105,6 @@ the comparison harness and `comparison/parity_scorecard.toml`. Difficult-model
 progress is measured by the focused difficult-model scoreboard:
 time-to-certified-fit, certificate quality, diagnostic precision, and whether
 manual optimizer switching is avoided.
+
+The public wording and release-label contract for that claim lives in
+[`difficult_model_release_contract.md`](difficult_model_release_contract.md).

@@ -3189,6 +3189,78 @@ mod tests {
         assert_relative_eq!(model.varcorr().residual_sd.unwrap(), sigma, epsilon = 1e-12);
     }
 
+    /// Difficult-model corpus row `gamma_near_zero_random_effect_unit`
+    /// (see `comparison/difficult_model_scoreboard.toml`). Gamma is
+    /// implemented but not 1.0-certified and there is no Gamma comparison
+    /// fixture, so the near-zero-random-effect axis is represented here as a
+    /// deterministic unit-test diagnostic, never an lme4-parity claim.
+    #[test]
+    fn test_gamma_glmm_near_zero_random_effect_is_diagnostic() {
+        // Every group shares the same linear predictor: the between-group
+        // variance is structurally negligible, so the MLE of theta sits at
+        // (or against) the zero boundary.
+        let mut y = Vec::new();
+        let mut x = Vec::new();
+        let mut group = Vec::new();
+        for g in 0..5 {
+            for obs in 0..6 {
+                let xv = obs as f64 - 2.5;
+                let eta = 1.1 + 0.2 * xv;
+                let wiggle = 1.0 + 0.04 * ((g + obs) % 3) as f64;
+                y.push(eta.exp() * wiggle);
+                x.push(xv);
+                group.push(format!("g{}", g + 1));
+            }
+        }
+        let mut data = DataFrame::new();
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_categorical("group", group).unwrap();
+
+        let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
+        let mut model = GeneralizedLinearMixedModel::new(
+            formula,
+            &data,
+            Family::Gamma,
+            Some(LinkFunction::Log),
+        )
+        .unwrap();
+
+        model.fit_with_options(true, 1, false).unwrap();
+
+        // optimizer_status: a certificate must be recorded for this fit.
+        assert!(
+            model.lmm.compiler_artifact.optimizer_certificate.is_some(),
+            "Gamma near-zero RE fit must record an optimizer certificate"
+        );
+        assert!(model.lmm.optsum.feval > 0);
+
+        // time_to_certified_fit input: the objective is finite and computable.
+        assert!(model.objective().is_finite());
+
+        // certification_status: this is a near-zero boundary diagnostic, not
+        // an lme4-parity claim. theta is non-negative and pinned near zero.
+        let theta = model.theta();
+        assert_eq!(theta.len(), 1);
+        assert!(theta[0].is_finite() && theta[0] >= 0.0);
+        assert!(
+            theta[0] < 1e-1,
+            "near-zero random-effect axis: expected theta pinned near the \
+             zero boundary, got {}",
+            theta[0]
+        );
+
+        // The corpus criterion is a *diagnostic*, not just a small number:
+        // the near-zero random effect must be reported through the artifact
+        // as a singular/boundary covariance, so an ordinary interior fit that
+        // merely happened to land on a small theta would NOT satisfy this.
+        assert!(
+            model.is_singular(),
+            "near-zero random-effect axis must surface as a singular/boundary \
+             covariance in the artifact, not be inferred from theta alone"
+        );
+    }
+
     #[test]
     fn test_glmm_fast_parameter_documented_or_implemented() {
         let data = contra_fixture();

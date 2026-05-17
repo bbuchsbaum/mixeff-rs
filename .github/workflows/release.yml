@@ -44,6 +44,11 @@ jobs:
         run: cargo test
       - name: cheap difficult-model scoreboard contract
         run: cargo test --test difficult_model_scoreboard
+      - name: cheap GLMM diagnostics/divergence contract
+        run: >
+          cargo test --features unstable-internals
+          --test parity_divergence_contract
+          --test glmm_diagnostic_taxonomy
 
   # ── Gate 3: tests (release) ────────────────────────────────────────────────
   # Optimizer/Cholesky behavior can differ between debug and release builds

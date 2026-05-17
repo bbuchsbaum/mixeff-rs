@@ -262,6 +262,18 @@ fn difficult_scoreboard_covers_required_axes_and_reuses_parity_scorecard() {
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
+    for label in [
+        "release_blocking_parity",
+        "documented_divergence",
+        "diagnostic_contract",
+        "performance_known_slow",
+        "experimental_recovery",
+    ] {
+        assert!(
+            statuses.contains(label),
+            "difficult-model release label {label} must be present"
+        );
+    }
     let mut seen_ids = BTreeSet::new();
     let mut seen_axes = BTreeSet::new();
     let mut saw_non_certifiable_comparator = false;
@@ -322,10 +334,14 @@ fn difficult_scoreboard_covers_required_axes_and_reuses_parity_scorecard() {
                 scenario.id
             );
         } else {
-            assert_eq!(
-                scenario.scorecard_class, "unit_test_contract",
-                "{}: unit-test rows use the local unit_test_contract class",
-                scenario.id
+            assert!(
+                matches!(
+                    scenario.scorecard_class.as_str(),
+                    "diagnostic_contract" | "experimental_recovery"
+                ),
+                "{}: unit-test rows use diagnostic_contract or experimental_recovery, got {}",
+                scenario.id,
+                scenario.scorecard_class
             );
         }
 
@@ -511,6 +527,8 @@ fn unit_test_backed_recovery_scenarios_point_to_existing_tests() {
     let scoreboard = difficult_scoreboard();
     let linear_rs = fs::read_to_string(repo_root().join("src/model/linear.rs"))
         .expect("read src/model/linear.rs");
+    let generalized_rs = fs::read_to_string(repo_root().join("src/model/generalized.rs"))
+        .expect("read src/model/generalized.rs");
     let mut unit_rows = 0;
 
     for scenario in scoreboard
@@ -523,8 +541,9 @@ fn unit_test_backed_recovery_scenarios_point_to_existing_tests() {
             .unit_test_name
             .as_deref()
             .unwrap_or_else(|| panic!("{}: unit_test_name is required", scenario.id));
+        let needle = format!("fn {test_name}");
         assert!(
-            linear_rs.contains(&format!("fn {test_name}")),
+            linear_rs.contains(&needle) || generalized_rs.contains(&needle),
             "{}: unit-test backed scenario points to missing test {test_name}",
             scenario.id
         );

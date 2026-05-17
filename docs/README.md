@@ -40,6 +40,9 @@ rules — no fake p-values, no hidden model surgery.
 - [`difficult_model_certification.md`](difficult_model_certification.md) —
   how difficult boundary/singular fits reuse the existing optimizer
   certificate, covariance KKT, verdict, and parity-scorecard surfaces.
+- [`difficult_model_release_contract.md`](difficult_model_release_contract.md)
+  — release-safe public wording and scorecard labels for difficult-model
+  claims.
 
 ## Internal design (in flux — not a stable contract)
 

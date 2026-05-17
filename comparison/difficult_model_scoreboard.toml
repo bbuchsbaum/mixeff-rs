@@ -15,14 +15,19 @@ required_axes = [
   "crossed_sparse_lmm",
   "invalid_boundary_start_lmm",
   "glmm_near_zero_random_effect",
+  "glmm_near_zero_gamma_random_effect",
+  "glmm_rare_event_separation",
+  "glmm_fast_pirls_divergence",
   "glmm_large_profiled_gap",
 ]
 
 certification_statuses = [
+  "release_blocking_parity",
   "certified_fit",
   "certified_boundary",
   "diagnostic_contract",
   "documented_divergence",
+  "experimental_recovery",
   "performance_known_slow",
   "unit_test_recovery",
   "stress_opt_in",
@@ -180,8 +185,8 @@ link = "Identity"
 estimator = "REML"
 comparator_engines = ["mixeff-rs good-start reference"]
 release_relevance = "This is the regression guard for claiming certificate-guided recovery, not just post-hoc messaging."
-scorecard_class = "unit_test_contract"
-certification_status = "unit_test_recovery"
+scorecard_class = "experimental_recovery"
+certification_status = "experimental_recovery"
 certification_claim = "test_kkt_guided_restart_repairs_scalar_invalid_boundary_stop proves objective improvement and interior certificate after restart."
 required_metrics = ["optimizer_status", "certification_status", "time_to_certified_fit_ms"]
 rust_certification = "kkt_guided_restart"
@@ -233,3 +238,70 @@ comparator_certification = "single_fit"
 rust_time_multiplier = 1.0
 comparator_time_multiplier = 1.0
 comparator_extra_ms = 0.0
+
+[[scenario]]
+id = "culcitalogreg_rare_event_separation"
+axis = "glmm_rare_event_separation"
+description = "Small-N binomial GLMM with separation-like, near-non-existent fixed-effect MLE under the fast-PIRLS profiled path."
+data_source = "datasets/culcitalogreg"
+generator = "checked-in fixture"
+dataset = "culcitalogreg"
+formula = "predation ~ ttt + (1 | block)"
+family = "Binomial"
+link = "Logit"
+estimator = "Laplace"
+comparator_engines = ["lme4"]
+release_relevance = "Separation-like binary GLMMs must stay an explicit inference-impacting non-parity diagnostic, never a soft pass, until a certified joint GLMM optimizer lands."
+scorecard_class = "documented_divergence"
+certification_status = "documented_divergence"
+certification_claim = "Rust returns a fast-PIRLS profiled fit with a roughly one-logit-unit fixed-effect gap from lme4; this is inference-impacting non-parity, not optimizer failure."
+required_metrics = ["beta_delta", "theta_delta", "optimizer_status", "singular_status", "warnings", "wall_time_ms", "fevals", "time_to_certified_fit_ms"]
+rust_certification = "fast_pirls_profiled_glmm_non_parity"
+comparator_certification = "single_fit"
+rust_time_multiplier = 1.0
+comparator_time_multiplier = 1.0
+comparator_extra_ms = 0.0
+
+[[scenario]]
+id = "cbpp_fast_pirls_divergence"
+axis = "glmm_fast_pirls_divergence"
+description = "Grouped-binomial GLMM on the fast-PIRLS profiled objective family with a documented lme4 joint-estimation beta gap."
+data_source = "datasets/cbpp"
+generator = "checked-in fixture"
+dataset = "cbpp"
+formula = "incidence / size ~ 1 + period + (1 | herd)"
+family = "Binomial"
+link = "Logit"
+estimator = "Laplace"
+comparator_engines = ["lme4"]
+release_relevance = "The canonical fast-PIRLS divergence row: keeps the approximation-gap class visible and honestly non-lme4 until the certified joint optimizer lands."
+scorecard_class = "documented_divergence"
+certification_status = "documented_divergence"
+certification_claim = "Rust fits the profiled fast-PIRLS objective; the lme4 beta gap is an approximation difference, not an optimizer bug, and objective constants are non-comparable."
+required_metrics = ["beta_delta", "theta_delta", "optimizer_status", "singular_status", "warnings", "wall_time_ms", "fevals", "time_to_certified_fit_ms"]
+rust_certification = "fast_pirls_profiled_glmm_non_parity"
+comparator_certification = "single_fit"
+rust_time_multiplier = 1.0
+comparator_time_multiplier = 1.0
+comparator_extra_ms = 0.0
+
+[[scenario]]
+id = "gamma_near_zero_random_effect_unit"
+axis = "glmm_near_zero_gamma_random_effect"
+description = "Gamma GLMM whose grouping factor carries a near-zero random-effect variance; deterministic unit test, no Gamma comparison fixture exists."
+data_source = "src/model/generalized.rs unit tests"
+generator = "deterministic synthetic Gamma fixture with negligible between-group variance"
+dataset = "unit_test"
+formula = "y ~ 1 + x + (1 | group)"
+family = "Gamma"
+link = "Log"
+estimator = "Laplace"
+comparator_engines = ["mixeff-rs deterministic unit test"]
+release_relevance = "Gamma is implemented but not 1.0-certified; the near-zero random-effect axis must still be represented so the corpus does not silently omit it."
+scorecard_class = "diagnostic_contract"
+certification_status = "diagnostic_contract"
+certification_claim = "test_gamma_glmm_near_zero_random_effect_is_diagnostic proves the near-zero theta path fits and reports a boundary/diagnostic state without claiming lme4 parity."
+required_metrics = ["optimizer_status", "certification_status", "time_to_certified_fit_ms"]
+rust_certification = "fast_pirls_profiled_glmm_non_parity"
+comparator_certification = "not_applicable"
+unit_test_name = "test_gamma_glmm_near_zero_random_effect_is_diagnostic"

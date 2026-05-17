@@ -338,6 +338,10 @@ fn glmm_fast_pirls_divergences_are_quantified_and_kept_non_lme4() {
                 beta_delta > 0.8 && reason.contains("large beta gap"),
                 "{key}: culcitalogreg must keep its large-gap diagnosis"
             );
+            assert!(
+                reason.contains("inference-impacting") && reason.contains("non-parity"),
+                "{key}: culcitalogreg must be explicitly marked inference-impacting non-parity, not a soft pass"
+            );
         }
     }
 }
@@ -411,6 +415,81 @@ fn gopherdat2_keeps_coefficient_parity_but_documents_near_boundary_singularity_g
     );
     assert_eq!(field_str(rust_row, "response_constants", &key), "dropped");
     assert_eq!(field_str(lme4_row, "response_constants", &key), "included");
+}
+
+/// AC4 (issue bd-01KRVA2201SY7W2TSZEANCERG5): for GLMM rows where the
+/// coefficients match but the objective constants differ, coefficient parity
+/// must be pinned separately from objective comparability. Objective values
+/// are explicitly *not* compared because the response-constant convention
+/// differs; coefficient parity is asserted on its own with a tight tolerance.
+#[test]
+fn glmm_coefficient_parity_is_pinned_separately_from_objective_constants() {
+    let scorecard = scorecard_by_key();
+    let rust = results_by_key("comparison/rust_results.json");
+    let lme4 = results_by_key("comparison/lme4_results.json");
+
+    let mut checked = 0;
+    for (key, row) in &scorecard {
+        if row.reference != "lme4_numeric_without_objective_constants" {
+            continue;
+        }
+        checked += 1;
+
+        let rust_row = rust
+            .get(key)
+            .unwrap_or_else(|| panic!("rust_results.json missing {key}"));
+        let lme4_row = lme4
+            .get(key)
+            .unwrap_or_else(|| panic!("lme4_results.json missing {key}"));
+
+        // The objective convention genuinely differs, so any objective
+        // comparison would be meaningless. We assert the divergence and
+        // deliberately do NOT compare objective values.
+        assert_eq!(
+            field_str(rust_row, "response_constants", key),
+            "dropped",
+            "{key}: Rust GLMM objective drops response constants"
+        );
+        assert_eq!(
+            field_str(lme4_row, "response_constants", key),
+            "included",
+            "{key}: lme4 GLMM objective includes response constants"
+        );
+        let objective_gap =
+            (field_f64(rust_row, "objective", key) - field_f64(lme4_row, "objective", key)).abs();
+        assert!(
+            objective_gap > 1.0,
+            "{key}: objective constants must be demonstrably non-comparable, gap {objective_gap}"
+        );
+
+        // Coefficient parity is pinned independently and tightly.
+        let beta_delta = max_abs_delta(
+            &numeric_array(rust_row, "beta", key),
+            &numeric_array(lme4_row, "beta", key),
+            &format!("{key}: beta"),
+        );
+        assert!(
+            beta_delta <= 1e-3,
+            "{key}: coefficient parity must hold independently of the objective, got {beta_delta}"
+        );
+
+        // The scorecard reason must record that objective constants are the
+        // excluded dimension, not the coefficients.
+        let reason = scorecard
+            .get(key)
+            .and_then(|r| r.reason.as_deref())
+            .unwrap_or("");
+        assert!(
+            reason.contains("objective constants") || reason.contains("objective"),
+            "{key}: scorecard must record that objective constants are the excluded dimension"
+        );
+    }
+
+    assert!(
+        checked >= 2,
+        "expected the numeric-without-objective-constants contract to cover \
+         both the release-blocking and documented-divergence GLMM cases"
+    );
 }
 
 #[test]
