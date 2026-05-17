@@ -258,6 +258,8 @@ fn intended_model_barrel_exports_compile_for_downstream_users() {
     assert_type::<LinkFunction>();
     assert_trait::<dyn MixedModelFit>();
 
+    let _ = LinearMixedModel::fixed_effect_fitted
+        as fn(&LinearMixedModel) -> mixeff_rs::nalgebra::DVector<f64>;
     let _ = BOOTSTRAP_RUN_SCHEMA;
     let _ = BOOTSTRAP_RUN_SCHEMA_VERSION;
     let _ = parametricbootstrap::<rand::rngs::StdRng>;

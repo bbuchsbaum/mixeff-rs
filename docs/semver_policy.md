@@ -28,7 +28,9 @@ The following modules and their documented public items are part of the stable
   `LinearMixedModelBuilder`, `GeneralizedLinearMixedModel`,
   `GeneralizedLinearMixedModelBuilder`, `FitOptions`, `ModelCriterion`,
   `MixedModelFit`, `Family`, `LinkFunction`, and all documented fit /
-  inference / bootstrap entry points.
+  inference / bootstrap / prediction entry points, including
+  `LinearMixedModel::fixed_effect_fitted()` for training-frame
+  fixed-effects-only fitted values.
 
 - **`mixeff_rs::stats`** — post-fit summaries (`varcorr`, `coeftable`,
   `model_summary`, `lrt`, `bootstrap`, `profile`) and their documented JSON

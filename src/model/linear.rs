@@ -7958,11 +7958,9 @@ impl LinearMixedModel {
     /// Equivalent to `lme4`'s `predict(model, re.form = NA)` on the training
     /// frame, using the full-rank fixed-effects design.
     ///
-    /// Exposed under the opt-in `unstable-internals` feature for the `mixeff`
-    /// R bindings; the field it derives from (`feterm`) is `pub(crate)` and
-    /// the public 1.0 surface intentionally has no training-data Xβ accessor
-    /// (see `docs/semver_policy.md`). Not part of the stable API.
-    #[cfg(feature = "unstable-internals")]
+    /// Stable public API for downstream frontends that need lme4-compatible
+    /// population predictions for the training frame without exposing the
+    /// internal fixed-effect design storage.
     pub fn fixed_effect_fitted(&self) -> DVector<f64> {
         self.feterm.full_rank_x() * &self.beta()
     }
