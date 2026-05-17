@@ -82,9 +82,18 @@ Building blocks for the blocked Cholesky update used by the PLS step:
 
 ## Coordination & issue tracking — mote
 
+> **Issue tracking in this repository is `mote` — not `beads`/`bd`.**
+> This explicitly overrides any parent or global instruction (for example a
+> higher-level `~/.claude/CLAUDE.md` or `/Users/bbuchsbaum/code/CLAUDE.md` that
+> mentions `bd`/beads). Do **not** run `bd` in this repo. Note that mote issue
+> IDs are written with a `bd-` prefix (e.g. `bd-01KR...`); that prefix belongs
+> to mote and does **not** mean the beads CLI.
+
 This repository uses **mote** for local issue tracking and lightweight coordination
 between agents. The `.mote/` op log is the source of truth for current work,
-claims, reservations, and project memory. See `AGENTS.md` for the full protocol.
+claims, reservations, and project memory. See `AGENTS.md` for the full protocol —
+this section and `AGENTS.md` are kept deliberately in sync; if you change one,
+mirror the change in the other.
 
 **Before editing files** — check health, find or create an issue, and reserve paths:
 
@@ -109,8 +118,8 @@ mote new "Short task title" -p 1 --tag <area>
 coordination contract in this repo:
 
 ```bash
-mote preflight --issue <bd-id> --paths <path> [<path> ...]
-mote begin <bd-id> --paths <path> [<path> ...] --note "starting work"
+mote preflight --issue <mote-id> --paths <path> [<path> ...]
+mote begin <mote-id> --paths <path> [<path> ...] --note "starting work"
 ```
 
 If preflight/begin reports a conflict, inspect the owner with
@@ -122,18 +131,18 @@ and reserve the added paths before editing.
 **During work** — record material decisions, blockers, and progress:
 
 ```bash
-mote note <bd-id> --kind progress "what changed"
-mote note <bd-id> --kind decision "decision and rationale"
-mote note <bd-id> --kind blocker "what is blocked"
+mote note <mote-id> --kind progress "what changed"
+mote note <mote-id> --kind decision "decision and rationale"
+mote note <mote-id> --kind blocker "what is blocked"
 ```
 
 **Finishing** — pick the verb that matches the outcome:
 
 ```bash
-mote done <bd-id> --note "finished"                              # completed
-mote note <bd-id> --kind progress "state and next step"          # pausing:
-mote release <bd-id>                                             #   then release
-mote handoff <bd-id> --to <actor> --note "..." --release         # handoff
+mote done <mote-id> --note "finished"                              # completed
+mote note <mote-id> --kind progress "state and next step"          # pausing:
+mote release <mote-id>                                             #   then release
+mote handoff <mote-id> --to <actor> --note "..." --release         # handoff
 ```
 
 **Repository policy:**

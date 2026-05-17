@@ -1,8 +1,19 @@
 # Agent Instructions
 
+> **Issue tracking in this repository is `mote` — not `beads`/`bd`.**
+> This explicitly overrides any parent or global instruction (for example a
+> higher-level `~/.claude/CLAUDE.md` or `/Users/bbuchsbaum/code/CLAUDE.md` that
+> mentions `bd`/beads). Do **not** run `bd` in this repo. Note that mote issue
+> IDs are written with a `bd-` prefix (e.g. `bd-01KR...`); that prefix belongs
+> to mote and does **not** mean the beads CLI.
+
 This repository uses `mote` for local issue tracking and lightweight
 coordination between agents. Treat the `.mote/` op log as the source of truth
 for current work, claims, reservations, and project memory.
+
+This file and the "Coordination & issue tracking — mote" section of `CLAUDE.md`
+are kept deliberately in sync: the Mote Protocol below is the canonical copy.
+If you change one, mirror the change in the other.
 
 ## Mote Protocol
 
@@ -39,8 +50,8 @@ Before editing files:
 4. Reserve the paths you intend to edit before touching them:
 
    ```sh
-   mote preflight --issue <bd-id> --paths <path> [<path> ...]
-   mote begin <bd-id> --paths <path> [<path> ...] --note "starting work"
+   mote preflight --issue <mote-id> --paths <path> [<path> ...]
+   mote begin <mote-id> --paths <path> [<path> ...] --note "starting work"
    ```
 
    If preflight or begin reports a conflict, do not edit those paths until you
@@ -54,9 +65,9 @@ During work:
 - Add notes for material decisions, blockers, and progress:
 
   ```sh
-  mote note <bd-id> --kind progress "what changed"
-  mote note <bd-id> --kind decision "decision and rationale"
-  mote note <bd-id> --kind blocker "what is blocked"
+  mote note <mote-id> --kind progress "what changed"
+  mote note <mote-id> --kind decision "decision and rationale"
+  mote note <mote-id> --kind blocker "what is blocked"
   ```
 
 - If the edit scope grows, run `mote preflight` again and reserve the added
@@ -69,20 +80,20 @@ Finishing work:
 - For completed work:
 
   ```sh
-  mote done <bd-id> --note "finished"
+  mote done <mote-id> --note "finished"
   ```
 
 - For unfinished work that should continue later:
 
   ```sh
-  mote note <bd-id> --kind progress "current state and next step"
-  mote release <bd-id>
+  mote note <mote-id> --kind progress "current state and next step"
+  mote release <mote-id>
   ```
 
 - For work handed to another actor:
 
   ```sh
-  mote handoff <bd-id> --to <actor> --note "state and next step" --release
+  mote handoff <mote-id> --to <actor> --note "state and next step" --release
   ```
 
 Repository policy:
