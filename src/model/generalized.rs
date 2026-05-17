@@ -4252,6 +4252,45 @@ mod tests {
 
     #[cfg(feature = "nlopt")]
     #[test]
+    #[ignore = "phase-6 diagnostic probe"]
+    fn probe_cbpp_joint_objective_at_lme4_parameters() {
+        let (data, _) = crate::datasets::load("cbpp").unwrap();
+        let incidence = data.numeric("incidence").unwrap();
+        let size = data.numeric("size").unwrap();
+
+        let proportion: Vec<f64> = incidence
+            .iter()
+            .zip(size.iter())
+            .map(|(&y, &n)| y / n)
+            .collect();
+        let weights: Vec<f64> = size.to_vec();
+
+        let mut data_with_proportion = data.clone();
+        data_with_proportion
+            .add_numeric("proportion", proportion)
+            .unwrap();
+
+        let formula = parse_formula("proportion ~ 1 + period + (1 | herd)").unwrap();
+        let mut model = GeneralizedLinearMixedModel::new_with_weights(
+            formula,
+            &data_with_proportion,
+            Family::Binomial,
+            None,
+            weights,
+        )
+        .unwrap();
+        let params = vec![-1.3983, -0.9919, -1.1282, -1.5797, 0.6421];
+        let objective = model.joint_laplace_deviance_at_params(&params, 4);
+        println!("cbpp lme4 params in Rust joint objective: {objective:.9}");
+        println!(
+            "cbpp conditional theta={:?}; beta={:?}",
+            model.theta,
+            model.beta.as_slice()
+        );
+    }
+
+    #[cfg(feature = "nlopt")]
+    #[test]
     fn test_cbpp_agq_deviance_uses_case_weights() {
         let (data, _) = crate::datasets::load("cbpp").unwrap();
         let incidence = data.numeric("incidence").unwrap();

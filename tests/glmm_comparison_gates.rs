@@ -5,6 +5,8 @@
 //! semantics match lme4 stay numerically gated, and current large-row
 //! fast-PIRLS divergences remain tied to an explicit MixedModels.jl oracle.
 
+#![cfg(feature = "unstable-internals")]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
