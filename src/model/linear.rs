@@ -10828,10 +10828,21 @@ fn compute_re_cross_product(a: &ReMat, b: &ReMat) -> MatrixBlock {
             }
         }
         MatrixBlock::BlockDiagonal(blocks)
-    } else if a.vsize == 1 && b.vsize == 1 && !is_nested(b, a) {
-        // Truly crossed scalar-intercept terms: keep the raw cross-product sparse.
-        // A partially crossed random-intercept block can be enormous in shape
-        // while having only O(n_obs) structural nonzeros.
+    } else if a.vsize == 1 && b.vsize == 1 {
+        // Keep every scalar-intercept off-diagonal cross-product sparse, not
+        // just the truly-crossed ones. The raw Z_a' Z_b cross-product of two
+        // scalar-intercept terms always has at most n_obs structural nonzeros
+        // (one per observation) regardless of nesting, while its dense shape
+        // (nlevels_a x nlevels_b) can be enormous. Reverse-ordered nested
+        // terms hit this too: with reterms sorted by decreasing nranef, a
+        // finer factor (e.g. observation-level INDEX, 403 levels) precedes a
+        // coarser one (BROOD, 118 levels), so A[BROOD x INDEX] is a 118x403
+        // block with only 403 nonzeros. Materializing it dense forced dense
+        // gemm/downdate through the blocked Cholesky; the sparse form lets the
+        // factorization use rank_k_downdate_sparse and keeps the diagonal
+        // INDEX block diagonal. Numerically transparent (objective/theta/beta
+        // unchanged to ~1e-8, identical optimizer trajectory) but ~25% faster
+        // on the grouseticks Poisson GLMM (bd-01KRSQYRHF8VK627HZ6Z23CP93).
         let mut entries = BTreeMap::<(usize, usize), f64>::new();
         let n = a.refs.len();
 
