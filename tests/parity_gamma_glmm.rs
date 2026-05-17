@@ -1,10 +1,13 @@
 use approx::assert_relative_eq;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 use serde::Deserialize;
 
 use mixeff_rs::formula::parse_formula;
 use mixeff_rs::model::data::DataFrame;
 use mixeff_rs::model::generalized::GeneralizedLinearMixedModel;
 use mixeff_rs::model::traits::{Family, LinkFunction, MixedModelFit};
+use mixeff_rs::stats::bootstrap::parametricbootstrap_glmm;
 #[cfg(not(feature = "nlopt"))]
 use mixeff_rs::types::Optimizer;
 
@@ -313,5 +316,52 @@ fn test_gamma_log_fit_is_invariant_to_row_order() {
     );
     for (actual, want) in ordered.fixef().iter().zip(reversed.fixef().iter()) {
         assert_relative_eq!(*actual, *want, epsilon = 1e-8, max_relative = 1e-8);
+    }
+}
+
+#[test]
+fn test_gamma_glmm_parametric_bootstrap_is_seeded_and_positive() {
+    let expected = fixture();
+    let model = fit_gamma_log(&gamma_log_data(), &expected.formula, expected.n_agq);
+
+    let mut rng_a = StdRng::seed_from_u64(0x4741_4d4d_415f_2026);
+    let mut rng_b = StdRng::seed_from_u64(0x4741_4d4d_415f_2026);
+    let boot_a = parametricbootstrap_glmm(&mut rng_a, 4, &model).unwrap();
+    let boot_b = parametricbootstrap_glmm(&mut rng_b, 4, &model).unwrap();
+
+    assert_eq!(boot_a.fits.len(), 4);
+    assert_eq!(boot_b.fits.len(), 4);
+    for (idx, (a, b)) in boot_a.fits.iter().zip(boot_b.fits.iter()).enumerate() {
+        assert!(
+            a.objective.is_finite(),
+            "Gamma bootstrap replicate {idx} objective should refit cleanly"
+        );
+        assert!(
+            a.sigma.is_finite() && a.sigma > 0.0,
+            "Gamma bootstrap replicate {idx} dispersion should be positive"
+        );
+        assert_eq!(a.beta.len(), expected.rust_reference.beta.len());
+        assert_eq!(a.theta.len(), expected.rust_reference.theta.len());
+        for value in a.beta.iter().chain(a.se.iter()) {
+            assert!(
+                value.is_finite(),
+                "Gamma bootstrap replicate {idx} coefficient/SE is not finite"
+            );
+        }
+        for value in &a.theta {
+            assert!(
+                value.is_finite(),
+                "Gamma bootstrap replicate {idx} theta is not finite"
+            );
+        }
+
+        assert_relative_eq!(a.objective, b.objective, epsilon = 0.0);
+        assert_relative_eq!(a.sigma, b.sigma, epsilon = 0.0);
+        for (actual, want) in a.beta.iter().zip(b.beta.iter()) {
+            assert_relative_eq!(*actual, *want, epsilon = 0.0);
+        }
+        for (actual, want) in a.theta.iter().zip(b.theta.iter()) {
+            assert_relative_eq!(*actual, *want, epsilon = 0.0);
+        }
     }
 }
