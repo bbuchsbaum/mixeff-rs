@@ -251,9 +251,11 @@ fn comparison_backed<'a>(
         .unwrap_or_else(|| panic!("{label} missing difficult scenario row {key}"))
 }
 
-fn uses_joint_laplace_gate(scenario: &DifficultScenario) -> bool {
-    scenario.rust_certification == "certified_joint_laplace"
-        && scenario.scorecard_class == "release_blocking_parity"
+fn uses_joint_glmm_gate(scenario: &DifficultScenario) -> bool {
+    matches!(
+        scenario.rust_certification.as_str(),
+        "certified_joint_laplace" | "certified_joint_agq"
+    ) && scenario.scorecard_class == "release_blocking_parity"
 }
 
 #[test]
@@ -383,7 +385,8 @@ fn comparison_backed_scenarios_compute_certification_times_and_metrics() {
     {
         let key = scenario_key(scenario);
         let rust_row = comparison_backed(scenario, &rust, "rust_results.json");
-        if uses_joint_laplace_gate(scenario) {
+        if uses_joint_glmm_gate(scenario) {
+            let is_joint_agq = scenario.rust_certification == "certified_joint_agq";
             assert!(
                 scenario.required_metrics.iter().any(|m| m == "objective_delta")
                     && scenario.required_metrics.iter().any(|m| m == "beta_delta")
@@ -404,7 +407,11 @@ fn comparison_backed_scenarios_compute_certification_times_and_metrics() {
             );
             assert_eq!(
                 field_str(rust_row, "objective_definition", &key),
-                "joint_glmm_laplace_deviance",
+                if is_joint_agq {
+                    "joint_glmm_agq_deviance"
+                } else {
+                    "joint_glmm_laplace_deviance"
+                },
                 "{}: certified joint GLMM row must use the joint objective artifact",
                 scenario.id
             );

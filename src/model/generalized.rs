@@ -1388,8 +1388,9 @@ impl GeneralizedLinearMixedModel {
     ///
     /// `fast` selects the MixedModels.jl-style fast path, which profiles over
     /// θ and updates β through PIRLS. `fast = false` selects the certified
-    /// joint Laplace path for `n_agq <= 1` when the NLopt backend is enabled;
-    /// without NLopt, or for `n_agq > 1`, it returns an explicit
+    /// joint path when the NLopt backend is enabled: joint Laplace for
+    /// `n_agq <= 1`, and joint AGQ for valid single-scalar random-effect
+    /// models with `n_agq > 1`. Without NLopt it returns an explicit
     /// [`MixedModelError::Unsupported`] rather than silently using another
     /// algorithm.
     ///
@@ -1404,16 +1405,14 @@ impl GeneralizedLinearMixedModel {
         n_agq: usize,
         verbose: bool,
     ) -> Result<&mut Self> {
+        if let Err(error) = self.validate_agq(n_agq) {
+            self.record_invalid_agq_diagnostic(n_agq, &error.to_string());
+            return Err(error);
+        }
         if !fast {
-            if n_agq > 1 {
-                return Err(MixedModelError::Unsupported(format!(
-                    "GLMM fit_with_options(fast = false, n_agq = {n_agq}) is not implemented; \
-                     certified joint AGQ is tracked separately"
-                )));
-            }
             #[cfg(feature = "nlopt")]
             {
-                return self.fit_experimental_joint_laplace_with_response_constants(verbose);
+                return self.fit_joint_glmm_with_response_constants(n_agq, verbose);
             }
             #[cfg(not(feature = "nlopt"))]
             {
@@ -1423,10 +1422,6 @@ impl GeneralizedLinearMixedModel {
                         .to_string(),
                 ));
             }
-        }
-        if let Err(error) = self.validate_agq(n_agq) {
-            self.record_invalid_agq_diagnostic(n_agq, &error.to_string());
-            return Err(error);
         }
         if self.lmm.optsum.feval > 0 {
             return Err(MixedModelError::AlreadyFitted);
@@ -1445,34 +1440,50 @@ impl GeneralizedLinearMixedModel {
         &mut self,
         verbose: bool,
     ) -> Result<&mut Self> {
+        self.fit_joint_glmm_with_response_constants(1, verbose)
+    }
+
+    /// Labelled joint GLMM fit with response constants retained.
+    ///
+    /// For `n_agq <= 1` this is joint Laplace; for `n_agq > 1` this is joint
+    /// AGQ and is accepted only for the scalar random-effect shapes permitted
+    /// by [`validate_agq`](Self::validate_agq).
+    #[cfg(feature = "nlopt")]
+    pub fn fit_joint_glmm_with_response_constants(
+        &mut self,
+        n_agq: usize,
+        verbose: bool,
+    ) -> Result<&mut Self> {
         if self.lmm.optsum.feval > 0 {
             return Err(MixedModelError::AlreadyFitted);
         }
-        self.validate_agq(1)?;
+        self.validate_agq(n_agq)?;
 
         // Use the supported fast path as the deterministic start. This keeps
-        // the prototype focused on whether joint [β; θ] can improve the same
-        // included-constants objective, without changing default behavior.
-        self.fit_with_options_impl(1, verbose)?;
+        // the joint optimizer focused on whether [β; θ] can improve the same
+        // included-constants objective for the requested approximation.
+        self.fit_with_options_impl(n_agq, verbose)?;
         let fallback_fast_pirls = self.clone();
         let start_beta = self.beta.as_slice().to_vec();
         let start_theta = self.theta.clone();
-        let profiled_start_objective = self.deviance_with_response_constants(1);
-        self.fit_experimental_joint_laplace_from_start(
+        let profiled_start_objective = self.deviance_with_response_constants(n_agq);
+        self.fit_joint_glmm_from_start(
             start_beta,
             start_theta,
             profiled_start_objective,
+            n_agq,
             200,
             Some(fallback_fast_pirls),
         )
     }
 
     #[cfg(feature = "nlopt")]
-    fn fit_experimental_joint_laplace_from_start(
+    fn fit_joint_glmm_from_start(
         &mut self,
         start_beta: Vec<f64>,
         start_theta: Vec<f64>,
         profiled_start_objective: f64,
+        n_agq: usize,
         maxeval: u32,
         fallback_fast_pirls: Option<Self>,
     ) -> Result<&mut Self> {
@@ -1498,7 +1509,7 @@ impl GeneralizedLinearMixedModel {
             feval_count.set(feval_count.get() + 1);
             let objective = model
                 .borrow_mut()
-                .joint_laplace_deviance_at_params(params, n_beta);
+                .joint_glmm_deviance_at_params(params, n_beta, n_agq);
             fit_log.borrow_mut().push(FitLogEntry {
                 theta: params.to_vec(),
                 objective,
@@ -1526,23 +1537,25 @@ impl GeneralizedLinearMixedModel {
         drop(optimizer);
 
         let me = model.into_inner();
-        let final_objective = me.joint_laplace_deviance_at_params(&params, n_beta);
+        let final_objective = me.joint_glmm_deviance_at_params(&params, n_beta, n_agq);
         me.refresh_dispersion();
+        let status_prefix = joint_glmm_status_prefix(n_agq);
         let status_label = match &nlopt_result {
             Ok((status, _fmin)) => {
                 format!(
-                    "JOINT_LAPLACE:{}",
+                    "{status_prefix}:{}",
                     experimental_nlopt_status_label(&format!("{status:?}"))
                 )
             }
             Err((status, _fmin)) => {
                 format!(
-                    "JOINT_LAPLACE_FAILED:{}",
+                    "{status_prefix}_FAILED:{}",
                     experimental_nlopt_status_label(&format!("{status:?}"))
                 )
             }
         };
         me.lmm.optsum.return_value = status_label;
+        me.lmm.optsum.n_agq = n_agq;
         me.lmm.optsum.feval = feval_count.get();
         me.lmm.optsum.max_feval = maxeval as i64;
         me.lmm.optsum.fit_log = rc_refcell_into_inner_or_clone(fit_log);
@@ -1559,6 +1572,7 @@ impl GeneralizedLinearMixedModel {
         let gradient = me.joint_laplace_finite_difference_gradient(
             &me.lmm.optsum.final_params.clone(),
             n_beta,
+            n_agq,
             &lower_bounds,
         );
         certificate.apply_derivative_evidence(
@@ -1596,7 +1610,12 @@ impl GeneralizedLinearMixedModel {
     }
 
     #[cfg(feature = "nlopt")]
-    fn joint_laplace_deviance_at_params(&mut self, params: &[f64], n_beta: usize) -> f64 {
+    fn joint_glmm_deviance_at_params(
+        &mut self,
+        params: &[f64],
+        n_beta: usize,
+        n_agq: usize,
+    ) -> f64 {
         if params.len() != n_beta + self.theta.len()
             || !params.iter().all(|value| value.is_finite())
         {
@@ -1606,7 +1625,7 @@ impl GeneralizedLinearMixedModel {
         let theta = &params[n_beta..];
         match self.update_pirls_at_theta(theta, false) {
             Ok(()) => {
-                let deviance = self.deviance_with_response_constants(1);
+                let deviance = self.deviance_with_response_constants(n_agq);
                 if deviance.is_finite() {
                     deviance
                 } else {
@@ -1622,9 +1641,10 @@ impl GeneralizedLinearMixedModel {
         &mut self,
         params: &[f64],
         n_beta: usize,
+        n_agq: usize,
         lower_bounds: &[f64],
     ) -> Vec<f64> {
-        let base = self.joint_laplace_deviance_at_params(params, n_beta);
+        let base = self.joint_glmm_deviance_at_params(params, n_beta, n_agq);
         let mut gradient = Vec::with_capacity(params.len());
         for (index, &value) in params.iter().enumerate() {
             let h = 1.0e-5 * value.abs().max(1.0);
@@ -1634,17 +1654,17 @@ impl GeneralizedLinearMixedModel {
                 .unwrap_or(f64::NEG_INFINITY);
             let mut plus = params.to_vec();
             plus[index] = value + h;
-            let fp = self.joint_laplace_deviance_at_params(&plus, n_beta);
+            let fp = self.joint_glmm_deviance_at_params(&plus, n_beta, n_agq);
             if value - h > lower {
                 let mut minus = params.to_vec();
                 minus[index] = value - h;
-                let fm = self.joint_laplace_deviance_at_params(&minus, n_beta);
+                let fm = self.joint_glmm_deviance_at_params(&minus, n_beta, n_agq);
                 gradient.push((fp - fm) / (2.0 * h));
             } else {
                 gradient.push((fp - base) / h);
             }
         }
-        let _ = self.joint_laplace_deviance_at_params(params, n_beta);
+        let _ = self.joint_glmm_deviance_at_params(params, n_beta, n_agq);
         gradient
     }
 
@@ -2474,6 +2494,15 @@ fn lower_triangle_pair(offset: usize) -> (usize, usize) {
     (row, remaining)
 }
 
+#[cfg(feature = "nlopt")]
+fn joint_glmm_status_prefix(n_agq: usize) -> &'static str {
+    if n_agq <= 1 {
+        "JOINT_LAPLACE"
+    } else {
+        "JOINT_AGQ"
+    }
+}
+
 fn glmm_block_index(row: usize, col: usize) -> usize {
     debug_assert!(row >= col);
     row * (row + 1) / 2 + col
@@ -2707,9 +2736,13 @@ fn uncertified_joint_fallback(
     }
     let mut fallback = fallback_fast_pirls?;
     let fast_return_code = fallback.lmm.optsum.return_value.clone();
-    fallback.lmm.optsum.return_value = format!(
-        "JOINT_LAPLACE_FALLBACK_FAST_PIRLS(joint={joint_return_code}; fast={fast_return_code})"
-    );
+    let fallback_prefix = if joint_return_code.starts_with("JOINT_AGQ") {
+        "JOINT_AGQ_FALLBACK_FAST_PIRLS"
+    } else {
+        "JOINT_LAPLACE_FALLBACK_FAST_PIRLS"
+    };
+    fallback.lmm.optsum.return_value =
+        format!("{fallback_prefix}(joint={joint_return_code}; fast={fast_return_code})");
     let mut diagnostic = Diagnostic::new(
         DiagnosticCode::OptimizerRecovery,
         DiagnosticSeverity::Warning,
@@ -3300,13 +3333,7 @@ mod tests {
         let start_objective = model.deviance_with_response_constants(1);
 
         model
-            .fit_experimental_joint_laplace_from_start(
-                start_beta,
-                start_theta,
-                start_objective,
-                1,
-                None,
-            )
+            .fit_joint_glmm_from_start(start_beta, start_theta, start_objective, 1, 1, None)
             .unwrap();
 
         let certificate = model
@@ -3347,10 +3374,11 @@ mod tests {
         let start_objective = model.deviance_with_response_constants(1);
 
         model
-            .fit_experimental_joint_laplace_from_start(
+            .fit_joint_glmm_from_start(
                 start_beta,
                 start_theta,
                 start_objective,
+                1,
                 1,
                 Some(fallback),
             )
@@ -4212,6 +4240,33 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "nlopt")]
+    #[test]
+    fn test_glmm_fast_false_nagq_uses_labelled_joint_agq_path() {
+        let data = contra_fixture();
+        let formula = parse_formula("use_num ~ 1 + (1 | urban_dist)").unwrap();
+        let mut model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+
+        model.fit_with_options(false, 7, false).unwrap();
+
+        assert!(
+            model.lmm.optsum.return_value.contains("JOINT_AGQ"),
+            "fast=false n_agq>1 must label the joint AGQ path, got {}",
+            model.lmm.optsum.return_value
+        );
+        let metadata = model
+            .lmm
+            .compiler_artifact
+            .glmm_fit_metadata
+            .as_ref()
+            .expect("fast=false AGQ fit should record GLMM metadata");
+        assert_eq!(metadata.estimation_method, "joint_agq");
+        assert_eq!(metadata.objective_definition, "joint_glmm_agq_deviance");
+        assert_eq!(metadata.response_constants, "included");
+        assert_eq!(metadata.n_agq, 7);
+    }
+
     fn constant_response_fixture(y: Vec<f64>) -> DataFrame {
         let mut data = DataFrame::new();
         data.add_numeric("y", y).unwrap();
@@ -4471,7 +4526,7 @@ mod tests {
             -1.579_745_413_889_423,
             0.642_069_926_557_109,
         ];
-        let objective = model.joint_laplace_deviance_at_params(&params, 4);
+        let objective = model.joint_glmm_deviance_at_params(&params, 4, 1);
         let lme4_objective = 184.053_132_779_073_5;
         let delta = (objective - lme4_objective).abs();
         assert!(

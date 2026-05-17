@@ -1,9 +1,9 @@
 # Certified Joint GLMM Optimizer Contract
 
-Status: row-scoped implementation contract. A labelled joint Laplace path is
-wired to `fit_with_options(fast = false, n_agq <= 1)` when the NLopt backend is
-enabled, but rows are certified only when their objective, stationarity,
-covariance, fallback, and scorecard evidence pass this gate.
+Status: row-scoped implementation contract. Labelled joint Laplace and joint
+AGQ paths are wired to `fit_with_options(fast = false, ...)` when the NLopt
+backend is enabled, but rows are certified only when their objective,
+stationarity, covariance, fallback, and scorecard evidence pass this gate.
 
 This note specifies what a *certified joint GLMM optimizer* must expose before
 any GLMM row may be promoted from `documented_divergence` to
@@ -37,10 +37,10 @@ re-enter the `lme4` parity gate.
 
 Current evidence: certification is row-scoped. The fixed-beta conditional
 PIRLS solve now evaluates the same included-constants joint Laplace objective
-as `lme4` at the `cbpp` optimum, and `culcitalogreg` Laplace has passed the
-labelled joint-Laplace promotion gate. `cbpp` and `contraception` still remain
-below the promotion line because their fitted estimates miss row tolerances;
-AGQ remains a separate extension.
+as `lme4` at the `cbpp` optimum, and `culcitalogreg` Laplace plus AGQ have
+passed the labelled joint-promotion gates. `cbpp` and `contraception` still
+remain below the promotion line because their fitted estimates miss row
+tolerances.
 
 ## Required surface
 
@@ -115,8 +115,8 @@ The optimizer must define and record a deterministic fallback policy:
 - The joint path is labelled and row-scoped until it passes the external-engine
   parity gates (`comparison/parity_scorecard.toml` plus the
   divergence/scoreboard tests changed in lockstep). `fast = false` requires the
-  NLopt backend for joint Laplace and remains an explicit unsupported request
-  for certified joint AGQ, per `docs/glmm_support_contract.md`.
+  NLopt backend for joint Laplace and joint AGQ, per
+  `docs/glmm_support_contract.md`.
 - Promotion of any GLMM row from `documented_divergence` to
   `release_blocking_parity` requires: the `included` objective convention on
   both sides, a recorded stationarity certificate, covariance classification

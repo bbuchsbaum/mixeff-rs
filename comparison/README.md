@@ -23,11 +23,10 @@ not a blanket raw-speed or universal superiority claim.
 Documented divergence rows are not soft parity passes. They are release-visible
 decisions with tests in `tests/parity_divergence_contract.rs`:
 
-- GLMM fast-PIRLS rows (`cbpp`, `contraception`, `culcitalogreg` AGQ,
-  `verbagg`) remain non-`lme4` claims unless a row passes the certified joint
-  GLMM gate. `culcitalogreg` Laplace is the first row-scoped promotion: the
-  Rust comparison harness fits it through `fast=false` joint Laplace, while the
-  AGQ row remains an inference-impacting fast-PIRLS divergence.
+- GLMM fast-PIRLS rows (`cbpp`, `contraception`, `verbagg`) remain non-`lme4`
+  claims unless a row passes the certified joint GLMM gate. `culcitalogreg`
+  Laplace and AGQ are row-scoped promotions: the Rust comparison harness fits
+  them through `fast=false` joint estimation with response constants retained.
 - `gopherdat2` keeps coefficient parity but remains divergent because Rust
   estimates a near-zero covariance parameter without lme4's singular flag, and
   GLMM objective constants are not comparable.
@@ -131,8 +130,9 @@ loosen these if you're comparing against a different optimizer baseline.
   `machines :: (Machine | Worker)`.
 - **GLMM objective definitions** are row-scoped. Fast-PIRLS rows use the
   profiled deviance with response constants dropped and are classified
-  explicitly. Certified joint Laplace rows use the joint deviance with response
-  constants included so `objective_delta` against `lme4` is meaningful.
+  explicitly. Certified joint Laplace/AGQ rows use joint deviances with
+  response constants included so `objective_delta` against `lme4` is
+  meaningful.
 - **Coefficient-name formatting**: Rust uses `"Type: T2"` (space-colon),
   R uses `"TypeT2"`. Cosmetic; doesn't affect numerical match.
 

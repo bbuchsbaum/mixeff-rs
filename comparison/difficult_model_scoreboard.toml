@@ -24,6 +24,7 @@ required_axes = [
 certification_statuses = [
   "release_blocking_parity",
   "certified_joint_laplace",
+  "certified_joint_agq",
   "certified_fit",
   "certified_boundary",
   "diagnostic_contract",
@@ -258,6 +259,29 @@ certification_status = "certified_joint_laplace"
 certification_claim = "Rust fast=false joint Laplace matches lme4 objective, beta, and theta tolerances with a stationarity certificate and shared covariance-state reporting."
 required_metrics = ["objective_delta", "beta_delta", "theta_delta", "optimizer_status", "certification_status", "warnings", "wall_time_ms", "fevals", "time_to_certified_fit_ms"]
 rust_certification = "certified_joint_laplace"
+comparator_certification = "single_fit"
+rust_time_multiplier = 1.0
+comparator_time_multiplier = 1.0
+comparator_extra_ms = 0.0
+
+[[scenario]]
+id = "culcitalogreg_joint_agq_parity"
+axis = "glmm_rare_event_separation"
+description = "Small-N binomial GLMM whose certified fast=false joint AGQ path matches lme4."
+data_source = "datasets/culcitalogreg"
+generator = "checked-in fixture"
+dataset = "culcitalogreg"
+formula = "predation ~ ttt + (1 | block)"
+family = "Binomial"
+link = "Logit"
+estimator = "AGQ"
+comparator_engines = ["lme4"]
+release_relevance = "This is the certified joint AGQ counterpart to the culcitalogreg Laplace row and proves n_agq > 1 uses the same row-scoped evidence gate."
+scorecard_class = "release_blocking_parity"
+certification_status = "certified_joint_agq"
+certification_claim = "Rust fast=false joint AGQ matches lme4 objective, beta, and theta tolerances with a stationarity certificate and shared covariance-state reporting."
+required_metrics = ["objective_delta", "beta_delta", "theta_delta", "optimizer_status", "certification_status", "warnings", "wall_time_ms", "fevals", "time_to_certified_fit_ms"]
+rust_certification = "certified_joint_agq"
 comparator_certification = "single_fit"
 rust_time_multiplier = 1.0
 comparator_time_multiplier = 1.0

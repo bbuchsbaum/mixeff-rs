@@ -182,8 +182,8 @@ fn response_constant_convention_is_a_mode_not_a_failure() {
     // The convention difference must coexist with an ok optimizer status: it
     // is a convention, not a fit failure or identification problem.
     let rust = results_by_key("comparison/rust_results.json");
-    let key = "culcitalogreg\nAGQ".to_string();
-    let rust_row = rust.get(&key).expect("rust culcitalogreg AGQ row");
+    let key = "cbpp\nLaplace".to_string();
+    let rust_row = rust.get(&key).expect("rust cbpp Laplace row");
     assert_eq!(
         rust_row.get("response_constants").and_then(Value::as_str),
         Some("dropped")

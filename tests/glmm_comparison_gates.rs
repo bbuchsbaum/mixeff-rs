@@ -532,12 +532,15 @@ fn glmm_comparison_rows_have_expected_status_and_payload_shape() {
             assert_ok_glmm_payload(rust_record, "rust_results.json", &key);
             assert_ok_glmm_payload(r_record, "lme4_results.json", &key);
             let is_promoted_joint_laplace = key == expected_row_key(CULCITA_BINOMIAL_LAPLACE);
+            let is_promoted_joint_agq = key == expected_row_key(CULCITA_BINOMIAL_AGQ);
             assert_eq!(
                 rust_record
                     .get("objective_definition")
                     .and_then(Value::as_str),
                 Some(if is_promoted_joint_laplace {
                     "joint_glmm_laplace_deviance"
+                } else if is_promoted_joint_agq {
+                    "joint_glmm_agq_deviance"
                 } else {
                     "profiled_glmm_deviance"
                 }),
@@ -547,7 +550,7 @@ fn glmm_comparison_rows_have_expected_status_and_payload_shape() {
                 rust_record
                     .get("response_constants")
                     .and_then(Value::as_str),
-                Some(if is_promoted_joint_laplace {
+                Some(if is_promoted_joint_laplace || is_promoted_joint_agq {
                     "included"
                 } else {
                     "dropped"
@@ -1002,6 +1005,7 @@ fn experimental_joint_binomial_rows_stay_below_promotion_gate() {
     let rows = [
         CBPP,
         CULCITA_BINOMIAL_LAPLACE,
+        CULCITA_BINOMIAL_AGQ,
         CONTRACEPTION_INTERCEPT,
         CONTRACEPTION_SLOPE,
     ];
@@ -1016,11 +1020,12 @@ fn experimental_joint_binomial_rows_stay_below_promotion_gate() {
             .unwrap_or_else(|| panic!("lme4_results.json missing GLMM row {key}"));
 
         let mut joint = construct_binomial_logit_model(row);
+        let n_agq = if row.estimator == "AGQ" { 7 } else { 1 };
         joint
-            .fit_experimental_joint_laplace_with_response_constants(false)
-            .unwrap_or_else(|err| panic!("{key}: fit joint Laplace failed: {err}"));
+            .fit_joint_glmm_with_response_constants(n_agq, false)
+            .unwrap_or_else(|err| panic!("{key}: fit joint GLMM failed: {err}"));
 
-        let objective = joint.deviance_with_response_constants(1);
+        let objective = joint.deviance_with_response_constants(n_agq);
         let lme4_objective = field_f64(lme4_record, "objective", &key);
         let beta = MixedModelFit::coef(&joint);
         let theta = joint.theta();
@@ -1045,8 +1050,11 @@ fn experimental_joint_binomial_rows_stay_below_promotion_gate() {
 
     assert_eq!(
         passed,
-        vec![expected_row_key(CULCITA_BINOMIAL_LAPLACE)],
-        "only the culcitalogreg Laplace row is currently certified for promotion"
+        vec![
+            expected_row_key(CULCITA_BINOMIAL_LAPLACE),
+            expected_row_key(CULCITA_BINOMIAL_AGQ)
+        ],
+        "only the culcitalogreg Laplace and AGQ rows are currently certified for promotion"
     );
     assert!(
         !missed_objective_gate.is_empty(),
@@ -1064,7 +1072,6 @@ fn glmm_report_contains_expected_numeric_classifications() {
     );
     for required in [
         "small Binomial/Logit row uses the current fast-PIRLS profiled path",
-        "Binomial/AGQ row uses the current fast-PIRLS profiled path with AGQ quadrature",
         "Poisson/Log multi-random-intercept row matches MixedModels.jl 5.3.0 fast=true",
         "large crossed Binomial/Logit row matches MixedModels.jl 5.3.0 fast=true",
         "large Binomial/Logit random-intercept row matches MixedModels.jl 5.3.0 fast=true",

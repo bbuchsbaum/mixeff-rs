@@ -250,17 +250,27 @@ fn release_blocking_scorecard_rows_pass_checked_in_comparison_artifacts() {
         let r_row = r_by_key
             .get(&key)
             .unwrap_or_else(|| panic!("lme4_results.json missing release row {key}"));
-        if row.reference == "lme4_joint_laplace" {
+        if row.reference == "lme4_joint_laplace" || row.reference == "lme4_joint_agq" {
             let reason = row.reason.as_deref().unwrap_or("");
+            let is_joint_agq = row.reference == "lme4_joint_agq";
             assert!(
-                row.issue_id.as_deref() == Some("bd-01KRVGT0H37JYNYB5FA2EZD5CW")
+                row.issue_id.as_deref()
+                    == Some(if is_joint_agq {
+                        "bd-01KRVGW2H561CF8GY70E1072M3"
+                    } else {
+                        "bd-01KRVGT0H37JYNYB5FA2EZD5CW"
+                    })
                     && reason.contains("fast=false")
-                    && reason.contains("objective"),
+                    && (reason.contains("objective") || reason.contains("AGQ")),
                 "{key}: joint GLMM release rows must name the certified fast=false evidence and phase-6 issue"
             );
             assert_eq!(
                 rust_row.get("objective_definition").and_then(Value::as_str),
-                Some("joint_glmm_laplace_deviance"),
+                Some(if is_joint_agq {
+                    "joint_glmm_agq_deviance"
+                } else {
+                    "joint_glmm_laplace_deviance"
+                }),
                 "{key}: joint GLMM release row must use the joint objective artifact"
             );
             assert_eq!(
@@ -273,7 +283,11 @@ fn release_blocking_scorecard_rows_pass_checked_in_comparison_artifacts() {
                     .get("optimizer_return_code")
                     .and_then(Value::as_str)
                     .unwrap_or("")
-                    .starts_with("JOINT_LAPLACE:"),
+                    .starts_with(if is_joint_agq {
+                        "JOINT_AGQ:"
+                    } else {
+                        "JOINT_LAPLACE:"
+                    }),
                 "{key}: joint GLMM release row must carry the labelled joint optimizer status"
             );
         }

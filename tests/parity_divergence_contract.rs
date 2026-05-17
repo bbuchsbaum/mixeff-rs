@@ -282,7 +282,6 @@ fn glmm_fast_pirls_divergences_are_quantified_and_kept_non_lme4() {
             "MixedModels.jl fast=true",
         ),
         (CONTRACEPTION_SLOPE, 0.03, 0.04, "MixedModels.jl fast=true"),
-        (CULCITA_AGQ, 0.8, 1.0, "fast_pirls_profiled_glmm_agq"),
         (VERBAGG, 0.08, 0.09, "MixedModels.jl fast=true"),
     ];
 
@@ -331,17 +330,6 @@ fn glmm_fast_pirls_divergences_are_quantified_and_kept_non_lme4() {
             beta_delta >= min_beta_delta && beta_delta <= max_beta_delta,
             "{key}: expected documented lme4 beta gap in [{min_beta_delta}, {max_beta_delta}], got {beta_delta}"
         );
-
-        if row == CULCITA_AGQ {
-            assert!(
-                beta_delta > 0.8 && reason.contains("large beta gap"),
-                "{key}: culcitalogreg AGQ must keep its large-gap diagnosis"
-            );
-            assert!(
-                reason.contains("inference-impacting") && reason.contains("non-parity"),
-                "{key}: culcitalogreg AGQ must be explicitly marked inference-impacting non-parity, not a soft pass"
-            );
-        }
     }
 }
 
@@ -360,6 +348,24 @@ fn culcitalogreg_laplace_is_promoted_to_joint_laplace_parity() {
     assert!(
         reason.contains("fast=false") && reason.contains("objective"),
         "{key}: promoted GLMM row must name the certified joint path and objective evidence"
+    );
+}
+
+#[test]
+fn culcitalogreg_agq_is_promoted_to_joint_agq_parity() {
+    let scorecard = scorecard_by_key();
+    let key = row_key(CULCITA_AGQ);
+    let score = scorecard_row(&scorecard, CULCITA_AGQ);
+    assert_eq!(score.class_name, "release_blocking_parity", "{key}");
+    assert_eq!(score.reference, "lme4_joint_agq", "{key}");
+    assert_eq!(
+        score.issue_id.as_deref(),
+        Some("bd-01KRVGW2H561CF8GY70E1072M3")
+    );
+    let reason = score.reason.as_deref().unwrap_or("");
+    assert!(
+        reason.contains("fast=false") && reason.contains("AGQ"),
+        "{key}: promoted GLMM AGQ row must name the certified joint AGQ path"
     );
 }
 

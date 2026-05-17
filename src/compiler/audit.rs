@@ -4370,7 +4370,7 @@ fn optimizer_stop_is_acceptable(return_value: &str) -> bool {
     if let Some(final_code) = optimizer_recovery_final_code(return_value) {
         return optimizer_stop_is_acceptable(final_code);
     }
-    if let Some(final_code) = optimizer_joint_laplace_final_code(return_value) {
+    if let Some(final_code) = optimizer_joint_glmm_final_code(return_value) {
         return optimizer_stop_is_acceptable(final_code);
     }
     matches!(
@@ -4386,8 +4386,9 @@ fn optimizer_budget_exhausted(optsum: &OptSummary) -> bool {
     {
         return false;
     }
-    let return_value = optimizer_joint_laplace_final_code(&optsum.return_value)
+    let return_value = optimizer_joint_glmm_final_code(&optsum.return_value)
         .or_else(|| optsum.return_value.strip_prefix("JOINT_LAPLACE_FAILED:"))
+        .or_else(|| optsum.return_value.strip_prefix("JOINT_AGQ_FAILED:"))
         .or_else(|| {
             optsum
                 .return_value
@@ -4399,9 +4400,10 @@ fn optimizer_budget_exhausted(optsum: &OptSummary) -> bool {
         || (optsum.max_feval > 0 && optsum.feval >= optsum.max_feval)
 }
 
-fn optimizer_joint_laplace_final_code(return_value: &str) -> Option<&str> {
+fn optimizer_joint_glmm_final_code(return_value: &str) -> Option<&str> {
     return_value
         .strip_prefix("JOINT_LAPLACE:")
+        .or_else(|| return_value.strip_prefix("JOINT_AGQ:"))
         .or_else(|| return_value.strip_prefix("EXPERIMENTAL_JOINT:"))
         .filter(|code| !code.is_empty())
 }

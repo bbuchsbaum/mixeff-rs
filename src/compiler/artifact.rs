@@ -182,9 +182,12 @@ impl GlmmFitMetadata {
     pub fn from_opt_summary(opt: &OptSummary) -> Self {
         let status = opt.return_value.as_str();
         let is_fallback = status.starts_with("JOINT_LAPLACE_FALLBACK_FAST_PIRLS")
+            || status.starts_with("JOINT_AGQ_FALLBACK_FAST_PIRLS")
             || status.starts_with("EXPERIMENTAL_JOINT_FALLBACK_FAST_PIRLS");
         let is_joint = status.starts_with("JOINT_LAPLACE:")
             || status.starts_with("JOINT_LAPLACE_FAILED:")
+            || status.starts_with("JOINT_AGQ:")
+            || status.starts_with("JOINT_AGQ_FAILED:")
             || status.starts_with("EXPERIMENTAL_JOINT:")
             || status.starts_with("EXPERIMENTAL_JOINT_FAILED:");
         let (estimation_method, objective_definition, response_constants, fallback_status) =
@@ -195,6 +198,8 @@ impl GlmmFitMetadata {
                     "dropped",
                     Some("fallback_fast_pirls"),
                 )
+            } else if status.starts_with("JOINT_AGQ:") || status.starts_with("JOINT_AGQ_FAILED:") {
+                ("joint_agq", "joint_glmm_agq_deviance", "included", None)
             } else if is_joint {
                 (
                     "joint_laplace",
