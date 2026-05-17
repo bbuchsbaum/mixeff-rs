@@ -7951,6 +7951,22 @@ impl LinearMixedModel {
         self.fitted()
     }
 
+    /// Population-level (fixed-effects-only) fitted values on the training
+    /// data: the marginal linear predictor `Xβ`, **excluding** the random
+    /// effects contribution that [`Self::predict`]/`fitted` include.
+    ///
+    /// Equivalent to `lme4`'s `predict(model, re.form = NA)` on the training
+    /// frame, using the full-rank fixed-effects design.
+    ///
+    /// Exposed under the opt-in `unstable-internals` feature for the `mixeff`
+    /// R bindings; the field it derives from (`feterm`) is `pub(crate)` and
+    /// the public 1.0 surface intentionally has no training-data Xβ accessor
+    /// (see `docs/semver_policy.md`). Not part of the stable API.
+    #[cfg(feature = "unstable-internals")]
+    pub fn fixed_effect_fitted(&self) -> DVector<f64> {
+        self.feterm.full_rank_x() * &self.beta()
+    }
+
     /// Names of categorical columns that participate in the *fixed-effects*
     /// design (directly or via an interaction). Only these need training-time
     /// realignment; grouping-only categoricals are handled training-anchored by
