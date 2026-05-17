@@ -1,0 +1,235 @@
+# Difficult-model corpus and time-to-certified-fit scoreboard.
+#
+# This file is a release-facing manifest for hard cases. It deliberately sits
+# beside parity_scorecard.toml: parity_scorecard.toml classifies every dataset
+# fit, while this file selects the difficult rows and records why they matter.
+
+schema_version = "1.0.0"
+
+required_axes = [
+  "zero_variance_lmm",
+  "near_boundary_lmm",
+  "rank_deficient_random_slope_lmm",
+  "overspecified_random_slopes_lmm",
+  "constant_response_pathology_lmm",
+  "crossed_sparse_lmm",
+  "invalid_boundary_start_lmm",
+  "glmm_near_zero_random_effect",
+  "glmm_large_profiled_gap",
+]
+
+certification_statuses = [
+  "certified_fit",
+  "certified_boundary",
+  "diagnostic_contract",
+  "documented_divergence",
+  "performance_known_slow",
+  "unit_test_recovery",
+  "stress_opt_in",
+]
+
+[[scenario]]
+id = "dyestuff2_reml_zero_variance"
+axis = "zero_variance_lmm"
+description = "Canonical scalar LMM with random-effect variance estimated at zero."
+data_source = "datasets/dyestuff2"
+generator = "checked-in fixture"
+dataset = "dyestuff2"
+formula = "Yield ~ 1 + (1 | Batch)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+comparator_engines = ["lme4"]
+release_relevance = "Boundary variance should be reported as a valid fitted boundary, not an optimizer failure."
+scorecard_class = "release_blocking_parity"
+certification_status = "certified_boundary"
+certification_claim = "Rust and lme4 both fit a singular boundary model with theta pinned at zero."
+required_metrics = ["objective_delta", "beta_delta", "theta_delta", "optimizer_status", "singular_status", "warnings", "wall_time_ms", "fevals", "time_to_certified_fit_ms"]
+rust_certification = "single_fit_certificate"
+comparator_certification = "single_fit_warning"
+rust_time_multiplier = 1.0
+comparator_time_multiplier = 1.0
+comparator_extra_ms = 0.0
+
+[[scenario]]
+id = "station_season_duration_boundary"
+axis = "near_boundary_lmm"
+description = "Weakly identified two-block LMM boundary row that remains numerically matched under the release tolerance."
+data_source = "datasets/station_season_duration"
+generator = "checked-in fixture"
+dataset = "station_season_duration"
+formula = "effect ~ 1 + duration + (1 + duration | sites) + (1 + duration | season)"
+family = "Gaussian"
+link = "Identity"
+estimator = "ML"
+comparator_engines = ["lme4"]
+release_relevance = "Boundary-sensitive fitted covariance must stay parity-gated and not become an unlabelled ordinary fit."
+scorecard_class = "release_blocking_parity"
+certification_status = "certified_boundary"
+certification_claim = "Release parity row with expected weak/boundary covariance behavior."
+required_metrics = ["objective_delta", "beta_delta", "theta_delta", "optimizer_status", "singular_status", "warnings", "wall_time_ms", "fevals", "time_to_certified_fit_ms"]
+rust_certification = "single_fit_certificate"
+comparator_certification = "single_fit_warning"
+rust_time_multiplier = 1.0
+comparator_time_multiplier = 1.0
+comparator_extra_ms = 0.0
+
+[[scenario]]
+id = "singular_double_bar_rank_deficient"
+axis = "rank_deficient_random_slope_lmm"
+description = "Independent maximal random-effect structure with near-zero covariance directions."
+data_source = "datasets/singular"
+generator = "checked-in singular fixture"
+dataset = "singular"
+formula = "y ~ 1 + A * B * C + (A * B * C || group)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+comparator_engines = ["lme4"]
+release_relevance = "Rank-deficient covariance rows must remain diagnostic contracts until certificate evidence supports promotion."
+scorecard_class = "documented_divergence"
+certification_status = "diagnostic_contract"
+certification_claim = "Both sides expose singular directions, but this row remains non-parity until the pathology contract is tightened."
+required_metrics = ["objective_delta", "beta_delta", "theta_delta", "optimizer_status", "singular_status", "warnings", "wall_time_ms", "fevals", "time_to_certified_fit_ms"]
+rust_certification = "diagnostic_contract"
+comparator_certification = "single_fit_warning"
+rust_time_multiplier = 1.0
+comparator_time_multiplier = 1.0
+comparator_extra_ms = 0.0
+
+[[scenario]]
+id = "singular_maximal_overspecified"
+axis = "overspecified_random_slopes_lmm"
+description = "Maximal random-slope structure that exhausts the Rust optimizer budget and drifts from lme4."
+data_source = "datasets/singular"
+generator = "checked-in singular fixture"
+dataset = "singular"
+formula = "y ~ 1 + A * B * C + (A * B * C | group)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+comparator_engines = ["lme4"]
+release_relevance = "This is the clearest LMM hard-row failure mode and should drive recovery/active-face follow-up."
+scorecard_class = "documented_divergence"
+certification_status = "documented_divergence"
+certification_claim = "Rust reaches MAXEVAL with large coefficient drift; the row is diagnostic, not release parity."
+required_metrics = ["objective_delta", "beta_delta", "theta_delta", "optimizer_status", "singular_status", "warnings", "wall_time_ms", "fevals", "time_to_certified_fit_ms"]
+rust_certification = "budget_exhausted_diagnostic"
+comparator_certification = "single_fit_warning"
+rust_time_multiplier = 1.0
+comparator_time_multiplier = 1.0
+comparator_extra_ms = 0.0
+
+[[scenario]]
+id = "nested_constant_response_explicit"
+axis = "constant_response_pathology_lmm"
+description = "Nested constant-response pathology where lme4 errors and Rust returns a structural diagnostic contract."
+data_source = "datasets/nested_constant_response"
+generator = "checked-in pathology fixture"
+dataset = "nested_constant_response"
+formula = "logterrisize ~ 1 + spm + (1 | studyarea) + (1 | studyarea:teriid)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+comparator_engines = ["lme4"]
+release_relevance = "Hard-model reporting must distinguish a precise diagnostic from ordinary parity."
+scorecard_class = "documented_divergence"
+certification_status = "diagnostic_contract"
+certification_claim = "Rust result is a diagnostic contract; lme4 has no certified fit for this row."
+required_metrics = ["optimizer_status", "singular_status", "warnings", "wall_time_ms", "fevals", "time_to_certified_fit_ms"]
+rust_certification = "structural_diagnostic_contract"
+comparator_certification = "not_certified_error"
+rust_time_multiplier = 1.0
+comparator_time_multiplier = 1.0
+comparator_extra_ms = 0.0
+comparator_certifiable = false
+
+[[scenario]]
+id = "penicillin_crossed_sparse"
+axis = "crossed_sparse_lmm"
+description = "Small crossed random-intercept LMM used as the cheap crossed-design release row."
+data_source = "datasets/penicillin"
+generator = "checked-in fixture"
+dataset = "penicillin"
+formula = "diameter ~ 1 + (1 | plate) + (1 | sample)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+comparator_engines = ["lme4"]
+release_relevance = "Crossed sparse designs need a cheap always-on row before larger stress fixtures are run."
+scorecard_class = "release_blocking_parity"
+certification_status = "certified_fit"
+certification_claim = "Ordinary crossed LMM release row with objective and coefficient parity."
+required_metrics = ["objective_delta", "beta_delta", "theta_delta", "optimizer_status", "singular_status", "warnings", "wall_time_ms", "fevals", "time_to_certified_fit_ms"]
+rust_certification = "single_fit_certificate"
+comparator_certification = "single_fit"
+rust_time_multiplier = 1.0
+comparator_time_multiplier = 1.0
+comparator_extra_ms = 0.0
+
+[[scenario]]
+id = "kkt_scalar_invalid_boundary_restart"
+axis = "invalid_boundary_start_lmm"
+description = "Synthetic bad-start scalar LMM where the covariance-space score rejects an invalid zero-variance stop and restart repairs it."
+data_source = "src/model/linear.rs unit tests"
+generator = "shared_julia_parity_fixture with forced theta=0"
+dataset = "unit_test"
+formula = "reaction ~ 1 + days + (1 | subj)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+comparator_engines = ["mixeff-rs good-start reference"]
+release_relevance = "This is the regression guard for claiming certificate-guided recovery, not just post-hoc messaging."
+scorecard_class = "unit_test_contract"
+certification_status = "unit_test_recovery"
+certification_claim = "test_kkt_guided_restart_repairs_scalar_invalid_boundary_stop proves objective improvement and interior certificate after restart."
+required_metrics = ["optimizer_status", "certification_status", "time_to_certified_fit_ms"]
+rust_certification = "kkt_guided_restart"
+comparator_certification = "not_applicable"
+unit_test_name = "test_kkt_guided_restart_repairs_scalar_invalid_boundary_stop"
+
+[[scenario]]
+id = "gopherdat2_near_zero_glmm"
+axis = "glmm_near_zero_random_effect"
+description = "Poisson GLMM with coefficient parity but near-zero theta / singular-flag disagreement."
+data_source = "datasets/gopherdat2"
+generator = "checked-in fixture"
+dataset = "gopherdat2"
+formula = "shells ~ year + prev + offset(log(Area)) + (1 | Site)"
+family = "Poisson"
+link = "Log"
+estimator = "Laplace"
+comparator_engines = ["lme4"]
+release_relevance = "GLMM near-boundary rows must preserve coefficient parity while documenting objective and singularity-convention limits."
+scorecard_class = "documented_divergence"
+certification_status = "documented_divergence"
+certification_claim = "Coefficient parity holds, but GLMM objective constants and singular flag thresholds diverge."
+required_metrics = ["beta_delta", "theta_delta", "optimizer_status", "singular_status", "warnings", "wall_time_ms", "fevals", "time_to_certified_fit_ms"]
+rust_certification = "coefficient_parity_with_singularity_gap"
+comparator_certification = "single_fit"
+rust_time_multiplier = 1.0
+comparator_time_multiplier = 1.0
+comparator_extra_ms = 0.0
+
+[[scenario]]
+id = "grouseticks_profiled_gap"
+axis = "glmm_large_profiled_gap"
+description = "Large Poisson GLMM where Rust matches the profiled fast objective family but remains performance-known-slow versus lme4."
+data_source = "datasets/grouseticks"
+generator = "checked-in fixture"
+dataset = "grouseticks"
+formula = "TICKS ~ 1 + YEAR + cHEIGHT + (1 | BROOD) + (1 | INDEX) + (1 | LOCATION)"
+family = "Poisson"
+link = "Log"
+estimator = "Laplace"
+comparator_engines = ["lme4", "MixedModels.jl fast=true"]
+release_relevance = "This row measures downstream performance impact and keeps the speed gap visible."
+scorecard_class = "performance_known_slow"
+certification_status = "performance_known_slow"
+certification_claim = "Known slow GLMM row; keep as performance diagnostic until the grouseticks speed mote closes."
+required_metrics = ["beta_delta", "theta_delta", "optimizer_status", "singular_status", "warnings", "wall_time_ms", "fevals", "time_to_certified_fit_ms"]
+rust_certification = "single_fit_profiled_glmm"
+comparator_certification = "single_fit"
+rust_time_multiplier = 1.0
+comparator_time_multiplier = 1.0
+comparator_extra_ms = 0.0

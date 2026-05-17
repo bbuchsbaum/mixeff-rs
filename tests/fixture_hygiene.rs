@@ -21,6 +21,39 @@ use mixeff_rs::model::linear::LinearMixedModel;
 use mixeff_rs::model::traits::MixedModelFit;
 use serde_json::{json, Value};
 
+fn parity_scorecard_release_keys() -> std::collections::BTreeSet<String> {
+    #[derive(serde::Deserialize)]
+    struct Scorecard {
+        row: Vec<ScorecardRow>,
+    }
+    #[derive(serde::Deserialize)]
+    struct ScorecardRow {
+        dataset: String,
+        formula: String,
+        family: String,
+        link: String,
+        estimator: String,
+        #[serde(rename = "class")]
+        class_name: String,
+    }
+
+    let path = repo_root().join("comparison/parity_scorecard.toml");
+    let scorecard: Scorecard =
+        toml::from_str(&fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}")))
+            .unwrap_or_else(|e| panic!("parse {path:?}: {e}"));
+    scorecard
+        .row
+        .into_iter()
+        .filter(|row| row.class_name == "release_blocking_parity")
+        .map(|row| {
+            format!(
+                "{}\n{}\n{}\n{}\n{}",
+                row.dataset, row.formula, row.family, row.link, row.estimator
+            )
+        })
+        .collect()
+}
+
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -324,14 +357,15 @@ fn approx_equal(actual: f64, expected: f64, abs_tol: f64, rel_tol: f64) -> bool 
     diff <= abs_tol || diff <= rel_tol * expected.abs()
 }
 
-/// Re-fit every pinned `[fits.expected]` block via the in-crate engine and
-/// assert β / σ / θ / objective fall within tolerance of the lme4 /
-/// MixedModels.jl reference values.
+/// Re-fit every stable release-blocking pinned `[fits.expected]` block via the
+/// in-crate engine and assert β / σ / θ / objective fall within tolerance of
+/// the lme4 / MixedModels.jl reference values.
 ///
-/// **Opt-in.** Set `MIXEDMODELS_ENABLE_REFIT_HYGIENE=1` to run. Default
-/// behavior is to early-return so the test does not false-flag in-flight
-/// numerical work in `src/model/linear.rs`. Once that work has stabilized
-/// and the test passes consistently, this gate can be removed.
+/// Stable release rows run by default for the default backend. Set
+/// `MIXEDMODELS_ENABLE_REFIT_HYGIENE=1` to widen the check to all pinned
+/// non-stress Gaussian rows, including documented divergences.
+/// No-default builds skip the default run because checked-in expected values
+/// are pinned to the default optimizer stack, but can still opt in explicitly.
 ///
 /// Skips: non-Gaussian/Identity fits, `difficulty == "stress"` fixtures
 /// (unless `MIXEDMODELS_INCLUDE_STRESS=1`), and pinned fits without an
@@ -339,13 +373,8 @@ fn approx_equal(actual: f64, expected: f64, abs_tol: f64, rel_tol: f64) -> bool 
 /// `objective` + `is_singular`; θ is non-unique on the boundary.
 #[test]
 fn every_pinned_fit_matches_within_tolerance() {
-    if std::env::var("MIXEDMODELS_ENABLE_REFIT_HYGIENE").is_err() {
-        eprintln!(
-            "skipped: set MIXEDMODELS_ENABLE_REFIT_HYGIENE=1 to enable the \
-             re-fit tolerance hygiene check"
-        );
-        return;
-    }
+    let release_keys = parity_scorecard_release_keys();
+    let include_all_pinned = std::env::var("MIXEDMODELS_ENABLE_REFIT_HYGIENE").is_ok();
     let include_stress = std::env::var("MIXEDMODELS_INCLUDE_STRESS").is_ok();
     let tol = Tolerance::default();
 
@@ -354,6 +383,8 @@ fn every_pinned_fit_matches_within_tolerance() {
     let mut skipped_glmm = 0usize;
     let mut skipped_stress = 0usize;
     let mut skipped_no_expected = 0usize;
+    let mut skipped_nonrelease = 0usize;
+    let mut skipped_backend = 0usize;
 
     for case in datasets::iter_cases() {
         let mixeff_rs::datasets::Case {
@@ -368,6 +399,18 @@ fn every_pinned_fit_matches_within_tolerance() {
             || !fit.link.eq_ignore_ascii_case("Identity")
         {
             skipped_glmm += 1;
+            continue;
+        }
+        if !cfg!(feature = "nlopt") && !include_all_pinned {
+            skipped_backend += 1;
+            continue;
+        }
+        let case_key = format!(
+            "{}\n{}\n{}\n{}\n{}",
+            name, fit.formula, fit.family, fit.link, fit.estimator
+        );
+        if !include_all_pinned && !release_keys.contains(&case_key) {
+            skipped_nonrelease += 1;
             continue;
         }
         let is_stress = meta.tags.difficulty.as_deref() == Some("stress");
@@ -504,7 +547,8 @@ fn every_pinned_fit_matches_within_tolerance() {
 
     eprintln!(
         "re-fit hygiene: checked {checked}, skipped (GLMM) {skipped_glmm}, \
-         skipped (stress) {skipped_stress}, skipped (no expected) {skipped_no_expected}"
+         skipped (stress) {skipped_stress}, skipped (no expected) {skipped_no_expected}, \
+         skipped (non-release) {skipped_nonrelease}, skipped (backend) {skipped_backend}"
     );
 
     if !failures.is_empty() {

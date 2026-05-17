@@ -42,10 +42,36 @@ boundary or reduced-rank fit, and KKT/gradient checks for an interior optimum
 are skipped. The compact surface should say boundary, singular, or reduced-rank,
 not non-converged.
 
+For supported LMM covariance blocks, the stronger check is the covariance-cone
+KKT certificate rather than an interior theta-gradient rule. Scalar
+`(1 | group)` blocks and full 2x2 `(1 + x | group)` blocks can be inspected in
+covariance space. The certificate classifies the block as an interior optimum,
+a valid zero-variance boundary, a valid rank-deficient covariance, an invalid
+boundary stop, or weak identification.
+
+Those classifications feed the existing optimizer certificate and verdict
+surfaces. They are not a separate convergence system. A valid zero-variance or
+rank-deficient covariance result may support `ConvergedBoundary` or
+`ConvergedReducedRank`; an invalid boundary stop should remain an optimizer
+failure or recovery event; weak identification should stay visible as cautionary
+evidence.
+
+When the solver repairs an invalid boundary stop with a covariance
+KKT-guided restart, the optimizer return code is prefixed with
+`KKT_BOUNDARY_RESTART(...)` and the verdict headline includes recovered
+convergence. This is an acceptable recovered stop when the inner restart
+returns an acceptable optimizer code, but it is intentionally not presented as
+first-pass clean convergence.
+
 The usual next action is to inspect effective covariance and decide whether the
 boundary direction is scientifically central. A simpler random-effect structure,
 diagonal covariance, or design-compiled policy can be appropriate when the
 direction is unsupported.
+
+The implementation note
+[`difficult_model_certification.md`](difficult_model_certification.md) maps the
+covariance KKT certificate, TrustBQ certified stop, KKT-guided restart, and
+parity scorecard to the existing certificate vocabulary.
 
 ## Large Theta Fits
 

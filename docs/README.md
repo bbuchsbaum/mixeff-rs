@@ -37,6 +37,9 @@ rules — no fake p-values, no hidden model surgery.
   families/links are supported and the refusal boundaries.
 - [`summary_estimates_meta_analysis.md`](summary_estimates_meta_analysis.md) —
   the summary-estimate (meta-analysis) front door contract.
+- [`difficult_model_certification.md`](difficult_model_certification.md) —
+  how difficult boundary/singular fits reuse the existing optimizer
+  certificate, covariance KKT, verdict, and parity-scorecard surfaces.
 
 ## Internal design (in flux — not a stable contract)
 

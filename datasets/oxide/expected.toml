@@ -3,6 +3,16 @@
 # Loader: src/datasets/mod.rs::load_meta merges these into Meta.fits[i].expected.
 
 [[expected]]
+formula = "Thickness ~ 1 + (1 | Lot) + (1 | Lot:Wafer)"
+estimator = "REML"
+beta = [2000.1527777778349]
+sigma = 3.5453258700425447
+re_sigmas = [5.9888349125255544, 11.39792001905149]
+theta = [1.6892198720377958, 3.2149146331969516]
+objective = 454.02206930988217
+is_singular = false
+
+[[expected]]
 formula = "Thickness ~ 1 + (1 | Lot/Wafer)"
 estimator = "REML"
 beta = [2000.1527777778349]

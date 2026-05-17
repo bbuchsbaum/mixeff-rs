@@ -4,6 +4,36 @@ Three-stage workflow producing `comparison/REPORT.md` — accuracy + performance
 tables for every `[[fits]]` block in `datasets/*/meta.toml`, side-by-side
 against R `lme4`.
 
+`comparison/parity_scorecard.toml` is the release-gate classification for the
+same manifest rows. It records which rows are release-blocking parity, which
+are documented divergences, which are stress opt-ins, and which are supported
+refusals. Tests fail if the scorecard stops covering the manifest exactly.
+
+`comparison/difficult_model_scoreboard.toml` is the focused hard-model layer on
+top of that release scorecard. It selects boundary, singular, weakly
+identified, crossed, constant-response, invalid-boundary-start, and GLMM
+pathology scenarios and records the evidence needed to compute
+`time_to_certified_fit` from the checked-in Rust/lme4 artifacts or from named
+unit tests. It is the source of truth for the narrower claim that `mixeff-rs`
+should return a certified fit or precise diagnostic on difficult models; it is
+not a blanket raw-speed or universal superiority claim.
+
+## Divergence Policy
+
+Documented divergence rows are not soft parity passes. They are release-visible
+decisions with tests in `tests/parity_divergence_contract.rs`:
+
+- GLMM fast-PIRLS rows (`cbpp`, `contraception`, `culcitalogreg`, `verbagg`)
+  remain non-`lme4` claims until a certified joint GLMM optimizer closes the
+  fixed-effect gaps. The `culcitalogreg` rows are intentionally called out
+  because their beta gaps are large enough to affect inference.
+- `gopherdat2` keeps coefficient parity but remains divergent because Rust
+  estimates a near-zero covariance parameter without lme4's singular flag, and
+  GLMM objective constants are not comparable.
+- Boundary/pathology LMM rows (`nested_constant_response` and maximal
+  `singular` formulas) are diagnostic contracts. They must not appear as clean
+  release parity unless the pathology test and scorecard are updated together.
+
 This harness is intentionally repo-owned. It reads committed `datasets/*`
 fixtures and `comparison/manifest.json`; it must not depend on downstream
 package fixtures, private paths such as `~/code/mixeff`, or local R-layer
@@ -15,6 +45,17 @@ cargo run --release --example compare_rust   # writes manifest.json + rust_resul
 Rscript scripts/compare_lme4.R               # reads manifest.json, writes lme4_results.json
 cargo run --release --example compare_report # joins both, writes REPORT.md
 ```
+
+For release checks, use:
+
+```bash
+bash scripts/check_release_lme4_parity.sh
+```
+
+That script regenerates both sides and runs the scorecard gate against the
+fresh artifacts, then restores the caller's original comparison files. Raw
+wall-clock timings in `*_results.json` and `REPORT.md` are intentionally
+volatile across machines, so they are not used as release-blocking diffs.
 
 Each stage is independent — re-run only the side that changed. The R driver
 honours `[[columns]].levels` so factor encoding matches the canonical order
@@ -28,6 +69,8 @@ recorded in `meta.toml`.
 | `rust_results.json`     | `examples/compare_rust.rs`        | `examples/compare_report.rs`         |
 | `lme4_results.json`     | `scripts/compare_lme4.R`          | `examples/compare_report.rs`         |
 | `REPORT.md`             | `examples/compare_report.rs`      | humans                               |
+| `parity_scorecard.toml` | maintained with dataset parity gates | release tests                     |
+| `difficult_model_scoreboard.toml` | maintained with hard-model gates | release tests and recovery planning |
 
 ## Schema
 

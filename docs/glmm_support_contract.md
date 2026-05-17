@@ -33,6 +33,46 @@ where the family semantics define them, including binomial trial weights.
 future joint optimizer path and must return an explicit unsupported error
 rather than silently selecting another algorithm.
 
+## Parity Claim Classes
+
+GLMM release evidence is not a single blanket "`lme4` parity" claim. The
+machine-readable source of truth is `comparison/parity_scorecard.toml`, and
+the generated comparison report must use the same distinctions:
+
+- `release_blocking_parity`: fitted quantities are within the declared
+  tolerance for the stated reference. For GLMM rows, objective values may be
+  excluded from this comparison only when the scorecard explicitly records the
+  response-constant convention difference.
+- `documented_divergence`: the row is fitted and useful evidence, but it is
+  not a release-blocking `lme4` parity row. Current examples include
+  fast-PIRLS/profiled-objective rows that track the MixedModels.jl `fast=true`
+  behavior while differing from `lme4` joint-estimation coefficients.
+- `performance_known_slow`: the numerical claim is separately classified, but
+  the row remains a release-visible performance issue with a mote id.
+- `stress_opt_in`: the row is deliberately excluded from routine comparison
+  regeneration unless `MIXEDMODELS_INCLUDE_STRESS=1` is set.
+- `unsupported_with_contract`: the row exercises a behavior that Rust rejects
+  by design and must carry a stable reason.
+
+Tests must fail if a GLMM documented-divergence row is presented as ordinary
+`lme4` parity. `fast=false` remains outside the supported contract until a
+certified joint optimizer supplies its own parity fixtures.
+
+The current documented-divergence rows are deliberate release exclusions, not
+soft passes:
+
+- `cbpp`, `contraception`, `culcitalogreg`, and `verbagg` are fast-PIRLS /
+  profiled-objective rows. Some large rows match the MixedModels.jl
+  `fast=true` objective, but they are not `lme4` joint-estimation parity rows.
+  The `culcitalogreg` Laplace and AGQ rows have large fixed-effect gaps and
+  must remain non-parity until a certified joint GLMM optimizer lands.
+- `gopherdat2` has coefficient parity, but Rust records a near-zero covariance
+  parameter without lme4's singular flag. This is a diagnostic threshold /
+  convention gap plus the normal GLMM objective-constant difference.
+- `grouseticks` is tracked separately as `performance_known_slow`: it has a
+  MixedModels.jl `fast=true` objective contract and a known lme4 beta gap, but
+  its release-visible issue is currently performance.
+
 ## Approximation Semantics
 
 `n_agq <= 1` means the Laplace approximation. `n_agq > 1` means adaptive
