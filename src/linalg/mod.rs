@@ -9,22 +9,27 @@
 // Re-export LinAlgError so submodules can use `crate::linalg::LinAlgError`
 pub use crate::error::LinAlgError;
 
-// These are faithful MixedModels.jl numerical-primitive ports kept with full
-// per-function unit-test coverage for parity. Not all are wired into the
-// active fit path — `model::linear` carries its own blocked Cholesky/PLS
-// routines — so several primitives have no non-test caller. Demoting `linalg`
-// to `pub(crate)` (v1.0 API trim) made that visible as dead_code. Retaining
-// the tested ports is deliberate; whether to wire them in or remove them is
-// tracked as a follow-up rather than silently suppressed here. See
-// `docs/linalg_primitive_audit.md` for the current caller map and post-1.0
-// decision boundary.
+// `block_ops`, `chol_unblocked`, `logdet`, and `rank_update` are faithful
+// MixedModels.jl numerical-primitive ports kept with full per-function
+// unit-test coverage for parity. They are not wired into the active fit path
+// — `model::linear` carries its own blocked Cholesky/PLS routines — so they
+// have no non-test caller. Demoting `linalg` to `pub(crate)` (v1.0 API trim)
+// made that visible as dead_code. Retaining the tested ports is deliberate;
+// whether to wire them in or remove them is tracked as a follow-up rather than
+// silently suppressed here. See `docs/linalg_primitive_audit.md` for the
+// caller map and post-1.0 decision boundary.
+//
+// `pivot` is NOT in that group: it is live infrastructure (`compiler::audit`,
+// `stats::lrt`, and `types::fe_term` depend on `pivoted_qr_with_tol`,
+// `stats_rank_with_tol`, and `stats_rank`). Only the no-tol `pivoted_qr`
+// convenience wrapper is currently uncalled, so the dead_code allowance is
+// scoped to that single function in `pivot.rs` instead of the whole module.
 #[allow(dead_code)]
 pub mod block_ops;
 #[allow(dead_code)]
 pub mod chol_unblocked;
 #[allow(dead_code)]
 pub mod logdet;
-#[allow(dead_code)]
 pub mod pivot;
 #[allow(dead_code)]
 pub mod rank_update;

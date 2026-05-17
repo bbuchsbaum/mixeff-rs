@@ -32,6 +32,11 @@ use nalgebra::DMatrix;
 /// - `R_factor` is the upper triangular R from the factorization.
 ///
 /// The default tolerance is `1e-8`.
+// No-tol convenience wrapper. Live callers (`compiler::audit`) use
+// `pivoted_qr_with_tol` directly with an explicit tolerance, so this variant
+// currently has only test callers; kept as the documented default-tolerance
+// entry point. See `docs/linalg_primitive_audit.md`.
+#[allow(dead_code)]
 pub fn pivoted_qr(a: &DMatrix<f64>) -> (usize, Vec<usize>, DMatrix<f64>) {
     pivoted_qr_with_tol(a, 1e-8)
 }

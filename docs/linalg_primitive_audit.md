@@ -15,7 +15,7 @@ no longer exactly true.
 
 | Module | Public items | Non-test callers today | Current interpretation |
 | --- | --- | --- | --- |
-| `linalg::pivot` | `pivoted_qr`, `pivoted_qr_with_tol`, `stats_rank`, `stats_rank_with_tol` | Yes: `compiler::audit` uses `pivoted_qr_with_tol` and `stats_rank_with_tol`; `stats::lrt` and `types::fe_term` use the `stats_rank` facade. | Keep. This is now active compiler/statistics infrastructure, though the MGS-vs-Householder parity question remains. |
+| `linalg::pivot` | `pivoted_qr`, `pivoted_qr_with_tol`, `stats_rank`, `stats_rank_with_tol` | Yes: `compiler::audit` uses `pivoted_qr_with_tol` and `stats_rank_with_tol`; `stats::lrt` and `types::fe_term` use the `stats_rank` facade. Only the no-tol `pivoted_qr` wrapper has no non-test caller. | Keep. This is active compiler/statistics infrastructure, so the module-level `#[allow(dead_code)]` was removed; the allowance is now scoped to the single uncalled `pivoted_qr` wrapper in `pivot.rs`. The MGS-vs-Householder parity question remains. |
 | `linalg::chol_unblocked` | `chol_unblocked`, `chol_unblocked_diag`, `chol_unblocked_blocks` | No non-test caller found. | Retain as a tested reference port until the post-1.0 numerical-engine decision. Do not wire into `model::linear` without benchmark and parity evidence. |
 | `linalg::logdet` | `logdet_triangular`, `logdet_diag`, `logdet_block_diagonal`, `logdet_from_chol`, `logdet_block_diagonal_from_chol` | No non-test caller found. | Retain as simple tested reference functions. The active fit path has specialized `MatrixBlock` logdet code. |
 | `linalg::rank_update` | `rank_update_dense`, `rank_update_diag`, `rank_update_sparse_dense`, `rank_update_sparse` | No non-test caller found. | Retain as tested MixedModels.jl-style ports. Wiring these into the fit path would be a numerical refactor, not cleanup. |
@@ -26,10 +26,13 @@ no longer exactly true.
 For 1.0, keep the current arrangement:
 
 - `linalg` stays internal, not public API.
-- `pivot` remains active because rank and audit code now depend on it.
+- `pivot` remains active because rank and audit code now depend on it; its
+  module-level dead_code allowance was removed and scoped down to the single
+  uncalled `pivoted_qr` wrapper so the gate reflects reality.
 - unused-but-tested ports remain available for post-1.0 numerical work.
-- the documented `#[allow(dead_code)]` stays on internal modules whose only
-  current callers are unit tests.
+- the documented `#[allow(dead_code)]` stays on the four internal modules
+  (`block_ops`, `chol_unblocked`, `logdet`, `rank_update`) whose only current
+  callers are unit tests.
 
 The follow-up decision should be made only after comparing three options:
 
