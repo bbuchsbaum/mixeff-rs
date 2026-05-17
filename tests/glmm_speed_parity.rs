@@ -23,6 +23,18 @@ struct GlmmSpeedCase {
     known_slow_bead: Option<&'static str>,
 }
 
+#[derive(Clone, Copy)]
+struct FastFalseGlmmSpeedCase {
+    dataset: &'static str,
+    formula: &'static str,
+    family: &'static str,
+    link: &'static str,
+    estimator: &'static str,
+    objective_definition: &'static str,
+    optimizer_prefix: &'static str,
+    minimum_speedup: f64,
+}
+
 const SPEED_CASES: &[GlmmSpeedCase] = &[
     GlmmSpeedCase {
         dataset: "cbpp",
@@ -42,7 +54,7 @@ const SPEED_CASES: &[GlmmSpeedCase] = &[
         estimator: "Laplace",
         status: "ok",
         minimum_speedup: Some(1.0),
-        known_slow_bead: Some("bd-01KRSQYRHF8VK627HZ6Z23CP93"),
+        known_slow_bead: None,
     },
     GlmmSpeedCase {
         dataset: "verbagg",
@@ -63,6 +75,29 @@ const SPEED_CASES: &[GlmmSpeedCase] = &[
         status: "skipped_stress",
         minimum_speedup: None,
         known_slow_bead: None,
+    },
+];
+
+const FAST_FALSE_SPEED_CASES: &[FastFalseGlmmSpeedCase] = &[
+    FastFalseGlmmSpeedCase {
+        dataset: "culcitalogreg",
+        formula: "predation ~ ttt + (1 | block)",
+        family: "Binomial",
+        link: "Logit",
+        estimator: "Laplace",
+        objective_definition: "joint_glmm_laplace_deviance",
+        optimizer_prefix: "JOINT_LAPLACE:",
+        minimum_speedup: 1.0,
+    },
+    FastFalseGlmmSpeedCase {
+        dataset: "culcitalogreg",
+        formula: "predation ~ ttt + (1 | block)",
+        family: "Binomial",
+        link: "Logit",
+        estimator: "AGQ",
+        objective_definition: "joint_glmm_agq_deviance",
+        optimizer_prefix: "JOINT_AGQ:",
+        minimum_speedup: 1.0,
     },
 ];
 
@@ -117,6 +152,16 @@ fn case_key(case: GlmmSpeedCase) -> String {
     )
 }
 
+fn fast_false_case_key(case: FastFalseGlmmSpeedCase) -> String {
+    key(
+        case.dataset,
+        case.formula,
+        case.family,
+        case.link,
+        case.estimator,
+    )
+}
+
 fn results_by_key(file: &Value, label: &str) -> BTreeMap<String, Value> {
     let mut by_key = BTreeMap::new();
     for record in file
@@ -158,6 +203,13 @@ fn nonempty_str<'a>(record: &'a Value, field: &str, key: &str) -> &'a str {
     value
 }
 
+fn field_str<'a>(record: &'a Value, field: &str, key: &str) -> &'a str {
+    record
+        .get(field)
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("{key}: missing string `{field}`"))
+}
+
 fn assert_ok_speed_payload(record: &Value, key: &str) {
     assert_eq!(
         record.get("status").and_then(Value::as_str),
@@ -171,6 +223,50 @@ fn assert_ok_speed_payload(record: &Value, key: &str) {
     positive_i64(record, "optimizer_fevals", key);
     for field in ["optimizer", "optimizer_backend", "optimizer_return_code"] {
         nonempty_str(record, field, key);
+    }
+}
+
+#[test]
+fn glmm_fast_false_speed_rows_cover_certified_joint_cases_and_thresholds() {
+    let rust = read_json("comparison/rust_results.json");
+    let lme4 = read_json("comparison/lme4_results.json");
+    let rust_by_key = results_by_key(&rust, "rust_results.json");
+    let lme4_by_key = results_by_key(&lme4, "lme4_results.json");
+
+    for case in FAST_FALSE_SPEED_CASES {
+        let key = fast_false_case_key(*case);
+        let rust_row = rust_by_key
+            .get(&key)
+            .unwrap_or_else(|| panic!("rust_results.json missing fast=false speed row {key}"));
+        let lme4_row = lme4_by_key
+            .get(&key)
+            .unwrap_or_else(|| panic!("lme4_results.json missing fast=false speed row {key}"));
+
+        assert_ok_speed_payload(rust_row, &key);
+        assert_ok_speed_payload(lme4_row, &key);
+        assert_eq!(
+            field_str(rust_row, "objective_definition", &key),
+            case.objective_definition,
+            "{key}: fast=false speed row must use the certified joint objective"
+        );
+        assert_eq!(
+            field_str(rust_row, "response_constants", &key),
+            "included",
+            "{key}: fast=false speed row must retain response constants"
+        );
+        assert!(
+            field_str(rust_row, "optimizer_return_code", &key).starts_with(case.optimizer_prefix),
+            "{key}: fast=false speed row must carry the labelled joint optimizer status"
+        );
+
+        let rust_ms = field_f64(rust_row, "fit_time_ms_min", &key);
+        let lme4_ms = field_f64(lme4_row, "fit_time_ms_min", &key);
+        let speedup = lme4_ms / rust_ms;
+        assert!(
+            speedup >= case.minimum_speedup,
+            "{key}: certified fast=false speedup {speedup:.2}x is below threshold {:.2}x",
+            case.minimum_speedup
+        );
     }
 }
 
@@ -253,6 +349,17 @@ fn glmm_speed_report_exposes_ratios_fevals_and_optimizer_codes() {
             report.contains(&format!("`{}`", case.dataset)),
             "comparison/REPORT.md missing representative GLMM speed dataset `{}`",
             case.dataset
+        );
+    }
+    for case in FAST_FALSE_SPEED_CASES {
+        assert!(
+            report.contains(&format!("`{}`", case.dataset))
+                && report.contains(case.estimator)
+                && report.contains(case.optimizer_prefix),
+            "comparison/REPORT.md missing certified fast=false speed row `{}` `{}` with optimizer prefix `{}`",
+            case.dataset,
+            case.estimator,
+            case.optimizer_prefix
         );
     }
 }
