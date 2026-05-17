@@ -1332,6 +1332,7 @@ impl GeneralizedLinearMixedModel {
         // the prototype focused on whether joint [β; θ] can improve the same
         // included-constants objective, without changing default behavior.
         self.fit_with_options_impl(1, verbose)?;
+        let fallback_fast_pirls = self.clone();
         let start_beta = self.beta.as_slice().to_vec();
         let start_theta = self.theta.clone();
         let profiled_start_objective = self.deviance_with_response_constants(1);
@@ -1340,6 +1341,7 @@ impl GeneralizedLinearMixedModel {
             start_theta,
             profiled_start_objective,
             200,
+            Some(fallback_fast_pirls),
         )
     }
 
@@ -1350,6 +1352,7 @@ impl GeneralizedLinearMixedModel {
         start_theta: Vec<f64>,
         profiled_start_objective: f64,
         maxeval: u32,
+        fallback_fast_pirls: Option<Self>,
     ) -> Result<&mut Self> {
         use nlopt::{Algorithm as NloptAlgorithm, Nlopt, Target as NloptTarget};
 
@@ -1453,6 +1456,16 @@ impl GeneralizedLinearMixedModel {
             &gradient,
             2.0e-2,
         );
+        if let Some(fallback) = uncertified_joint_fallback(
+            &certificate,
+            &me.lmm.optsum.return_value,
+            fallback_fast_pirls,
+        ) {
+            *me = fallback;
+            me.refresh_binomial_separation_diagnostics();
+            me.refresh_near_unit_random_effect_correlation_diagnostics();
+            return Ok(me);
+        }
         me.lmm.compiler_artifact.optimizer_certificate = Some(certificate);
         me.refresh_binomial_separation_diagnostics();
         me.refresh_near_unit_random_effect_correlation_diagnostics();
@@ -2521,6 +2534,63 @@ fn annotate_glmm_singular_covariance_status(
     certificate.diagnostics.push(diagnostic);
 }
 
+#[cfg(feature = "nlopt")]
+fn uncertified_joint_fallback(
+    joint_certificate: &OptimizerCertificate,
+    joint_return_code: &str,
+    fallback_fast_pirls: Option<GeneralizedLinearMixedModel>,
+) -> Option<GeneralizedLinearMixedModel> {
+    if joint_certificate.evidence.optimizer_stop.acceptable_stop
+        && !matches!(
+            joint_certificate.status,
+            crate::compiler::FitStatus::NotOptimized | crate::compiler::FitStatus::NotAssessed
+        )
+    {
+        return None;
+    }
+    let mut fallback = fallback_fast_pirls?;
+    let fast_return_code = fallback.lmm.optsum.return_value.clone();
+    fallback.lmm.optsum.return_value = format!(
+        "EXPERIMENTAL_JOINT_FALLBACK_FAST_PIRLS(joint={joint_return_code}; fast={fast_return_code})"
+    );
+    let mut diagnostic = Diagnostic::new(
+        DiagnosticCode::OptimizerRecovery,
+        DiagnosticSeverity::Warning,
+        DiagnosticStage::Certification,
+        "experimental joint GLMM did not certify; returning labelled fast-PIRLS fallback",
+    )
+    .with_suggested_actions(vec![
+        "treat this as a documented-divergence fast-PIRLS GLMM result, not a certified joint fit"
+            .to_string(),
+        "inspect the joint optimizer return code before promoting this row to parity".to_string(),
+    ]);
+    diagnostic.payload.insert(
+        "fit_mode".to_string(),
+        serde_json::json!("fallback_fast_pirls"),
+    );
+    diagnostic.payload.insert(
+        "scorecard_class".to_string(),
+        serde_json::json!("documented_divergence"),
+    );
+    diagnostic.payload.insert(
+        "joint_return_code".to_string(),
+        serde_json::json!(joint_return_code),
+    );
+    diagnostic.payload.insert(
+        "fast_pirls_return_code".to_string(),
+        serde_json::json!(fast_return_code),
+    );
+    fallback
+        .lmm
+        .compiler_artifact
+        .diagnostics
+        .push(diagnostic.clone());
+    if let Some(certificate) = &mut fallback.lmm.compiler_artifact.optimizer_certificate {
+        certificate.diagnostics.push(diagnostic);
+    }
+    Some(fallback)
+}
+
 fn binary_column_split(values: impl Iterator<Item = f64>) -> Option<BinaryColumnSplit> {
     let mut unique = Vec::new();
     for value in values {
@@ -3072,7 +3142,13 @@ mod tests {
         let start_objective = model.deviance_with_response_constants(1);
 
         model
-            .fit_experimental_joint_laplace_from_start(start_beta, start_theta, start_objective, 1)
+            .fit_experimental_joint_laplace_from_start(
+                start_beta,
+                start_theta,
+                start_objective,
+                1,
+                None,
+            )
             .unwrap();
 
         let certificate = model
@@ -3099,6 +3175,55 @@ mod tests {
             model.opt_summary().return_value.contains("MAXEVAL_REACHED"),
             "forced one-evaluation joint fit must report MAXEVAL_REACHED, got {}",
             model.opt_summary().return_value
+        );
+    }
+
+    #[cfg(feature = "nlopt")]
+    #[test]
+    fn experimental_joint_failed_stop_returns_labelled_fast_pirls_fallback() {
+        let mut model = small_joint_poisson_fixture();
+        model.fit_with_options_impl(1, false).unwrap();
+        let fallback = model.clone();
+        let start_beta = model.beta.as_slice().to_vec();
+        let start_theta = model.theta.clone();
+        let start_objective = model.deviance_with_response_constants(1);
+
+        model
+            .fit_experimental_joint_laplace_from_start(
+                start_beta,
+                start_theta,
+                start_objective,
+                1,
+                Some(fallback),
+            )
+            .unwrap();
+
+        assert!(
+            model
+                .opt_summary()
+                .return_value
+                .starts_with("EXPERIMENTAL_JOINT_FALLBACK_FAST_PIRLS"),
+            "fallback result must label the returned estimates, got {}",
+            model.opt_summary().return_value
+        );
+        let certificate = model
+            .compiler_artifact()
+            .optimizer_certificate
+            .as_ref()
+            .expect("fallback fit should retain the fast-PIRLS certificate");
+        assert!(
+            !matches!(certificate.status, crate::compiler::FitStatus::NotOptimized),
+            "fallback certificate should describe the returned fast-PIRLS fit, not the failed joint attempt"
+        );
+        assert!(
+            certificate.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == DiagnosticCode::OptimizerRecovery
+                    && diagnostic.payload.get("fit_mode")
+                        == Some(&serde_json::json!("fallback_fast_pirls"))
+                    && diagnostic.payload.get("scorecard_class")
+                        == Some(&serde_json::json!("documented_divergence"))
+            }),
+            "fallback artifact must record the documented-divergence fallback path"
         );
     }
 

@@ -13,11 +13,12 @@ use std::path::PathBuf;
 use mixeff_rs::compiler::{CertificateCheck, EvidenceMethod, FitStatus};
 use mixeff_rs::datasets;
 use mixeff_rs::formula::parse_formula;
+#[cfg(feature = "nlopt")]
 use mixeff_rs::model::data::DataFrame;
 use mixeff_rs::model::generalized::GeneralizedLinearMixedModel;
-use mixeff_rs::model::traits::{Family as ModelFamily, LinkFunction};
 #[cfg(feature = "nlopt")]
 use mixeff_rs::model::traits::MixedModelFit;
+use mixeff_rs::model::traits::{Family as ModelFamily, LinkFunction};
 use serde_json::Value;
 
 const BETA_ABS_TOL: f64 = 1e-3;
