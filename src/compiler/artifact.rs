@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::data::DataFrame;
+use crate::types::OptSummary;
 
 use super::audit::{audit_design, DesignAudit, OptimizerCertificate};
 use super::diagnostics::{Diagnostic, DiagnosticCode};
@@ -155,6 +156,67 @@ impl ModelBoundary {
                     "LMM finite-sample methods such as Satterthwaite/KR are unsupported for GLMMs in compiler v0"
                         .to_string(),
             },
+        }
+    }
+}
+
+/// Post-fit GLMM estimation metadata for downstream wrappers.
+///
+/// This is intentionally separate from optimizer certificates: it records which
+/// GLMM objective family was actually returned, even when a failed experimental
+/// joint attempt falls back to the supported fast-PIRLS path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GlmmFitMetadata {
+    pub estimation_method: String,
+    pub objective_definition: String,
+    pub response_constants: String,
+    pub n_agq: usize,
+    pub optimizer_backend: String,
+    pub optimizer: String,
+    pub optimizer_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_status: Option<String>,
+}
+
+impl GlmmFitMetadata {
+    pub fn from_opt_summary(opt: &OptSummary) -> Self {
+        let status = opt.return_value.as_str();
+        let is_fallback = status.starts_with("EXPERIMENTAL_JOINT_FALLBACK_FAST_PIRLS");
+        let is_joint = status.starts_with("EXPERIMENTAL_JOINT:")
+            || status.starts_with("EXPERIMENTAL_JOINT_FAILED:");
+        let (estimation_method, objective_definition, response_constants, fallback_status) =
+            if is_fallback {
+                (
+                    "fallback_fast_pirls",
+                    "profiled_glmm_deviance",
+                    "dropped",
+                    Some("fallback_fast_pirls"),
+                )
+            } else if is_joint {
+                (
+                    "experimental_joint_laplace",
+                    "joint_glmm_laplace_deviance",
+                    "included",
+                    None,
+                )
+            } else {
+                (
+                    "fast_pirls_profiled",
+                    "profiled_glmm_deviance",
+                    "dropped",
+                    None,
+                )
+            };
+
+        Self {
+            estimation_method: estimation_method.to_string(),
+            objective_definition: objective_definition.to_string(),
+            response_constants: response_constants.to_string(),
+            n_agq: opt.n_agq,
+            optimizer_backend: opt.backend_name().to_string(),
+            optimizer: opt.optimizer_name().to_string(),
+            optimizer_status: status.to_string(),
+            fallback_status: fallback_status.map(str::to_string),
         }
     }
 }
@@ -809,6 +871,8 @@ pub struct CompiledModelArtifact {
     pub covariance_transitions: Vec<CovarianceFamilyTransition>,
     pub covariance_parameter_traces: Vec<CovarianceParameterTrace>,
     pub reproducibility: ReproducibilityRecord,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glmm_fit_metadata: Option<GlmmFitMetadata>,
     pub optimizer_certificate: Option<OptimizerCertificate>,
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -852,6 +916,7 @@ impl CompiledModelArtifact {
             covariance_transitions: Vec::new(),
             covariance_parameter_traces: Vec::new(),
             reproducibility,
+            glmm_fit_metadata: None,
             optimizer_certificate: None,
         };
         artifact.refresh_covariance_parameter_traces(None, None, &[]);

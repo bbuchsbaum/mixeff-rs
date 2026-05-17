@@ -29,15 +29,35 @@ the SemVer-covered GLMM contract for 1.0.
 Offsets are fixed linear-predictor offsets. Observation weights are supported
 where the family semantics define them, including binomial trial weights.
 
-`fast = true` is the supported fitting mode. `fast = false` is reserved for a
-future joint optimizer path and must return an explicit unsupported error
-rather than silently selecting another algorithm. The prerequisites that a
-future certified joint GLMM optimizer must satisfy — objective convention,
-derivative/stationarity evidence, covariance-certificate compatibility, and
-fallback policy — are specified in
+`fast = true` is the supported fitting mode. It is a profiled fast-PIRLS
+approximation: the current engine profiles the fixed effects through PIRLS
+while optimizing covariance parameters on the profiled GLMM objective. This is
+the MixedModels.jl `fast=true` family of behavior, not `lme4::glmer`'s joint
+Laplace fit. It is faster, but it can be less accurate for inference when the
+profiled approximation is stressed, especially overdispersed Poisson/binomial
+models and observation-level random-effect models.
+
+`fast = false` is reserved for a future joint optimizer path and must return
+an explicit unsupported error rather than silently selecting another
+algorithm. The prerequisites that a future certified joint GLMM optimizer must
+satisfy — objective convention, derivative/stationarity evidence,
+covariance-certificate compatibility, and fallback policy — are specified in
 `docs/certified_joint_glmm_optimizer_contract.md`. No GLMM row may move from
 `documented_divergence` to `release_blocking_parity` until a row passes that
 gate.
+
+Fit-summary payloads and compiler artifacts must expose the effective GLMM
+mode rather than requiring wrappers to infer it. The stable summary fields are:
+
+- `estimation_method`: `fast_pirls_profiled`, `experimental_joint_laplace`, or
+  `fallback_fast_pirls`.
+- `objective_definition`: `profiled_glmm_deviance` for the supported fast
+  path, `joint_glmm_laplace_deviance` for an experimental joint attempt.
+- `response_constants`: `dropped` for the supported fast path and labelled
+  fallback, `included` for the experimental joint objective.
+- `n_agq`: the requested/effective quadrature count.
+- `fallback_status`: `fallback_fast_pirls` only when an uncertified joint
+  attempt returned the deterministic fast-PIRLS fallback.
 
 ## Parity Claim Classes
 

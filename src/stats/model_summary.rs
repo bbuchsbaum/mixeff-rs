@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{ChiSquared, ContinuousCDF};
 
+use crate::compiler::GlmmFitMetadata;
 use crate::model::traits::MixedModelFit;
 use crate::model::{GeneralizedLinearMixedModel, LinearMixedModel};
 use crate::stats::{CoefTable, VarCorr};
@@ -40,6 +41,11 @@ pub struct FitSummaryPayload {
     pub optimizer_code: String,
     pub optimizer_backend: String,
     pub optimizer_status: String,
+    pub estimation_method: Option<String>,
+    pub objective_definition: Option<String>,
+    pub response_constants: Option<String>,
+    pub n_agq: Option<usize>,
+    pub fallback_status: Option<String>,
     pub feval: i64,
     pub coefficients: CoefTable,
     pub varcorr: VarCorr,
@@ -292,6 +298,7 @@ impl FitSummaryPayload {
         summary: ModelSummary,
     ) -> Self {
         let opt = model.opt_summary();
+        let glmm_metadata = family.map(|_| GlmmFitMetadata::from_opt_summary(opt));
         FitSummaryPayload {
             schema_name: FIT_SUMMARY_SCHEMA.to_string(),
             schema_version: FIT_SUMMARY_SCHEMA_VERSION.to_string(),
@@ -313,6 +320,19 @@ impl FitSummaryPayload {
             optimizer_code: opt.optimizer_code().to_string(),
             optimizer_backend: opt.backend_name().to_string(),
             optimizer_status: opt.return_value.clone(),
+            estimation_method: glmm_metadata
+                .as_ref()
+                .map(|metadata| metadata.estimation_method.clone()),
+            objective_definition: glmm_metadata
+                .as_ref()
+                .map(|metadata| metadata.objective_definition.clone()),
+            response_constants: glmm_metadata
+                .as_ref()
+                .map(|metadata| metadata.response_constants.clone()),
+            n_agq: family.map(|_| opt.n_agq),
+            fallback_status: glmm_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.fallback_status.clone()),
             feval: opt.feval,
             coefficients,
             varcorr,
@@ -1005,6 +1025,17 @@ mod tests {
         assert_eq!(payload.model_kind, "generalized_linear_mixed_model");
         assert_eq!(payload.family.as_deref(), Some("bernoulli"));
         assert_eq!(payload.link.as_deref(), Some("logit"));
+        assert_eq!(
+            payload.estimation_method.as_deref(),
+            Some("fast_pirls_profiled")
+        );
+        assert_eq!(
+            payload.objective_definition.as_deref(),
+            Some("profiled_glmm_deviance")
+        );
+        assert_eq!(payload.response_constants.as_deref(), Some("dropped"));
+        assert_eq!(payload.n_agq, Some(1));
+        assert_eq!(payload.fallback_status, None);
         assert_eq!(payload.schema_version, FIT_SUMMARY_SCHEMA_VERSION);
     }
 }

@@ -6,6 +6,7 @@ use mixeff_rs::compiler::{
 };
 use mixeff_rs::formula::parse_formula;
 use mixeff_rs::model::{DataFrame, Family, GeneralizedLinearMixedModel, LinkFunction};
+use mixeff_rs::stats::FitSummaryPayload;
 
 // toy: 4 groups × 5 obs of Gamma/Log GLMM data; tests the artifact
 // metadata surface, not numerical fit accuracy.
@@ -59,6 +60,32 @@ fn native_glmm_artifact_records_support_contract_metadata() {
     assert_eq!(model.lmm().optsum.n_agq, 1);
     assert_eq!(model.lmm().optsum.backend.label(), "native");
     assert_eq!(model.lmm().optsum.optimizer_name(), "cobyla");
+
+    let metadata = artifact
+        .glmm_fit_metadata
+        .as_ref()
+        .expect("fitted GLMM artifact should expose fit-mode metadata");
+    assert_eq!(metadata.estimation_method, "fast_pirls_profiled");
+    assert_eq!(metadata.objective_definition, "profiled_glmm_deviance");
+    assert_eq!(metadata.response_constants, "dropped");
+    assert_eq!(metadata.n_agq, 1);
+    assert_eq!(metadata.optimizer_backend, "native");
+    assert_eq!(metadata.optimizer, "cobyla");
+    assert_eq!(metadata.fallback_status, None);
+
+    let summary = FitSummaryPayload::from_generalized_model(&model);
+    assert_eq!(
+        summary.estimation_method.as_deref(),
+        Some("fast_pirls_profiled")
+    );
+    assert_eq!(
+        summary.objective_definition.as_deref(),
+        Some("profiled_glmm_deviance")
+    );
+    assert_eq!(summary.response_constants.as_deref(), Some("dropped"));
+    assert_eq!(summary.n_agq, Some(1));
+    assert_eq!(summary.optimizer_backend, "native");
+    assert_eq!(summary.fallback_status, None);
 
     let certificate = artifact
         .optimizer_certificate

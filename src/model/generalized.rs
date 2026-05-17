@@ -17,8 +17,8 @@ use std::rc::Rc;
 
 use crate::compiler::{
     CompiledModelArtifact, CompilerPolicy, Diagnostic, DiagnosticCode, DiagnosticSeverity,
-    DiagnosticStage, EvidenceQuality, ModelAuditReport, ModelBoundary, ObjectiveApproximation,
-    OptimizerCertificate,
+    DiagnosticStage, EvidenceQuality, GlmmFitMetadata, ModelAuditReport, ModelBoundary,
+    ObjectiveApproximation, OptimizerCertificate,
 };
 #[cfg(feature = "nlopt")]
 use crate::compiler::{EvidenceMethod, OptimizerDerivativeEvidence};
@@ -1467,6 +1467,7 @@ impl GeneralizedLinearMixedModel {
             return Ok(me);
         }
         me.lmm.compiler_artifact.optimizer_certificate = Some(certificate);
+        me.record_glmm_fit_metadata();
         me.refresh_binomial_separation_diagnostics();
         me.refresh_near_unit_random_effect_correlation_diagnostics();
         Ok(me)
@@ -1587,8 +1588,14 @@ impl GeneralizedLinearMixedModel {
         self.lmm.optsum.return_value.clear();
         self.lmm.optsum.fit_log.clear();
         self.lmm.compiler_artifact.optimizer_certificate = None;
+        self.lmm.compiler_artifact.glmm_fit_metadata = None;
         self.lmm.compiler_artifact.effective_covariance.clear();
         Ok(())
+    }
+
+    fn record_glmm_fit_metadata(&mut self) {
+        self.lmm.compiler_artifact.glmm_fit_metadata =
+            Some(GlmmFitMetadata::from_opt_summary(&self.lmm.optsum));
     }
 
     #[cfg(not(feature = "nlopt"))]
@@ -1694,6 +1701,7 @@ impl GeneralizedLinearMixedModel {
         );
         annotate_glmm_singular_covariance_status(&mut certificate, &me.theta, me.lmm.is_singular());
         me.lmm.compiler_artifact.optimizer_certificate = Some(certificate);
+        me.record_glmm_fit_metadata();
         me.refresh_binomial_separation_diagnostics();
         me.refresh_near_unit_random_effect_correlation_diagnostics();
 
@@ -1811,6 +1819,7 @@ impl GeneralizedLinearMixedModel {
         );
         annotate_glmm_singular_covariance_status(&mut certificate, &me.theta, me.lmm.is_singular());
         me.lmm.compiler_artifact.optimizer_certificate = Some(certificate);
+        me.record_glmm_fit_metadata();
         me.refresh_binomial_separation_diagnostics();
         me.refresh_near_unit_random_effect_correlation_diagnostics();
 
@@ -1967,6 +1976,7 @@ impl GeneralizedLinearMixedModel {
             self.lmm.is_singular(),
         );
         self.lmm.compiler_artifact.optimizer_certificate = Some(certificate);
+        self.record_glmm_fit_metadata();
         self.refresh_binomial_separation_diagnostics();
         self.refresh_near_unit_random_effect_correlation_diagnostics();
 
@@ -2588,6 +2598,7 @@ fn uncertified_joint_fallback(
     if let Some(certificate) = &mut fallback.lmm.compiler_artifact.optimizer_certificate {
         certificate.diagnostics.push(diagnostic);
     }
+    fallback.record_glmm_fit_metadata();
     Some(fallback)
 }
 
