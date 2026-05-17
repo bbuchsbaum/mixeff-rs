@@ -160,6 +160,14 @@ pub(crate) struct PatternSearchOutcome {
     pub(crate) best_fmin: f64,
     pub(crate) feval_count: i64,
     pub(crate) fit_log: Vec<FitLogEntry>,
+    #[cfg(test)]
+    pub(crate) trace_label: Option<String>,
+    #[cfg(test)]
+    pub(crate) active_rank: Option<usize>,
+    #[cfg(test)]
+    pub(crate) inactive_directions: Option<usize>,
+    #[cfg(test)]
+    pub(crate) exit_reason: String,
 }
 
 #[derive(Debug, Clone)]
@@ -4869,11 +4877,28 @@ impl LinearMixedModel {
             }
         }
 
+        #[cfg(test)]
+        let exit_reason = if feval_count >= maxeval {
+            "maxeval"
+        } else if Self::steps_are_small(&step, step_tol) {
+            "step_tolerance"
+        } else {
+            "ftol_or_no_progress"
+        };
+
         Ok(PatternSearchOutcome {
             best_theta,
             best_fmin,
             feval_count,
             fit_log,
+            #[cfg(test)]
+            trace_label: None,
+            #[cfg(test)]
+            active_rank: None,
+            #[cfg(test)]
+            inactive_directions: None,
+            #[cfg(test)]
+            exit_reason: exit_reason.to_string(),
         })
     }
 
@@ -15073,7 +15098,7 @@ mod tests {
         };
         let initial = objective(&start).unwrap();
 
-        LinearMixedModel::run_multivariate_pattern_search(
+        let mut outcome = LinearMixedModel::run_multivariate_pattern_search(
             start,
             initial,
             &[0.0],
@@ -15083,7 +15108,11 @@ mod tests {
             1e-12,
             objective,
         )
-        .unwrap()
+        .unwrap();
+        outcome.trace_label = Some("active_face_rank_one_2x2".to_string());
+        outcome.active_rank = Some(1);
+        outcome.inactive_directions = Some(1);
+        outcome
     }
 
     #[test]
@@ -15301,6 +15330,20 @@ mod tests {
 
         assert_eq!(active_outcome.best_theta.len(), 1);
         assert_eq!(full_outcome.best_theta.len(), 3);
+        assert_eq!(
+            active_outcome.trace_label.as_deref(),
+            Some("active_face_rank_one_2x2")
+        );
+        assert_eq!(active_outcome.active_rank, Some(1));
+        assert_eq!(active_outcome.inactive_directions, Some(1));
+        assert!(
+            matches!(
+                active_outcome.exit_reason.as_str(),
+                "step_tolerance" | "ftol_or_no_progress"
+            ),
+            "active-face trace should record a non-budget exit reason, got {}",
+            active_outcome.exit_reason
+        );
         let active_gap = (active_outcome.best_fmin - reference).abs();
         let full_gap = (full_outcome.best_fmin - reference).abs();
         assert!(
@@ -15336,6 +15379,71 @@ mod tests {
             covariance_gap <= 1e-3 * (1.0 + two_by_two_frobenius_norm(block.covariance)),
             "active-face covariance estimate drift too large: gap={covariance_gap}, reference={:?}",
             block.covariance
+        );
+    }
+
+    #[test]
+    fn test_active_face_detection_records_lower_rank_four_by_four_block() {
+        let mut data = DataFrame::new();
+        let mut y = Vec::new();
+        let mut x1 = Vec::new();
+        let mut x2 = Vec::new();
+        let mut x3 = Vec::new();
+        let mut group = Vec::new();
+        for g in 0..16_usize {
+            let shift = (g as f64 - 7.5) * 0.08;
+            for k in 0..6_usize {
+                let t = k as f64 - 2.5;
+                let a = t / 3.0;
+                let b = (t * t - 2.0) / 5.0;
+                let c = if k % 2 == 0 { -0.5 } else { 0.5 };
+                y.push(1.0 + 0.4 * a - 0.2 * b + 0.1 * c + shift);
+                x1.push(a);
+                x2.push(b);
+                x3.push(c);
+                group.push(format!("g{}", g + 1));
+            }
+        }
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x1", x1).unwrap();
+        data.add_numeric("x2", x2).unwrap();
+        data.add_numeric("x3", x3).unwrap();
+        data.add_categorical("group", group).unwrap();
+
+        let formula = parse_formula("y ~ 1 + x1 + x2 + x3 + (1 + x1 + x2 + x3 | group)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        // Force a rank-2 lower Cholesky factor in the 4x4 covariance block.
+        // The active-face prototype does not optimize this shape yet, but the
+        // fitted artifact must detect the active face from the same
+        // eigenstructure used by future continuation.
+        let mut theta = vec![0.0; model.n_theta()];
+        for (idx, &(_, row, col)) in model.parmap().iter().enumerate() {
+            theta[idx] = match (row, col) {
+                (0, 0) => 1.0,
+                (1, 0) => 0.35,
+                (2, 0) => -0.15,
+                (3, 0) => 0.10,
+                (1, 1) => 0.70,
+                (2, 1) => 0.25,
+                (3, 1) => -0.20,
+                _ => 0.0,
+            };
+        }
+        model.set_theta(&theta).unwrap();
+        model.update_l().unwrap();
+        model.refresh_effective_covariance_summaries();
+
+        let summary = &model.compiler_artifact().effective_covariance[0];
+        assert_eq!(summary.requested_rank, 4);
+        assert_eq!(summary.supported_rank, 2);
+        assert_eq!(summary.status, EffectiveRankStatus::ReducedRank);
+        assert_eq!(summary.directions.len(), 2);
+        assert_eq!(summary.unsupported_directions.len(), 2);
+        assert!(
+            summary.interpretable_submodel.is_none(),
+            "4x4 lower-rank detection must not pretend the active face is a simple one-axis formula"
         );
     }
 

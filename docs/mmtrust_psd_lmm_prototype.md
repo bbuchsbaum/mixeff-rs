@@ -12,12 +12,15 @@ The first prototype is LMM-only and supports:
 
 - scalar random-effect variance blocks `(1 | group)`;
 - full 2x2 random intercept/slope blocks `(1 + x | group)`;
+- effective active-face detection for larger fitted covariance summaries,
+  including checked 4x4 over-specified random-slope blocks;
 - ML and REML objectives through the existing profiled evaluator;
 - objective parity against the current theta optimizer;
 - rank-one active-face reduction for certified singular 2x2 blocks.
 
 It explicitly does not support GLMMs, dense `V` or `P` construction,
-matrix-free exact scores, or multi-block trust-region subproblems yet.
+matrix-free exact scores, production active-face continuation for 4x4 blocks,
+or multi-block trust-region subproblems yet.
 
 ## Parameterization
 
@@ -128,6 +131,13 @@ to:
 The prototype still evaluates every trial by converting `G(a)` back to theta
 and calling the existing profiled objective. The face is used only for the
 outer search geometry.
+
+For larger random-slope blocks, the current implementation stops at detection:
+the fitted artifact records requested rank, supported rank, active directions,
+and inactive directions through the effective-covariance summary. It does not
+yet continue optimization on the detected lower-rank face. That keeps the
+release behavior honest while preserving the evidence needed for a later
+experimental continuation mode.
 
 ## Next Steps
 
