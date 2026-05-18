@@ -1,16 +1,19 @@
-//! Core types for the mixed-effects models library.
+//! Typed support values for advanced callers and tests.
 //!
-//! This module re-exports the primary data structures used throughout the
-//! crate:
+//! The intentionally stable surface here is small — optimization state and a
+//! generic matrix block, exposed for inspecting fits and writing tests:
 //!
-//! * [`UniformBlockDiagonal`] -- homogeneous block diagonal matrix
-//! * [`BlockedSparse`] -- sparse matrix with block structure
-//! * [`RaggedArray`] -- jagged array for group-wise accumulation
-//! * [`GaussHermiteNormalized`] and [`gh_norm`] -- Gauss-Hermite quadrature
-//! * [`FeTerm`] -- fixed-effects model matrix with pivoted QR rank detection
-//! * [`FeMat`] -- concatenated `[X | y]` matrix with optional weighting
-//! * [`ReMat`] -- random-effects model matrix for one grouping factor
-//! * [`OptSummary`] -- optimisation state, tolerances, and fit log
+//! * [`OptSummary`] — optimization state, tolerances, and fit log
+//! * [`FitLogEntry`] — one objective evaluation in the fit log
+//! * [`Optimizer`] / [`ConvergenceStatus`] — optimizer choice and outcome
+//! * [`MatrixBlock`] — a generic dense/diagonal matrix block
+//!
+//! The remaining containers — [`UniformBlockDiagonal`], [`BlockedSparse`],
+//! [`RaggedArray`], [`GaussHermiteNormalized`] / [`gh_norm`], [`FeTerm`],
+//! [`FeMat`], [`ReMat`] — are storage backing the fit path. They are visible
+//! for in-tree benches and staged downstream work but are implementation
+//! detail, not part of the stable surface unless asserted in
+//! `tests/public_api.rs`. See `docs/semver_policy.md`.
 
 mod blocked_sparse;
 pub mod fe_mat;
