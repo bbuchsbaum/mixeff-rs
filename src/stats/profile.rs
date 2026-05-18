@@ -176,14 +176,49 @@ impl MixedModelProfile {
             let estimate = self
                 .profile_estimate(name)
                 .unwrap_or_else(|| spline.eval(0.0));
-            let mut lower = spline.eval(-cutoff);
-            let mut upper = spline.eval(cutoff);
+
+            // The reverse spline maps ζ → parameter; its knots span only the
+            // ζ range the profile walker actually reached. Evaluating it at
+            // ±cutoff when the walker stopped early (boundary or max_points)
+            // would *extrapolate*, fabricating a CI bound no refit supports —
+            // a fake statistic. Detect that and report the unsupported bound
+            // as `NaN` (lme4's `confint` likewise returns `NA` for a
+            // truncated profile) instead of a silently-extrapolated number.
+            let zk = spline.knots_x();
+            let tol = 1e-9;
+            let (zmin, zmax) = (
+                zk.first().copied().unwrap_or(f64::NEG_INFINITY),
+                zk.last().copied().unwrap_or(f64::INFINITY),
+            );
+            let lower_supported = -cutoff >= zmin - tol;
+            let upper_supported = cutoff <= zmax + tol;
+            let touches_zero = self.profile_touches_nonnegative_boundary(name);
+
+            let mut lower = if lower_supported {
+                spline.eval(-cutoff)
+            } else if touches_zero {
+                // Not extrapolation: the grid is short on the lower side
+                // precisely because the parameter cannot go below its
+                // nonnegative boundary, which the profile reached. The
+                // lower limit is legitimately that boundary.
+                0.0
+            } else {
+                f64::NAN
+            };
+            let mut upper = if upper_supported {
+                spline.eval(cutoff)
+            } else {
+                f64::NAN
+            };
             if lower > upper {
                 std::mem::swap(&mut lower, &mut upper);
             }
-            if lower < 0.0 && self.profile_touches_nonnegative_boundary(name) {
+            if lower < 0.0 && touches_zero {
                 lower = 0.0;
             }
+            // NaN comparisons are false, so an undetermined (NaN) bound
+            // neither trips this guard nor is falsely accepted — it is
+            // surfaced verbatim as the honest "not determined" signal.
             if lower > estimate || upper < estimate {
                 return Err(MixedModelError::Optimization(format!(
                     "confint for {name}: profile interval [{lower}, {upper}] does not bracket estimate {estimate}"
@@ -1341,6 +1376,51 @@ mod tests {
         df.add_numeric("x", x).unwrap();
         df.add_categorical("g", g).unwrap();
         df
+    }
+
+    #[test]
+    fn confint_reports_nan_instead_of_extrapolating_past_profile_grid() {
+        // Regression for audit 05·M1 / mote bd-01KRXCR3P1D3BMX7SREFCWJ1MM:
+        // a CI whose cutoff lies beyond the computed ζ grid must NOT be a
+        // silently-extrapolated finite number; it must be reported as NaN
+        // (not determined), like lme4's NA for a truncated profile.
+        let data = dyestuff_fixture();
+        let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+        let pr = profile_sigma(&mut model, 4.0).expect("σ profile");
+
+        // A standard 95% level (cutoff ≈ 1.96, well inside the ±~4 grid)
+        // must still yield finite, bracketed bounds.
+        let row95 = pr.confint_for("σ", 0.95).expect("95% confint");
+        assert!(
+            row95.lower.is_finite() && row95.upper.is_finite(),
+            "95% bounds must be finite, got [{}, {}]",
+            row95.lower,
+            row95.upper
+        );
+
+        // An extreme level whose cutoff Φ⁻¹(0.5 + level/2) lies strictly
+        // past the computed reverse-spline ζ span, forcing what was
+        // previously a silent extrapolation.
+        let zmax = pr.rev["σ"].knots_x().last().copied().unwrap();
+        let level = 1.0 - 1e-10;
+        let cutoff = normal_inverse_cdf(0.5 + level / 2.0);
+        assert!(
+            cutoff > zmax,
+            "test precondition: cutoff {cutoff} must exceed grid ζ_max {zmax}"
+        );
+        let row = pr.confint_for("σ", level).expect("extreme-level confint");
+        // Dyestuff residual σ (~50) is far from 0, so its profile is
+        // truncated on *both* sides at this absurd level — neither bound is
+        // determined by any refit, so both must be NaN (honest) rather than
+        // silently extrapolated finite numbers.
+        assert!(
+            row.lower.is_nan() && row.upper.is_nan(),
+            "bounds past the ζ grid must be NaN (not extrapolated), got [{}, {}]",
+            row.lower,
+            row.upper
+        );
     }
 
     #[test]
