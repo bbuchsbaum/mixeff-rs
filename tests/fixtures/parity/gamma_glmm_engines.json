@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0.0",
-  "source": "Deterministic Gamma-log GLMM fixture cross-checked against MixedModels.jl 5.3.0 and lme4 2.0-1 on 2026-04-29",
+  "source": "Deterministic Gamma-log GLMM fixture cross-checked against MixedModels.jl 5.3.0 and lme4 2.0-1 on 2026-04-29. rust_reference.loglik updated 2026-05-18 (mote bd-01KRXCQ85SAMGEAH3HBZESJ16H, B1): MixedModelFit::loglikelihood now reports the full normalized -2logLik scale (response/dispersion constants retained) instead of -objective/2; the corrected value -23.9751 sits ~0.3% from the independent MixedModels.jl engine reference (-23.8936), the residual being the documented dispersion-family scale divergence — the prior -0.5151 was off the Julia oracle by ~46x. beta/theta/objective are unchanged by B1.",
   "formula": "y ~ 1 + x + (1 | group)",
   "family": "gamma",
   "link": "log",
@@ -23,7 +23,7 @@
     "dispersion_sigma": 0.24113736806697922,
     "dispersion_phi": 0.058147230278269811,
     "objective": 1.0302950465115652,
-    "loglik": -0.51514752325578261,
+    "loglik": -23.975120721071598,
     "fitted_mu_head": [2.1815275135717491, 2.8013115344188639, 3.5971796202652278, 4.6191582269466664, 5.9314866028279907, 2.1815275135717491]
   },
   "engines": [

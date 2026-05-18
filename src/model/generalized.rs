@@ -3217,7 +3217,20 @@ impl MixedModelFit for GeneralizedLinearMixedModel {
     }
 
     fn loglikelihood(&self) -> f64 {
-        -self.objective() / 2.0
+        // `objective()` deliberately reports the *dropped-constant* deviance
+        // (the fitting/parity-artifact convention). The log-likelihood — and
+        // therefore AIC/BIC/AICc — must instead be on the full normalized
+        // `-2 logLik` scale, i.e. with the response normalising constants
+        // (`Σ ln yᵢ!`, `Σ ln C(nᵢ,kᵢ)`, dispersion-density terms) retained,
+        // to match lme4/MixedModels.jl. In both the Laplace and AGQ paths
+        // `full_normalized = optsum.fmin + response_constants_offset()`
+        // (see `deviance_with_response_constants`); the offset is a pure
+        // `&self` quantity evaluated at the post-fit μ.
+        if self.is_fitted() {
+            -(self.lmm.optsum.fmin + self.response_constants_offset()) / 2.0
+        } else {
+            -self.laplace_objective_with_response_constants() / 2.0
+        }
     }
 
     fn formula_label(&self) -> Option<String> {
@@ -4498,12 +4511,21 @@ mod tests {
 
         let dev = model.deviance(1);
         // Julia ref: `deviance(gm2, true) ≈ 100.09585620707632`, rtol=0.0001.
-        // (Julia's `loglikelihood(m) ≈ -92.02628` includes the binomial
-        // saturation constant; Rust's MixedModelFit::loglikelihood returns
-        // -objective/2 by definition, so the two are not directly comparable
-        // without the saturation term — the deviance check is the meaningful
-        // parity assertion here.)
         assert_relative_eq!(dev, 100.09585620707632, max_relative = 1e-3);
+
+        // `MixedModelFit::loglikelihood` is on the full normalized `-2 logLik`
+        // scale (response normalising constants retained), so it is now
+        // directly comparable to Julia's `loglikelihood(gm2) ≈
+        // -92.02628187247377` (pirls.jl:125-147). This pins the B1 fix:
+        // before it, `loglikelihood` was `-objective/2` on the
+        // dropped-constant scale and AIC/BIC were offset by `2·Σ ln C(nᵢ,kᵢ)`.
+        // Same fast-PIRLS-vs-joint band as the deviance check above (the
+        // log-likelihood inherits that divergence): rtol 1e-3.
+        let ll = MixedModelFit::loglikelihood(&model);
+        assert_relative_eq!(ll, -92.02628187247377, max_relative = 1e-3);
+        // AIC/BIC follow from the corrected log-likelihood + dof.
+        let dof = MixedModelFit::dof(&model) as f64;
+        assert_relative_eq!(model.aic(), -2.0 * ll + 2.0 * dof, epsilon = 1e-9);
     }
 
     #[cfg(feature = "nlopt")]
