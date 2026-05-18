@@ -1428,8 +1428,7 @@ impl LinearMixedModel {
 
     fn fit_with_forced_optimizer(&mut self, reml: bool, optimizer: Optimizer) -> Result<()> {
         self.optsum.reml = reml;
-        let theta0 = self.optsum.initial.clone();
-        self.optsum.finitial = self.objective_at_fast_or_generic(&theta0)?;
+        self.set_initial_objective_with_rescue()?;
         match optimizer {
             Optimizer::PatternSearch => {
                 if self.n_theta() == 1 {
@@ -2930,6 +2929,58 @@ impl LinearMixedModel {
         }
 
         self.objective_at(theta)
+    }
+
+    /// Evaluate the objective at `optsum.initial` and store it as
+    /// `optsum.finitial`, rescaling the initial guess once if the first
+    /// evaluation is non-finite.
+    ///
+    /// Port of MixedModels.jl `linearmixedmodel.jl:478-491`. Without this, a
+    /// non-finite initial objective (e.g. a non-PD θ₀ on a poorly scaled
+    /// model) seeds the optimizer's `best_fmin` with `NaN/Inf`; every
+    /// `obj < best_fmin` test is then false, so the model finalizes at the
+    /// bad initial θ yet `fit()` returns `Ok` — a silent non-fit. If the
+    /// rescaled retry is still non-finite we refuse instead of proceeding.
+    fn set_initial_objective_with_rescue(&mut self) -> Result<()> {
+        let theta0 = self.optsum.initial.clone();
+        let finitial = self.objective_at_fast_or_generic(&theta0)?;
+        if finitial.is_finite() {
+            self.optsum.finitial = finitial;
+            return Ok(());
+        }
+
+        // Julia: optsum.initial ./= (max(sqrtwts)^2 or 1) * max(response).
+        let wt_scale = if self.sqrtwts.is_empty() {
+            1.0
+        } else {
+            self.sqrtwts
+                .iter()
+                .copied()
+                .fold(f64::MIN, f64::max)
+                .powi(2)
+        };
+        let resp_max = self.y.iter().copied().fold(f64::MIN, f64::max);
+        let denom = wt_scale * resp_max;
+        let rescaled: Vec<f64> = if denom.is_finite() && denom.abs() > 0.0 {
+            theta0.iter().map(|t| t / denom).collect()
+        } else {
+            theta0.clone()
+        };
+
+        let retried = self.objective_at_fast_or_generic(&rescaled)?;
+        if !retried.is_finite() {
+            return Err(MixedModelError::Optimization(
+                "initial objective is non-finite even after rescaling the \
+                 initial guess; the model is likely misspecified or too \
+                 poorly scaled for the data to be fit reliably"
+                    .to_string(),
+            ));
+        }
+        // Subsequent optimization starts from the rescaled guess (Julia
+        // mutates optsum.initial in place before optimize!).
+        self.optsum.initial = rescaled;
+        self.optsum.finitial = retried;
+        Ok(())
     }
 
     fn profiled_objective_fast(&self, theta: &[f64]) -> Option<f64> {
@@ -5610,9 +5661,9 @@ impl LinearMixedModel {
 
         self.optsum.reml = reml;
 
-        // Initial objective evaluation
-        let theta0 = self.optsum.initial.clone();
-        self.optsum.finitial = self.objective_at_fast_or_generic(&theta0)?;
+        // Initial objective evaluation (with one rescaling retry on a
+        // non-finite value — see set_initial_objective_with_rescue).
+        self.set_initial_objective_with_rescue()?;
 
         if self.use_scalar_single_theta_optimizer() {
             self.fit_scalar_single_theta()?;
