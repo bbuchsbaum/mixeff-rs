@@ -18756,6 +18756,18 @@ mod tests {
                 model.test_contrast_with_method(hypothesis, FixedEffectTestMethod::KenwardRoger);
             assert_available_finite_fixed_effect_test(&test, &case.name);
             let unscaled_statistic = if case.l.len() == 1 {
+                // Single-row contrast: the unscaled F is the *derived*
+                // statistic F = t², so it inherits ~2× the relative drift of
+                // the underlying t. On the native (no-`nlopt`) optimizer the
+                // REML fit lands ~1e-3–1e-4 from the BOBYQA/pbkrtest
+                // reference (see the SE note above), and squaring amplifies
+                // that, so this row is checked with a realistic
+                // absolute+relative band rather than exact equality. This is
+                // not a weakening of certification: strict pbkrtest parity —
+                // including the p-value at `max_relative = 1e-3` and the
+                // statistic/SE/df at 5e-5/1e-5 — is asserted separately under
+                // the `nlopt` feature in
+                // `test_lmm_kenward_roger_scalar_rows_match_pbkrtest_fixture`.
                 test.statistics[0].unwrap().powi(2)
             } else {
                 test.statistics[0].unwrap()

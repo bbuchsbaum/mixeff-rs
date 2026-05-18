@@ -53,6 +53,32 @@
       "denominator_df": 17.00000000000027,
       "statistic": 0.30229595691820904,
       "p_value": 0.7660937199879374
+    },
+    {
+      "name": "penicillin_crossed_intercept",
+      "formula": "diameter ~ 1 + (1 | plate) + (1 | sample)",
+      "coefficient": "(Intercept)",
+      "label": "intercept = 0",
+      "l": [[1.0]],
+      "rhs": [0.0],
+      "estimate": 22.97222222221934,
+      "std_error": 0.808595361658175,
+      "denominator_df": 5.487061859944688,
+      "statistic": 28.410034624871617,
+      "p_value": 3.619975399199779e-7
+    },
+    {
+      "name": "pastes_nested_intercept",
+      "formula": "strength ~ 1 + (1 | batch) + (1 | batch_cask)",
+      "coefficient": "(Intercept)",
+      "label": "intercept = 0",
+      "l": [[1.0]],
+      "rhs": [0.0],
+      "estimate": 60.0533333333317,
+      "std_error": 0.6768701126602541,
+      "denominator_df": 9.000000000000334,
+      "statistic": 88.72209336782265,
+      "p_value": 1.4878344509837676e-14
     }
   ],
   "multi_df_cases": [
@@ -103,6 +129,34 @@
       "f_scaling": 1.0,
       "unscaled_statistic": 0.09138284556909569,
       "unscaled_p_value": 0.7660937199879374
+    },
+    {
+      "name": "penicillin_crossed_intercept_f",
+      "formula": "diameter ~ 1 + (1 | plate) + (1 | sample)",
+      "label": "intercept = 0",
+      "l": [[1.0]],
+      "rhs": [0.0],
+      "numerator_df": 1.0,
+      "denominator_df": 5.487061859944688,
+      "statistic": 807.1300634273451,
+      "p_value": 3.619975399199779e-7,
+      "f_scaling": 1.0,
+      "unscaled_statistic": 807.1300634273451,
+      "unscaled_p_value": 3.619975399199779e-7
+    },
+    {
+      "name": "pastes_nested_intercept_f",
+      "formula": "strength ~ 1 + (1 | batch) + (1 | batch_cask)",
+      "label": "intercept = 0",
+      "l": [[1.0]],
+      "rhs": [0.0],
+      "numerator_df": 1.0,
+      "denominator_df": 9.000000000000334,
+      "statistic": 7871.620012473703,
+      "p_value": 1.4878344509837676e-14,
+      "f_scaling": 1.0,
+      "unscaled_statistic": 7871.620012473703,
+      "unscaled_p_value": 1.4878344509837676e-14
     }
   ]
 }

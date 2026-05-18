@@ -1,6 +1,7 @@
 # Kenward-Roger Fixed-Effect Inference Contract
 
-Status: specified; implementation blocked on method-specific artifacts
+Status: implemented for explicit Gaussian REML LMM requests; certification
+expanding by fixture-backed model class
 Owner: Rust fixed-effect inference
 Parent issue: `bd-01KQATBN53CKDTMA5VN5A1YMW3`
 Primary local reference: `vendor/lmerTestR`
@@ -8,11 +9,13 @@ Primary external reference: `pbkrtest`
 
 ## Purpose
 
-This note pins the Rust contract for Kenward-Roger fixed-effect tests before
-numeric `method = kenward_roger` p-values are enabled. KR support is in scope,
-but only after Rust can produce and certify the adjusted fixed-effect
-covariance, denominator degrees of freedom, F scaling, and reference parity
-fixtures needed to make the method label true.
+This note pins the Rust contract for Kenward-Roger fixed-effect tests. Rust now
+produces explicit `method = kenward_roger` scalar and multi-df rows for
+supported Gaussian REML LMMs, backed by adjusted fixed-effect covariance,
+denominator degrees of freedom, F-test metadata, no-silent-fallback behavior,
+and reference parity fixtures. The remaining certification work is to broaden
+fixture coverage by model class before making broad claims about crossed,
+nested, or other structured designs.
 
 The initial scope is Gaussian LMMs fitted by REML with iid Gaussian residuals
 and the covariance structures already represented by the Rust LMM engine.
@@ -269,6 +272,25 @@ assert current multi-df row parity against `pbkrtest::KRmodcomp()`'s unscaled
 F statistic/p-value. The same fixture also stores the scaled F statistic,
 p-value, and `F.scaling`; rows with `F.scaling != 1` remain explicitly
 documented as not yet using pbkrtest's scaled F output in the row payload.
+
+`bd-01KRNMNWZ6RFY0MYKAFMF9E07G` extends that fixture-backed certification to
+representative crossed and nested LMM structures. The first certified rows are
+the crossed `Penicillin` intercept model
+`diameter ~ 1 + (1 | plate) + (1 | sample)` and the nested `Pastes` intercept
+model `strength ~ 1 + (1 | batch) + (1 | batch_cask)`. These rows exercise
+both `contest1D(..., ddf = "Kenward-Roger")` and single-row `KRmodcomp()`
+references while keeping GLMM KR explicitly unsupported.
+
+> **Build scope.** Strict `pbkrtest`/`lmerTest` parity for the crossed and
+> nested rows is certified on the **default build only** (the `nlopt`
+> feature, which `cargo test` enables). On a `--no-default-features`
+> (native-optimizer) build the parity test
+> (`test_native_default_kenward_roger_rows_are_finite_with_realistic_tolerances`)
+> deliberately restricts itself to the scalar `random_slope` cases and only
+> asserts finiteness with realistic tolerances — it does **not** certify
+> crossed/nested KR parity against `pbkrtest`. The native optimizer's
+> crossed/nested KR output is therefore "finite and plausible", not
+> "certified to pbkrtest", and must not be described as the latter.
 `bd-01KQBDHNVJFZJHSBVB8S15GXEM` fixed the active-basis contrast mapping used
 by `Lb_ddf`: full-rank user-order contrasts are now permuted through the
 fixed-effect pivot even when all fixed-effect columns are active. This closes
