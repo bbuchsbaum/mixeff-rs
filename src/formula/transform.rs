@@ -362,7 +362,7 @@ pub fn materialize_column(derived: &DerivedColumn, data: &DataFrame) -> Result<V
 /// an actionable [`FormulaError`] so [`super::parser`] keeps refusing.
 pub fn parse_transform_arith(src: &str) -> std::result::Result<Expr, FormulaError> {
     let toks = lex(src)?;
-    let mut p = TParser { toks, pos: 0 };
+    let mut p = TParser { toks, pos: 0, depth: 0 };
     let e = p.parse_expr(0)?;
     if p.pos != p.toks.len() {
         return Err(refuse(src));
@@ -395,7 +395,7 @@ fn parse_call_argument(src: &str) -> std::result::Result<Expr, FormulaError> {
         )));
     }
     let toks = lex(trimmed)?;
-    let mut p = TParser { toks, pos: 0 };
+    let mut p = TParser { toks, pos: 0, depth: 0 };
     let e = p.parse_primary()?;
     if p.pos != p.toks.len() {
         // e.g. `log(x + 1)` written without the I() wrapper — arithmetic
@@ -554,9 +554,24 @@ fn lex(src: &str) -> std::result::Result<Vec<Tok>, FormulaError> {
     Ok(out)
 }
 
+/// Maximum nesting depth of an in-formula transform expression.
+///
+/// Recursive descent here (and the subsequent `write_expr`/`eval_row` walks
+/// over the produced tree) recurses once per nesting level, so an adversarial
+/// or typo'd formula such as `I(((((…)))))` or `sqrt(sqrt(…))` would otherwise
+/// overflow the stack and **abort the process** — uncatchable by
+/// `catch_unwind`, so a host wrapper passing untrusted formulas could not
+/// defend. Capping parse depth bounds the produced `Expr` tree, which in turn
+/// bounds every later recursive walk over it. Real transforms nest only a
+/// handful deep (e.g. `sqrt(I(log(x) + a*b))` is depth ~5); 64 is far beyond
+/// any legitimate use yet a trivial amount of stack.
+const MAX_TRANSFORM_DEPTH: usize = 64;
+
 struct TParser {
     toks: Vec<Tok>,
     pos: usize,
+    /// Current recursive-descent nesting depth (see [`MAX_TRANSFORM_DEPTH`]).
+    depth: usize,
 }
 
 impl TParser {
@@ -572,9 +587,36 @@ impl TParser {
         t
     }
 
+    /// Bump the recursion-depth counter, refusing once the budget is
+    /// exhausted. Paired with [`Self::leave`]; every recursive grammar entry
+    /// point (`parse_expr`, `parse_primary`) brackets its body between the two
+    /// so no descent path can overflow the stack.
+    fn enter(&mut self) -> std::result::Result<(), FormulaError> {
+        self.depth += 1;
+        if self.depth > MAX_TRANSFORM_DEPTH {
+            return Err(FormulaError::Other(format!(
+                "in-formula transform nesting exceeds the maximum supported \
+                 depth ({MAX_TRANSFORM_DEPTH}); deeply nested \
+                 parentheses/calls are rejected to bound parser recursion"
+            )));
+        }
+        Ok(())
+    }
+
+    fn leave(&mut self) {
+        self.depth -= 1;
+    }
+
     /// Pratt parser over the arithmetic grammar. `min_prec` is the minimum
     /// binding power this call will consume.
     fn parse_expr(&mut self, min_prec: u8) -> std::result::Result<Expr, FormulaError> {
+        self.enter()?;
+        let r = self.parse_expr_inner(min_prec);
+        self.leave();
+        r
+    }
+
+    fn parse_expr_inner(&mut self, min_prec: u8) -> std::result::Result<Expr, FormulaError> {
         let mut lhs = self.parse_unary()?;
         while let Some(Tok::Op(op)) = self.peek().cloned() {
             let p = op.precedence();
@@ -601,15 +643,22 @@ impl TParser {
             let inner = self.parse_expr(BinOp::Pow.precedence())?;
             return Ok(Expr::Neg(Box::new(inner)));
         }
-        if let Some(Tok::Op(BinOp::Add)) = self.peek() {
-            // Unary plus is a no-op; same binding-power treatment as `-`.
+        // Unary plus is a no-op; consume any run of leading `+` iteratively
+        // so `+ + + … x` cannot recurse (and overflow) through parse_unary.
+        while let Some(Tok::Op(BinOp::Add)) = self.peek() {
             self.bump();
-            return self.parse_unary();
         }
         self.parse_primary()
     }
 
     fn parse_primary(&mut self) -> std::result::Result<Expr, FormulaError> {
+        self.enter()?;
+        let r = self.parse_primary_inner();
+        self.leave();
+        r
+    }
+
+    fn parse_primary_inner(&mut self) -> std::result::Result<Expr, FormulaError> {
         match self.bump() {
             Some(Tok::Num(v)) => Ok(Expr::Lit(v)),
             Some(Tok::Ident(name)) => Ok(Expr::Col(name)),
@@ -699,6 +748,44 @@ mod tests {
     fn parse_and_label_power() {
         let e = parse_transform_arith("days^2").unwrap();
         assert_eq!(canonical_label(&e), "I(days^2)");
+    }
+
+    #[test]
+    fn deeply_nested_parens_are_refused_not_aborted() {
+        // Regression for B1/B2 (mote bd-01KRXCQ8BQZMP51GMYB0BPP0C9):
+        // pathological nesting must return an actionable FormulaError, not
+        // overflow the stack and abort the process (uncatchable). Use a depth
+        // well past MAX_TRANSFORM_DEPTH; the parser must bail early and cheap.
+        let n = MAX_TRANSFORM_DEPTH + 50;
+        let src = format!("{}x{}", "(".repeat(n), ")".repeat(n));
+        let err = parse_transform_arith(&src).expect_err("must refuse, not abort");
+        match err {
+            FormulaError::Other(m) => assert!(
+                m.contains("maximum supported") && m.contains("depth"),
+                "unexpected message: {m}"
+            ),
+            other => panic!("unexpected error variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deeply_nested_calls_are_refused_not_aborted() {
+        let n = MAX_TRANSFORM_DEPTH + 50;
+        let src = format!("{}x{}", "sqrt(".repeat(n), ")".repeat(n));
+        let err = parse_transform_arith(&src).expect_err("must refuse, not abort");
+        assert!(matches!(err, FormulaError::Other(_)));
+    }
+
+    #[test]
+    fn nesting_within_budget_still_parses() {
+        // A realistic transform nests only a few deep; ensure the guard does
+        // not regress legitimate use.
+        let e = parse_transform_arith("((x + 1) * (a - b)) / 2").unwrap();
+        assert_eq!(canonical_label(&e), "I((x+1)*(a-b)/2)");
+        // Exactly at a comfortable depth (well under the cap) must succeed.
+        let n = 16;
+        let src = format!("{}x{}", "(".repeat(n), ")".repeat(n));
+        assert!(parse_transform_arith(&src).is_ok());
     }
 
     #[test]
