@@ -214,7 +214,7 @@
         {
           "label": "optimizer stop",
           "status": "ok",
-          "detail": "return_code=SUCCESS; acceptable=true; budget_exhausted=false; fevals=407; objective_delta=886.70"
+          "detail": "return_code=SUCCESS; acceptable=true; budget_exhausted=false; fevals=407; final_trust_radius=unknown; objective_delta=886.70"
         },
         {
           "label": "parameter space",
