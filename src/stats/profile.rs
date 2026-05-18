@@ -29,7 +29,9 @@ use crate::model::traits::MixedModelFit;
 use crate::model::LinearMixedModel;
 use crate::stats::spline::NaturalCubicSpline;
 
+/// Stable schema name for serialized profile-likelihood CI payloads.
 pub const PROFILE_LIKELIHOOD_CI_SCHEMA: &str = "mixedmodels.profile_likelihood_ci";
+/// Stable schema version for serialized profile-likelihood CI payloads.
 pub const PROFILE_LIKELIHOOD_CI_SCHEMA_VERSION: &str = "1.0.0";
 
 /// One row of a profile table.
@@ -82,22 +84,34 @@ pub struct MixedModelProfile {
 /// One row of a profile-likelihood confidence interval table.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConfintRow {
+    /// Parameter name.
     pub parameter: String,
+    /// Fitted estimate.
     pub estimate: f64,
+    /// Lower confidence limit.
     pub lower: f64,
+    /// Upper confidence limit.
     pub upper: f64,
 }
 
 /// One serializable profile-likelihood CI row.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProfileLikelihoodCiRow {
+    /// Parameter name.
     pub parameter: String,
+    /// Fitted estimate.
     pub estimate: f64,
+    /// Lower confidence limit.
     pub lower: f64,
+    /// Upper confidence limit.
     pub upper: f64,
+    /// Confidence level used to compute the interval.
     pub level: f64,
+    /// Interval method label.
     pub method: String,
+    /// Regularity note for the interval.
     pub regularity: String,
+    /// Whether the lower limit was clamped at a nonnegative boundary.
     pub boundary_clamped_lower: bool,
 }
 
@@ -108,24 +122,34 @@ pub struct ProfileLikelihoodCiRow {
 /// consumers that need diagnostics can inspect `profile_rows`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProfileLikelihoodCiPayload {
+    /// Stable schema name.
     pub schema_name: String,
+    /// Stable schema version.
     pub schema_version: String,
+    /// Confidence level used for all intervals.
     pub level: f64,
+    /// Fit criterion used by the profiled model.
     pub fit_criterion: String,
+    /// Computed profile-likelihood intervals.
     pub intervals: Vec<ProfileLikelihoodCiRow>,
+    /// Raw profile rows retained for diagnostics.
     pub profile_rows: Vec<ProfileRow>,
+    /// Reader-facing caveats and interpretation notes.
     pub notes: Vec<String>,
 }
 
 impl ProfileLikelihoodCiPayload {
+    /// Serialize this payload to compact JSON.
     pub fn to_json(&self) -> std::result::Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
 
+    /// Serialize this payload to pretty-printed JSON.
     pub fn to_json_pretty(&self) -> std::result::Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
     }
 
+    /// Deserialize a profile-likelihood CI payload from JSON.
     pub fn from_json(input: &str) -> std::result::Result<Self, serde_json::Error> {
         serde_json::from_str(input)
     }

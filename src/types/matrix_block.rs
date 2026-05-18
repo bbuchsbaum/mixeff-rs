@@ -10,8 +10,11 @@ use nalgebra_sparse::csc::CscMatrix;
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum MatrixBlock {
+    /// Dense rectangular block stored as a full matrix.
     Dense(DMatrix<f64>),
+    /// Sparse rectangular block stored in compressed sparse column format.
     Sparse(CscMatrix<f64>),
+    /// Square diagonal block stored by its diagonal entries.
     Diagonal(DVector<f64>),
     /// Uniform block diagonal: `nlevels` blocks each of size `vsize x vsize`.
     /// Total matrix is `(nlevels * vsize) x (nlevels * vsize)`.
@@ -19,6 +22,7 @@ pub enum MatrixBlock {
 }
 
 impl MatrixBlock {
+    /// Number of rows represented by this block.
     pub fn nrows(&self) -> usize {
         match self {
             MatrixBlock::Dense(m) => m.nrows(),
@@ -28,6 +32,7 @@ impl MatrixBlock {
         }
     }
 
+    /// Number of columns represented by this block.
     pub fn ncols(&self) -> usize {
         match self {
             MatrixBlock::Dense(m) => m.ncols(),
@@ -37,6 +42,7 @@ impl MatrixBlock {
         }
     }
 
+    /// Materialize this block as a dense matrix.
     pub fn as_dense(&self) -> DMatrix<f64> {
         match self {
             MatrixBlock::Dense(m) => m.clone(),
@@ -68,6 +74,7 @@ impl MatrixBlock {
         }
     }
 
+    /// Borrow the underlying dense matrix when this block is dense.
     pub fn as_dense_ref(&self) -> Option<&DMatrix<f64>> {
         match self {
             MatrixBlock::Dense(m) => Some(m),
@@ -76,6 +83,7 @@ impl MatrixBlock {
         }
     }
 
+    /// Mutably borrow the underlying dense matrix when this block is dense.
     pub fn as_dense_mut(&mut self) -> Option<&mut DMatrix<f64>> {
         match self {
             MatrixBlock::Dense(m) => Some(m),
@@ -84,6 +92,7 @@ impl MatrixBlock {
         }
     }
 
+    /// Borrow the diagonal vector when this block is diagonal.
     pub fn as_diag_ref(&self) -> Option<&DVector<f64>> {
         match self {
             MatrixBlock::Diagonal(v) => Some(v),
@@ -91,6 +100,7 @@ impl MatrixBlock {
         }
     }
 
+    /// Mutably borrow the diagonal vector when this block is diagonal.
     pub fn as_diag_mut(&mut self) -> Option<&mut DVector<f64>> {
         match self {
             MatrixBlock::Diagonal(v) => Some(v),

@@ -21,34 +21,63 @@ pub const FIT_SUMMARY_SCHEMA_VERSION: &str = "1.0.0";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct FitSummaryPayload {
+    /// Stable schema name.
     pub schema_name: String,
+    /// Stable schema version.
     pub schema_version: String,
+    /// Model family of the fitted object, such as `linear_mixed_model`.
     pub model_kind: String,
+    /// Formula label, when available.
     pub formula: Option<String>,
+    /// GLMM response family label, when applicable.
     pub family: Option<String>,
+    /// GLMM link-function label, when applicable.
     pub link: Option<String>,
+    /// Number of observations.
     pub nobs: usize,
+    /// Model degrees of freedom.
     pub dof: usize,
+    /// Fitted objective value.
     pub objective: f64,
+    /// Fitted log-likelihood.
     pub loglikelihood: f64,
+    /// Akaike information criterion.
     pub aic: f64,
+    /// Bayesian information criterion.
     pub bic: f64,
+    /// Whether the model has been fitted.
     pub is_fitted: bool,
+    /// Whether the fitted random-effect covariance is singular.
     pub is_singular: bool,
+    /// Covariance-parameter vector.
     pub theta: Vec<f64>,
+    /// Residual scale or GLMM dispersion parameter.
     pub dispersion: f64,
+    /// Optimizer selected by the fit.
     pub optimizer: String,
+    /// Backend-specific optimizer code.
     pub optimizer_code: String,
+    /// Optimizer backend name.
     pub optimizer_backend: String,
+    /// Optimizer return status.
     pub optimizer_status: String,
+    /// GLMM estimation method label, when applicable.
     pub estimation_method: Option<String>,
+    /// GLMM objective-definition label, when applicable.
     pub objective_definition: Option<String>,
+    /// GLMM response-constants convention, when applicable.
     pub response_constants: Option<String>,
+    /// Number of adaptive Gauss-Hermite quadrature points for GLMMs.
     pub n_agq: Option<usize>,
+    /// Fallback status for GLMM fitting, when a fallback path was used.
     pub fallback_status: Option<String>,
+    /// Number of objective evaluations.
     pub feval: i64,
+    /// Fixed-effect coefficient table.
     pub coefficients: CoefTable,
+    /// Random-effect variance-covariance table.
     pub varcorr: VarCorr,
+    /// Renderable compact model summary.
     pub summary: ModelSummary,
 }
 
@@ -56,11 +85,17 @@ pub struct FitSummaryPayload {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ModelSummaryRow {
+    /// Row label, usually a coefficient or random-effect term name.
     pub label: String,
+    /// Estimate shown in the fixed-effect columns, when applicable.
     pub estimate: Option<f64>,
+    /// Standard error shown in the fixed-effect columns, when applicable.
     pub std_error: Option<f64>,
+    /// Wald statistic shown in the fixed-effect columns, when available.
     pub z_stat: Option<f64>,
+    /// P-value shown in the fixed-effect columns, when available.
     pub pvalue: Option<f64>,
+    /// Per-group random-effect scale values aligned with `sigma_headers`.
     pub sigma_values: Vec<Option<f64>>,
 }
 
@@ -68,7 +103,9 @@ pub struct ModelSummaryRow {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ModelSummary {
+    /// Headers for random-effect scale columns.
     pub sigma_headers: Vec<String>,
+    /// Summary rows in display order.
     pub rows: Vec<ModelSummaryRow>,
 }
 

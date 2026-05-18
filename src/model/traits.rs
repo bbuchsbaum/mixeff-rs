@@ -17,11 +17,17 @@ pub struct RandomEffectTermInfo {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum Family {
+    /// Gaussian response with constant variance.
     Normal,
+    /// Bernoulli response for binary outcomes.
     Bernoulli,
+    /// Binomial response for grouped binary outcomes.
     Binomial,
+    /// Poisson response for counts.
     Poisson,
+    /// Gamma response for positive continuous outcomes.
     Gamma,
+    /// Inverse-Gaussian response for positive continuous outcomes.
     InverseGaussian,
 }
 
@@ -29,12 +35,19 @@ pub enum Family {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum LinkFunction {
+    /// Identity link, `g(mu) = mu`.
     Identity,
+    /// Log link, `g(mu) = log(mu)`.
     Log,
+    /// Logit link, `g(mu) = log(mu / (1 - mu))`.
     Logit,
+    /// Probit link using the standard-normal quantile.
     Probit,
+    /// Complementary log-log link.
     Cloglog,
+    /// Inverse link, `g(mu) = 1 / mu`.
     Inverse,
+    /// Square-root link, `g(mu) = sqrt(mu)`.
     Sqrt,
 }
 
@@ -144,9 +157,13 @@ impl LinkFunction {
 /// forbids `model` depending on `stats`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct WaldConfintRow {
+    /// Parameter name.
     pub parameter: String,
+    /// Fitted estimate.
     pub estimate: f64,
+    /// Lower Wald confidence limit.
     pub lower: f64,
+    /// Upper Wald confidence limit.
     pub upper: f64,
 }
 

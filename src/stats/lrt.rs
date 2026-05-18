@@ -11,9 +11,13 @@ use crate::model::traits::{MixedModelFit, RandomEffectTermInfo};
 use crate::types::OptSummary;
 
 const LOG_LIK_TOL: f64 = 1.0e-10;
+/// Stable schema name for boundary-aware LRT payloads.
 pub const BOUNDARY_LRT_SCHEMA: &str = "mixedmodels.boundary_lrt";
+/// Stable schema version for boundary-aware LRT payloads.
 pub const BOUNDARY_LRT_SCHEMA_VERSION: &str = "1.0.0";
+/// Stable schema name for parametric-bootstrap LRT payloads.
 pub const PARAMETRIC_BOOTSTRAP_LRT_SCHEMA: &str = "mixedmodels.parametric_bootstrap_lrt";
+/// Stable schema version for parametric-bootstrap LRT payloads.
 pub const PARAMETRIC_BOOTSTRAP_LRT_SCHEMA_VERSION: &str = "1.0.0";
 
 /// Ordinary Gaussian linear-model fit for comparison with mixed models.
@@ -264,9 +268,13 @@ pub enum ModelComparisonClass {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum FixedEffectComparison {
+    /// Fixed-effect column spaces are equal.
     Same,
+    /// The first model's fixed-effect space is nested in the second.
     Nested,
+    /// The second model's fixed-effect space is nested in the first.
     ReverseNested,
+    /// Fixed-effect spaces are not nested.
     NonNested,
 }
 
@@ -275,9 +283,13 @@ pub enum FixedEffectComparison {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum RandomEffectComparison {
+    /// Random-effect terms are equal.
     Same,
+    /// The first model's random-effect terms are nested in the second.
     Nested,
+    /// The second model's random-effect terms are nested in the first.
     ReverseNested,
+    /// Random-effect terms are not nested.
     NonNested,
 }
 
@@ -287,28 +299,46 @@ pub enum RandomEffectComparison {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ModelComparisonAlternative {
+    /// Refit both models with ML and run an ordinary LRT.
     MlRefitLikelihoodRatio,
+    /// Use the REML likelihood comparison when fixed-effect spaces match.
     RemlLikelihoodRatio,
+    /// Compare AIC/BIC instead of an LRT p-value.
     InformationCriteria,
+    /// Test a fixed-effect contrast in a single fitted model.
     FixedEffectContrastTest,
+    /// Use a simulation-calibrated LRT reference distribution.
     ParametricBootstrap,
+    /// Compare predictive performance with held-out data.
     CrossValidation,
+    /// Reverse model order before comparing.
     ReorderModels,
+    /// Refit with a common likelihood criterion before comparing.
     RefitWithCommonCriterion,
 }
 
 /// Structured preflight assessment for comparing two fitted models.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelComparisonAssessment {
+    /// Structural comparison class for the pair.
     pub class: ModelComparisonClass,
+    /// Fixed-effect column-space relation.
     pub fixed_effects: FixedEffectComparison,
+    /// Random-effect term relation.
     pub random_effects: RandomEffectComparison,
+    /// Whether an ordinary LRT is valid for the pair as supplied.
     pub lrt_available: bool,
+    /// Human-readable reason when `lrt_available` is false.
     pub lrt_reason: Option<String>,
+    /// Whether AIC/BIC-style comparison is meaningful for the pair.
     pub information_criteria_available: bool,
+    /// Human-readable reason when information criteria are unavailable.
     pub information_criteria_reason: Option<String>,
+    /// Whether ML refitting would be required for the requested comparison.
     pub ml_refit_required: bool,
+    /// Human-readable reason for ML refit requirement.
     pub ml_refit_reason: Option<String>,
+    /// Suggested comparison routes that remain valid.
     pub valid_alternatives: Vec<ModelComparisonAlternative>,
 }
 
@@ -345,20 +375,32 @@ pub enum ModelComparisonRefitPolicy {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ModelComparisonReasonCode {
+    /// Information-criteria table requested no LRT.
     InformationCriteriaRequested,
+    /// Models are structurally non-nested for LRT.
     NonNestedModelsLrtInvalid,
+    /// REML comparison would require ML refits.
     MlRefitRequired,
+    /// Larger model had a lower log-likelihood beyond tolerance.
     LowerLoglikelihoodLrtInvalid,
+    /// Models occupy the same parameter space, so no LRT increment exists.
     SameModelSpaceLrtInvalid,
+    /// Models were fit to different response values.
     DifferentResponse,
+    /// Conditional response families differ.
     DifferentFamily,
+    /// Link functions differ.
     DifferentLink,
+    /// REML and ML fits were mixed.
     MixedFitCriterion,
+    /// Models are ordered from larger to smaller or have non-increasing dof.
     InvalidModelOrder,
+    /// LRT is unavailable for another classified reason.
     LrtUnavailable,
 }
 
 impl ModelComparisonReasonCode {
+    /// Stable snake-case reason code.
     pub fn as_str(&self) -> &'static str {
         match self {
             ModelComparisonReasonCode::InformationCriteriaRequested => {
@@ -383,7 +425,9 @@ impl ModelComparisonReasonCode {
 /// Options for building a [`ModelComparisonTable`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelComparisonOptions {
+    /// Table construction method.
     pub method: ModelComparisonMethod,
+    /// Refitting behavior when ML refits would be needed.
     pub refit_policy: ModelComparisonRefitPolicy,
 }
 
@@ -399,33 +443,56 @@ impl Default for ModelComparisonOptions {
 /// One display row in a model comparison table.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelComparisonRow {
+    /// Model label, usually the formula.
     pub label: String,
+    /// Number of observations.
     pub nobs: usize,
+    /// Model degrees of freedom.
     pub dof: usize,
+    /// Model log-likelihood.
     pub loglik: f64,
+    /// Model deviance, `-2 * loglik`.
     pub deviance: f64,
+    /// Akaike information criterion.
     pub aic: f64,
+    /// Bayesian information criterion.
     pub bic: f64,
+    /// Difference from the minimum AIC in the table.
     pub delta_aic: f64,
+    /// Difference from the minimum BIC in the table.
     pub delta_bic: f64,
+    /// Adjacent likelihood-ratio statistic when available.
     pub chisq: Option<f64>,
+    /// Degrees of freedom for `chisq`.
     pub chisq_dof: Option<usize>,
+    /// LRT p-value when available.
     pub pvalue: Option<f64>,
+    /// Whether a non-positive log-likelihood difference was within optimizer tolerance.
     pub loglik_within_optimizer_tol: Option<bool>,
+    /// Structural class for the adjacent comparison.
     pub comparison_class: Option<ModelComparisonClass>,
+    /// Whether LRT columns are valid for this row.
     pub lrt_available: bool,
+    /// Whether information criteria are valid for this row.
     pub information_criteria_available: bool,
+    /// Whether this row would require ML refitting for LRT.
     pub requires_ml_refit: bool,
+    /// Stable reason code when LRT columns are unavailable.
     pub reason_code: Option<String>,
+    /// Human-readable reason when LRT columns are unavailable.
     pub reason: Option<String>,
 }
 
 /// Information-criteria table with optional valid LRT columns.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelComparisonTable {
+    /// Requested comparison method.
     pub method: ModelComparisonMethod,
+    /// Refitting policy used to build the table.
     pub refit_policy: ModelComparisonRefitPolicy,
+    /// Display rows, one per model.
     pub rows: Vec<ModelComparisonRow>,
+    /// Pairwise assessments for adjacent model pairs.
     pub assessments: Vec<ModelComparisonAssessment>,
     /// Present for API honesty: automatic refitting is not performed here.
     pub refit_performed: bool,
@@ -436,16 +503,22 @@ pub struct ModelComparisonTable {
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum BoundaryLrtStatus {
+    /// Boundary-aware reference distribution was certified and evaluated.
     Available,
+    /// The comparison shape was plausible but not certified by this route.
     NotAssessed,
+    /// Boundary-aware LRT is unsupported for this comparison class.
     Unsupported,
 }
 
 /// One component of a chi-square mixture reference distribution.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BoundaryLrtMixtureComponent {
+    /// Mixture weight for this reference-distribution component.
     pub weight: f64,
+    /// Chi-square degrees of freedom, or `None` for a point mass.
     pub chisq_df: Option<usize>,
+    /// Point-mass location when this component is degenerate.
     pub point_mass_at: Option<f64>,
 }
 
@@ -456,18 +529,31 @@ pub struct BoundaryLrtMixtureComponent {
 /// with the 50:50 mixture of a point mass at zero and chi-square(1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BoundaryLikelihoodRatioTest {
+    /// Stable schema name.
     pub schema_name: String,
+    /// Stable schema version.
     pub schema_version: String,
+    /// Boundary LRT availability status.
     pub status: BoundaryLrtStatus,
+    /// Stable reason code when unavailable.
     pub reason_code: Option<String>,
+    /// Human-readable reason when unavailable.
     pub reason: Option<String>,
+    /// Structural comparison class when it could be assessed.
     pub comparison_class: Option<ModelComparisonClass>,
+    /// Observed likelihood-ratio statistic.
     pub statistic: Option<f64>,
+    /// Ordinary chi-square degrees of freedom before boundary adjustment.
     pub ordinary_chisq_dof: Option<usize>,
+    /// Boundary-adjusted p-value when available.
     pub pvalue: Option<f64>,
+    /// Whether a non-positive log-likelihood difference was within optimizer tolerance.
     pub loglik_within_optimizer_tol: Option<bool>,
+    /// Certified mixture reference distribution.
     pub mixture: Vec<BoundaryLrtMixtureComponent>,
+    /// Literature references supporting the route.
     pub references: Vec<String>,
+    /// Reader-facing caveats and interpretation notes.
     pub notes: Vec<String>,
 }
 
@@ -690,10 +776,12 @@ impl ModelComparisonAssessment {
         assess_model_pair(smaller, larger)
     }
 
+    /// Whether an ordinary likelihood-ratio test is valid for this pair.
     pub fn lrt_is_available(&self) -> bool {
         self.lrt_available
     }
 
+    /// Whether AIC/BIC-style information criteria are valid for this pair.
     pub fn information_criteria_are_available(&self) -> bool {
         self.information_criteria_available
     }
@@ -1611,7 +1699,9 @@ fn format_pvalue(pvalue: f64) -> String {
 /// variance/covariance parameter.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ParametricBootstrapLrt {
+    /// Stable schema name.
     pub schema_name: String,
+    /// Stable schema version.
     pub schema_version: String,
     /// Observed statistic `2·(ℓ_larger − ℓ_smaller)` (clamped at 0 within
     /// optimizer tolerance, matching the ordinary LRT convention).
@@ -1619,6 +1709,7 @@ pub struct ParametricBootstrapLrt {
     /// Nominal `larger.dof − smaller.dof`. Informational only — the
     /// p-value does **not** use a chi-square reference with this dof.
     pub chisq_dof: usize,
+    /// Number of bootstrap simulations requested by the caller.
     pub n_sim_requested: usize,
     /// Replicates where the null simulation refit succeeded for *both*
     /// the smaller and larger models.

@@ -11,12 +11,18 @@ use statrs::distribution::{ContinuousCDF, Normal};
 
 use crate::stats::profile::ConfintRow;
 
+/// Policy for fixed-effect coefficient p-values in [`CoefTable`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum CoefTablePValuePolicy {
+    /// Compute two-sided asymptotic Wald-z p-values.
     AsymptoticWaldZ,
-    Unavailable { reason: String },
+    /// Mark p-values as unavailable with a shared reason.
+    Unavailable {
+        /// Explanation stored in each unavailable p-value row.
+        reason: String,
+    },
 }
 
 /// A coefficient table for the fixed-effects of a mixed model.
@@ -70,6 +76,7 @@ impl CoefTable {
         )
     }
 
+    /// Construct a table whose p-values are explicitly unavailable.
     pub fn new_without_p_values(
         names: Vec<String>,
         estimates: Vec<f64>,
@@ -86,6 +93,7 @@ impl CoefTable {
         )
     }
 
+    /// Construct a table with an explicit p-value policy.
     pub fn new_with_p_value_policy(
         names: Vec<String>,
         estimates: Vec<f64>,

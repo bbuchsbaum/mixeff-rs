@@ -311,25 +311,21 @@ impl OptSummary {
         // Unwrap `KKT_BOUNDARY_RESTART(<n>): <inner status>` to the inner
         // outcome that actually determined the final iterate.
         let status = if let Some(rest) = raw.strip_prefix("KKT_BOUNDARY_RESTART") {
-            rest.split_once(": ").map(|(_, inner)| inner.trim()).unwrap_or(raw)
+            rest.split_once(": ")
+                .map(|(_, inner)| inner.trim())
+                .unwrap_or(raw)
         } else {
             raw
         };
         match status {
             // Clean convergence criteria across all backends.
-            "SUCCESS" | "STOPVAL_REACHED" | "FTOL_REACHED" | "XTOL_REACHED"
-            | "RADIUS_REACHED" | "SMALL_TR_RADIUS" | "FTARGET_ACHIEVED" => {
-                ConvergenceStatus::Converged
-            }
+            "SUCCESS" | "STOPVAL_REACHED" | "FTOL_REACHED" | "XTOL_REACHED" | "RADIUS_REACHED"
+            | "SMALL_TR_RADIUS" | "FTARGET_ACHIEVED" => ConvergenceStatus::Converged,
             // Budget/iteration limits — best-effort, NOT a verified optimum.
-            "MAXEVAL_REACHED" | "MAXTIME_REACHED" | "MAXFUN_REACHED"
-            | "MAXTR_REACHED" | "CALLBACK_TERMINATE" => {
-                ConvergenceStatus::BudgetExhausted
-            }
+            "MAXEVAL_REACHED" | "MAXTIME_REACHED" | "MAXFUN_REACHED" | "MAXTR_REACHED"
+            | "CALLBACK_TERMINATE" => ConvergenceStatus::BudgetExhausted,
             // Roundoff/stagnation: provisional, not a clean convergence.
-            "ROUNDOFF_LIMITED" | "DAMAGING_ROUNDING" => {
-                ConvergenceStatus::RoundoffLimited
-            }
+            "ROUNDOFF_LIMITED" | "DAMAGING_ROUNDING" => ConvergenceStatus::RoundoffLimited,
             // Everything else (FAILURE, INVALID_ARGS, OUT_OF_MEMORY,
             // FORCED_STOP, UNEXPECTED_ERROR, FORCED_BAD_BOUNDARY,
             // TRSUBP_FAILED, NAN_INF_*, NO_SPACE_BETWEEN_BOUNDS,

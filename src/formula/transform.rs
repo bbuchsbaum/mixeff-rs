@@ -2,7 +2,7 @@
 //!
 //! This module owns the *stateless / pointwise* slice of R's formula language
 //! that the engine is allowed to evaluate itself, per the frozen contract in
-//! [`docs/formula_transform_seam.md`]. The defining property is that every
+//! `docs/formula_transform_seam.md`. The defining property is that every
 //! transform here is a pure pointwise function `R -> R` with **no
 //! fitting-time state** (no centering means, no QR basis, no knots, no level
 //! set). Because the closed-form expression *is* the recipe, prediction on new
@@ -99,10 +99,15 @@ impl TransformFn {
 /// A binary arithmetic operator allowed inside `I(...)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
+    /// Addition (`+`).
     Add,
+    /// Subtraction (`-`).
     Sub,
+    /// Multiplication (`*`).
     Mul,
+    /// Division (`/`).
     Div,
+    /// Real-valued exponentiation (`^`).
     Pow,
 }
 
@@ -169,6 +174,10 @@ pub struct DerivedColumn {
 }
 
 impl DerivedColumn {
+    /// Build a derived-column descriptor from a parsed expression.
+    ///
+    /// The canonical label is computed immediately and used later as the
+    /// synthetic column name at the fit/predict data boundary.
     pub fn new(expr: Expr) -> Self {
         Self {
             label: canonical_label(&expr),
@@ -354,7 +363,8 @@ pub fn materialize_column(derived: &DerivedColumn, data: &DataFrame) -> Result<V
 
 /// A minimal token used only by the transform sub-parser. The formula lexer
 /// hands the raw character span between the opening and closing parenthesis
-/// of an `I(...)`/`fn(...)` call to [`parse_transform`].
+/// of an `I(...)`/`fn(...)` call to [`parse_transform_arith`] or
+/// [`parse_bare_call`].
 ///
 /// Whitelist enforcement is by *parsed construct*, never by surface syntax:
 /// only the operators/functions enumerated here are accepted; everything else
@@ -362,7 +372,11 @@ pub fn materialize_column(derived: &DerivedColumn, data: &DataFrame) -> Result<V
 /// an actionable [`FormulaError`] so [`super::parser`] keeps refusing.
 pub fn parse_transform_arith(src: &str) -> std::result::Result<Expr, FormulaError> {
     let toks = lex(src)?;
-    let mut p = TParser { toks, pos: 0, depth: 0 };
+    let mut p = TParser {
+        toks,
+        pos: 0,
+        depth: 0,
+    };
     let e = p.parse_expr(0)?;
     if p.pos != p.toks.len() {
         return Err(refuse(src));
@@ -395,7 +409,11 @@ fn parse_call_argument(src: &str) -> std::result::Result<Expr, FormulaError> {
         )));
     }
     let toks = lex(trimmed)?;
-    let mut p = TParser { toks, pos: 0, depth: 0 };
+    let mut p = TParser {
+        toks,
+        pos: 0,
+        depth: 0,
+    };
     let e = p.parse_primary()?;
     if p.pos != p.toks.len() {
         // e.g. `log(x + 1)` written without the I() wrapper — arithmetic
@@ -931,8 +949,11 @@ mod tests {
         let d = df(); // x = [1, 2, 3]
         let e = parse_transform_arith("-x^2").unwrap();
         let vals = eval(&e, &d).unwrap();
-        assert_eq!(vals, vec![-1.0, -4.0, -9.0],
-            "`-x^2` must be `-(x^2)`, got {vals:?}");
+        assert_eq!(
+            vals,
+            vec![-1.0, -4.0, -9.0],
+            "`-x^2` must be `-(x^2)`, got {vals:?}"
+        );
     }
 
     #[test]
@@ -953,8 +974,12 @@ mod tests {
         // `-x^2` must round-trip to `I(-x^2)`, NOT `I((-x)^2)`.
         // The byte-identical-to-R label promise requires this.
         let e = parse_transform_arith("-x^2").unwrap();
-        assert_eq!(canonical_label(&e), "I(-x^2)",
-            "label must be `I(-x^2)` (R-style), got `{}`", canonical_label(&e));
+        assert_eq!(
+            canonical_label(&e),
+            "I(-x^2)",
+            "label must be `I(-x^2)` (R-style), got `{}`",
+            canonical_label(&e)
+        );
 
         // Also verify the AST shape: Neg(Bin(Pow, Col(x), Lit(2))).
         match &e {
@@ -987,11 +1012,18 @@ mod tests {
         // With x=3: (-3)^2 = 9.
         let d = df();
         let vals = eval(&e, &d).unwrap();
-        assert_eq!(vals, vec![1.0, 4.0, 9.0],
-            "`(-x)^2` must be +9 for x=3, got {vals:?}");
+        assert_eq!(
+            vals,
+            vec![1.0, 4.0, 9.0],
+            "`(-x)^2` must be +9 for x=3, got {vals:?}"
+        );
         // Label must add parens around Neg when it is the base of Pow.
-        assert_eq!(canonical_label(&e), "I((-x)^2)",
-            "got `{}`", canonical_label(&e));
+        assert_eq!(
+            canonical_label(&e),
+            "I((-x)^2)",
+            "got `{}`",
+            canonical_label(&e)
+        );
     }
 
     // ── Collision policy ────────────────────────────────────────────────────
@@ -1004,7 +1036,8 @@ mod tests {
         let mut data = DataFrame::new();
         data.add_numeric("x", vec![1.0, 2.0, 3.0]).unwrap();
         data.add_numeric("y", vec![10.0, 20.0, 30.0]).unwrap();
-        data.add_categorical("g", vec!["a".into(), "b".into(), "c".into()]).unwrap();
+        data.add_categorical("g", vec!["a".into(), "b".into(), "c".into()])
+            .unwrap();
         // Pre-supply the exact correct values (1, 4, 9).
         data.add_numeric("I(x^2)", vec![1.0, 4.0, 9.0]).unwrap();
 
@@ -1021,7 +1054,8 @@ mod tests {
         let mut data = DataFrame::new();
         data.add_numeric("x", vec![1.0, 2.0, 3.0]).unwrap();
         data.add_numeric("y", vec![10.0, 20.0, 30.0]).unwrap();
-        data.add_categorical("g", vec!["a".into(), "b".into(), "c".into()]).unwrap();
+        data.add_categorical("g", vec!["a".into(), "b".into(), "c".into()])
+            .unwrap();
         // Pre-supply wrong values (1, 5, 9 instead of 1, 4, 9).
         data.add_numeric("I(x^2)", vec![1.0, 5.0, 9.0]).unwrap();
 
@@ -1030,7 +1064,10 @@ mod tests {
         match err {
             crate::error::MixedModelError::InvalidArgument(m) => {
                 assert!(m.contains("I(x^2)"), "message should name the label: {m}");
-                assert!(m.contains("engine"), "message should mention engine ownership: {m}");
+                assert!(
+                    m.contains("engine"),
+                    "message should mention engine ownership: {m}"
+                );
             }
             o => panic!("expected InvalidArgument, got {o:?}"),
         }
@@ -1052,7 +1089,10 @@ mod tests {
         let err2 = parse_transform_arith("I(   )").unwrap_err();
         match err2 {
             FormulaError::Other(m) => {
-                assert!(m.contains("empty"), "whitespace-only I() should say 'empty': {m}");
+                assert!(
+                    m.contains("empty"),
+                    "whitespace-only I() should say 'empty': {m}"
+                );
             }
             o => panic!("expected Other, got {o:?}"),
         }
@@ -1063,8 +1103,14 @@ mod tests {
     #[test]
     fn integral_literal_labels_no_trailing_dot_zero() {
         // Small integer: printed as integer (no `.0`).
-        assert_eq!(canonical_label(&parse_transform_arith("x+1").unwrap()), "I(x+1)");
-        assert_eq!(canonical_label(&parse_transform_arith("x+0").unwrap()), "I(x+0)");
+        assert_eq!(
+            canonical_label(&parse_transform_arith("x+1").unwrap()),
+            "I(x+1)"
+        );
+        assert_eq!(
+            canonical_label(&parse_transform_arith("x+0").unwrap()),
+            "I(x+0)"
+        );
         // Large integral value inside 1e15 threshold.
         assert_eq!(
             canonical_label(&parse_transform_arith("x+1000").unwrap()),
@@ -1091,8 +1137,10 @@ mod tests {
         let e = parse_transform_arith("1e300").unwrap();
         let label = canonical_label(&e);
         // Should contain the exponential notation, not integer.
-        assert!(label.contains('e') || label.contains('E') || label.starts_with("I(10"),
-            "expected scientific notation for 1e300, got {label}");
+        assert!(
+            label.contains('e') || label.contains('E') || label.starts_with("I(10"),
+            "expected scientific notation for 1e300, got {label}"
+        );
     }
 
     #[test]
@@ -1102,6 +1150,9 @@ mod tests {
         d.add_numeric("dummy", vec![0.0]).unwrap();
         let e = parse_transform_arith("-3^2").unwrap();
         let result = eval_row(&e, &d, 0).unwrap();
-        assert_eq!(result, -9.0, "`-3^2` must be -9 (R semantics), got {result}");
+        assert_eq!(
+            result, -9.0,
+            "`-3^2` must be -9 (R semantics), got {result}"
+        );
     }
 }

@@ -6,48 +6,74 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum MixedModelError {
+    /// Formula parsing or formula-lowering failed.
     #[error("Formula error: {0}")]
     Formula(#[from] crate::formula::FormulaError),
 
+    /// Linear algebra backend reported a numerical failure.
     #[error("Linear algebra error: {0}")]
     LinAlg(#[from] LinAlgError),
 
+    /// Optimizer failed, exhausted its budget, or returned an unusable state.
     #[error("Optimization error: {0}")]
     Optimization(String),
 
+    /// Input arrays or matrices had incompatible dimensions.
     #[error("Dimension mismatch: {0}")]
     DimensionMismatch(String),
 
+    /// Operation requires fitted model state, but the model has not been fit.
     #[error("Model not fitted: call fit() first")]
     NotFitted,
 
+    /// Operation is only valid before the first fit.
     #[error("Model already fitted: use refit() instead")]
     AlreadyFitted,
 
+    /// The response is constant and cannot identify the requested model.
     #[error("Constant response: model fitting failed")]
     ConstantResponse,
 
+    /// The formula has no random-effects terms.
     #[error("No random effects in formula: this is not a mixed model")]
     NoRandomEffects,
 
+    /// Caller supplied an invalid argument value.
     #[error("Invalid argument: {0}")]
     InvalidArgument(String),
 
+    /// Requested model or operation is outside the implemented support matrix.
     #[error("Unsupported model: {0}")]
     Unsupported(String),
 
+    /// Requested GLMM family/link pair is unsupported.
     #[error("Unsupported family/link combination: {family}/{link}")]
-    UnsupportedFamilyLink { family: String, link: String },
+    UnsupportedFamilyLink {
+        /// Distribution family label.
+        family: String,
+        /// Link-function label.
+        link: String,
+    },
 
+    /// Requested design would exceed configured memory or size limits.
     #[error("Problem too large: {0}")]
     ProblemTooLarge(String),
 
+    /// Model fit or covariance structure is singular in a context that
+    /// requires full rank.
     #[error("Singular model: {0}")]
     Singular(String),
 
+    /// Fixed-effect rank leaves no residual degrees of freedom.
     #[error("Fixed-effect design is rank-saturated: rank(X) = {rank} and n = {nobs}, leaving zero residual degrees of freedom. Ordinary unpenalized LMM fitting is not identifiable; use fewer fixed effects or an explicit penalized/MAP fixed-effect prior.")]
-    RankSaturatedFixedEffects { rank: usize, nobs: usize },
+    RankSaturatedFixedEffects {
+        /// Numerical rank of the fixed-effect design.
+        rank: usize,
+        /// Number of observations.
+        nobs: usize,
+    },
 
+    /// Cholesky factorization encountered a non-positive-definite matrix.
     #[error("Positive definite exception during Cholesky")]
     PosDefException,
 }
@@ -56,19 +82,29 @@ pub enum MixedModelError {
 #[derive(Error, Debug)]
 #[non_exhaustive]
 pub enum LinAlgError {
+    /// Matrix was expected to be positive definite but was not.
     #[error("Matrix is not positive definite")]
     NotPositiveDefinite,
 
+    /// Matrix/vector dimensions are incompatible.
     #[error("Dimension mismatch: {0}")]
     DimensionMismatch(String),
 
+    /// Matrix is singular.
     #[error("Singular matrix")]
     Singular,
 
+    /// Matrix rank was lower than required.
     #[error("Rank deficient matrix (rank {rank}, expected {expected})")]
-    RankDeficient { rank: usize, expected: usize },
+    RankDeficient {
+        /// Observed numerical rank.
+        rank: usize,
+        /// Required rank for the operation.
+        expected: usize,
+    },
 }
 
+/// Crate-wide result type using [`MixedModelError`].
 pub type Result<T> = std::result::Result<T, MixedModelError>;
 
 impl MixedModelError {

@@ -21,7 +21,9 @@ pub struct DataFrame {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum Column {
+    /// Numeric `f64` values.
     Numeric(Vec<f64>),
+    /// Categorical values encoded as integer references into a level table.
     Categorical(CategoricalColumn),
 }
 
@@ -43,15 +45,22 @@ pub struct CategoricalColumn {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ContrastSource {
+    /// Treatment/dummy coding.
     Treatment,
+    /// Sum-to-zero/deviation coding.
     Sum,
+    /// Helmert coding.
     Helmert,
+    /// Orthonormal polynomial coding for ordered factors.
     Polynomial,
+    /// User-supplied contrast matrix.
     Custom,
+    /// Contrast source was not supplied by the frontend.
     Unknown,
 }
 
 impl ContrastSource {
+    /// Stable lowercase label for serialization and diagnostics.
     pub fn as_str(self) -> &'static str {
         match self {
             ContrastSource::Treatment => "treatment",
@@ -68,7 +77,9 @@ impl ContrastSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CategoricalCoding {
+    /// Drop the first level as a reference category.
     Treatment,
+    /// Encode every level as its own indicator column.
     CellMeans,
 }
 
@@ -79,14 +90,20 @@ pub enum CategoricalCoding {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct CategoricalContrast {
+    /// Level order corresponding to matrix rows.
     pub levels: Vec<String>,
+    /// Contrast basis with one row per level.
     pub matrix: DMatrix<f64>,
+    /// Names for encoded columns, one per matrix column.
     pub column_names: Vec<String>,
+    /// Whether the contrast treats the factor as ordered.
     pub ordered: bool,
+    /// Provenance label for the contrast basis.
     pub source: ContrastSource,
 }
 
 impl CategoricalContrast {
+    /// Construct a contrast basis after validating shape and column names.
     pub fn new(
         levels: Vec<String>,
         matrix: DMatrix<f64>,
@@ -212,26 +229,38 @@ fn polynomial_column_name(degree: usize) -> String {
     }
 }
 
+/// One encoded numeric column derived from a categorical predictor.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EncodedCategoricalColumn {
+    /// Display/stable column name.
     pub name: String,
+    /// Encoded numeric values, one per input row.
     pub values: Vec<f64>,
+    /// Whether the values came from an explicit contrast matrix.
     pub explicit_contrast: bool,
 }
 
 /// Audit record for one cluster-resampling draw.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClusterResampleDraw {
+    /// Grouping column used for cluster resampling.
     pub group: String,
+    /// Number of observed levels in the original grouping factor.
     pub original_level_count: usize,
+    /// Sampled original levels in draw order.
     pub sampled_levels: Vec<String>,
+    /// Number of distinct original levels sampled at least once.
     pub distinct_sampled_level_count: usize,
+    /// Number of duplicate level draws.
     pub duplicate_count: usize,
+    /// Number of rows in the resampled data frame.
     pub output_rows: usize,
+    /// Stable label for the relabeling rule used for duplicate clusters.
     pub relabeling_policy: String,
 }
 
 impl CategoricalColumn {
+    /// Construct a categorical column using first-appearance level order.
     pub fn new(values: Vec<String>) -> Self {
         let mut levels = Vec::new();
         let mut level_map: HashMap<String, u32> = HashMap::new();
@@ -255,6 +284,7 @@ impl CategoricalColumn {
         }
     }
 
+    /// Number of canonical levels.
     pub fn n_levels(&self) -> usize {
         self.levels.len()
     }
@@ -287,6 +317,7 @@ impl CategoricalColumn {
         })
     }
 
+    /// Construct a categorical column with explicit level order and contrast.
     pub fn with_levels_and_contrast(
         values: Vec<String>,
         levels: Vec<String>,
@@ -297,6 +328,7 @@ impl CategoricalColumn {
         Ok(cat)
     }
 
+    /// Attach an explicit contrast basis to this categorical column.
     pub fn set_contrast(&mut self, contrast: CategoricalContrast) -> Result<()> {
         if contrast.levels != self.levels {
             return Err(MixedModelError::InvalidArgument(
@@ -308,6 +340,7 @@ impl CategoricalColumn {
         Ok(())
     }
 
+    /// Encode this categorical column for fixed-effect or random-effect design construction.
     pub fn encoded_columns(
         &self,
         variable: &str,
@@ -439,6 +472,7 @@ impl DataFrame {
         Ok(self)
     }
 
+    /// Add a categorical column with explicit level order and contrast basis.
     pub fn add_categorical_with_contrast(
         &mut self,
         name: &str,

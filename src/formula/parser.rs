@@ -170,10 +170,7 @@ fn matching_paren(chars: &[char], open_idx: usize) -> Result<usize, FormulaError
 /// pointwise `fn(...)`) is replaced by an `Ident` carrying its canonical
 /// label, so the recursive-descent parser keeps treating it as a plain
 /// column reference (the layered tower above the data boundary is unchanged).
-fn tokenize(
-    input: &str,
-    derived: &mut Vec<DerivedColumn>,
-) -> Result<Vec<Spanned>, FormulaError> {
+fn tokenize(input: &str, derived: &mut Vec<DerivedColumn>) -> Result<Vec<Spanned>, FormulaError> {
     let mut tokens = Vec::new();
     let chars: Vec<char> = input.chars().collect();
     let len = chars.len();
@@ -1553,7 +1550,9 @@ mod tests {
         // `I(...)` arithmetic and pointwise calls on both sides.
         let f = parse_formula("log(reaction) ~ days + I(days^2) + (1 | subj)").unwrap();
         assert_eq!(f.response, "log(reaction)");
-        assert!(f.fixed_terms.contains(&FixedTerm::Column("I(days^2)".into())));
+        assert!(f
+            .fixed_terms
+            .contains(&FixedTerm::Column("I(days^2)".into())));
         assert!(f.fixed_terms.contains(&FixedTerm::Column("days".into())));
         // Derived set carries the transformed response and the I() term.
         let labels: Vec<&str> = f.derived.iter().map(|d| d.label.as_str()).collect();
