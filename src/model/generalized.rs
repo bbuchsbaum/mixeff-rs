@@ -721,13 +721,33 @@ impl GeneralizedLinearMixedModel {
             }
             Family::Normal => (y - mu).powi(2),
             Family::Gamma => {
+                // Gamma requires μ > 0, but an inverse-link Gamma GLMM can
+                // transiently propose η giving μ ≤ 0 during PIRLS. Unfloored,
+                // `(y/μ).ln()` / `(y-μ)/μ` would yield NaN/±Inf from valid
+                // data; that NaN then slips the `obj > halving_bound`
+                // step-halving guard (`NaN > x` is false) and is silently
+                // accepted. Floor μ to the same positive-mean ε (1e-6) this
+                // module already uses for Gamma/Poisson/InverseGaussian
+                // means: valid μ (O(y), far above 1e-6) is unaffected, while
+                // a degenerate μ≤0 yields a finite, very large deviance that
+                // step-halving correctly rejects as "worse". A tighter floor
+                // (e.g. f64::MIN_POSITIVE) still overflows: `(y-μ)/μ` reaches
+                // ~1e308 and doubles to +Inf.
+                let mu = mu.max(1e-6);
                 if y == 0.0 {
                     2.0 * (mu.ln())
                 } else {
                     -2.0 * ((y / mu).ln() - (y - mu) / mu)
                 }
             }
-            Family::InverseGaussian => (y - mu).powi(2) / (y * mu * mu),
+            Family::InverseGaussian => {
+                // Same μ>0 requirement: μ=0 would divide by zero. Floor at
+                // the same 1e-6 positive-mean ε so a transient degenerate
+                // iterate is finite-but-rejected, not NaN/Inf silently
+                // accepted.
+                let mu = mu.max(1e-6);
+                (y - mu).powi(2) / (y * mu * mu)
+            }
         }
     }
 
@@ -830,8 +850,12 @@ impl GeneralizedLinearMixedModel {
 
             // --- Step-halving: average toward the previous accepted state
             //     until obj is no worse, up to `max_halvings` averagings. ---
+            // A non-finite obj must count as "worse": `NaN > bound` is false,
+            // so without the explicit check a NaN/Inf iterate would skip
+            // halving and be silently accepted (audit 03·H2 defense-in-depth;
+            // the family μ-floors above are the primary fix).
             let mut nhalf = 0;
-            while obj > halving_bound && nhalf < max_halvings {
+            while (!obj.is_finite() || obj > halving_bound) && nhalf < max_halvings {
                 nhalf += 1;
                 for i in 0..self.u.len() {
                     self.u[i] = 0.5 * (&self.u[i] + &u_prev[i]);
@@ -1099,7 +1123,11 @@ impl GeneralizedLinearMixedModel {
         if n_agq <= 1 {
             return self.laplace_objective();
         }
-        debug_assert!(
+        // Hard runtime check (not debug_assert!): in release a violated
+        // invariant here would otherwise feed a multi-/vector-valued RE model
+        // into the single-scalar AGQ math below, silently producing wrong
+        // numbers (or an opaque index panic) rather than a clear refusal.
+        assert!(
             self.is_single_scalar_re(),
             "AGQ with n_agq > 1 requires exactly one scalar random-effects term; \
              callers must invoke validate_agq() before reaching this path"
@@ -3958,6 +3986,43 @@ mod tests {
         assert_eq!(model.family, Family::Gamma);
         assert_eq!(model.dispersion(false), 1.0);
         assert_eq!(model.dispersion(true), 1.0);
+    }
+
+    #[test]
+    fn test_gamma_inverse_gaussian_deviance_finite_at_nonpositive_mu() {
+        // Regression for audit 03·H2 / mote bd-01KRXCQ8T7J50F739C7ADHFD41:
+        // an inverse-link Gamma/InverseGaussian GLMM can transiently propose
+        // μ ≤ 0 during PIRLS. The per-observation deviance component must stay
+        // finite (a large penalty step-halving can reject), never NaN/Inf
+        // that would slip the `obj > halving_bound` guard.
+        let data = gamma_dispersion_fixture();
+        let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
+        let gamma = GeneralizedLinearMixedModel::new(
+            formula.clone(),
+            &data,
+            Family::Gamma,
+            Some(LinkFunction::Log),
+        )
+        .unwrap();
+        for &mu in &[0.0_f64, -1e-12, -1.0, -1e6] {
+            let d = gamma.dev_resid_component(2.5, mu);
+            assert!(d.is_finite(), "Gamma dev at μ={mu} must be finite, got {d}");
+        }
+
+        let inv_g = GeneralizedLinearMixedModel::new(
+            formula,
+            &data,
+            Family::InverseGaussian,
+            Some(LinkFunction::Log),
+        )
+        .unwrap();
+        for &mu in &[0.0_f64, -1e-9, -3.0] {
+            let d = inv_g.dev_resid_component(2.5, mu);
+            assert!(
+                d.is_finite(),
+                "InverseGaussian dev at μ={mu} must be finite, got {d}"
+            );
+        }
     }
 
     #[cfg(not(feature = "nlopt"))]
