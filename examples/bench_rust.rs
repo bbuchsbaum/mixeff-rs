@@ -182,7 +182,7 @@ fn bench_fit_with_feval(
                 let elapsed = start.elapsed().as_secs_f64() * 1000.0;
                 times_ms.push(elapsed);
                 objectives.push(m.objective());
-                fevals.push(m.optsum.feval as f64);
+                fevals.push(m.optsum().feval as f64);
             }
             Err(e) => {
                 eprintln!("Fit failed: {}", e);
@@ -230,7 +230,7 @@ fn bench_fit_with_breakdown(
                 totals_ms.push(total_start.elapsed().as_secs_f64() * 1000.0);
                 build_ms.push(build_elapsed);
                 objectives.push(m.objective());
-                fevals.push(m.optsum.feval as f64);
+                fevals.push(m.optsum().feval as f64);
             }
             Err(e) => {
                 eprintln!("Fit failed: {}", e);

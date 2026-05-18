@@ -19,8 +19,11 @@ use nalgebra::DMatrix;
 use mixeff_rs::datasets;
 use mixeff_rs::formula::parse_formula;
 use mixeff_rs::model::{
-    BatchOptimizerControl, BatchOptions, BatchWarmStart, LinearMixedModel, LinearMixedModelBatch,
-    ResponseBatchMode,
+    batch::{
+        BatchOptimizerControl, BatchOptions, BatchWarmStart, LinearMixedModelBatch,
+        ResponseBatchMode,
+    },
+    LinearMixedModel,
 };
 
 const DEFAULT_QS: &[usize] = &[1, 4, 16, 64];

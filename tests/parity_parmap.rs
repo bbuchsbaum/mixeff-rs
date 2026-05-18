@@ -71,11 +71,11 @@ fn test_parmap_vsize3_lower_triangular_order() {
     let model = LinearMixedModel::new(formula, &data, None).unwrap();
 
     assert_eq!(model.nobs(), expected.nobs);
-    assert_eq!(model.reterms.len(), 1);
-    assert_eq!(model.reterms[0].grouping_name, expected.grouping);
-    assert_eq!(model.reterms[0].cnames, expected.cnames);
-    assert_eq!(model.reterms[0].vsize, 3);
-    assert_eq!(model.reterms[0].inds, expected.linear_indices_column_major);
+    assert_eq!(model.reterms().len(), 1);
+    assert_eq!(model.reterms()[0].grouping_name, expected.grouping);
+    assert_eq!(model.reterms()[0].cnames, expected.cnames);
+    assert_eq!(model.reterms()[0].vsize, 3);
+    assert_eq!(model.reterms()[0].inds, expected.linear_indices_column_major);
 
     let expected_parmap = expected
         .parmap_zero_based

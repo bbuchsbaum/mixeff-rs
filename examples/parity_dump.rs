@@ -145,7 +145,7 @@ fn block_logdet_factor(block: &MatrixBlock) -> f64 {
 }
 
 fn objective_components(model: &LinearMixedModel) -> (f64, f64, f64) {
-    let k = model.reterms.len();
+    let k = model.reterms().len();
     let l_blocks = model.l_blocks();
     let logdet_re = (0..k)
         .map(|j| {
@@ -164,7 +164,7 @@ fn objective_components(model: &LinearMixedModel) -> (f64, f64, f64) {
         }
     }
 
-    let logdet_total = if model.optsum.reml {
+    let logdet_total = if model.optsum().reml {
         logdet_re + 2.0 * logdet_xx
     } else {
         logdet_re
@@ -314,14 +314,14 @@ fn dump_contra_glmm(n_agq: usize) {
         family: "bernoulli".to_string(),
         link: "logit".to_string(),
         n_rows: data.nrow(),
-        n_groups: model.lmm().reterms[0].n_levels(),
+        n_groups: model.lmm().reterms()[0].n_levels(),
         fit_n_agq: n_agq,
         fit_theta: model.theta(),
         fit_beta: model.beta.iter().copied().collect(),
         fit_objective: model.objective(),
         fit_deviance_laplace: dev_lap,
         fit_deviance_agq: dev_agq,
-        fit_feval: model.lmm().optsum.feval,
+        fit_feval: model.lmm().optsum().feval,
     };
 
     println!("{}", serde_json::to_string_pretty(&dump).unwrap());
@@ -370,7 +370,7 @@ fn main() {
     let fit_objective = model.objective();
     let fit_pwrss = model.pwrss();
     let (fit_logdet_re, fit_logdet_xx, fit_logdet_total) = objective_components(&model);
-    let fit_feval = model.optsum.feval;
+    let fit_feval = model.optsum().feval;
 
     let input_theta_summary = input_theta.as_ref().map(|theta| {
         let mut probe = model.clone();

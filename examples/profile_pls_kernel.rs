@@ -260,10 +260,10 @@ fn profile_update_stages(
 
     for _ in 0..measured {
         model.set_theta(theta)?;
-        let l00 = model.reterms[0].lambda[(0, 0)];
-        let l01 = model.reterms[0].lambda[(0, 1)];
-        let l10 = model.reterms[0].lambda[(1, 0)];
-        let l11 = model.reterms[0].lambda[(1, 1)];
+        let l00 = model.reterms()[0].lambda[(0, 0)];
+        let l01 = model.reterms()[0].lambda[(0, 1)];
+        let l10 = model.reterms()[0].lambda[(1, 0)];
+        let l11 = model.reterms()[0].lambda[(1, 1)];
 
         let (l_blocks, a_blocks) = model.l_blocks_mut_a_blocks();
 

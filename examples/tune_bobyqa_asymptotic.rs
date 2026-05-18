@@ -90,16 +90,16 @@ fn percentile(samples: &mut [f64], q: f64) -> f64 {
 fn configure(model: &mut LinearMixedModel, variant: Variant) {
     let n_theta = model.n_theta();
     if let Some(ftol_rel) = variant.ftol_rel {
-        model.optsum.ftol_rel = ftol_rel;
+        model.optsum_mut().ftol_rel = ftol_rel;
     }
     if let Some(ftol_abs) = variant.ftol_abs {
-        model.optsum.ftol_abs = ftol_abs;
+        model.optsum_mut().ftol_abs = ftol_abs;
     }
     if let Some(xtol_abs) = variant.xtol_abs {
-        model.optsum.xtol_abs = vec![xtol_abs; n_theta];
+        model.optsum_mut().xtol_abs = vec![xtol_abs; n_theta];
     }
     if let Some(initial_step) = variant.initial_step {
-        model.optsum.initial_step = vec![initial_step; n_theta];
+        model.optsum_mut().initial_step = vec![initial_step; n_theta];
     }
 }
 

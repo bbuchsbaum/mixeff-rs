@@ -45,6 +45,17 @@ The native TrustBQ profile is useful for downstream packages, binary
 distribution, embedded use, and build systems that prefer to avoid additional C
 dependencies. NLopt-backed builds remain the default performance path.
 
+## API documentation
+
+The docs.rs surface is intentionally centered on the stable fitting API:
+`prelude`, `formula`, `model`, `stats`, `error`, and the small support surface
+under `types`. Advanced implementation modules such as compiler artifacts,
+pathology internals, bundled datasets, response-matrix batch helpers, and
+fixed-design backends are either behind `unstable-internals` or hidden from
+the primary `model::*` barrel until their contracts are ready for SemVer
+protection. See [`docs/semver_policy.md`](docs/semver_policy.md) for the
+current public-surface inventory.
+
 ## Quick start
 
 The `prelude` pulls in the common types; the builder collapses construction and

@@ -24,13 +24,16 @@ The following modules and their documented public items are part of the stable
 - **`mixeff_rs::formula`** — `parse_formula`, the `Formula` AST types
   (`Formula`, `FixedTerm`, `RandomTerm`, `GroupingFactor`), `FormulaError`.
 
-- **`mixeff_rs::model`** — `DataFrame`, `LinearMixedModel`,
-  `LinearMixedModelBuilder`, `GeneralizedLinearMixedModel`,
-  `GeneralizedLinearMixedModelBuilder`, `FitOptions`, `ModelCriterion`,
-  `MixedModelFit`, `Family`, `LinkFunction`, and all documented fit /
-  inference / bootstrap / prediction entry points, including
+- **`mixeff_rs::model`** — the primary fitting surface: `DataFrame`,
+  `LinearMixedModel`, `LinearMixedModelBuilder`,
+  `GeneralizedLinearMixedModel`, `GeneralizedLinearMixedModelBuilder`,
+  `FitOptions`, `ModelCriterion`, `MixedModelFit`, `Family`,
+  `LinkFunction`, `NewReLevels`, and the documented fit / inference /
+  bootstrap / prediction entry points, including
   `LinearMixedModel::fixed_effect_fitted()` for training-frame
-  fixed-effects-only fitted values.
+  fixed-effects-only fitted values. Experimental batch-response,
+  fixed-design-backend, KR-builder, and optimizer-verification helper types
+  are not re-exported from the stable `model::*` barrel.
 
 - **`mixeff_rs::stats`** — post-fit summaries (`varcorr`, `coeftable`,
   `model_summary`, `lrt`, `bootstrap`, `profile`) and their documented JSON
@@ -42,9 +45,11 @@ The following modules and their documented public items are part of the stable
   `MixedModelError::code()` / `LinAlgError::code()` strings for downstream
   bindings.
 
-- **`mixeff_rs::types`** — typed model-matrix containers intentionally
-  exposed for advanced callers (e.g. `MatrixBlock`, `OptSummary`,
-  `FitLogEntry`, `Optimizer`, `GaussHermiteNormalized`).
+- **`mixeff_rs::types`** — the small set of typed support values
+  intentionally exposed for advanced callers and tests, notably
+  `MatrixBlock`, `OptSummary`, `FitLogEntry`, `Optimizer`, and
+  `ConvergenceStatus`. Other storage helpers remain implementation detail
+  unless explicitly asserted in `tests/public_api.rs`.
 
 - **`mixeff_rs::nalgebra`** (re-export via `pub use nalgebra`) — the path is
   stable; the nalgebra *version* behind it follows nalgebra's own SemVer and
@@ -73,6 +78,13 @@ a major version bump:
 
 - **`mixeff_rs::datasets`** — bundled reference fixtures; contents and
   provenance metadata may change as parity fixtures are regenerated.
+
+- **`mixeff_rs::model::batch`**, **`mixeff_rs::model::fixed_design`**, and
+  KR/optimizer-verification helper structs under `mixeff_rs::model::linear`
+  — advanced implementation surfaces used by benchmarks, internal tests, and
+  staged downstream work. They are deliberately not part of the stable
+  `model::*` barrel until their contracts are ready for rustdoc-first
+  documentation and SemVer protection.
 
 Not reachable downstream at all (always `pub(crate)`):
 

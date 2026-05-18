@@ -379,10 +379,10 @@ fn main() {
 
         let theta = model.theta();
         let fit_objective = model.objective();
-        let fit_feval = model.optsum.feval as f64;
-        let optimizer = model.optsum.optimizer_name().to_string();
-        let backend = model.optsum.backend_name().to_string();
-        let status = model.optsum.return_value.clone();
+        let fit_feval = model.optsum().feval as f64;
+        let optimizer = model.optsum().optimizer_name().to_string();
+        let backend = model.optsum().backend_name().to_string();
+        let status = model.optsum().return_value.clone();
         let (n, p, q, n_reterms) = model.model_size();
         let d_theta = model.n_theta();
 

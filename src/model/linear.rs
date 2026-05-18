@@ -81,18 +81,18 @@ use crate::unstable_internal_method;
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct LinearMixedModel {
-    pub formula: Formula,
-    pub reterms: Vec<ReMat>,
+    pub(crate) formula: Formula,
+    pub(crate) reterms: Vec<ReMat>,
     pub(crate) xy_mat: FeMat,
-    pub y: DVector<f64>,
+    pub(crate) y: DVector<f64>,
     pub(crate) feterm: FeTerm,
     pub(crate) fixed_design: FixedDesign,
     pub(crate) sqrtwts: Vec<f64>,
     pub(crate) parmap: Vec<(usize, usize, usize)>, // (block, row, col)
-    pub dims: ModelDims,
+    pub(crate) dims: ModelDims,
     pub(crate) a_blocks: Vec<MatrixBlock>,
     pub(crate) l_blocks: Vec<MatrixBlock>,
-    pub optsum: OptSummary,
+    pub(crate) optsum: OptSummary,
     pub(crate) compiler_artifact: CompiledModelArtifact,
     pub(crate) residual_source: crate::model::summary_estimates::ResidualSource,
     /// Training-time categorical level order (and explicit contrast, if any)
@@ -117,9 +117,12 @@ pub(crate) struct TrainingCategoricalLevels {
 /// Model dimensions.
 #[derive(Debug, Clone, Copy)]
 pub struct ModelDims {
-    pub n: usize,       // number of observations
-    pub p: usize,       // rank of fixed-effects matrix
-    pub nretrms: usize, // number of random-effects terms
+    /// Number of observations.
+    pub n: usize,
+    /// Rank of the fixed-effects matrix.
+    pub p: usize,
+    /// Number of random-effects terms.
+    pub nretrms: usize,
 }
 
 /// How to handle random-effects levels not seen during training.
@@ -136,6 +139,7 @@ pub enum NewReLevels {
 
 /// Profiled quantities for a batch of response columns sharing the same
 /// fixed-effects design, random-effects structure, and theta.
+#[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct ResponseMatrixProfile {
     /// Fixed-effects solutions for each response column, shape `p x q`.
@@ -202,6 +206,7 @@ where
 }
 
 /// Covariance estimate for `varpar = c(theta, sigma)` plus Hessian diagnostics.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct VcovVarparEstimate {
     pub covariance: DMatrix<f64>,
@@ -233,6 +238,7 @@ pub enum CovarianceKktClassification {
 }
 
 /// Per-term scalar covariance-cone KKT diagnostic.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScalarCovarianceKktBlock {
     pub term_index: usize,
@@ -247,6 +253,7 @@ pub struct ScalarCovarianceKktBlock {
 }
 
 /// Scalar covariance-cone KKT certificate for fitted LMM covariance blocks.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScalarCovarianceKktCertificate {
     pub blocks: Vec<ScalarCovarianceKktBlock>,
@@ -257,6 +264,7 @@ pub struct ScalarCovarianceKktCertificate {
 }
 
 /// Per-term 2x2 covariance-cone KKT diagnostic.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct TwoByTwoCovarianceKktBlock {
     pub term_index: usize,
@@ -273,6 +281,7 @@ pub struct TwoByTwoCovarianceKktBlock {
 }
 
 /// 2x2 covariance-cone KKT certificate for fitted LMM covariance blocks.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct TwoByTwoCovarianceKktCertificate {
     pub blocks: Vec<TwoByTwoCovarianceKktBlock>,
@@ -288,6 +297,7 @@ pub struct TwoByTwoCovarianceKktCertificate {
 /// This is the Rust analogue of `pbkrtest::get_SigmaG()`: `sigma` is the
 /// fitted marginal response covariance and each component matrix is a known
 /// `G_i` such that `sigma = sum_i weights[i] * components[i]`.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct KenwardRogerSigmaG {
     pub sigma: DMatrix<f64>,
@@ -308,6 +318,7 @@ pub struct KenwardRogerSigmaG {
 }
 
 /// Kenward-Roger adjusted fixed-effect covariance payload.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct KenwardRogerAdjustedVcov {
     pub unadjusted_vcov_active: DMatrix<f64>,
@@ -326,6 +337,7 @@ pub struct KenwardRogerAdjustedVcov {
 }
 
 /// Kenward-Roger denominator degrees-of-freedom result for `L beta = rhs`.
+#[doc(hidden)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct KenwardRogerLbDdf {
     pub denominator_df: f64,
@@ -342,6 +354,7 @@ pub struct KenwardRogerLbDdf {
 }
 
 /// Controls the bounded verification workflow run after a fitted model.
+#[doc(hidden)]
 #[derive(Debug, Clone)]
 pub struct ConvergenceVerificationOptions {
     pub restart_from_optimum: bool,
@@ -2081,6 +2094,61 @@ impl LinearMixedModel {
     /// Get the response vector y (last column of xy_mat).
     pub fn y(&self) -> DVector<f64> {
         self.y.clone()
+    }
+
+    /// Borrow the response vector `y` without cloning.
+    ///
+    /// Read-only view of the same data returned (by value) from
+    /// [`LinearMixedModel::y`]; prefer this when an owned copy is unnecessary.
+    pub fn y_ref(&self) -> &DVector<f64> {
+        &self.y
+    }
+
+    /// Borrow the model formula.
+    ///
+    /// The fitted model owns the parsed [`Formula`]; it is exposed read-only
+    /// because mutating it post-fit would silently desynchronize every derived
+    /// quantity (design matrices, β, vcov, …).
+    pub fn formula(&self) -> &Formula {
+        &self.formula
+    }
+
+    /// Borrow the random-effects terms.
+    ///
+    /// Read-only: the per-term Λ_θ/Z/refs are part of the fitted state and must
+    /// not be mutated externally without re-fitting.
+    pub fn reterms(&self) -> &[ReMat] {
+        &self.reterms
+    }
+
+    /// Borrow the model dimensions (`n`, `p`, `nretrms`).
+    pub fn dims(&self) -> &ModelDims {
+        &self.dims
+    }
+
+    /// Borrow the optimization summary.
+    ///
+    /// Read-only mirror of [`MixedModelFit::opt_summary`]; mutating optimizer
+    /// state after a fit invalidates convergence diagnostics.
+    pub fn optsum(&self) -> &OptSummary {
+        &self.optsum
+    }
+
+    // The method inside the macro carries its own docs when it is public.
+    unstable_internal_method! {
+    /// Mutable optimizer summary.
+    ///
+    /// **Unstable internal surface:** `pub` only with the
+    /// `unstable-internals` feature; otherwise `pub(crate)`. This escape
+    /// hatch exists solely so in-repo benchmarks and tuning harnesses can
+    /// configure optimizer tolerances and the initial θ *before* calling
+    /// [`LinearMixedModel::fit`]. Mutating `optsum` *after* a fit silently
+    /// desynchronizes convergence diagnostics; there is no supported reason
+    /// to do so. Not part of the stable 1.0 API and exempt from SemVer.
+    #[allow(dead_code)]
+    unstable_vis fn optsum_mut(&mut self) -> &mut OptSummary {
+        &mut self.optsum
+    }
     }
 
     /// Get the current θ parameter vector.
@@ -6114,6 +6182,7 @@ impl LinearMixedModel {
         Ok(y_new)
     }
 
+    /// Build the null data-generating state for a fixed-effect bootstrap test.
     pub fn fixed_effect_null_bootstrap_target(
         &self,
         hypothesis: &FixedEffectHypothesis,
@@ -6198,6 +6267,7 @@ impl LinearMixedModel {
         })
     }
 
+    /// Simulate one response vector under a fixed-effect null target.
     pub fn simulate_fixed_effect_null<R: rand::Rng>(
         &self,
         rng: &mut R,
@@ -6590,6 +6660,7 @@ impl LinearMixedModel {
         )
     }
 
+    /// Build one zero-valued single-coefficient hypothesis per fixed effect.
     pub fn coefficient_hypotheses(&self) -> Vec<FixedEffectHypothesis> {
         let names = self.coef_names();
         names
@@ -6601,10 +6672,12 @@ impl LinearMixedModel {
             .collect()
     }
 
+    /// Test a fixed-effect contrast with the model's default method policy.
     pub fn test_contrast(&self, hypothesis: FixedEffectHypothesis) -> FixedEffectTest {
         self.test_contrast_with_method(hypothesis, FixedEffectTestMethod::Auto)
     }
 
+    /// Test a fixed-effect contrast with an explicitly requested method.
     pub fn test_contrast_with_method(
         &self,
         hypothesis: FixedEffectHypothesis,
@@ -6772,6 +6845,7 @@ impl LinearMixedModel {
         }
     }
 
+    /// Test a fixed-effect contrast using a certified bootstrap payload.
     pub fn test_contrast_with_bootstrap_payload(
         &self,
         hypothesis: FixedEffectHypothesis,
@@ -6839,6 +6913,7 @@ impl LinearMixedModel {
         )
     }
 
+    /// Build one fixed-effect inference row from a bootstrap payload.
     pub fn fixed_effect_bootstrap_inference_row(
         &self,
         kind: FixedEffectInferenceRowKind,
@@ -6853,6 +6928,7 @@ impl LinearMixedModel {
         row
     }
 
+    /// Build an inference table for user-supplied fixed-effect hypotheses.
     pub fn fixed_effect_contrast_inference_table(
         &self,
         hypotheses: Vec<FixedEffectHypothesis>,
@@ -6871,6 +6947,7 @@ impl LinearMixedModel {
         FixedEffectInferenceTable::new(rows)
     }
 
+    /// Build one inference row for a user-supplied fixed-effect hypothesis.
     pub fn fixed_effect_contrast_inference_row(
         &self,
         kind: FixedEffectInferenceRowKind,
@@ -6880,6 +6957,7 @@ impl LinearMixedModel {
         fixed_effect_test_to_inference_row(kind, self.test_contrast_with_method(hypothesis, method))
     }
 
+    /// Run fixed-effect null bootstrap inference for a set of hypotheses.
     pub fn fixed_effect_null_bootstrap_inference_table(
         &self,
         hypotheses: Vec<FixedEffectHypothesis>,
@@ -6898,6 +6976,7 @@ impl LinearMixedModel {
         FixedEffectInferenceTable::new(rows)
     }
 
+    /// Run fixed-effect null bootstrap inference for one hypothesis.
     pub fn fixed_effect_null_bootstrap_inference_row(
         &self,
         kind: FixedEffectInferenceRowKind,
@@ -7018,6 +7097,7 @@ impl LinearMixedModel {
         Ok(bootstrap.into_run_payload_with_statistics(metadata, statistics))
     }
 
+    /// Build a cluster-resampling full-model bootstrap payload for one contrast.
     pub fn cluster_resample_full_model_contrast_payload(
         &self,
         data: &DataFrame,
@@ -7154,6 +7234,7 @@ impl LinearMixedModel {
             .into_run_payload_with_statistics_and_intervals(metadata, statistics, intervals))
     }
 
+    /// Build one fixed-effect term hypothesis per compiler-audited term.
     pub fn fixed_effect_term_hypotheses(&self) -> Vec<FixedEffectHypothesis> {
         let names = self.coef_names();
         let Some(audit) = self.compiler_artifact.design_audit.as_ref() else {
@@ -7186,6 +7267,7 @@ impl LinearMixedModel {
             .collect()
     }
 
+    /// Build an inference table for compiler-audited fixed-effect terms.
     pub fn fixed_effect_term_inference_table(
         &self,
         method: FixedEffectTestMethod,
@@ -7902,6 +7984,7 @@ impl LinearMixedModel {
         Ok(values)
     }
 
+    /// Build the default fixed-effect coefficient inference table.
     pub fn fixed_effect_inference_table(&self) -> FixedEffectInferenceTable {
         self.fixed_effect_inference_table_with_method(FixedEffectTestMethod::Auto)
     }
@@ -7923,6 +8006,7 @@ impl LinearMixedModel {
         FixedEffectInferenceTable::new(rows)
     }
 
+    /// Return the fixed-effect covariance matrix with compiler-audit metadata.
     pub fn fixed_effect_covariance_matrix(&self) -> FixedEffectCovarianceMatrix {
         let coef_names = self.coef_names();
         let vcov = self.vcov();
@@ -12591,26 +12675,37 @@ pub struct BootstrapInterval {
     pub method: BootstrapIntervalMethod,
 }
 
+/// Stable schema name for bootstrap-run payloads.
 pub const BOOTSTRAP_RUN_SCHEMA: &str = "mixedmodels.bootstrap_run";
+/// Stable schema version for bootstrap-run payloads.
 pub const BOOTSTRAP_RUN_SCHEMA_VERSION: &str = "1.0.0";
 
+/// Target distribution represented by a bootstrap run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum BootstrapTargetKind {
+    /// Full fitted-model data-generating distribution.
     FullModelDistribution,
+    /// Fixed-effect null distribution for a contrast.
     FixedEffectNull,
+    /// Cluster-resampled empirical distribution.
     ClusterResample,
 }
 
+/// Description of the bootstrap target.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BootstrapTarget {
+    /// Target distribution kind.
     pub kind: BootstrapTargetKind,
+    /// Human-readable target label.
     pub label: String,
+    /// Contrast label for fixed-effect null targets.
     pub contrast_label: Option<String>,
 }
 
 impl BootstrapTarget {
+    /// Build a full-model bootstrap target.
     pub fn full_model_distribution(label: impl Into<String>) -> Self {
         Self {
             kind: BootstrapTargetKind::FullModelDistribution,
@@ -12619,6 +12714,7 @@ impl BootstrapTarget {
         }
     }
 
+    /// Build a fixed-effect null bootstrap target.
     pub fn fixed_effect_null(label: impl Into<String>, contrast_label: impl Into<String>) -> Self {
         Self {
             kind: BootstrapTargetKind::FixedEffectNull,
@@ -12627,6 +12723,7 @@ impl BootstrapTarget {
         }
     }
 
+    /// Build a cluster-resampling bootstrap target.
     pub fn cluster_resample(label: impl Into<String>) -> Self {
         Self {
             kind: BootstrapTargetKind::ClusterResample,
@@ -12636,19 +12733,27 @@ impl BootstrapTarget {
     }
 }
 
+/// Policy for bootstrap refits that fail numerically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum BootstrapFailedRefitPolicy {
+    /// Exclude failed refits from bootstrap summaries.
     Exclude,
+    /// Count failed refits as extreme replicates for p-value accounting.
     CountExtreme,
+    /// Stop the bootstrap when the first refit fails.
     Abort,
 }
 
+/// Options for fixed-effect bootstrap inference.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FixedEffectBootstrapOptions {
+    /// Number of bootstrap replicates requested.
     pub requested_replicates: usize,
+    /// How to handle failed bootstrap refits.
     pub failed_refit_policy: BootstrapFailedRefitPolicy,
+    /// Optional deterministic seed for `StdRng`.
     pub seed: Option<u64>,
 }
 
@@ -12662,14 +12767,19 @@ impl Default for FixedEffectBootstrapOptions {
     }
 }
 
+/// Reproducibility record for a bootstrap run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BootstrapSeedRecord {
+    /// Random-number generator name.
     pub rng: String,
+    /// Recorded seed when available.
     pub seed: Option<u64>,
+    /// Human-readable reproducibility note.
     pub reproducibility_note: String,
 }
 
 impl BootstrapSeedRecord {
+    /// Build a record for an unrecorded seed.
     pub fn unspecified() -> Self {
         Self {
             rng: "unknown".to_string(),
@@ -12679,6 +12789,7 @@ impl BootstrapSeedRecord {
         }
     }
 
+    /// Build a record for a `StdRng` seed.
     pub fn std_rng(seed: u64) -> Self {
         Self {
             rng: "StdRng".to_string(),
@@ -12688,14 +12799,19 @@ impl BootstrapSeedRecord {
     }
 }
 
+/// Refit settings used inside bootstrap replicates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BootstrapRefitOptions {
+    /// Whether refits use REML.
     pub reml: bool,
+    /// Optimizer backend label.
     pub backend: String,
+    /// Optimizer label.
     pub optimizer: String,
 }
 
 impl BootstrapRefitOptions {
+    /// Capture refit options from a fitted model.
     pub fn from_model(model: &LinearMixedModel) -> Self {
         Self {
             reml: model.optsum.reml,
@@ -12705,56 +12821,90 @@ impl BootstrapRefitOptions {
     }
 }
 
+/// Metadata attached to a bootstrap-run payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BootstrapRunMetadata {
+    /// Stable schema name.
     pub schema_name: String,
+    /// Stable schema version.
     pub schema_version: String,
+    /// Bootstrap target.
     pub target: BootstrapTarget,
+    /// Number of replicates requested by the caller.
     pub requested_replicates: usize,
+    /// Number of replicates actually collected.
     pub completed_replicates: usize,
+    /// Number of replicates with finite successful refits.
     pub successful_replicates: usize,
+    /// Number of failed refits.
     pub failed_refits: usize,
+    /// Failed-refit accounting policy.
     pub failed_refit_policy: BootstrapFailedRefitPolicy,
+    /// Successful refits ending on a covariance boundary.
     pub boundary_count: usize,
+    /// Boundary refit fraction among successful replicates.
     pub boundary_rate: Option<f64>,
+    /// Randomness/reproducibility record.
     pub seed_record: BootstrapSeedRecord,
+    /// Refit settings used for bootstrap replicates.
     pub refit_options: BootstrapRefitOptions,
+    /// Statistic label when scalar replicate statistics are attached.
     pub statistic_label: Option<String>,
+    /// Count of finite attached replicate statistics.
     pub finite_statistic_count: Option<usize>,
+    /// Monte Carlo standard error for a bootstrap p-value, when available.
     pub mcse: Option<f64>,
+    /// Reader-facing caveats and diagnostics.
     pub notes: Vec<String>,
 }
 
+/// Serializable bootstrap run with metadata and optional scalar summaries.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BootstrapRunPayload {
+    /// Run metadata and accounting.
     pub metadata: BootstrapRunMetadata,
+    /// Per-replicate fitted quantities.
     pub replicates: MixedModelBootstrap,
+    /// Optional scalar statistic per replicate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicate_statistics: Option<Vec<f64>>,
+    /// Optional bootstrap intervals for scalar statistics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intervals: Option<Vec<BootstrapInterval>>,
 }
 
+/// Covariance policy for fixed-effect null bootstrap simulation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum FixedEffectNullCovariancePolicy {
+    /// Reuse the fitted random-effect covariance and residual scale.
     ReuseFittedCovariance,
 }
 
+/// Null data-generating state for fixed-effect bootstrap simulation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FixedEffectNullBootstrapTarget {
+    /// Bootstrap target descriptor.
     pub target: BootstrapTarget,
+    /// Covariance handling policy.
     pub covariance_policy: FixedEffectNullCovariancePolicy,
+    /// Coefficient names aligned with `beta_fitted` and `beta_null`.
     pub coefficient_names: Vec<String>,
+    /// Fitted fixed-effect coefficients.
     #[serde(with = "json_dvector_f64")]
     pub beta_fitted: DVector<f64>,
+    /// Null-constrained fixed-effect coefficients.
     #[serde(with = "json_dvector_f64")]
     pub beta_null: DVector<f64>,
+    /// Fitted covariance-parameter vector reused under the null.
     pub theta: Vec<f64>,
+    /// Fitted residual scale reused under the null.
     #[serde(with = "json_f64")]
     pub sigma: f64,
+    /// Whether the source model was REML-fitted.
     pub reml: bool,
+    /// Reader-facing caveats and diagnostics.
     pub notes: Vec<String>,
 }
 
@@ -12916,6 +13066,7 @@ impl MixedModelBootstrap {
         Ok(())
     }
 
+    /// Build metadata for these replicates against a fitted model template.
     pub fn run_metadata_for_model(
         &self,
         model: &LinearMixedModel,
@@ -12989,6 +13140,7 @@ impl MixedModelBootstrap {
         }
     }
 
+    /// Attach metadata and return a bootstrap payload.
     pub fn into_run_payload(self, metadata: BootstrapRunMetadata) -> BootstrapRunPayload {
         BootstrapRunPayload {
             metadata,
@@ -12998,6 +13150,7 @@ impl MixedModelBootstrap {
         }
     }
 
+    /// Attach metadata plus scalar replicate statistics and return a payload.
     pub fn into_run_payload_with_statistics(
         self,
         metadata: BootstrapRunMetadata,
@@ -13011,6 +13164,7 @@ impl MixedModelBootstrap {
         }
     }
 
+    /// Attach metadata, scalar statistics, and intervals and return a payload.
     pub fn into_run_payload_with_statistics_and_intervals(
         self,
         metadata: BootstrapRunMetadata,
@@ -20590,8 +20744,7 @@ mod tests {
         // transform labels surface as the response name and a coefficient
         // name byte-identical to what R prints.
         let data = sleepstudy_fixture();
-        let formula =
-            parse_formula("log(reaction) ~ days + I(days^2) + (1 | subj)").unwrap();
+        let formula = parse_formula("log(reaction) ~ days + I(days^2) + (1 | subj)").unwrap();
         assert_eq!(formula.response, "log(reaction)");
         let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
         model.fit(false).unwrap();
@@ -20639,13 +20792,9 @@ mod tests {
             )
             .unwrap();
         bare_data
-            .add_categorical(
-                "subj",
-                data.categorical("subj").unwrap().values.clone(),
-            )
+            .add_categorical("subj", data.categorical("subj").unwrap().values.clone())
             .unwrap();
-        let bare_formula =
-            parse_formula("reaction ~ days + days_sq + (1 | subj)").unwrap();
+        let bare_formula = parse_formula("reaction ~ days + days_sq + (1 | subj)").unwrap();
         let mut bare_model = LinearMixedModel::new(bare_formula, &bare_data, None).unwrap();
         bare_model.fit(false).unwrap();
 
@@ -20657,7 +20806,9 @@ mod tests {
         bare_fresh
             .add_categorical("subj", vec!["S308".into(), "S309".into(), "S310".into()])
             .unwrap();
-        let via_bare = bare_model.predict_new(&bare_fresh, NewReLevels::Error).unwrap();
+        let via_bare = bare_model
+            .predict_new(&bare_fresh, NewReLevels::Error)
+            .unwrap();
 
         assert_eq!(via_transform.len(), via_bare.len());
         for (a, b) in via_transform.iter().zip(via_bare.iter()) {

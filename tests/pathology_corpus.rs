@@ -724,7 +724,7 @@ fn crossed_block_diagonal_engine_runs_with_two_grouping_factors() {
     // Acceptance criterion: the crossed-RE fixture must "verifiably touch
     // BlockedSparse code paths". The engine in this codebase uses the
     // multi-`ReMat` blocked-Cholesky path (see `promote_crossed_fill_in_blocks`
-    // in src/model/linear.rs) once `model.reterms.len() >= 2`, which is
+    // in src/model/linear.rs) once `model.reterms().len() >= 2`, which is
     // the regime BlockedSparse was introduced for. We therefore probe
     // the model's reterm count rather than instantiating BlockedSparse
     // directly.
@@ -734,7 +734,7 @@ fn crossed_block_diagonal_engine_runs_with_two_grouping_factors() {
     let mut model = LinearMixedModel::new(formula, &out.data, None)
         .expect("crossed-RE LMM must construct on a structurally disconnected design");
     assert_eq!(
-        model.reterms.len(),
+        model.reterms().len(),
         2,
         "crossed fixture must produce two grouping factors (g, h)"
     );

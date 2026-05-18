@@ -3,9 +3,11 @@ use nalgebra::DMatrix;
 
 use mixeff_rs::formula::parse_formula;
 use mixeff_rs::model::{
-    BatchOptimizerControl, BatchOptions, BatchThetaGrouping, BatchWarmStart, DataFrame,
-    LinearMixedModel, LinearMixedModelBatch, MixedModelFit, ResponseBatchMode, ResponseFitStatus,
-    ThetaBatch,
+    batch::{
+        BatchOptimizerControl, BatchOptions, BatchThetaGrouping, BatchWarmStart,
+        LinearMixedModelBatch, ResponseBatchMode, ResponseFitStatus, ThetaBatch,
+    },
+    DataFrame, LinearMixedModel, MixedModelFit,
 };
 
 fn random_intercept_data() -> DataFrame {

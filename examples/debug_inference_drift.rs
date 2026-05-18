@@ -92,7 +92,7 @@ fn diagnose_penicillin() {
     ] {
         let formula = parse_formula("diameter ~ 1 + (1 | plate) + (1 | sample)").unwrap();
         let mut m = LinearMixedModel::new(formula, &data, None).unwrap();
-        m.optsum.initial = theta_start.clone();
+        m.optsum_mut().initial = theta_start.clone();
         match m.fit(true) {
             Ok(_) => println!(
                 "    start={:?}  →  θ=[{:.6}, {:.6}]  σ={:.6}  REMLobj={:.6}  feval={}",
@@ -101,7 +101,7 @@ fn diagnose_penicillin() {
                 m.theta()[1],
                 m.sigma(),
                 m.objective_value(),
-                m.optsum.feval
+                m.optsum().feval
             ),
             Err(e) => println!("    start={:?}  →  fit ERROR: {e}", theta_start),
         }

@@ -53,6 +53,8 @@
 //! The lower-level form (`LinearMixedModel::new(formula, &df, None)?` then
 //! `model.fit(false)`) remains available; the builder is purely additive.
 
+#![warn(rustdoc::broken_intra_doc_links)]
+#![warn(rustdoc::bare_urls)]
 // Clippy allowlist policy (v1.0 — see docs/v1_0_release_roadmap.md Phase D #18).
 //
 // This crate is a numerically-faithful implementation of the MixedModels.jl

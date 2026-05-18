@@ -58,7 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(LinkFunction::Log),
         )?;
         if force_pattern_search {
-            model.lmm_mut().optsum.optimizer = Optimizer::PatternSearch;
+            model.lmm_mut().optsum_mut().optimizer = Optimizer::PatternSearch;
         }
         model.fit_with_options(true, 1, false)?;
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
