@@ -131,20 +131,52 @@ pub fn parametricbootstrap_glmm<R: rand::Rng>(
 
 /// Shortest coverage interval containing `level` proportion of values.
 ///
-/// Sorts `v` ascending in place, then scans every contiguous window of size
-/// `ceil(n * level)` and returns the narrowest one. Mirrors the
-/// `shortestcovint` summary helper used by the Julia bootstrap surface.
+/// Sorts `v` in place, then scans every contiguous window of size
+/// `ceil(n * level)` over the *finite* values and returns the narrowest one.
+/// Faithful port of MixedModels.jl `shortestcovint` (bootstrap.jl:473-486),
+/// including its skip of non-finite elements at the sorted ends.
+///
+/// This is a public helper documented for summarizing bootstrap replicate
+/// vectors (`boot.objectives()`, `boot.sigmas()`), which **deliberately
+/// contain `NaN`** for replicates whose refit failed (see the `Err` arm of
+/// the resampling loop above). It must therefore never panic on non-finite
+/// input: sorting uses a total order ([`f64::total_cmp`], which ranks `NaN`
+/// last just as Julia's `sort` does) rather than `partial_cmp().unwrap()`,
+/// and non-finite ends are trimmed before the window scan. If there are
+/// fewer than `ceil(n*level)` finite values the degenerate full-range
+/// `(v[0], v[n-1])` is returned (Julia's fallback), never a crash.
 pub fn shortest_cov_int(v: &mut [f64], level: f64) -> (f64, f64) {
-    assert!((0.0..1.0).contains(&level), "level must be in (0, 1)");
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert!(
+        level > 0.0 && level < 1.0,
+        "level must be in the open interval (0, 1)"
+    );
     let n = v.len();
+    if n == 0 {
+        return (f64::NAN, f64::NAN);
+    }
+    // Total order so NaN cannot panic the comparator; NaN sorts to the end
+    // (matching Julia `sort`'s `isless` placement of NaN).
+    v.sort_by(f64::total_cmp);
     let ilen = ((n as f64) * level).ceil() as usize;
-    if ilen >= n {
+
+    // First/last finite index in the sorted slice; the non-finite tail (the
+    // NaN failed-refit sentinels) is skipped (Julia: findfirst/findlast).
+    let (Some(start), Some(stop)) = (
+        v.iter().position(|x| x.is_finite()),
+        v.iter().rposition(|x| x.is_finite()),
+    ) else {
+        // No finite replicates at all — degenerate fallback, not a panic.
+        return (v[0], v[n - 1]);
+    };
+    // Not enough finite values to fill the interval
+    // (Julia: `stop < start + ilen - 1`). `ilen >= 1` since level > 0.
+    if ilen == 0 || stop < start + ilen - 1 {
         return (v[0], v[n - 1]);
     }
+
     let mut min_len = f64::INFINITY;
-    let mut best_i = 0;
-    for i in 0..=(n - ilen) {
+    let mut best_i = start;
+    for i in start..=(stop + 1 - ilen) {
         let len = v[i + ilen - 1] - v[i];
         if len < min_len {
             min_len = len;
@@ -206,6 +238,37 @@ mod tests {
         let mut v = vec![0.0, 10.0, 11.0, 12.0, 100.0];
         let (lo, hi) = shortest_cov_int(&mut v, 0.6);
         assert_eq!((lo, hi), (10.0, 12.0));
+    }
+
+    #[test]
+    fn test_shortest_cov_int_does_not_panic_on_nan_failed_refits() {
+        // Regression for audit 05·H1 / mote bd-01KRXCQ93S101ZC87ZG5BF7HRJ:
+        // failed bootstrap refits deliberately record f64::NAN in the
+        // objective/sigma series this public helper is documented to
+        // summarize. It must trim the non-finite tail (Julia shortestcovint),
+        // not panic via partial_cmp().unwrap().
+        let mut v = vec![10.0, f64::NAN, 11.0, 12.0, f64::NAN, 0.0, 100.0];
+        let (lo, hi) = shortest_cov_int(&mut v, 0.6);
+        // 5 finite values; ceil(7*0.6)=5 -> only one finite window
+        // [0,10,11,12,100] so the interval spans the finite range.
+        assert_eq!((lo, hi), (0.0, 100.0));
+        assert!(lo.is_finite() && hi.is_finite());
+
+        // Tighter level still ignores the NaNs and finds the tight cluster.
+        let mut v2 = vec![f64::NAN, 0.0, 10.0, 11.0, 12.0, 100.0, f64::NAN];
+        let (lo2, hi2) = shortest_cov_int(&mut v2, 0.4); // ceil(7*0.4)=3
+        assert_eq!((lo2, hi2), (10.0, 12.0));
+    }
+
+    #[test]
+    fn test_shortest_cov_int_all_nan_is_degenerate_not_panic() {
+        let mut v = vec![f64::NAN, f64::NAN, f64::NAN];
+        let (lo, hi) = shortest_cov_int(&mut v, 0.95);
+        assert!(lo.is_nan() && hi.is_nan());
+        // Empty input is also a non-panicking degenerate case.
+        let mut empty: Vec<f64> = vec![];
+        let (elo, ehi) = shortest_cov_int(&mut empty, 0.95);
+        assert!(elo.is_nan() && ehi.is_nan());
     }
 
     fn poisson_glmm_fixture() -> GeneralizedLinearMixedModel {
