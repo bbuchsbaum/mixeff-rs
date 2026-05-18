@@ -206,6 +206,20 @@ impl MixedModelFit for LinearModelFit {
 }
 
 /// Result of a likelihood ratio test comparing nested models.
+///
+/// # Boundary caveat (variance-component comparisons)
+///
+/// This is the classical χ²(Δdf) test. When the models differ by one or
+/// more **random-effects variance components**, the null places that
+/// parameter on the boundary of its space (σ² = 0), so the naive χ²(Δdf)
+/// reference distribution is **anti-conservative** (p-values too small;
+/// the correct null is a ½:½ χ̄² mixture for one boundary parameter). This
+/// struct intentionally reports the unadjusted statistic — matching
+/// `lme4`/MixedModels.jl behaviour — and does not itself detect or correct
+/// the boundary case. For variance-component comparisons use
+/// [`BoundaryLikelihoodRatioTest`] (certified χ̄² mixture for the
+/// one-added-boundary-parameter case) or [`parametric_bootstrap_lrt`],
+/// which are statistically honest at the boundary.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LikelihoodRatioTest {
     /// Number of observations (must be equal across models).
