@@ -56,6 +56,10 @@ the primary `model::*` barrel until their contracts are ready for SemVer
 protection. See [`docs/semver_policy.md`](docs/semver_policy.md) for the
 current public-surface inventory.
 
+New to the crate? The [`guide`](https://docs.rs/mixeff-rs/latest/mixeff_rs/guide/)
+module is a short, doctested tutorial: getting started, reading results,
+GLMMs, and the refusal contract.
+
 ## Quick start
 
 The `prelude` pulls in the common types; the builder collapses construction and

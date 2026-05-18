@@ -143,6 +143,8 @@ pub(crate) mod datasets;
 
 pub mod error;
 pub mod formula;
+/// Narrative tutorial pages (rendered on docs.rs, doctested in CI).
+pub mod guide;
 // Numerical primitives (blocked Cholesky, pivoted QR, rank updates). Internal
 // to the crate's fit path; not part of the stable public API. Demoted from
 // `pub` for v1.0 — see docs/v1_0_release_roadmap.md Phase A.
