@@ -197,6 +197,12 @@ pub enum StructuralIssue {
     /// [`super::separation::SeparationReport`] (hyperplane direction,
     /// exact group indices) is recomputed by callers that need it.
     Separation { kind: SeparationKind },
+    /// The spec itself is malformed (e.g. `re_cov_truth` is not `q×q` for
+    /// `q = re_dim()`, or `n_re_slopes` exceeds the number of fixed-effect
+    /// predictors). This is an invalid input, not a property of a valid
+    /// design, but [`certify`] is contractually total and pure: it reports
+    /// the malformation here instead of panicking or indexing out of bounds.
+    MalformedSpec { detail: String },
 }
 
 /// Two-tier separation classification carried inside
@@ -246,6 +252,51 @@ impl ExpectedStatusSet {
 pub fn certify(spec: &GeneratorSpec) -> Certificate {
     let q = spec.re_dim();
     let sigma = &spec.re_cov_truth;
+
+    // Contract: certify is *total* and *pure linear algebra* — it must not
+    // panic. A malformed spec (truth covariance not q×q, or more random
+    // slopes than fixed-effect predictors) would otherwise index out of
+    // bounds below (and panic again via detect_separation → generate). Detect
+    // it up front and return a well-formed certificate flagged
+    // `MalformedSpec`, without touching the mis-sized matrix.
+    let n_predictors = spec.n_fe_predictors();
+    let shape_problem = if sigma.nrows() != q || sigma.ncols() != q {
+        Some(format!(
+            "re_cov_truth is {}×{} but re_dim() = {q}",
+            sigma.nrows(),
+            sigma.ncols()
+        ))
+    } else if spec.n_re_slopes > n_predictors {
+        Some(format!(
+            "spec requests {} random slopes but only {n_predictors} \
+             fixed-effect predictors exist",
+            spec.n_re_slopes
+        ))
+    } else {
+        None
+    };
+    if let Some(detail) = shape_problem {
+        return Certificate {
+            re_rank_truth: 0,
+            re_rank_requested: q,
+            re_cov_eigvals: Vec::new(),
+            fisher_eigvals: Vec::new(),
+            weak_id_score: f64::NAN,
+            weak_id_threshold: WEAK_ID_THRESHOLD,
+            weak_identification: false,
+            fe_rank_truth: 0,
+            fe_rank_requested: n_predictors,
+            boundary_directions: Vec::new(),
+            n_total: spec.n_total(),
+            n_params_estimated: 0,
+            min_group_size: spec.group_sizes.iter().copied().min().unwrap_or(0),
+            max_group_size: spec.group_sizes.iter().copied().max().unwrap_or(0),
+            structural_issue: Some(StructuralIssue::MalformedSpec { detail }),
+            family_label: format!("{:?}", spec.family),
+            label: spec.label.clone(),
+            crossed_summary: None,
+        };
+    }
 
     let (eigvals, _) = sorted_eigvals(sigma);
     let re_rank_truth = effective_rank(&eigvals);
@@ -778,6 +829,54 @@ mod tests {
         assert!(cert.structural_issue.is_none());
         let exp = expected_statuses(&cert);
         assert_eq!(exp.allowed, vec![FitStatus::ConvergedInterior]);
+    }
+
+    #[test]
+    fn certify_does_not_panic_on_malformed_spec() {
+        // Regression for audit 06·H2 / mote bd-01KRXCQ98S78SBNG0AHP22YB28:
+        // certify is contractually total. A truth covariance whose size
+        // disagrees with re_dim() must yield a MalformedSpec certificate,
+        // not an out-of-bounds index panic.
+        let mut spec = GeneratorSpec::lmm(
+            "malformed_dim",
+            42,
+            vec![6; 10],
+            vec![1.0, 2.0],
+            true,
+            1, // re_dim() == 2
+            dmatrix![4.0, 0.5; 0.5, 1.0],
+        );
+        spec.re_cov_truth = DMatrix::identity(3, 3); // now 3×3 ≠ 2
+
+        let cert = certify(&spec); // must not panic
+        assert!(matches!(
+            cert.structural_issue,
+            Some(StructuralIssue::MalformedSpec { .. })
+        ));
+        // Downstream consumers still work and treat it as non-identifiable.
+        let exp = expected_statuses(&cert);
+        assert!(exp.allowed.contains(&FitStatus::NotIdentifiable));
+    }
+
+    #[test]
+    fn generate_refuses_malformed_spec_instead_of_panicking() {
+        // Regression for audit 06·H1: the certify → detect_separation →
+        // generate path must return Err, not panic via an assert!.
+        let mut spec = GeneratorSpec::lmm(
+            "malformed_dim_gen",
+            7,
+            vec![5; 8],
+            vec![1.0, 2.0],
+            true,
+            1,
+            dmatrix![4.0, 0.5; 0.5, 1.0],
+        );
+        spec.re_cov_truth = DMatrix::identity(3, 3);
+
+        let err = super::super::spec::generate(&spec).unwrap_err();
+        assert!(matches!(err, MixedModelError::InvalidArgument(_)));
+        // detect_separation already handles Err — it must not panic either.
+        let _ = detect_separation(&spec);
     }
 
     #[test]

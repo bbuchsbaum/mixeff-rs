@@ -362,24 +362,27 @@ pub struct GeneratorOutput {
 /// strata stay seed-independent.
 pub fn generate(spec: &GeneratorSpec) -> ModelResult<GeneratorOutput> {
     let q = spec.re_dim();
-    assert_eq!(
-        spec.re_cov_truth.nrows(),
-        q,
-        "re_cov_truth dim mismatch in spec '{}': expected {} got {}",
-        spec.label,
-        q,
-        spec.re_cov_truth.nrows()
-    );
-    assert_eq!(spec.re_cov_truth.ncols(), q);
+    // A malformed spec is invalid input, not an assertion failure: return an
+    // error so callers (notably `detect_separation`, which already handles
+    // `Err`, and through it the contractually-total `certify`) refuse cleanly
+    // instead of panicking.
+    if spec.re_cov_truth.nrows() != q || spec.re_cov_truth.ncols() != q {
+        return Err(MixedModelError::InvalidArgument(format!(
+            "re_cov_truth dim mismatch in spec '{}': expected {q}×{q} got {}×{}",
+            spec.label,
+            spec.re_cov_truth.nrows(),
+            spec.re_cov_truth.ncols()
+        )));
+    }
 
     let n_predictors = spec.n_fe_predictors();
-    assert!(
-        spec.n_re_slopes <= n_predictors,
-        "spec '{}' requests {} random slopes but only {} fixed-effect predictors exist",
-        spec.label,
-        spec.n_re_slopes,
-        n_predictors
-    );
+    if spec.n_re_slopes > n_predictors {
+        return Err(MixedModelError::InvalidArgument(format!(
+            "spec '{}' requests {} random slopes but only {} fixed-effect \
+             predictors exist",
+            spec.label, spec.n_re_slopes, n_predictors
+        )));
+    }
 
     let mut rng = StdRng::seed_from_u64(spec.seed);
     let normal = Normal::new(0.0, 1.0).unwrap();
