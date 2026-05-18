@@ -166,6 +166,12 @@ where
     let mut xl = lower_bounds.to_vec();
     let mut xu = upper_bounds.to_vec();
 
+    // SAFETY: `PrimaProblem` is a `#[repr(C)]` plain-old-data struct from the
+    // PRIMA C API whose every field is valid when all-zero: raw pointers are
+    // null, integer/float fields are 0/0.0, and `Option<fn>` callbacks are
+    // `None` (null-optimized to 0). `prima_init_problem` is then called to
+    // populate it and its return code is checked immediately below, so the
+    // zeroed value is never observed by C in a half-initialized state.
     let mut problem = unsafe { std::mem::MaybeUninit::<PrimaProblem>::zeroed().assume_init() };
     let init_problem_rc = unsafe { prima_init_problem(&mut problem, n as c_int) };
     if init_problem_rc != 0 {
@@ -185,6 +191,10 @@ where
         panicked: false,
     };
 
+    // SAFETY: as for `PrimaProblem` above — `PrimaOptions` is a `#[repr(C)]`
+    // POD struct, all-zero is a valid bit pattern (the `iprint` enum's
+    // `PrimaMessage::None` discriminant is 0), and `prima_init_options`
+    // populates it before use with its return code checked below.
     let mut prima_options =
         unsafe { std::mem::MaybeUninit::<PrimaOptions>::zeroed().assume_init() };
     let init_options_rc = unsafe { prima_init_options(&mut prima_options) };
@@ -200,6 +210,10 @@ where
     prima_options.iprint = PrimaMessage::None;
     prima_options.data = (&mut state as *mut ObjectiveState<F>).cast::<c_void>();
 
+    // SAFETY: `PrimaResult` is a `#[repr(C)]` POD out-parameter; zeroed is a
+    // valid initial bit pattern (null `x`/`message` pointers, 0 counters).
+    // `prima_minimize` fills it; `minimize_rc` is validated before any field
+    // of `result` is read.
     let mut result = unsafe { std::mem::MaybeUninit::<PrimaResult>::zeroed().assume_init() };
     let minimize_rc =
         unsafe { prima_minimize(PrimaAlgorithm::Bobyqa, problem, prima_options, &mut result) };
@@ -232,7 +246,9 @@ where
             "PRIMA objective callback panicked".to_string(),
         ));
     }
-    if minimize_rc >= 100 || minimize_rc < 0 {
+    // PRIMA status codes in [0, 100) are normal stop reasons; <0 or >=100 are
+    // hard failures (NaN/Inf, invalid input, …).
+    if !(0..100).contains(&minimize_rc) {
         let detail = message
             .as_deref()
             .map(|msg| format!(" ({msg})"))
