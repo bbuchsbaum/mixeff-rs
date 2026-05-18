@@ -737,7 +737,15 @@ impl GeneralizedLinearMixedModel {
     /// are derived from the current μ = g⁻¹(Xβ + Zb).
     ///
     /// * `vary_beta` – if false, β is held fixed and only u is updated
-    pub fn pirls(&mut self, vary_beta: bool, verbose: bool) -> Result<()> {
+    ///
+    /// Returns `Ok(true)` if PIRLS reached its convergence tolerance within
+    /// the iteration budget, `Ok(false)` if it exhausted the budget without
+    /// converging (the conditional modes are the best seen but unverified).
+    /// The non-converged case is deliberately *not* an `Err`: callers decide
+    /// how to surface it (the final fit records a diagnostic; interior
+    /// optimizer probes tolerate it). `Err` is reserved for hard linear-
+    /// algebra/state failures.
+    pub fn pirls(&mut self, vary_beta: bool, verbose: bool) -> Result<bool> {
         // Mirrors MixedModels.jl/src/generalizedlinearmixedmodel.jl pirls!
         // (lines 614-669): step-halving toward the previous accepted iterate
         // whenever a fresh IRLS step would worsen the Laplace objective. Keeps
@@ -769,6 +777,15 @@ impl GeneralizedLinearMixedModel {
 
         let mut sqrtwts = vec![0.0f64; n];
         let mut working_y = vec![0.0f64; n];
+
+        // Whether PIRLS reached its convergence tolerance within `max_iter`.
+        // Returned to the caller so a non-converged conditional-mode solve is
+        // *observable* rather than silently accepted (audit 03·H1). We do not
+        // hard-error inside the loop: the outer optimizer legitimately probes
+        // near the variance-component boundary where an interior step may
+        // exhaust halving, and turning that into an error perturbs the
+        // soft-barrier search away from valid boundary fits.
+        let mut converged = false;
 
         for iter in 0..max_iter {
             // --- Compute IRLS weights and working response ---
@@ -834,6 +851,7 @@ impl GeneralizedLinearMixedModel {
             }
 
             if pirls_converged(obj, obj0, tol) {
+                converged = true;
                 break;
             }
 
@@ -848,7 +866,7 @@ impl GeneralizedLinearMixedModel {
 
         self.refresh_dispersion();
 
-        Ok(())
+        Ok(converged)
     }
 
     /// Conditional modes of the random effects with β held fixed.
@@ -1315,6 +1333,54 @@ impl GeneralizedLinearMixedModel {
         self.lmm.compiler_artifact.diagnostics.push(diagnostic);
     }
 
+    /// Record a Warning when the inner PIRLS at the *final* optimizer θ did
+    /// not reach its convergence tolerance within the iteration budget.
+    ///
+    /// The fit is still returned (mirroring MixedModels.jl, which also
+    /// returns a model after a bounded PIRLS), but the non-convergence must
+    /// not be *silent* (audit 03·H1): a downstream consumer can see this
+    /// diagnostic instead of unknowingly trusting unverified conditional
+    /// modes. Distinct from [`Self::record_pirls_failure_diagnostic`], which
+    /// flags a hard PIRLS/linear-algebra failure that aborts the fit.
+    fn record_pirls_nonconvergence_diagnostic(&mut self, theta: &[f64]) {
+        self.lmm
+            .compiler_artifact
+            .diagnostics
+            .retain(|d| d.code != DiagnosticCode::OptimizerNonconvergence);
+
+        let affected_terms = self
+            .lmm
+            .reterms
+            .iter()
+            .map(random_effect_term_label)
+            .collect::<Vec<_>>();
+        let mut diagnostic = Diagnostic::new(
+            DiagnosticCode::OptimizerNonconvergence,
+            DiagnosticSeverity::Warning,
+            DiagnosticStage::Optimization,
+            "the inner PIRLS conditional-mode solve did not reach its \
+             convergence tolerance within the iteration budget at the final \
+             optimizer parameters; the random-effect modes (and therefore the \
+             Laplace/AGQ objective) are the best seen but unverified.",
+        )
+        .with_affected_terms(affected_terms)
+        .with_suggested_actions(vec![
+            "treat the conditional modes and objective as provisional and \
+             cross-check against an alternate starting value"
+                .to_string(),
+            "simplify the random-effects structure or rescale predictors if \
+             the GLMM surface is ill-conditioned near the optimum"
+                .to_string(),
+        ]);
+        diagnostic
+            .payload
+            .insert("theta_len".to_string(), serde_json::json!(theta.len()));
+        diagnostic
+            .payload
+            .insert("stage".to_string(), serde_json::json!("final_pirls"));
+        self.lmm.compiler_artifact.diagnostics.push(diagnostic);
+    }
+
     /// Log-determinant from the LMM's Cholesky factor.
     fn lmm_logdet(&self) -> f64 {
         // Delegate to the internal LMM's block structure
@@ -1624,7 +1690,7 @@ impl GeneralizedLinearMixedModel {
         self.beta = DVector::from_column_slice(&params[..n_beta]);
         let theta = &params[n_beta..];
         match self.update_pirls_at_theta(theta, false) {
-            Ok(()) => {
+            Ok(_) => {
                 let deviance = self.deviance_with_response_constants(n_agq);
                 if deviance.is_finite() {
                     deviance
@@ -2130,9 +2196,18 @@ impl GeneralizedLinearMixedModel {
 
         // Final PIRLS at optimal θ, after matching MixedModels.jl's
         // post-optimizer sign convention for Cholesky columns.
-        if let Err(error) = self.update_pirls_at_theta(theta, true) {
-            self.record_pirls_failure_diagnostic(theta, &error.to_string());
-            return Err(error);
+        let pirls_converged = match self.update_pirls_at_theta(theta, true) {
+            Ok(converged) => converged,
+            Err(error) => {
+                self.record_pirls_failure_diagnostic(theta, &error.to_string());
+                return Err(error);
+            }
+        };
+        if !pirls_converged {
+            // Not a hard failure (Julia also returns a model here), but the
+            // unverified modes must be observable rather than silently
+            // accepted as a good fit (audit 03·H1).
+            self.record_pirls_nonconvergence_diagnostic(theta);
         }
         self.beta = self.lmm.beta();
         self.refresh_dispersion();
@@ -2143,7 +2218,8 @@ impl GeneralizedLinearMixedModel {
         Ok(())
     }
 
-    fn update_pirls_at_theta(&mut self, theta: &[f64], vary_beta: bool) -> Result<()> {
+    /// Returns whether the inner PIRLS converged (see [`Self::pirls`]).
+    fn update_pirls_at_theta(&mut self, theta: &[f64], vary_beta: bool) -> Result<bool> {
         if theta.len() != self.theta.len() {
             return Err(MixedModelError::DimensionMismatch(format!(
                 "theta vector length {} does not match fitted GLMM theta length {}",
@@ -2162,8 +2238,8 @@ impl GeneralizedLinearMixedModel {
         for u in self.u.iter_mut() {
             u.fill(0.0);
         }
-        self.pirls(vary_beta, false)?;
-        Ok(())
+        let converged = self.pirls(vary_beta, false)?;
+        Ok(converged)
     }
 
     fn refresh_dispersion(&mut self) {
@@ -2197,7 +2273,7 @@ impl GeneralizedLinearMixedModel {
 
     fn penalized_pirls_deviance_at_theta(&mut self, theta: &[f64], n_agq: usize) -> f64 {
         match self.update_pirls_at_theta(theta, true) {
-            Ok(()) => {
+            Ok(_) => {
                 let deviance = self.deviance(n_agq);
                 if deviance.is_finite() {
                     deviance

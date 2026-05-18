@@ -27,7 +27,7 @@ pub use fe_mat::FeMat;
 pub use fe_term::FeTerm;
 pub use gauss_hermite::{gh_norm, GaussHermiteNormalized};
 pub use matrix_block::MatrixBlock;
-pub use opt_summary::{FitLogEntry, OptSummary, Optimizer};
+pub use opt_summary::{ConvergenceStatus, FitLogEntry, OptSummary, Optimizer};
 pub use ragged_array::RaggedArray;
 pub use re_mat::ReMat;
 pub use uniform_block_diagonal::UniformBlockDiagonal;

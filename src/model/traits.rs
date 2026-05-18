@@ -2,7 +2,7 @@
 
 use nalgebra::{DMatrix, DVector};
 
-use crate::types::OptSummary;
+use crate::types::{ConvergenceStatus, OptSummary};
 
 /// Structural summary of one random-effects term.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,6 +222,24 @@ pub trait MixedModelFit {
 
     /// Optimization summary.
     fn opt_summary(&self) -> &OptSummary;
+
+    /// Typed classification of the optimizer's termination status.
+    ///
+    /// Use this (or [`converged`](Self::converged)) instead of string-matching
+    /// `opt_summary().return_value`: a fit that hit an evaluation budget is
+    /// [`ConvergenceStatus::BudgetExhausted`], not a verified optimum, and
+    /// `fit()` returning `Ok` does **not** by itself imply convergence.
+    fn convergence_status(&self) -> ConvergenceStatus {
+        self.opt_summary().convergence_status()
+    }
+
+    /// Whether the optimizer reached a genuine convergence criterion.
+    ///
+    /// `true` only for [`ConvergenceStatus::Converged`]. A budget-exhausted,
+    /// roundoff-limited, failed, or unfitted model returns `false`.
+    fn converged(&self) -> bool {
+        self.opt_summary().converged()
+    }
 
     /// The θ parameter vector.
     fn theta(&self) -> Vec<f64>;

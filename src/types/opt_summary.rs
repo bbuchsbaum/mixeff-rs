@@ -107,6 +107,39 @@ pub struct FitLogEntry {
     pub objective: f64,
 }
 
+/// Typed classification of an optimizer's termination status.
+///
+/// The optimizer's raw outcome is stored as a free-form
+/// [`OptSummary::return_value`] string (`"FTOL_REACHED"`,
+/// `"MAXEVAL_REACHED"`, …). Forcing every caller to string-match that to
+/// learn whether the fit actually converged is exactly the brittle
+/// anti-pattern the crate warns against, and it makes it easy to ship a
+/// budget-truncated (non-optimal) fit as if it were good. This enum is the
+/// single typed contract; prefer [`OptSummary::converged`] /
+/// [`OptSummary::convergence_status`] over inspecting the string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ConvergenceStatus {
+    /// Stopped at a genuine convergence criterion (objective/parameter
+    /// tolerance, trust radius, or target value reached). The returned
+    /// parameters are a verified local optimum to the requested tolerance.
+    Converged,
+    /// An evaluation/time/iteration budget was hit before a convergence
+    /// criterion. The returned parameters are the best seen so far but are
+    /// **not** a verified optimum — treating this as success is the
+    /// "non-convergence masquerading as a fit" hazard.
+    BudgetExhausted,
+    /// The optimizer halted because progress was limited by floating-point
+    /// roundoff/stagnation. Often near-optimal, but not a clean convergence;
+    /// callers should treat the fit as provisional.
+    RoundoffLimited,
+    /// The optimizer failed outright (invalid input, non-finite objective,
+    /// forced stop, out of memory, …). The fit is not usable.
+    Failed,
+    /// No optimizer status is recorded yet (model not fitted).
+    NotRun,
+}
+
 /// Summary of the optimization used to fit a mixed-effects model.
 ///
 /// Stores initial and final parameter values, convergence information,
@@ -258,6 +291,60 @@ impl OptSummary {
     /// evaluation has been performed).
     pub fn is_fitted(&self) -> bool {
         self.feval > 0
+    }
+
+    /// Typed classification of the optimizer's termination status.
+    ///
+    /// Interprets [`return_value`](Self::return_value) (the union of the
+    /// status vocabularies of every backend: NLopt, COBYLA, the bounded
+    /// trust-region solver, and PRIMA), so callers never have to string-match
+    /// it. The KKT boundary-restart wrapper (`"KKT_BOUNDARY_RESTART(n):
+    /// <inner>"`) is unwrapped and classified by its inner status.
+    pub fn convergence_status(&self) -> ConvergenceStatus {
+        if !self.is_fitted() {
+            return ConvergenceStatus::NotRun;
+        }
+        let raw = self.return_value.trim();
+        if raw.is_empty() {
+            return ConvergenceStatus::NotRun;
+        }
+        // Unwrap `KKT_BOUNDARY_RESTART(<n>): <inner status>` to the inner
+        // outcome that actually determined the final iterate.
+        let status = if let Some(rest) = raw.strip_prefix("KKT_BOUNDARY_RESTART") {
+            rest.split_once(": ").map(|(_, inner)| inner.trim()).unwrap_or(raw)
+        } else {
+            raw
+        };
+        match status {
+            // Clean convergence criteria across all backends.
+            "SUCCESS" | "STOPVAL_REACHED" | "FTOL_REACHED" | "XTOL_REACHED"
+            | "RADIUS_REACHED" | "SMALL_TR_RADIUS" | "FTARGET_ACHIEVED" => {
+                ConvergenceStatus::Converged
+            }
+            // Budget/iteration limits — best-effort, NOT a verified optimum.
+            "MAXEVAL_REACHED" | "MAXTIME_REACHED" | "MAXFUN_REACHED"
+            | "MAXTR_REACHED" | "CALLBACK_TERMINATE" => {
+                ConvergenceStatus::BudgetExhausted
+            }
+            // Roundoff/stagnation: provisional, not a clean convergence.
+            "ROUNDOFF_LIMITED" | "DAMAGING_ROUNDING" => {
+                ConvergenceStatus::RoundoffLimited
+            }
+            // Everything else (FAILURE, INVALID_ARGS, OUT_OF_MEMORY,
+            // FORCED_STOP, UNEXPECTED_ERROR, FORCED_BAD_BOUNDARY,
+            // TRSUBP_FAILED, NAN_INF_*, NO_SPACE_BETWEEN_BOUNDS,
+            // ZERO_LINEAR_CONSTRAINT, INVALID_INPUT, …) is a hard failure.
+            _ => ConvergenceStatus::Failed,
+        }
+    }
+
+    /// Whether the optimizer reached a genuine convergence criterion.
+    ///
+    /// `true` only for [`ConvergenceStatus::Converged`]: a budget-exhausted,
+    /// roundoff-limited, failed, or not-yet-run fit all return `false`. This
+    /// is the honest gate — a non-converged fit must never report `true`.
+    pub fn converged(&self) -> bool {
+        matches!(self.convergence_status(), ConvergenceStatus::Converged)
     }
 
     /// Record a function evaluation in the fit log.
@@ -647,5 +734,99 @@ mod tests {
         assert!(out.contains("\\textbf{Initialization}"));
         assert!(out.contains("\\texttt{LN\\_BOBYQA}"));
         assert!(out.contains("\\texttt{FTOL\\_REACHED}"));
+    }
+
+    fn status_of(feval: i64, code: &str) -> ConvergenceStatus {
+        let mut opt = OptSummary::new(vec![1.0]);
+        opt.feval = feval;
+        opt.return_value = code.to_string();
+        opt.convergence_status()
+    }
+
+    #[test]
+    fn convergence_status_classifies_every_backend_vocabulary() {
+        // Not fitted / no status -> NotRun.
+        assert_eq!(status_of(-1, "FTOL_REACHED"), ConvergenceStatus::NotRun);
+        assert_eq!(status_of(10, ""), ConvergenceStatus::NotRun);
+
+        // Clean convergence across NLopt / COBYLA / trust-region / PRIMA.
+        for code in [
+            "SUCCESS",
+            "STOPVAL_REACHED",
+            "FTOL_REACHED",
+            "XTOL_REACHED",
+            "RADIUS_REACHED",
+            "SMALL_TR_RADIUS",
+            "FTARGET_ACHIEVED",
+        ] {
+            assert_eq!(
+                status_of(10, code),
+                ConvergenceStatus::Converged,
+                "{code} should be Converged"
+            );
+        }
+
+        // Budget exhaustion must never be reported as converged — this is the
+        // "non-convergence masquerading as a fit" hazard.
+        for code in [
+            "MAXEVAL_REACHED",
+            "MAXTIME_REACHED",
+            "MAXFUN_REACHED",
+            "MAXTR_REACHED",
+            "CALLBACK_TERMINATE",
+        ] {
+            assert_eq!(
+                status_of(10, code),
+                ConvergenceStatus::BudgetExhausted,
+                "{code} should be BudgetExhausted"
+            );
+            assert!(!status_of(10, code).eq(&ConvergenceStatus::Converged));
+        }
+
+        assert_eq!(
+            status_of(10, "ROUNDOFF_LIMITED"),
+            ConvergenceStatus::RoundoffLimited
+        );
+
+        for code in [
+            "FAILURE",
+            "INVALID_ARGS",
+            "OUT_OF_MEMORY",
+            "FORCED_STOP",
+            "FORCED_BAD_BOUNDARY",
+            "TRSUBP_FAILED",
+            "NAN_INF_F",
+            "INVALID_INPUT",
+        ] {
+            assert_eq!(
+                status_of(10, code),
+                ConvergenceStatus::Failed,
+                "{code} should be Failed"
+            );
+        }
+    }
+
+    #[test]
+    fn convergence_status_unwraps_kkt_boundary_restart() {
+        // The KKT restart wrapper must classify by its inner outcome.
+        assert_eq!(
+            status_of(10, "KKT_BOUNDARY_RESTART(2): FTOL_REACHED"),
+            ConvergenceStatus::Converged
+        );
+        assert_eq!(
+            status_of(10, "KKT_BOUNDARY_RESTART(1): MAXEVAL_REACHED"),
+            ConvergenceStatus::BudgetExhausted
+        );
+    }
+
+    #[test]
+    fn converged_is_true_only_for_clean_convergence() {
+        assert!(status_of(10, "FTOL_REACHED") == ConvergenceStatus::Converged);
+        let mut opt = OptSummary::new(vec![1.0]);
+        opt.feval = 10;
+        opt.return_value = "MAXEVAL_REACHED".to_string();
+        assert!(!opt.converged());
+        opt.return_value = "FTOL_REACHED".to_string();
+        assert!(opt.converged());
     }
 }

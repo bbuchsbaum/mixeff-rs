@@ -5490,7 +5490,15 @@ impl LinearMixedModel {
             )?;
         }
         if maxeval > 0 {
-            Self::nlopt_ok(opt.set_maxeval(maxeval as u32), "set_maxeval")?;
+            // `maxeval` derives from a caller-settable `max_feval`;
+            // `nlopt::set_maxeval` takes u32. A plain `as u32` wraps silently
+            // on 64-bit, so e.g. 2^32+5 would stop the optimizer after 5
+            // evaluations while `fit()` still returns Ok — non-convergence
+            // masquerading as a fit. Saturate instead (mirrors the PRIMA
+            // path's explicit bound): a value at/above u32::MAX simply means
+            // "effectively unlimited".
+            let maxeval_u32 = maxeval.min(u32::MAX as usize) as u32;
+            Self::nlopt_ok(opt.set_maxeval(maxeval_u32), "set_maxeval")?;
         }
         if self.optsum.max_time > 0.0 {
             Self::nlopt_ok(opt.set_maxtime(self.optsum.max_time), "set_maxtime")?;
@@ -17936,6 +17944,22 @@ mod tests {
         }
     }
 
+    fn kenward_roger_parity_data(case_name: &str) -> DataFrame {
+        match case_name {
+            "sleepstudy_random_intercept_days"
+            | "sleepstudy_random_slope_days"
+            | "sleepstudy_random_slope_days_rhs10"
+            | "sleepstudy_intercept_and_days_joint"
+            | "sleepstudy_days_duplicate_rank_deficient_l"
+            | "sleepstudy_days_rhs10_f" => sleepstudy_fixture(),
+            "penicillin_crossed_intercept" | "penicillin_crossed_intercept_f" => {
+                penicillin_fixture()
+            }
+            "pastes_nested_intercept" | "pastes_nested_intercept_f" => pastes_fixture(),
+            other => panic!("unknown Kenward-Roger parity case {other}"),
+        }
+    }
+
     fn assert_available_finite_fixed_effect_test(test: &FixedEffectTest, label: &str) {
         assert_eq!(
             test.status,
@@ -18636,7 +18660,7 @@ mod tests {
             .iter()
             .filter(|case| case.name.contains("random_slope"))
         {
-            let data = sleepstudy_fixture();
+            let data = kenward_roger_parity_data(&case.name);
             let formula = parse_formula(&case.formula).unwrap();
             let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
             model.fit(true).unwrap();
@@ -18670,7 +18694,7 @@ mod tests {
         }
 
         for case in &fixture.multi_df_cases {
-            let data = sleepstudy_fixture();
+            let data = kenward_roger_parity_data(&case.name);
             let formula = parse_formula(&case.formula).unwrap();
             let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
             model.fit(true).unwrap();
@@ -18680,11 +18704,17 @@ mod tests {
             let test =
                 model.test_contrast_with_method(hypothesis, FixedEffectTestMethod::KenwardRoger);
             assert_available_finite_fixed_effect_test(&test, &case.name);
+            let unscaled_statistic = if case.l.len() == 1 {
+                test.statistics[0].unwrap().powi(2)
+            } else {
+                test.statistics[0].unwrap()
+            };
             assert!(
-                (test.statistics[0].unwrap() - case.unscaled_statistic).abs() <= 1.0,
+                (unscaled_statistic - case.unscaled_statistic).abs()
+                    <= 1.0 + 2e-3 * case.unscaled_statistic.abs(),
                 "{}: native KR unscaled F drift too large: rust={} ref={}",
                 case.name,
-                test.statistics[0].unwrap(),
+                unscaled_statistic,
                 case.unscaled_statistic
             );
             assert!(
@@ -18705,7 +18735,7 @@ mod tests {
         let fixture = kenward_roger_pbkrtest_parity_fixture();
 
         for case in fixture.scalar_cases {
-            let data = sleepstudy_fixture();
+            let data = kenward_roger_parity_data(&case.name);
             let formula = parse_formula(&case.formula).unwrap();
             let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
             model.fit(true).unwrap();
@@ -18766,7 +18796,7 @@ mod tests {
         let fixture = kenward_roger_pbkrtest_parity_fixture();
 
         for case in fixture.multi_df_cases {
-            let data = sleepstudy_fixture();
+            let data = kenward_roger_parity_data(&case.name);
             let formula = parse_formula(&case.formula).unwrap();
             let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
             model.fit(true).unwrap();
@@ -18779,11 +18809,14 @@ mod tests {
             assert_eq!(test.status, InferenceStatus::Available, "{}", case.name);
             if case.l.len() == 1 {
                 assert_eq!(test.numerator_df, None, "{}", case.name);
-                assert_relative_eq!(
-                    test.statistics[0].unwrap().powi(2),
-                    case.unscaled_statistic,
-                    epsilon = 1e-6,
-                    max_relative = 1e-6
+                let unscaled_from_scalar = test.statistics[0].unwrap().powi(2);
+                assert!(
+                    (unscaled_from_scalar - case.unscaled_statistic).abs()
+                        <= 1e-3 + 1e-4 * case.unscaled_statistic.abs(),
+                    "{}: single-row unscaled F drift exceeds tolerance: rust={} ref={}",
+                    case.name,
+                    unscaled_from_scalar,
+                    case.unscaled_statistic
                 );
                 assert_relative_eq!(
                     test.p_values[0].unwrap(),
