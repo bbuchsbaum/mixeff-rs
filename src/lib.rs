@@ -10,7 +10,7 @@
 //!
 //! # Tutorial
 //!
-//! New to the crate? Read the [`guide`] module — four short, doctested
+//! New to the crate? Read the [`guide`] module — five short, doctested
 //! pages:
 //!
 //! 1. [Getting started](crate::guide::getting_started) — build a frame,

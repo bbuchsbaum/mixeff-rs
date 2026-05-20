@@ -22,9 +22,10 @@ refuses. Status labels follow the project's no-fake-claims contract:
 The supported family/link matrix is enforced by
 [`GeneralizedLinearMixedModel::new`](crate::model::GeneralizedLinearMixedModel)
 — anything outside it returns
-[`MixedModelError::UnsupportedFamilyLink`](crate::error::MixedModelError).
-`Family::Normal + LinkFunction::Identity` is **refused on purpose**: that
-is a linear mixed model, so use
+[`MixedModelError::UnsupportedFamilyLink`](crate::error::MixedModelError),
+except `Family::Normal + LinkFunction::Identity`, which returns an explicit
+invalid-argument refusal. That case is **refused on purpose**: it is a linear
+mixed model, so use
 [`LinearMixedModel`](crate::model::LinearMixedModel).
 
 | Family | Allowed links | Default (canonical) |
@@ -69,7 +70,9 @@ subset:
 | `(re | g)` | Correlated random effects in group `g` | Stable |
 | `(re || g)` | Zero-correlation random effects | Stable |
 | `(re | g1 & g2)` | Interaction grouping factor | Stable |
-| Nested groups via `/` inside `( | )` | Implicit nesting | Stable |
+| `(re | g1:g2)` | Cell-level grouping factor | Stable |
+| `(re | g1/g2)` | Nested grouping expansion | Stable |
+| `(re | g1*g2)` | Main grouping factors plus cell expansion | Stable |
 | `I(expr)` and other in-formula transforms | Stateless arithmetic subset | Stable (minimal subset) |
 | Full `I()` / model.matrix transformations | — | Out of scope |
 
@@ -100,7 +103,7 @@ GLMM `fast=true` default is **not** the same statistical approximation as
 | Wald CIs ([`CoefTable::wald_confint`](crate::stats::CoefTable::wald_confint)) | ✓ | ✓ | Stable |
 | Satterthwaite / Kenward-Roger df rows in [`CoefTable`](crate::stats::CoefTable) | ✓ | — | Stable for Gaussian REML LMMs with iid Gaussian residuals; crossed/nested certification is fixture-driven and expanding |
 | Profile-likelihood CIs ([`crate::stats::profile`](mod@crate::stats::profile)) — `σ`, `θ`, ML `β` | ✓ | — | Stable for LMM; GLMM out of scope |
-| Parametric bootstrap ([`parametricbootstrap`](crate::model::parametricbootstrap)) | ✓ | — | Stable for LMM; Gamma GLMM bootstrap is out of scope |
+| Parametric bootstrap ([`parametricbootstrap`](crate::model::parametricbootstrap), [`parametricbootstrap_glmm`](crate::stats::bootstrap::parametricbootstrap_glmm)) | ✓ | ✓ | Stable for LMM; stable for Bernoulli, Binomial, Poisson, and Gamma GLMMs. InverseGaussian and Normal-as-GLMM bootstrap are refused |
 | Likelihood-ratio tests ([`LikelihoodRatioTest`](crate::stats::LikelihoodRatioTest), [`BoundaryLikelihoodRatioTest`](crate::stats::BoundaryLikelihoodRatioTest), [`ModelComparisonTable`](crate::stats::ModelComparisonTable)) | ✓ | ✓ | Stable, with a typed taxonomy and stable reason codes |
 
 ## Refusals
@@ -114,7 +117,7 @@ contract.
 
 - Multivariate response (`cbind(y1, y2) ~ …`).
 - Profile-likelihood CIs for GLMMs.
-- Parametric bootstrap for Gamma GLMMs.
+- Parametric bootstrap for InverseGaussian and Normal-as-GLMM GLMMs.
 - Full `I()` / arbitrary formula-level transformations beyond the minimal
   stateless subset.
 - First-class `polars` / `arrow` ingestion (convert into

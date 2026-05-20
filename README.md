@@ -133,9 +133,9 @@ the precise breaking-change definition live in the
 on [docs.rs](https://docs.rs/mixeff-rs).
 
 **Scope.** Single-response models only. Multivariate response
-(`cbind(y1, y2) ~ …`), Gamma GLMM bootstrap, GLMM profile likelihood, and the
-full `I()` / formula-transformation surface are out of scope for the current
-line and tracked as later work.
+(`cbind(y1, y2) ~ …`), GLMM profile likelihood, InverseGaussian /
+Normal-as-GLMM bootstrap, and the full `I()` / formula-transformation surface
+are out of scope for the current line and tracked as later work.
 
 **Difficult models.** The release claim is "certified fit or precise
 diagnostic", not "always faster" or "always more convergent" than other
