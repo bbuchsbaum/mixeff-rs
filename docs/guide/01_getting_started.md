@@ -74,4 +74,4 @@ model.fit(false)?; // false = ML, true = REML
 # }
 ```
 
-Next: [reading the results](super::reading_results).
+Next: [reading the results][crate::guide::reading_results].

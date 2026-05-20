@@ -75,4 +75,4 @@ stable across releases — see the
 [SemVer policy](https://github.com/bbuchsbaum/mixeff-rs/blob/main/docs/semver_policy.md)
 for which codes and schemas are covered.
 
-Back to [getting started](super::getting_started).
+Back to [getting started][crate::guide::getting_started].

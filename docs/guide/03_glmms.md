@@ -45,7 +45,7 @@ Pass an explicit link through the lower-level constructor
 do not want the canonical default. `Family::Normal` with
 `LinkFunction::Identity` is **rejected** here on purpose — that is a linear
 mixed model, so use [`LinearMixedModel`](crate::model::LinearMixedModel). See
-[when the crate refuses](super::when_the_crate_refuses).
+[when the crate refuses][crate::guide::when_the_crate_refuses].
 
 ## Estimation semantics — read this before reporting GLMM inference
 
@@ -66,4 +66,4 @@ This is the project's no-fake-statistics stance applied to GLMMs: the
 approximation actually used is always recoverable from the fit, so a reported
 number can be trusted to mean what it says.
 
-Next: [when the crate refuses](super::when_the_crate_refuses).
+Next: [when the crate refuses][crate::guide::when_the_crate_refuses].

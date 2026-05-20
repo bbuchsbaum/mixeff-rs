@@ -3,7 +3,7 @@
 A fitted model implements [`MixedModelFit`](crate::model::MixedModelFit), and
 the [`stats`](crate::stats) module turns it into the usual summaries. Every
 quantity below is computed, never fabricated — see
-[when the crate refuses](super::when_the_crate_refuses) for what happens when
+[when the crate refuses][crate::guide::when_the_crate_refuses] for what happens when
 a quantity is not identifiable.
 
 ```rust
@@ -60,7 +60,7 @@ for row in ct.wald_confint(0.95) {
 | Need | Use |
 |------|-----|
 | Quick large-sample CI | [`CoefTable::wald_confint`](crate::stats::CoefTable::wald_confint) |
-| Small-sample / skewed likelihood | [`profile`](crate::stats::profile) (profile-likelihood CIs) |
+| Small-sample / skewed likelihood | [`profile`](mod@crate::stats::profile) (profile-likelihood CIs) |
 | Distribution-free, refit-based | [`parametricbootstrap`](crate::model::parametricbootstrap) |
 
 Wald intervals are symmetric and cheap but degrade near a boundary (a variance
@@ -75,4 +75,4 @@ than an extrapolated bound when a side of the interval is not identifiable.
 - [`MixedModelFit::fitted`](crate::model::MixedModelFit::fitted) — fitted
   values on the response scale.
 
-Next: [generalized linear mixed models](super::glmms).
+Next: [generalized linear mixed models][crate::guide::glmms].

@@ -8,6 +8,21 @@
 //! divergences (notably optimizer selection and the fallback strategy), not a
 //! line-for-line port.
 //!
+//! # Tutorial
+//!
+//! New to the crate? Read the [`guide`] module — four short, doctested
+//! pages:
+//!
+//! 1. [Getting started](crate::guide::getting_started) — build a frame,
+//!    parse a formula, fit an LMM.
+//! 2. [Reading results](crate::guide::reading_results) — coefficients,
+//!    variance components, summaries, Wald vs. profile vs. bootstrap CIs.
+//! 3. [GLMMs](crate::guide::glmms) — families, links, and the GLMM
+//!    estimation semantics.
+//! 4. [When the crate refuses](crate::guide::when_the_crate_refuses) —
+//!    typed errors and typed inference refusals (the no-fake-statistics
+//!    contract from a caller's POV).
+//!
 //! # Quick start
 //!
 //! Fit a linear mixed model `y ~ 1 + x + (1 | g)` on a small balanced dataset.
