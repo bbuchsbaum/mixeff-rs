@@ -13,6 +13,9 @@
 //!    estimation semantics.
 //! 4. [When the crate refuses](crate::guide::when_the_crate_refuses) —
 //!    typed errors and typed inference refusals.
+//! 5. [What is supported](crate::guide::what_is_supported) — a concrete
+//!    inventory of fits, families/links, formula syntax, inference paths,
+//!    and what is deliberately out of scope.
 
 #[doc = include_str!("../../docs/guide/01_getting_started.md")]
 pub mod getting_started {}
@@ -25,3 +28,6 @@ pub mod glmms {}
 
 #[doc = include_str!("../../docs/guide/04_when_the_crate_refuses.md")]
 pub mod when_the_crate_refuses {}
+
+#[doc = include_str!("../../docs/guide/05_what_is_supported.md")]
+pub mod what_is_supported {}

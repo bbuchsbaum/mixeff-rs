@@ -22,6 +22,9 @@
 //! 4. [When the crate refuses](crate::guide::when_the_crate_refuses) —
 //!    typed errors and typed inference refusals (the no-fake-statistics
 //!    contract from a caller's POV).
+//! 5. [What is supported](crate::guide::what_is_supported) — a concrete
+//!    inventory: model classes, families/links, formula syntax, inference
+//!    paths, and what is deliberately out of scope.
 //!
 //! # Quick start
 //!

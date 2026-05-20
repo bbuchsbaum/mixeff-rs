@@ -29,6 +29,10 @@ package.
   `GeneralizedLinearMixedModelBuilder` with `FitOptions`, built-in contrast
   constructors, and a re-exported `nalgebra` so callers don't pin our version.
 
+For a concrete, current-as-of-the-tip inventory — supported family/link
+matrix, formula DSL, inference paths, and out-of-scope items — see
+[`guide::what_is_supported`](https://docs.rs/mixeff-rs/latest/mixeff_rs/guide/what_is_supported/).
+
 ## Installation
 
 ```toml
