@@ -1825,6 +1825,7 @@ impl GeneralizedLinearMixedModel {
         self.lmm.optsum.fit_log.clear();
         self.lmm.compiler_artifact.optimizer_certificate = None;
         self.lmm.compiler_artifact.glmm_fit_metadata = None;
+        self.lmm.compiler_artifact.fixed_effect_covariance_matrix = None;
         self.lmm.compiler_artifact.effective_covariance.clear();
         Ok(())
     }
@@ -1832,6 +1833,8 @@ impl GeneralizedLinearMixedModel {
     fn record_glmm_fit_metadata(&mut self) {
         self.lmm.compiler_artifact.glmm_fit_metadata =
             Some(GlmmFitMetadata::from_opt_summary(&self.lmm.optsum));
+        self.lmm.compiler_artifact.fixed_effect_covariance_matrix =
+            Some(self.lmm.glmm_fixed_effect_covariance_matrix());
     }
 
     #[cfg(not(feature = "nlopt"))]

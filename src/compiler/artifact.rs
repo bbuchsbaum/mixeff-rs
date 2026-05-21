@@ -317,9 +317,11 @@ pub struct FixedEffectCovarianceMatrix {
 }
 
 impl FixedEffectCovarianceMatrix {
-    pub fn model_based(
+    fn available_with_method(
         coef_names: Vec<String>,
         matrix: Vec<Vec<f64>>,
+        method: FixedEffectCovarianceMethod,
+        reliability: ReliabilityGrade,
         details: FixedEffectCovarianceDetails,
         notes: Vec<String>,
     ) -> Self {
@@ -329,13 +331,45 @@ impl FixedEffectCovarianceMatrix {
             crate_version: Some(env!("CARGO_PKG_VERSION").to_string()),
             coef_names,
             matrix: Some(matrix),
-            method: FixedEffectCovarianceMethod::ModelBased,
+            method,
             status: FixedEffectCovarianceStatus::Available,
-            reliability: ReliabilityGrade::High,
+            reliability,
             reason: None,
             details,
             notes,
         }
+    }
+
+    pub fn model_based(
+        coef_names: Vec<String>,
+        matrix: Vec<Vec<f64>>,
+        details: FixedEffectCovarianceDetails,
+        notes: Vec<String>,
+    ) -> Self {
+        Self::available_with_method(
+            coef_names,
+            matrix,
+            FixedEffectCovarianceMethod::ModelBased,
+            ReliabilityGrade::High,
+            details,
+            notes,
+        )
+    }
+
+    pub fn pirls_laplace_working_hessian(
+        coef_names: Vec<String>,
+        matrix: Vec<Vec<f64>>,
+        details: FixedEffectCovarianceDetails,
+        notes: Vec<String>,
+    ) -> Self {
+        Self::available_with_method(
+            coef_names,
+            matrix,
+            FixedEffectCovarianceMethod::PirlsLaplaceWorkingHessian,
+            ReliabilityGrade::Moderate,
+            details,
+            notes,
+        )
     }
 
     pub fn unavailable(
@@ -364,6 +398,7 @@ impl FixedEffectCovarianceMatrix {
 #[serde(rename_all = "snake_case")]
 pub enum FixedEffectCovarianceMethod {
     ModelBased,
+    PirlsLaplaceWorkingHessian,
     Unavailable,
 }
 

@@ -26,14 +26,15 @@ use crate::compiler::{
     Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticStage, DominantLoading,
     EffectiveCovarianceSummary, EffectiveRankStatus, EstimabilityAssessment, EstimabilityStatus,
     EvidenceMethod, FixedContrastEstimability, FixedEffectCovarianceDetails,
-    FixedEffectCovarianceMatrix, FixedEffectHypothesis, FixedEffectInferenceDetails,
-    FixedEffectInferenceMethod, FixedEffectInferenceRow, FixedEffectInferenceRowKind,
-    FixedEffectInferenceStatus, FixedEffectInferenceTable, FixedEffectNullTargetSummary,
-    FixedEffectStatisticName, FixedEffectTest, FixedEffectTestMethod, InferenceMethod,
-    InferenceStatus, InterpretableSubmodel, KenwardRogerInferenceDetails, ModelAuditReport,
-    ModelStateChange, ModelStateSummary, OptimizerCertificate, OptimizerDerivativeEvidence,
-    PolicyAction, PolicyRecommendation, ReductionRecord, ReductionTrigger, ReliabilityGrade,
-    SupportedCovarianceDirection, DOMINANT_LOADING_THRESHOLD, INTERPRETABLE_GAP_TOLERANCE,
+    FixedEffectCovarianceMatrix, FixedEffectCovarianceMethod, FixedEffectHypothesis,
+    FixedEffectInferenceDetails, FixedEffectInferenceMethod, FixedEffectInferenceRow,
+    FixedEffectInferenceRowKind, FixedEffectInferenceStatus, FixedEffectInferenceTable,
+    FixedEffectNullTargetSummary, FixedEffectStatisticName, FixedEffectTest, FixedEffectTestMethod,
+    InferenceMethod, InferenceStatus, InterpretableSubmodel, KenwardRogerInferenceDetails,
+    ModelAuditReport, ModelStateChange, ModelStateSummary, OptimizerCertificate,
+    OptimizerDerivativeEvidence, PolicyAction, PolicyRecommendation, ReductionRecord,
+    ReductionTrigger, ReliabilityGrade, SupportedCovarianceDirection, DOMINANT_LOADING_THRESHOLD,
+    INTERPRETABLE_GAP_TOLERANCE,
 };
 use crate::error::{MixedModelError, Result};
 use crate::formula::{FixedTerm, Formula, RandomTerm};
@@ -8008,6 +8009,30 @@ impl LinearMixedModel {
 
     /// Return the fixed-effect covariance matrix with compiler-audit metadata.
     pub fn fixed_effect_covariance_matrix(&self) -> FixedEffectCovarianceMatrix {
+        self.fixed_effect_covariance_matrix_with_available_method(
+            FixedEffectCovarianceMethod::ModelBased,
+            vec![
+                "model-based fixed-effect covariance geometry; inference claims remain on fixed_effect_inference_table rows"
+                    .to_string(),
+            ],
+        )
+    }
+
+    pub(crate) fn glmm_fixed_effect_covariance_matrix(&self) -> FixedEffectCovarianceMatrix {
+        self.fixed_effect_covariance_matrix_with_available_method(
+            FixedEffectCovarianceMethod::PirlsLaplaceWorkingHessian,
+            vec![
+                "PIRLS/Laplace working-Hessian fixed-effect covariance geometry; inference claims remain on fixed_effect_inference_table rows"
+                    .to_string(),
+            ],
+        )
+    }
+
+    fn fixed_effect_covariance_matrix_with_available_method(
+        &self,
+        method: FixedEffectCovarianceMethod,
+        notes: Vec<String>,
+    ) -> FixedEffectCovarianceMatrix {
         let coef_names = self.coef_names();
         let vcov = self.vcov();
         let expected_rank = coef_names.len();
@@ -8055,15 +8080,25 @@ impl LinearMixedModel {
             );
         }
 
-        FixedEffectCovarianceMatrix::model_based(
-            coef_names,
-            matrix_rows(&vcov),
-            details,
-            vec![
-                "model-based fixed-effect covariance geometry; inference claims remain on fixed_effect_inference_table rows"
-                    .to_string(),
-            ],
-        )
+        match method {
+            FixedEffectCovarianceMethod::ModelBased => FixedEffectCovarianceMatrix::model_based(
+                coef_names,
+                matrix_rows(&vcov),
+                details,
+                notes,
+            ),
+            FixedEffectCovarianceMethod::PirlsLaplaceWorkingHessian => {
+                FixedEffectCovarianceMatrix::pirls_laplace_working_hessian(
+                    coef_names,
+                    matrix_rows(&vcov),
+                    details,
+                    notes,
+                )
+            }
+            FixedEffectCovarianceMethod::Unavailable => unreachable!(
+                "available covariance constructor should not be called with unavailable method"
+            ),
+        }
     }
 
     fn refresh_fixed_effect_covariance_matrix(&mut self) {

@@ -110,9 +110,11 @@ P-values, degrees of freedom, method labels, reliability grades, estimability,
 and reasons remain owned by `fixed_effect_inference_table` rows.
 
 For full-rank LMM fits, the covariance payload stores the model-based
-fixed-effect covariance matrix in coefficient order. When the covariance is not
-usable, the payload uses `status = unavailable`, `matrix = null`, and a stable
-reason such as `rank_deficient_fixed_effects` or
+fixed-effect covariance matrix in coefficient order. For full-rank GLMM fits,
+the payload stores the PIRLS/Laplace working-Hessian covariance in coefficient
+order and labels it with `method = pirls_laplace_working_hessian`. When the
+covariance is not usable, the payload uses `status = unavailable`,
+`matrix = null`, and a stable reason such as `rank_deficient_fixed_effects` or
 `fixed_effect_covariance_nonfinite`. R wrappers should prefer this artifact for
 fixed-effect covariance consumers, and fall back to diagonal matrices from
 stored standard errors only as an explicitly unavailable legacy/degraded path.

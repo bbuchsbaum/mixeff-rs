@@ -2,7 +2,9 @@
 #![cfg(feature = "unstable-internals")]
 
 use mixeff_rs::compiler::{
-    DiagnosticCode, InferenceAvailability, ModelKind, ObjectiveApproximation,
+    CompiledModelArtifact, DiagnosticCode, FixedEffectCovarianceMethod,
+    FixedEffectCovarianceStatus, InferenceAvailability, ModelKind, ObjectiveApproximation,
+    ReliabilityGrade,
 };
 use mixeff_rs::formula::parse_formula;
 use mixeff_rs::model::{DataFrame, Family, GeneralizedLinearMixedModel, LinkFunction};
@@ -57,9 +59,9 @@ fn native_glmm_artifact_records_support_contract_metadata() {
         InferenceAvailability::Unsupported { .. }
     ));
 
-    assert_eq!(model.lmm().optsum.n_agq, 1);
-    assert_eq!(model.lmm().optsum.backend.label(), "native");
-    assert_eq!(model.lmm().optsum.optimizer_name(), "cobyla");
+    assert_eq!(model.lmm().optsum().n_agq, 1);
+    assert_eq!(model.lmm().optsum().backend.label(), "native");
+    assert_eq!(model.lmm().optsum().optimizer_name(), "cobyla");
 
     let metadata = artifact
         .glmm_fit_metadata
@@ -99,4 +101,44 @@ fn native_glmm_artifact_records_support_contract_metadata() {
         .diagnostics
         .iter()
         .all(|diagnostic| diagnostic.code != DiagnosticCode::InvalidAgqRequest));
+
+    let covariance = artifact
+        .fixed_effect_covariance_matrix
+        .as_ref()
+        .expect("fitted GLMM artifact should carry fixed-effect covariance geometry");
+    assert_eq!(covariance.status, FixedEffectCovarianceStatus::Available);
+    assert_eq!(
+        covariance.method,
+        FixedEffectCovarianceMethod::PirlsLaplaceWorkingHessian
+    );
+    assert_eq!(covariance.reliability, ReliabilityGrade::Moderate);
+    assert_eq!(
+        covariance.coef_names,
+        vec!["(Intercept)".to_string(), "x".to_string()]
+    );
+    assert_eq!(covariance.details.matrix_rows, 2);
+    assert_eq!(covariance.details.matrix_cols, 2);
+    assert_eq!(covariance.details.finite, Some(true));
+    assert_eq!(covariance.details.symmetric, Some(true));
+    let matrix = covariance
+        .matrix
+        .as_ref()
+        .expect("available covariance payload should include matrix values");
+    assert_eq!(matrix.len(), 2);
+    assert!(matrix.iter().all(|row| row.len() == 2));
+    assert!(matrix.iter().flatten().all(|value| value.is_finite()));
+    assert!(covariance
+        .notes
+        .iter()
+        .any(|note| note.contains("PIRLS/Laplace working-Hessian")));
+
+    let value = serde_json::to_value(artifact).unwrap();
+    assert_eq!(
+        value["fixed_effect_covariance_matrix"]["method"],
+        "pirls_laplace_working_hessian"
+    );
+    assert!(value["fixed_effect_covariance_matrix"]["matrix"].is_array());
+    let json = serde_json::to_string(artifact).unwrap();
+    let decoded: CompiledModelArtifact = serde_json::from_str(&json).unwrap();
+    assert_eq!(&decoded, artifact);
 }
