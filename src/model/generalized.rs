@@ -1831,10 +1831,75 @@ impl GeneralizedLinearMixedModel {
     }
 
     fn record_glmm_fit_metadata(&mut self) {
-        self.lmm.compiler_artifact.glmm_fit_metadata =
-            Some(GlmmFitMetadata::from_opt_summary(&self.lmm.optsum));
+        let metadata = GlmmFitMetadata::from_opt_summary(&self.lmm.optsum);
+        self.record_fast_pirls_parity_scope_diagnostic(&metadata);
+        self.lmm.compiler_artifact.glmm_fit_metadata = Some(metadata);
         self.lmm.compiler_artifact.fixed_effect_covariance_matrix =
             Some(self.lmm.glmm_fixed_effect_covariance_matrix());
+    }
+
+    fn record_fast_pirls_parity_scope_diagnostic(&mut self, metadata: &GlmmFitMetadata) {
+        if metadata.estimation_method != "fast_pirls_profiled" {
+            return;
+        }
+        let scope = "fast_pirls_not_lme4_joint_parity";
+        if self
+            .lmm
+            .compiler_artifact
+            .diagnostics
+            .iter()
+            .any(|diagnostic| {
+                diagnostic.code == DiagnosticCode::SupportNote
+                    && diagnostic
+                        .payload
+                        .get("glmm_parity_scope")
+                        .and_then(serde_json::Value::as_str)
+                        == Some(scope)
+            })
+        {
+            return;
+        }
+
+        let mut diagnostic = Diagnostic::new(
+            DiagnosticCode::SupportNote,
+            DiagnosticSeverity::Info,
+            DiagnosticStage::Certification,
+            "Fast-PIRLS GLMM fit is not certified as lme4 joint-Laplace parity",
+        )
+        .with_suggested_actions(vec![
+            "treat this fit as profiled fast-PIRLS evidence, not an lme4 joint-Laplace parity row"
+                .to_string(),
+            "consult the parity scorecard or downstream mismatch ledger before applying strict lme4 tolerances"
+                .to_string(),
+        ]);
+        diagnostic
+            .payload
+            .insert("glmm_parity_scope".to_string(), serde_json::json!(scope));
+        diagnostic.payload.insert(
+            "scorecard_class".to_string(),
+            serde_json::json!("documented_divergence"),
+        );
+        diagnostic.payload.insert(
+            "external_engine_parity".to_string(),
+            serde_json::json!("not_certified"),
+        );
+        diagnostic.payload.insert(
+            "reference_gate".to_string(),
+            serde_json::json!("lme4_joint_laplace"),
+        );
+        diagnostic.payload.insert(
+            "estimation_method".to_string(),
+            serde_json::json!(metadata.estimation_method.as_str()),
+        );
+        diagnostic.payload.insert(
+            "objective_definition".to_string(),
+            serde_json::json!(metadata.objective_definition.as_str()),
+        );
+        diagnostic.payload.insert(
+            "response_constants".to_string(),
+            serde_json::json!(metadata.response_constants.as_str()),
+        );
+        self.lmm.compiler_artifact.diagnostics.push(diagnostic);
     }
 
     #[cfg(not(feature = "nlopt"))]

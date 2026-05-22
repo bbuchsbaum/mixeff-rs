@@ -102,6 +102,39 @@ fn native_glmm_artifact_records_support_contract_metadata() {
         .iter()
         .all(|diagnostic| diagnostic.code != DiagnosticCode::InvalidAgqRequest));
 
+    let parity_scope = artifact
+        .diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.code == DiagnosticCode::SupportNote
+                && diagnostic
+                    .payload
+                    .get("glmm_parity_scope")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("fast_pirls_not_lme4_joint_parity")
+        })
+        .expect("fast-PIRLS GLMM artifact should state its lme4 parity scope");
+    assert_eq!(
+        parity_scope.severity,
+        mixeff_rs::compiler::DiagnosticSeverity::Info
+    );
+    assert_eq!(
+        parity_scope.payload["scorecard_class"],
+        serde_json::json!("documented_divergence")
+    );
+    assert_eq!(
+        parity_scope.payload["external_engine_parity"],
+        serde_json::json!("not_certified")
+    );
+    assert_eq!(
+        parity_scope.payload["reference_gate"],
+        serde_json::json!("lme4_joint_laplace")
+    );
+    assert_eq!(
+        parity_scope.payload["response_constants"],
+        serde_json::json!("dropped")
+    );
+
     let covariance = artifact
         .fixed_effect_covariance_matrix
         .as_ref()
