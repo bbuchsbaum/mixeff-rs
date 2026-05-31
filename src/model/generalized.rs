@@ -17,11 +17,9 @@ use std::rc::Rc;
 
 use crate::compiler::{
     CompiledModelArtifact, CompilerPolicy, Diagnostic, DiagnosticCode, DiagnosticSeverity,
-    DiagnosticStage, EvidenceQuality, GlmmFitMetadata, ModelAuditReport, ModelBoundary,
-    ObjectiveApproximation, OptimizerCertificate,
+    DiagnosticStage, EvidenceMethod, EvidenceQuality, GlmmFitMetadata, ModelAuditReport,
+    ModelBoundary, ObjectiveApproximation, OptimizerCertificate, OptimizerDerivativeEvidence,
 };
-#[cfg(feature = "nlopt")]
-use crate::compiler::{EvidenceMethod, OptimizerDerivativeEvidence};
 use crate::error::{MixedModelError, Result};
 use crate::formula::Formula;
 use crate::model::data::DataFrame;
@@ -1482,11 +1480,9 @@ impl GeneralizedLinearMixedModel {
     ///
     /// `fast` selects the MixedModels.jl-style fast path, which profiles over
     /// θ and updates β through PIRLS. `fast = false` selects the certified
-    /// joint path when the NLopt backend is enabled: joint Laplace for
-    /// `n_agq <= 1`, and joint AGQ for valid single-scalar random-effect
-    /// models with `n_agq > 1`. Without NLopt it returns an explicit
-    /// [`MixedModelError::Unsupported`] rather than silently using another
-    /// algorithm.
+    /// joint path: joint Laplace for `n_agq <= 1`, and joint AGQ for valid
+    /// single-scalar random-effect models with `n_agq > 1`. NLopt builds use
+    /// BOBYQA; dependency-light builds use native COBYLA.
     ///
     /// `n_agq` selects the deviance approximation: `1` (or `0`) means the
     /// Laplace approximation; values `>= 2` request `n_agq`-point adaptive
@@ -1504,18 +1500,7 @@ impl GeneralizedLinearMixedModel {
             return Err(error);
         }
         if !fast {
-            #[cfg(feature = "nlopt")]
-            {
-                return self.fit_joint_glmm_with_response_constants(n_agq, verbose);
-            }
-            #[cfg(not(feature = "nlopt"))]
-            {
-                return Err(MixedModelError::Unsupported(
-                    "GLMM fit_with_options(fast = false) requires the nlopt backend; \
-                 use fast = true for the current profiled-θ PIRLS path"
-                        .to_string(),
-                ));
-            }
+            return self.fit_joint_glmm_with_response_constants(n_agq, verbose);
         }
         if self.lmm.optsum.feval > 0 {
             return Err(MixedModelError::AlreadyFitted);
@@ -1542,7 +1527,6 @@ impl GeneralizedLinearMixedModel {
     /// For `n_agq <= 1` this is joint Laplace; for `n_agq > 1` this is joint
     /// AGQ and is accepted only for the scalar random-effect shapes permitted
     /// by [`validate_agq`](Self::validate_agq).
-    #[cfg(feature = "nlopt")]
     pub fn fit_joint_glmm_with_response_constants(
         &mut self,
         n_agq: usize,
@@ -1561,12 +1545,13 @@ impl GeneralizedLinearMixedModel {
         let start_beta = self.beta.as_slice().to_vec();
         let start_theta = self.theta.clone();
         let profiled_start_objective = self.deviance_with_response_constants(n_agq);
+        let maxeval = joint_glmm_default_maxeval(start_beta.len() + start_theta.len());
         self.fit_joint_glmm_from_start(
             start_beta,
             start_theta,
             profiled_start_objective,
             n_agq,
-            200,
+            maxeval,
             Some(fallback_fast_pirls),
         )
     }
@@ -1703,7 +1688,174 @@ impl GeneralizedLinearMixedModel {
         Ok(me)
     }
 
-    #[cfg(feature = "nlopt")]
+    #[cfg(not(feature = "nlopt"))]
+    fn fit_joint_glmm_from_start(
+        &mut self,
+        start_beta: Vec<f64>,
+        start_theta: Vec<f64>,
+        profiled_start_objective: f64,
+        n_agq: usize,
+        maxeval: u32,
+        fallback_fast_pirls: Option<Self>,
+    ) -> Result<&mut Self> {
+        let n_beta = self.beta.len();
+        let n_theta = self.theta.len();
+        let n_params = n_beta + n_theta;
+        let mut initial = start_beta;
+        initial.extend(start_theta);
+        debug_assert_eq!(initial.len(), n_params);
+
+        let mut lower_bounds = vec![f64::NEG_INFINITY; n_beta];
+        lower_bounds.extend(self.lmm.lower_bounds());
+        self.lmm.optsum.optimizer = Optimizer::Cobyla;
+        self.lmm.optsum.backend = Optimizer::Cobyla.canonical_backend();
+        self.lmm.optsum.finitial = profiled_start_objective;
+
+        let best_params: Rc<RefCell<Vec<f64>>> = Rc::new(RefCell::new(initial.clone()));
+        let best_fmin: Rc<Cell<f64>> = Rc::new(Cell::new(f64::INFINITY));
+        let feval_count: Rc<Cell<i64>> = Rc::new(Cell::new(0i64));
+        let fit_log: Rc<RefCell<Vec<FitLogEntry>>> = Rc::new(RefCell::new(Vec::new()));
+
+        let bounds: Vec<(f64, f64)> = lower_bounds.iter().map(|&lo| (lo, f64::INFINITY)).collect();
+        let constraint_fns: Vec<Box<dyn cobyla::Func<()>>> = lower_bounds
+            .iter()
+            .enumerate()
+            .filter(|(_, &lo)| lo > f64::NEG_INFINITY)
+            .map(|(i, &lo)| {
+                Box::new(move |x: &[f64], _: &mut ()| -> f64 { x[i] - lo })
+                    as Box<dyn cobyla::Func<()>>
+            })
+            .collect();
+        let cons_refs: Vec<&dyn cobyla::Func<()>> =
+            constraint_fns.iter().map(|f| f.as_ref()).collect();
+        let stop_tol = cobyla::StopTols {
+            ftol_rel: self.lmm.optsum.ftol_rel.min(1.0e-10),
+            ftol_abs: self.lmm.optsum.ftol_abs.max(1.0e-7),
+            xtol_rel: self.lmm.optsum.xtol_rel,
+            xtol_abs: vec![1.0e-5; n_params],
+        };
+
+        let model = std::cell::RefCell::new(self);
+        let objective_fn = |params: &[f64], _data: &mut ()| -> f64 {
+            feval_count.set(feval_count.get() + 1);
+            let objective = model
+                .borrow_mut()
+                .joint_glmm_deviance_at_params(params, n_beta, n_agq);
+            fit_log.borrow_mut().push(FitLogEntry {
+                theta: params.to_vec(),
+                objective,
+            });
+            if objective < best_fmin.get() {
+                best_fmin.set(objective);
+                *best_params.borrow_mut() = params.to_vec();
+            }
+            objective
+        };
+
+        let result = cobyla::minimize(
+            objective_fn,
+            &initial,
+            &bounds,
+            &cons_refs,
+            (),
+            maxeval as usize,
+            cobyla::RhoBeg::All(0.5),
+            Some(stop_tol),
+        );
+
+        let (mut params, status_label) = match result {
+            Ok((status, x_opt, fmin)) if fmin.is_finite() => {
+                (x_opt, Self::cobyla_success_status_label(status))
+            }
+            Ok((status, _x_opt, _fmin)) if best_fmin.get().is_finite() => (
+                best_params.borrow().clone(),
+                Self::cobyla_success_status_label(status),
+            ),
+            Ok((status, x_opt, _fmin)) => (x_opt, Self::cobyla_success_status_label(status)),
+            Err((status @ cobyla::FailStatus::RoundoffLimited, _x_opt, _fmin))
+                if best_fmin.get().is_finite() =>
+            {
+                (
+                    best_params.borrow().clone(),
+                    format!("FAILED:{}", Self::cobyla_fail_status_label(status)),
+                )
+            }
+            Err((status, x_opt, fmin)) if fmin.is_finite() => (
+                x_opt,
+                format!("FAILED:{}", Self::cobyla_fail_status_label(status)),
+            ),
+            Err((status, _x_opt, _fmin)) if best_fmin.get().is_finite() => (
+                best_params.borrow().clone(),
+                format!("FAILED:{}", Self::cobyla_fail_status_label(status)),
+            ),
+            Err((_status, _x_opt, _fmin)) => {
+                return Err(MixedModelError::Optimization(
+                    "native COBYLA joint GLMM optimization failed before finding a finite objective"
+                        .to_string(),
+                ));
+            }
+        };
+
+        let me = model.into_inner();
+        let final_objective = me.joint_glmm_deviance_at_params(&params, n_beta, n_agq);
+        me.refresh_dispersion();
+        let status_prefix = joint_glmm_status_prefix(n_agq);
+        me.lmm.optsum.return_value = format!("{status_prefix}:{status_label}");
+        me.lmm.optsum.n_agq = n_agq;
+        me.lmm.optsum.feval = feval_count.get();
+        me.lmm.optsum.max_feval = maxeval as i64;
+        me.lmm.optsum.fit_log = rc_refcell_into_inner_or_clone(fit_log);
+        me.lmm.optsum.fmin = final_objective;
+        me.lmm.optsum.final_params = std::mem::take(&mut params);
+
+        let mut lower_bounds = vec![f64::NEG_INFINITY; n_beta];
+        lower_bounds.extend(me.lmm.lower_bounds());
+        let mut certificate = OptimizerCertificate::from_opt_summary_with_context(
+            &me.lmm.optsum,
+            &me.lmm.optsum.final_params,
+            &lower_bounds,
+            Some(me.lmm.dims.n),
+        );
+        let gradient = me.joint_laplace_finite_difference_gradient(
+            &me.lmm.optsum.final_params.clone(),
+            n_beta,
+            n_agq,
+            &lower_bounds,
+        );
+        certificate.apply_derivative_evidence(
+            OptimizerDerivativeEvidence {
+                method: EvidenceMethod::FiniteDifference,
+                gradient: gradient.clone(),
+                hessian: None,
+            },
+            2.0e-2,
+            1.0e-6,
+        );
+        annotate_glmm_covariance_status(
+            &mut certificate,
+            &me.lmm.optsum.final_params,
+            n_beta,
+            &lower_bounds,
+            &gradient,
+            2.0e-2,
+        );
+        if let Some(fallback) = uncertified_joint_fallback(
+            &certificate,
+            &me.lmm.optsum.return_value,
+            fallback_fast_pirls,
+        ) {
+            *me = fallback;
+            me.refresh_binomial_separation_diagnostics();
+            me.refresh_near_unit_random_effect_correlation_diagnostics();
+            return Ok(me);
+        }
+        me.lmm.compiler_artifact.optimizer_certificate = Some(certificate);
+        me.record_glmm_fit_metadata();
+        me.refresh_binomial_separation_diagnostics();
+        me.refresh_near_unit_random_effect_correlation_diagnostics();
+        Ok(me)
+    }
+
     fn joint_glmm_deviance_at_params(
         &mut self,
         params: &[f64],
@@ -1730,7 +1882,6 @@ impl GeneralizedLinearMixedModel {
         }
     }
 
-    #[cfg(feature = "nlopt")]
     fn joint_laplace_finite_difference_gradient(
         &mut self,
         params: &[f64],
@@ -2666,13 +2817,35 @@ fn lower_triangle_pair(offset: usize) -> (usize, usize) {
     (row, remaining)
 }
 
-#[cfg(feature = "nlopt")]
 fn joint_glmm_status_prefix(n_agq: usize) -> &'static str {
     if n_agq <= 1 {
         "JOINT_LAPLACE"
     } else {
         "JOINT_AGQ"
     }
+}
+
+fn glmm_objective_includes_response_constants(return_value: &str) -> bool {
+    return_value.starts_with("JOINT_LAPLACE:")
+        || return_value.starts_with("JOINT_LAPLACE_FAILED:")
+        || return_value.starts_with("JOINT_AGQ:")
+        || return_value.starts_with("JOINT_AGQ_FAILED:")
+        || return_value.starts_with("EXPERIMENTAL_JOINT:")
+        || return_value.starts_with("EXPERIMENTAL_JOINT_FAILED:")
+}
+
+#[cfg(feature = "nlopt")]
+fn joint_glmm_default_maxeval(_n_params: usize) -> u32 {
+    200
+}
+
+#[cfg(not(feature = "nlopt"))]
+fn joint_glmm_default_maxeval(n_params: usize) -> u32 {
+    // Native COBYLA is the dependency-light escape hatch for GLMMs where the
+    // profiled fast-PIRLS surface is known to miss the lme4 joint optimum.
+    // It needs a larger default budget than NLopt BOBYQA, especially once
+    // fixed effects join theta in the search vector.
+    (2_000usize + 200usize * n_params.max(1)).min(20_000) as u32
 }
 
 fn glmm_block_index(row: usize, col: usize) -> usize {
@@ -2759,7 +2932,6 @@ fn experimental_nlopt_status_label(name: &str) -> String {
     }
 }
 
-#[cfg(feature = "nlopt")]
 fn annotate_glmm_covariance_status(
     certificate: &mut OptimizerCertificate,
     params: &[f64],
@@ -2892,7 +3064,6 @@ fn annotate_glmm_singular_covariance_status(
     certificate.diagnostics.push(diagnostic);
 }
 
-#[cfg(feature = "nlopt")]
 fn uncertified_joint_fallback(
     joint_certificate: &OptimizerCertificate,
     joint_return_code: &str,
@@ -3389,17 +3560,17 @@ impl MixedModelFit for GeneralizedLinearMixedModel {
     }
 
     fn loglikelihood(&self) -> f64 {
-        // `objective()` deliberately reports the *dropped-constant* deviance
-        // (the fitting/parity-artifact convention). The log-likelihood — and
-        // therefore AIC/BIC/AICc — must instead be on the full normalized
-        // `-2 logLik` scale, i.e. with the response normalising constants
-        // (`Σ ln yᵢ!`, `Σ ln C(nᵢ,kᵢ)`, dispersion-density terms) retained,
-        // to match lme4/MixedModels.jl. In both the Laplace and AGQ paths
-        // `full_normalized = optsum.fmin + response_constants_offset()`
-        // (see `deviance_with_response_constants`); the offset is a pure
-        // `&self` quantity evaluated at the post-fit μ.
+        // Fast-PIRLS stores the dropped-constant deviance, while labelled
+        // joint fits store the included-constant objective optimized by the
+        // joint path. The log-likelihood — and therefore AIC/BIC/AICc — must
+        // always be on the full normalized `-2 logLik` scale to match
+        // lme4/MixedModels.jl.
         if self.is_fitted() {
-            -(self.lmm.optsum.fmin + self.response_constants_offset()) / 2.0
+            if glmm_objective_includes_response_constants(&self.lmm.optsum.return_value) {
+                -self.lmm.optsum.fmin / 2.0
+            } else {
+                -(self.lmm.optsum.fmin + self.response_constants_offset()) / 2.0
+            }
         } else {
             -self.laplace_objective_with_response_constants() / 2.0
         }
@@ -4407,36 +4578,45 @@ mod tests {
 
     #[cfg(not(feature = "nlopt"))]
     #[test]
-    fn test_glmm_fast_false_requires_nlopt_backend() {
+    fn test_glmm_fast_false_uses_native_joint_or_fallback_path_without_nlopt() {
         let data = contra_fixture();
         let formula = parse_formula("use_num ~ 1 + (1 | urban_dist)").unwrap();
         let mut model =
             GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
 
-        let err = model.fit_with_options(false, 1, false).unwrap_err();
+        model.fit_with_options(false, 1, false).unwrap();
 
-        match err {
-            MixedModelError::Unsupported(message) => {
-                assert!(message.contains("fast = false"));
-                assert!(message.contains("nlopt"));
-            }
-            other => panic!("expected Unsupported error, got {other:?}"),
-        }
-
-        let data = contra_fixture();
-        let formula = parse_formula("use_num ~ 1 + (1 | urban_dist)").unwrap();
-        let mut model =
-            GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
-        let err = model.fit_with_options(false, 7, false).unwrap_err();
-        match err {
-            MixedModelError::Unsupported(message) => {
-                assert!(message.contains("fast = false"));
-                assert!(message.contains("nlopt"));
-            }
-            other => panic!(
-                "expected Unsupported error for valid AGQ shape without nlopt, got {other:?}"
+        assert!(
+            model.lmm.optsum.return_value.contains("JOINT_LAPLACE"),
+            "fast=false without nlopt must use the labelled joint Laplace path or fallback, got {}",
+            model.lmm.optsum.return_value
+        );
+        assert_eq!(model.lmm.optsum.backend.label(), "native");
+        let metadata = model
+            .lmm
+            .compiler_artifact
+            .glmm_fit_metadata
+            .as_ref()
+            .expect("native fast=false fit should record GLMM metadata");
+        assert!(
+            matches!(
+                metadata.estimation_method.as_str(),
+                "joint_laplace" | "fallback_fast_pirls"
             ),
-        }
+            "native fast=false must record either joint Laplace or a labelled fallback, got {:?}",
+            metadata
+        );
+
+        let data = contra_fixture();
+        let formula = parse_formula("use_num ~ 1 + (1 | urban_dist)").unwrap();
+        let mut model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+        model.fit_with_options(false, 7, false).unwrap();
+        assert!(
+            model.lmm.optsum.return_value.contains("JOINT_AGQ"),
+            "valid scalar-RE AGQ should also use the labelled native joint path, got {}",
+            model.lmm.optsum.return_value
+        );
     }
 
     #[cfg(feature = "nlopt")]

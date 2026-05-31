@@ -37,16 +37,16 @@ Laplace fit. It is faster, but it can be less accurate for inference when the
 profiled approximation is stressed, especially overdispersed Poisson/binomial
 models and observation-level random-effect models.
 
-`fast = false` selects a labelled joint attempt when the NLopt backend is
-enabled: joint Laplace for `n_agq <= 1`, and joint AGQ for valid
-single-scalar random-effect models with `n_agq > 1`. It estimates `[β; θ]` on
-a joint objective with response constants retained, records stationarity and
-covariance evidence when the joint path certifies, and otherwise returns a
-labelled fast-PIRLS fallback. Without NLopt it remains an explicit unsupported
-request rather than silently selecting another algorithm. The prerequisites
-for promoting any GLMM row — objective convention, derivative/stationarity
-evidence, covariance-certificate compatibility, fallback policy, and lockstep
-scorecard tests — are specified in
+`fast = false` selects a labelled joint attempt: joint Laplace for
+`n_agq <= 1`, and joint AGQ for valid single-scalar random-effect models with
+`n_agq > 1`. It estimates `[β; θ]` on a joint objective with response
+constants retained, records stationarity and covariance evidence when the
+joint path certifies, and otherwise returns a labelled fast-PIRLS fallback.
+NLopt builds use BOBYQA; dependency-light builds use native COBYLA so users
+still have a documented joint-Laplace route when fast-PIRLS is not adequate.
+The prerequisites for promoting any GLMM row — objective convention,
+derivative/stationarity evidence, covariance-certificate compatibility,
+fallback policy, and lockstep scorecard tests — are specified in
 `docs/certified_joint_glmm_optimizer_contract.md`.
 
 Fit-summary payloads and compiler artifacts must expose the effective GLMM

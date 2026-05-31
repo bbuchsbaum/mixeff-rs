@@ -317,6 +317,14 @@ impl OptSummary {
         } else {
             raw
         };
+        let status = status
+            .strip_prefix("JOINT_LAPLACE:")
+            .or_else(|| status.strip_prefix("JOINT_AGQ:"))
+            .or_else(|| status.strip_prefix("EXPERIMENTAL_JOINT:"))
+            .or_else(|| status.strip_prefix("JOINT_LAPLACE_FAILED:"))
+            .or_else(|| status.strip_prefix("JOINT_AGQ_FAILED:"))
+            .or_else(|| status.strip_prefix("EXPERIMENTAL_JOINT_FAILED:"))
+            .unwrap_or(status);
         match status {
             // Clean convergence criteria across all backends.
             "SUCCESS" | "STOPVAL_REACHED" | "FTOL_REACHED" | "XTOL_REACHED" | "RADIUS_REACHED"
@@ -812,6 +820,22 @@ mod tests {
         assert_eq!(
             status_of(10, "KKT_BOUNDARY_RESTART(1): MAXEVAL_REACHED"),
             ConvergenceStatus::BudgetExhausted
+        );
+    }
+
+    #[test]
+    fn convergence_status_unwraps_joint_glmm_prefixes() {
+        assert_eq!(
+            status_of(10, "JOINT_LAPLACE:SUCCESS"),
+            ConvergenceStatus::Converged
+        );
+        assert_eq!(
+            status_of(10, "JOINT_AGQ:MAXEVAL_REACHED"),
+            ConvergenceStatus::BudgetExhausted
+        );
+        assert_eq!(
+            status_of(10, "JOINT_LAPLACE_FAILED:ROUNDOFF_LIMITED"),
+            ConvergenceStatus::RoundoffLimited
         );
     }
 

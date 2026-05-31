@@ -22,12 +22,12 @@ fn assert_native_glmm_fit(
     assert!(model.loglikelihood().is_finite());
     assert!(model.dispersion(false).is_finite());
     assert!(model.dispersion(true).is_finite());
-    assert_eq!(model.lmm().optsum.optimizer, Optimizer::Cobyla);
-    assert_eq!(model.lmm().optsum.backend.label(), "native");
-    assert_eq!(model.lmm().optsum.n_agq, n_agq);
-    assert!(model.lmm().optsum.feval > 0);
-    assert!(model.lmm().optsum.fmin.is_finite());
-    assert!(!model.lmm().optsum.fit_log.is_empty());
+    assert_eq!(model.lmm().optsum().optimizer, Optimizer::Cobyla);
+    assert_eq!(model.lmm().optsum().backend.label(), "native");
+    assert_eq!(model.lmm().optsum().n_agq, n_agq);
+    assert!(model.lmm().optsum().feval > 0);
+    assert!(model.lmm().optsum().fmin.is_finite());
+    assert!(!model.lmm().optsum().fit_log.is_empty());
     let certificate = model
         .compiler_artifact()
         .optimizer_certificate
@@ -155,6 +155,54 @@ fn default_native_binomial_logit_covers_weights_and_agq() {
     assert!(
         (weighted.deviance(5) - unit_weight.deviance(5)).abs() > 1.0,
         "Binomial case weights should materially affect the AGQ deviance"
+    );
+}
+
+#[test]
+fn default_native_joint_laplace_is_reachable_without_nlopt() {
+    let (data, _) = datasets::load("cbpp").unwrap();
+    let incidence = data.numeric("incidence").unwrap();
+    let size = data.numeric("size").unwrap();
+    let proportion: Vec<f64> = incidence
+        .iter()
+        .zip(size.iter())
+        .map(|(&y, &n)| y / n)
+        .collect();
+    let weights = size.to_vec();
+    let mut data = data.clone();
+    data.add_numeric("proportion", proportion).unwrap();
+
+    let formula = parse_formula("proportion ~ 1 + period + (1 | herd)").unwrap();
+    let mut model = GeneralizedLinearMixedModel::new_with_weights(
+        formula,
+        &data,
+        Family::Binomial,
+        None,
+        weights,
+    )
+    .unwrap();
+
+    model.fit_with_options(false, 1, false).unwrap();
+
+    assert!(
+        model.lmm().optsum().return_value.contains("JOINT_LAPLACE"),
+        "native fast=false should now be a labelled joint Laplace path or fallback, got {}",
+        model.lmm().optsum().return_value
+    );
+    assert_eq!(model.lmm().optsum().backend.label(), "native");
+    assert!(model.objective().is_finite());
+    assert!(model.loglikelihood().is_finite());
+    let metadata = model
+        .compiler_artifact()
+        .glmm_fit_metadata
+        .as_ref()
+        .expect("native joint GLMM fit should record metadata");
+    assert!(
+        matches!(
+            metadata.estimation_method.as_str(),
+            "joint_laplace" | "fallback_fast_pirls"
+        ),
+        "unexpected native joint fit metadata: {metadata:?}"
     );
 }
 

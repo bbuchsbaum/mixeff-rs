@@ -55,12 +55,13 @@ the same statistical approximation as `lme4::glmer`'s joint Laplace fit**, and
 it can be less accurate for inference on overdispersed or
 observation-level-random-effect models.
 
-With the NLopt backend, `fast=false` selects a labelled joint path: Laplace
-for `n_agq <= 1`, and AGQ for valid single-scalar random-effect GLMMs with
-`n_agq > 1`. Without NLopt, requesting the joint path is an explicit
-unsupported request rather than a silent downgrade. Any joint attempt or
-fast-PIRLS fallback is labelled in the optimizer status and diagnostics — it
-is never silently presented as ordinary `lme4` parity.
+`fast=false` selects a labelled joint path: Laplace for `n_agq <= 1`, and AGQ
+for valid single-scalar random-effect GLMMs with `n_agq > 1`. NLopt builds use
+BOBYQA; dependency-light builds use the native COBYLA joint path, which is
+slower but gives users a documented route to the joint Laplace objective when
+fast-PIRLS is not adequate. Any joint attempt or fast-PIRLS fallback is
+labelled in the optimizer status and diagnostics — it is never silently
+presented as ordinary `lme4` parity.
 
 This is the project's no-fake-statistics stance applied to GLMMs: the
 approximation actually used is always recoverable from the fit, so a reported

@@ -151,11 +151,13 @@ fast-PIRLS estimation with Laplace/AGQ approximation metadata carried in the
 fit summary and compiler artifact. It is intentionally not the same
 statistical approximation as `lme4::glmer`'s joint Laplace fit, and it can be
 less accurate for inference on overdispersed or observation-level-random-effect
-models. With the NLopt backend, `fast=false` selects a labelled joint path:
-Laplace for `n_agq <= 1`, and AGQ for valid single-scalar random-effect GLMMs
-with `n_agq > 1`. Without NLopt it remains an explicit unsupported request.
-Any joint attempt or fast-PIRLS fallback is labelled in optimizer status and
-diagnostics rather than silently presented as ordinary `lme4` parity.
+models. `fast=false` selects a labelled joint path: Laplace for `n_agq <= 1`,
+and AGQ for valid single-scalar random-effect GLMMs with `n_agq > 1`. NLopt
+builds use BOBYQA; dependency-light builds use the native COBYLA joint path,
+which is slower but gives users a documented route to the joint Laplace
+objective when fast-PIRLS is not adequate. Any joint attempt or fast-PIRLS
+fallback is labelled in optimizer status and diagnostics rather than silently
+presented as ordinary `lme4` parity.
 
 ## License
 
