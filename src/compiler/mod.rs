@@ -57,9 +57,10 @@ pub use audit::{
 pub use diagnostics::{Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticStage, FitStatus};
 pub use estimability::{
     ContrastMatrix, ContrastRhs, EstimabilityAssessment, EstimabilityStatus,
-    FixedContrastEstimability, FixedEffectHypothesis, FixedEffectTest, FixedEffectTestMethod,
-    FixedTermEstimability, InferenceMethod, InferenceStatus, KernelPathEstimability,
-    RandomCovarianceEstimability, RandomVarianceEstimability, ReliabilityGrade,
+    FixedContrastEstimability, FixedEffectHypothesis, FixedEffectTermTestType, FixedEffectTest,
+    FixedEffectTestMethod, FixedTermEstimability, InferenceMethod, InferenceStatus,
+    KernelPathEstimability, RandomCovarianceEstimability, RandomVarianceEstimability,
+    ReliabilityGrade,
 };
 pub use explain::{explain_model, ModelExplanation};
 pub use ir::{

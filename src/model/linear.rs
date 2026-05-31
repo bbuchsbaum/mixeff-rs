@@ -29,12 +29,12 @@ use crate::compiler::{
     FixedEffectCovarianceMatrix, FixedEffectCovarianceMethod, FixedEffectHypothesis,
     FixedEffectInferenceDetails, FixedEffectInferenceMethod, FixedEffectInferenceRow,
     FixedEffectInferenceRowKind, FixedEffectInferenceStatus, FixedEffectInferenceTable,
-    FixedEffectNullTargetSummary, FixedEffectStatisticName, FixedEffectTest, FixedEffectTestMethod,
-    InferenceMethod, InferenceStatus, InterpretableSubmodel, KenwardRogerInferenceDetails,
-    ModelAuditReport, ModelStateChange, ModelStateSummary, OptimizerCertificate,
-    OptimizerDerivativeEvidence, PolicyAction, PolicyRecommendation, ReductionRecord,
-    ReductionTrigger, ReliabilityGrade, SupportedCovarianceDirection, DOMINANT_LOADING_THRESHOLD,
-    INTERPRETABLE_GAP_TOLERANCE,
+    FixedEffectNullTargetSummary, FixedEffectStatisticName, FixedEffectTermTestType,
+    FixedEffectTest, FixedEffectTestMethod, InferenceMethod, InferenceStatus,
+    InterpretableSubmodel, KenwardRogerInferenceDetails, ModelAuditReport, ModelStateChange,
+    ModelStateSummary, OptimizerCertificate, OptimizerDerivativeEvidence, PolicyAction,
+    PolicyRecommendation, ReductionRecord, ReductionTrigger, ReliabilityGrade,
+    SupportedCovarianceDirection, DOMINANT_LOADING_THRESHOLD, INTERPRETABLE_GAP_TOLERANCE,
 };
 use crate::error::{MixedModelError, Result};
 use crate::formula::{FixedTerm, Formula, RandomTerm};
@@ -6739,10 +6739,11 @@ impl LinearMixedModel {
             };
         }
 
-        if hypothesis.n_contrasts() != 1 && requested_method != FixedEffectTestMethod::KenwardRoger
+        if hypothesis.n_contrasts() != 1
+            && matches!(requested_method, FixedEffectTestMethod::AsymptoticWaldZ)
         {
             let reason =
-                "multi-df fixed-effect contrast tests are not implemented in this scaffold"
+                "multi-df asymptotic Wald contrast tests are not implemented in this scaffold"
                     .to_string();
             return FixedEffectTest {
                 hypothesis,
@@ -6773,6 +6774,8 @@ impl LinearMixedModel {
                         estimability.clone(),
                     );
                     if satterthwaite.status == InferenceStatus::Available {
+                        satterthwaite
+                    } else if satterthwaite.hypothesis.n_contrasts() != 1 {
                         satterthwaite
                     } else {
                         let mut wald = fixed_effect_test_asymptotic_wald_z(
@@ -7237,6 +7240,40 @@ impl LinearMixedModel {
 
     /// Build one fixed-effect term hypothesis per compiler-audited term.
     pub fn fixed_effect_term_hypotheses(&self) -> Vec<FixedEffectHypothesis> {
+        self.fixed_effect_term_hypotheses_for_type(FixedEffectTermTestType::TypeIII)
+    }
+
+    /// Build fixed-effect term hypotheses with explicit ANOVA-style term semantics.
+    ///
+    /// Type III preserves the existing coefficient-block hypothesis for each
+    /// term. Type I and Type II use the fitted model matrix cross-product to
+    /// build sequential and marginal contrast bases, respectively, following
+    /// the Doolittle contrast construction used by lmerTest.
+    pub fn fixed_effect_term_hypotheses_for_type(
+        &self,
+        term_test_type: FixedEffectTermTestType,
+    ) -> Vec<FixedEffectHypothesis> {
+        let term_indices = self.fixed_effect_term_index_sets();
+        if term_indices.is_empty() {
+            return Vec::new();
+        }
+        match term_test_type {
+            FixedEffectTermTestType::TypeI => {
+                self.fixed_effect_type_i_term_hypotheses(&term_indices)
+            }
+            FixedEffectTermTestType::TypeII => {
+                self.fixed_effect_type_ii_term_hypotheses(&term_indices)
+            }
+            FixedEffectTermTestType::TypeIII => term_indices
+                .iter()
+                .filter_map(|(term, indices)| {
+                    fixed_effect_identity_hypothesis(term, indices, self.coef_names().len())
+                })
+                .collect(),
+        }
+    }
+
+    fn fixed_effect_term_index_sets(&self) -> Vec<(String, Vec<usize>)> {
         let names = self.coef_names();
         let Some(audit) = self.compiler_artifact.design_audit.as_ref() else {
             return Vec::new();
@@ -7256,14 +7293,47 @@ impl LinearMixedModel {
                 if indices.is_empty() {
                     return None;
                 }
-                let mut l = DMatrix::zeros(indices.len(), names.len());
-                for (row, index) in indices.into_iter().enumerate() {
-                    l[(row, index)] = 1.0;
+                Some((term.term.clone(), indices))
+            })
+            .collect()
+    }
+
+    fn fixed_effect_type_i_term_hypotheses(
+        &self,
+        term_indices: &[(String, Vec<usize>)],
+    ) -> Vec<FixedEffectHypothesis> {
+        let p = self.coef_names().len();
+        if self.feterm.x.ncols() != p || p == 0 {
+            return Vec::new();
+        }
+        let basis = doolittle_contrast_basis(&self.feterm.x);
+        term_indices
+            .iter()
+            .filter_map(|(term, indices)| fixed_effect_basis_hypothesis(term, indices, &basis))
+            .collect()
+    }
+
+    fn fixed_effect_type_ii_term_hypotheses(
+        &self,
+        term_indices: &[(String, Vec<usize>)],
+    ) -> Vec<FixedEffectHypothesis> {
+        let p = self.coef_names().len();
+        if self.feterm.x.ncols() != p || p == 0 {
+            return Vec::new();
+        }
+        let mut col_terms = vec![String::new(); p];
+        for (term, indices) in term_indices {
+            for &index in indices {
+                if index < p {
+                    col_terms[index] = term.clone();
                 }
-                Some(FixedEffectHypothesis::zero_rhs(
-                    term.term.clone(),
-                    crate::compiler::ContrastMatrix::new(l).ok()?,
-                ))
+            }
+        }
+        term_indices
+            .iter()
+            .filter_map(|(term, _indices)| {
+                let contained_terms = fixed_effect_terms_containing(term, term_indices);
+                fixed_effect_type_ii_hypothesis(term, &self.feterm.x, &col_terms, &contained_terms)
             })
             .collect()
     }
@@ -7273,14 +7343,29 @@ impl LinearMixedModel {
         &self,
         method: FixedEffectTestMethod,
     ) -> FixedEffectInferenceTable {
+        self.fixed_effect_term_inference_table_for_type(method, FixedEffectTermTestType::TypeIII)
+    }
+
+    /// Build an inference table for compiler-audited fixed-effect terms with
+    /// explicit Type I, Type II, or Type III term-test semantics.
+    pub fn fixed_effect_term_inference_table_for_type(
+        &self,
+        method: FixedEffectTestMethod,
+        term_test_type: FixedEffectTermTestType,
+    ) -> FixedEffectInferenceTable {
         let rows = self
-            .fixed_effect_term_hypotheses()
+            .fixed_effect_term_hypotheses_for_type(term_test_type)
             .into_iter()
             .map(|hypothesis| {
-                fixed_effect_test_to_inference_row(
+                let mut row = fixed_effect_test_to_inference_row(
                     FixedEffectInferenceRowKind::Term,
                     self.test_contrast_with_method(hypothesis, method),
-                )
+                );
+                row.notes.push(format!(
+                    "fixed-effect term test type: {}",
+                    fixed_effect_term_test_type_label(term_test_type)
+                ));
+                row
             })
             .collect();
         FixedEffectInferenceTable::new(rows)
@@ -7294,7 +7379,7 @@ impl LinearMixedModel {
         statistics: Vec<Option<f64>>,
         estimability: FixedContrastEstimability,
     ) -> FixedEffectTest {
-        use statrs::distribution::{ContinuousCDF, StudentsT};
+        use statrs::distribution::{ContinuousCDF, FisherSnedecor, StudentsT};
 
         let method = InferenceMethod::Satterthwaite;
         if self.residual_source
@@ -7309,44 +7394,6 @@ impl LinearMixedModel {
                 estimability,
                 "summary-estimate fit (residual sampling variances fixed); \
                  finite-sample methods are undefined when sigma is not estimated"
-                    .to_string(),
-            );
-        }
-        if hypothesis.n_contrasts() != 1 {
-            return fixed_effect_test_not_assessed_with_method(
-                hypothesis,
-                estimates,
-                standard_errors,
-                statistics,
-                method,
-                estimability,
-                "Satterthwaite fixed-effect inference is currently certified only for scalar contrasts"
-                    .to_string(),
-            );
-        }
-
-        let Some(std_error) = standard_errors.first().copied().flatten() else {
-            return fixed_effect_test_not_assessed_with_method(
-                hypothesis,
-                estimates,
-                standard_errors,
-                statistics,
-                method,
-                estimability,
-                "Satterthwaite fixed-effect inference requires an available fixed-effect standard error"
-                    .to_string(),
-            );
-        };
-        let var_con = std_error * std_error;
-        if !var_con.is_finite() || var_con <= 0.0 {
-            return fixed_effect_test_not_assessed_with_method(
-                hypothesis,
-                estimates,
-                standard_errors,
-                statistics,
-                method,
-                estimability,
-                "Satterthwaite fixed-effect inference requires a finite positive contrast variance"
                     .to_string(),
             );
         }
@@ -7382,6 +7429,205 @@ impl LinearMixedModel {
                 );
             }
         };
+
+        if hypothesis.n_contrasts() != 1 {
+            let vcov = self.vcov();
+            let contrast_cov = symmetrize_matrix(
+                &(&hypothesis.l.values * &vcov * hypothesis.l.values.transpose()),
+            );
+            if !matrix_is_finite(&contrast_cov) {
+                return fixed_effect_test_not_assessed_with_method(
+                    hypothesis,
+                    estimates,
+                    standard_errors,
+                    statistics,
+                    method,
+                    estimability,
+                    "Satterthwaite fixed-effect inference produced a non-finite contrast covariance"
+                        .to_string(),
+                );
+            }
+            let eig = SymmetricEigen::new(contrast_cov.clone());
+            let max_eigen = eig
+                .eigenvalues
+                .iter()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max)
+                .max(0.0);
+            let tolerance = (1.0e-8 * max_eigen).max(0.0);
+            let positive = eig
+                .eigenvalues
+                .iter()
+                .enumerate()
+                .filter_map(|(index, &value)| (value > tolerance).then_some((index, value)))
+                .collect::<Vec<_>>();
+            let q = positive.len();
+            if q == 0 {
+                return fixed_effect_test_not_assessed_with_method(
+                    hypothesis,
+                    estimates,
+                    standard_errors,
+                    statistics,
+                    method,
+                    estimability,
+                    "Satterthwaite fixed-effect inference found zero positive contrast-covariance directions"
+                        .to_string(),
+                );
+            }
+
+            let estimate_vector = DVector::from_column_slice(&estimates);
+            let mut f_numerator = 0.0;
+            let mut direction_dfs = Vec::with_capacity(q);
+            for (eig_index, eig_value) in positive {
+                let eigen_direction = eig.eigenvectors.column(eig_index).transpose();
+                let contrast_direction = &eigen_direction * &hypothesis.l.values;
+                let rotated_estimate = (&eigen_direction * &estimate_vector)[0];
+                f_numerator += rotated_estimate * rotated_estimate / eig_value;
+                let gradient = jacobian
+                    .iter()
+                    .map(|derivative| {
+                        let value =
+                            &contrast_direction * derivative * contrast_direction.transpose();
+                        value[(0, 0)]
+                    })
+                    .collect::<Vec<_>>();
+                if gradient.iter().any(|value| !value.is_finite()) {
+                    return fixed_effect_test_not_assessed_with_method(
+                        hypothesis,
+                        estimates,
+                        standard_errors,
+                        statistics,
+                        method,
+                        estimability,
+                        "Satterthwaite fixed-effect inference produced a non-finite multi-df variance-gradient component"
+                            .to_string(),
+                    );
+                }
+                let gradient = DVector::from_vec(gradient);
+                let denom = (gradient.transpose() * &vcov_varpar.covariance * &gradient)[(0, 0)];
+                if !denom.is_finite() || denom <= 0.0 {
+                    return fixed_effect_test_not_assessed_with_method(
+                        hypothesis,
+                        estimates,
+                        standard_errors,
+                        statistics,
+                        method,
+                        estimability,
+                        "Satterthwaite fixed-effect inference requires finite positive denominator variance for every multi-df direction"
+                            .to_string(),
+                    );
+                }
+                let df = 2.0 * eig_value * eig_value / denom;
+                if !df.is_finite() || df <= 0.0 {
+                    return fixed_effect_test_not_assessed_with_method(
+                        hypothesis,
+                        estimates,
+                        standard_errors,
+                        statistics,
+                        method,
+                        estimability,
+                        "Satterthwaite fixed-effect inference produced a non-finite multi-df denominator component"
+                            .to_string(),
+                    );
+                }
+                direction_dfs.push(df);
+            }
+            let denominator_df = match satterthwaite_f_denominator_df(&direction_dfs, 1.0e-8) {
+                Some(df) => df,
+                None => {
+                    return fixed_effect_test_not_assessed_with_method(
+                        hypothesis,
+                        estimates,
+                        standard_errors,
+                        statistics,
+                        method,
+                        estimability,
+                        "Satterthwaite fixed-effect inference could not combine multi-df denominator df components"
+                            .to_string(),
+                    );
+                }
+            };
+            let f_statistic = f_numerator / q as f64;
+            if !f_statistic.is_finite() || f_statistic < 0.0 {
+                return fixed_effect_test_not_assessed_with_method(
+                    hypothesis,
+                    estimates,
+                    standard_errors,
+                    statistics,
+                    method,
+                    estimability,
+                    "Satterthwaite fixed-effect inference produced a non-finite F statistic"
+                        .to_string(),
+                );
+            }
+            let p_value = match FisherSnedecor::new(q as f64, denominator_df) {
+                Ok(f_dist) => Some(1.0 - f_dist.cdf(f_statistic)),
+                Err(error) => {
+                    return fixed_effect_test_not_assessed_with_method(
+                        hypothesis,
+                        estimates,
+                        standard_errors,
+                        statistics,
+                        method,
+                        estimability,
+                        format!("Satterthwaite fixed-effect inference could not construct F distribution: {error}"),
+                    );
+                }
+            };
+
+            let mut notes = vec![
+                "Satterthwaite multi-df F row computed from eigen-directions of L V_beta L' and finite-difference vcov_beta Jacobian over varpar"
+                    .to_string(),
+            ];
+            if q < hypothesis.n_contrasts() {
+                notes.push(format!(
+                    "Satterthwaite restriction matrix effective rank {q} is lower than {} submitted row(s)",
+                    hypothesis.n_contrasts()
+                ));
+            }
+            notes.extend(vcov_varpar.notes);
+
+            return FixedEffectTest {
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics: vec![Some(f_statistic)],
+                numerator_df: Some(q as f64),
+                denominator_df: Some(denominator_df),
+                p_values: vec![p_value],
+                method,
+                reliability: ReliabilityGrade::Low,
+                status: InferenceStatus::Available,
+                estimability,
+                notes,
+            };
+        }
+
+        let Some(std_error) = standard_errors.first().copied().flatten() else {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                method,
+                estimability,
+                "Satterthwaite fixed-effect inference requires an available fixed-effect standard error"
+                    .to_string(),
+            );
+        };
+        let var_con = std_error * std_error;
+        if !var_con.is_finite() || var_con <= 0.0 {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                standard_errors,
+                statistics,
+                method,
+                estimability,
+                "Satterthwaite fixed-effect inference requires a finite positive contrast variance"
+                    .to_string(),
+            );
+        }
 
         let gradient = jacobian
             .iter()
@@ -9753,6 +9999,209 @@ fn fixed_effect_inference_method_label(method: FixedEffectInferenceMethod) -> &'
     }
 }
 
+fn fixed_effect_term_test_type_label(term_test_type: FixedEffectTermTestType) -> &'static str {
+    match term_test_type {
+        FixedEffectTermTestType::TypeI => "type_i",
+        FixedEffectTermTestType::TypeII => "type_ii",
+        FixedEffectTermTestType::TypeIII => "type_iii",
+    }
+}
+
+fn fixed_effect_identity_hypothesis(
+    term: &str,
+    indices: &[usize],
+    n_coefficients: usize,
+) -> Option<FixedEffectHypothesis> {
+    if indices.is_empty() || n_coefficients == 0 {
+        return None;
+    }
+    let mut l = DMatrix::zeros(indices.len(), n_coefficients);
+    for (row, &index) in indices.iter().enumerate() {
+        if index >= n_coefficients {
+            return None;
+        }
+        l[(row, index)] = 1.0;
+    }
+    Some(FixedEffectHypothesis::zero_rhs(
+        term.to_string(),
+        crate::compiler::ContrastMatrix::new(l).ok()?,
+    ))
+}
+
+fn fixed_effect_basis_hypothesis(
+    term: &str,
+    row_indices: &[usize],
+    basis: &DMatrix<f64>,
+) -> Option<FixedEffectHypothesis> {
+    if row_indices.is_empty() || basis.ncols() == 0 {
+        return None;
+    }
+    let mut l = DMatrix::zeros(row_indices.len(), basis.ncols());
+    for (row, &source_row) in row_indices.iter().enumerate() {
+        if source_row >= basis.nrows() {
+            return None;
+        }
+        for col in 0..basis.ncols() {
+            l[(row, col)] = basis[(source_row, col)];
+        }
+    }
+    Some(FixedEffectHypothesis::zero_rhs(
+        term.to_string(),
+        crate::compiler::ContrastMatrix::new(l).ok()?,
+    ))
+}
+
+fn fixed_effect_type_ii_hypothesis(
+    term: &str,
+    x: &DMatrix<f64>,
+    col_terms: &[String],
+    contained_terms: &[String],
+) -> Option<FixedEffectHypothesis> {
+    let p = x.ncols();
+    if p == 0 || col_terms.len() != p {
+        return None;
+    }
+    let mut moved = Vec::new();
+    for (index, col_term) in col_terms.iter().enumerate() {
+        if col_term == term
+            || contained_terms
+                .iter()
+                .any(|contained| contained == col_term)
+        {
+            moved.push(index);
+        }
+    }
+    let row_positions = moved
+        .iter()
+        .enumerate()
+        .filter_map(|(position, &original)| (col_terms[original] == term).then_some(position))
+        .collect::<Vec<_>>();
+    if row_positions.is_empty() {
+        return None;
+    }
+    let moved_len = moved.len();
+    let mut permutation = (0..p)
+        .filter(|index| !moved.contains(index))
+        .collect::<Vec<_>>();
+    permutation.extend(moved);
+    let x_new = select_matrix_columns(x, &permutation);
+    let basis_new = doolittle_contrast_basis(&x_new);
+    let moved_start = p - moved_len;
+    let mut l = DMatrix::zeros(row_positions.len(), p);
+    for (out_row, relative_row) in row_positions.into_iter().enumerate() {
+        let source_row = moved_start + relative_row;
+        for (new_col, &original_col) in permutation.iter().enumerate() {
+            l[(out_row, original_col)] = basis_new[(source_row, new_col)];
+        }
+    }
+    Some(FixedEffectHypothesis::zero_rhs(
+        term.to_string(),
+        crate::compiler::ContrastMatrix::new(l).ok()?,
+    ))
+}
+
+fn select_matrix_columns(x: &DMatrix<f64>, columns: &[usize]) -> DMatrix<f64> {
+    let mut out = DMatrix::zeros(x.nrows(), columns.len());
+    for (new_col, &old_col) in columns.iter().enumerate() {
+        for row in 0..x.nrows() {
+            out[(row, new_col)] = x[(row, old_col)];
+        }
+    }
+    out
+}
+
+fn doolittle_contrast_basis(x: &DMatrix<f64>) -> DMatrix<f64> {
+    if x.ncols() == 0 {
+        return DMatrix::zeros(0, 0);
+    }
+    let crossprod = x.transpose() * x;
+    doolittle_lower(&crossprod, 1.0e-6).transpose()
+}
+
+fn doolittle_lower(x: &DMatrix<f64>, eps: f64) -> DMatrix<f64> {
+    let n = x.nrows();
+    debug_assert_eq!(n, x.ncols());
+    let mut lower = DMatrix::zeros(n, n);
+    let mut upper = DMatrix::zeros(n, n);
+    for i in 0..n {
+        lower[(i, i)] = 1.0;
+    }
+    for i in 0..n {
+        for j in 0..n {
+            let mut value = x[(i, j)];
+            for k in 0..i {
+                value -= lower[(i, k)] * upper[(k, j)];
+            }
+            upper[(i, j)] = if value.abs() < eps { 0.0 } else { value };
+        }
+        for j in (i + 1)..n {
+            let mut value = x[(j, i)];
+            for k in 0..i {
+                value -= lower[(j, k)] * upper[(k, i)];
+            }
+            lower[(j, i)] = if upper[(i, i)].abs() < eps {
+                0.0
+            } else {
+                value / upper[(i, i)]
+            };
+            if lower[(j, i)].abs() < eps {
+                lower[(j, i)] = 0.0;
+            }
+        }
+    }
+    lower
+}
+
+fn fixed_effect_terms_containing(term: &str, term_indices: &[(String, Vec<usize>)]) -> Vec<String> {
+    term_indices
+        .iter()
+        .filter_map(|(candidate, _)| {
+            fixed_effect_term_contains(candidate, term).then_some(candidate.clone())
+        })
+        .collect()
+}
+
+fn fixed_effect_term_contains(candidate: &str, term: &str) -> bool {
+    let term_parts = fixed_effect_term_parts(term);
+    let candidate_parts = fixed_effect_term_parts(candidate);
+    !term_parts.is_empty()
+        && candidate_parts.len() > term_parts.len()
+        && term_parts
+            .iter()
+            .all(|part| candidate_parts.iter().any(|candidate| candidate == part))
+}
+
+fn fixed_effect_term_parts(term: &str) -> Vec<&str> {
+    if term == "1" || term == "(Intercept)" {
+        return Vec::new();
+    }
+    term.split(':')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+fn satterthwaite_f_denominator_df(direction_dfs: &[f64], tolerance: f64) -> Option<f64> {
+    if direction_dfs.is_empty() || direction_dfs.iter().any(|df| !df.is_finite() || *df <= 0.0) {
+        return None;
+    }
+    if direction_dfs.len() == 1 {
+        return Some(direction_dfs[0]);
+    }
+    if direction_dfs
+        .windows(2)
+        .all(|pair| (pair[1] - pair[0]).abs() < tolerance)
+    {
+        return Some(direction_dfs.iter().sum::<f64>() / direction_dfs.len() as f64);
+    }
+    if direction_dfs.iter().any(|df| *df <= 2.0) {
+        return Some(2.0);
+    }
+    let expected = direction_dfs.iter().map(|df| df / (df - 2.0)).sum::<f64>();
+    let denom = expected - direction_dfs.len() as f64;
+    (denom.is_finite() && denom > 0.0).then_some(2.0 * expected / denom)
+}
+
 fn fixed_effect_test_to_inference_row(
     kind: FixedEffectInferenceRowKind,
     test: FixedEffectTest,
@@ -9925,6 +10374,9 @@ fn fixed_effect_inference_status(status: &InferenceStatus) -> FixedEffectInferen
 fn fixed_effect_statistic_name(test: &FixedEffectTest) -> Option<FixedEffectStatisticName> {
     match test.method {
         InferenceMethod::AsymptoticWaldZ => Some(FixedEffectStatisticName::Z),
+        InferenceMethod::Satterthwaite if test.hypothesis.n_contrasts() > 1 => {
+            Some(FixedEffectStatisticName::F)
+        }
         InferenceMethod::Satterthwaite => Some(FixedEffectStatisticName::T),
         InferenceMethod::KenwardRoger if test.hypothesis.n_contrasts() > 1 => {
             Some(FixedEffectStatisticName::F)
@@ -13701,6 +14153,52 @@ mod tests {
             .expect("condition fixture should yield full-rank L V L'");
         let quadratic = (delta.transpose() * inverse * delta)[(0, 0)];
         quadratic / hypothesis.n_contrasts() as f64
+    }
+
+    fn typed_term_test_fixture() -> LinearMixedModel {
+        let mut subject = Vec::new();
+        let mut x = Vec::new();
+        let mut z = Vec::new();
+        let mut y = Vec::new();
+        for group in 0..12 {
+            let group_offset = group as f64 * 0.04;
+            for obs in 0..5 {
+                let xv = obs as f64 - 2.0 + group as f64 * 0.03;
+                let zv = ((group + obs * 2) % 7) as f64 / 3.0 - 1.0;
+                let wiggle = ((group * 11 + obs * 5) % 13) as f64 * 0.01;
+                subject.push(format!("s{group}"));
+                x.push(xv);
+                z.push(zv);
+                y.push(1.0 + 0.8 * xv - 0.4 * zv + 0.5 * xv * zv + group_offset + wiggle);
+            }
+        }
+        let mut data = DataFrame::new();
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_numeric("z", z).unwrap();
+        data.add_categorical("subject", subject).unwrap();
+
+        let formula = parse_formula("y ~ 1 + x + z + x:z + (1 | subject)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(true).unwrap();
+        model
+    }
+
+    fn hypothesis_by_label<'a>(
+        hypotheses: &'a [FixedEffectHypothesis],
+        label: &str,
+    ) -> &'a FixedEffectHypothesis {
+        hypotheses
+            .iter()
+            .find(|hypothesis| hypothesis.label == label)
+            .unwrap_or_else(|| panic!("missing hypothesis {label} in {hypotheses:?}"))
+    }
+
+    fn matrices_differ(a: &DMatrix<f64>, b: &DMatrix<f64>, tolerance: f64) -> bool {
+        a.shape() != b.shape()
+            || a.iter()
+                .zip(b.iter())
+                .any(|(left, right)| (left - right).abs() > tolerance)
     }
 
     fn successful_bootstrap_payload_with_statistics(
@@ -21362,6 +21860,71 @@ mod tests {
             .any(|note| note.contains("Satterthwaite denominator df computed")));
     }
 
+    #[test]
+    fn test_lmm_explicit_satterthwaite_multi_df_request_returns_f_test() {
+        let (model, hypothesis) = three_level_condition_fixture();
+        let observed = joint_wald_f_direct_inverse_oracle(&model, &hypothesis);
+
+        let test = model
+            .test_contrast_with_method(hypothesis.clone(), FixedEffectTestMethod::Satterthwaite);
+
+        assert_eq!(test.method, InferenceMethod::Satterthwaite);
+        assert_eq!(test.status, InferenceStatus::Available);
+        assert_eq!(test.numerator_df, Some(2.0));
+        assert!(test.denominator_df.unwrap().is_finite());
+        assert!(test.denominator_df.unwrap() > 0.0);
+        assert_eq!(test.statistics.len(), 1);
+        assert_relative_eq!(test.statistics[0].unwrap(), observed, epsilon = 1e-10);
+        assert_eq!(test.p_values.len(), 1);
+        assert!(test.p_values[0].unwrap().is_finite());
+        assert!((0.0..=1.0).contains(&test.p_values[0].unwrap()));
+        assert!(test
+            .notes
+            .iter()
+            .any(|note| note.contains("Satterthwaite multi-df F row")));
+
+        let row = fixed_effect_test_to_inference_row(FixedEffectInferenceRowKind::Term, test);
+        assert_eq!(row.statistic_name, Some(FixedEffectStatisticName::F));
+        assert_eq!(row.numerator_df, Some(2.0));
+        let family = row
+            .details
+            .as_ref()
+            .and_then(|details| details.contrast_family.as_ref())
+            .expect("multi-df Satterthwaite row should carry contrast-family details");
+        assert_eq!(family.effective_rank, Some(2));
+        assert_eq!(family.numerator_df_semantics, "effective_restriction_rank");
+    }
+
+    #[test]
+    fn test_satterthwaite_multi_df_denominator_df_combines_direction_dfs() {
+        assert_relative_eq!(
+            satterthwaite_f_denominator_df(&[8.0], 1.0e-8).unwrap(),
+            8.0,
+            epsilon = 1e-12
+        );
+        assert_relative_eq!(
+            satterthwaite_f_denominator_df(&[8.0, 8.0 + 1.0e-10], 1.0e-8).unwrap(),
+            8.0 + 0.5e-10,
+            epsilon = 1e-12
+        );
+        assert_relative_eq!(
+            satterthwaite_f_denominator_df(&[1.9, 12.0], 1.0e-8).unwrap(),
+            2.0,
+            epsilon = 1e-12
+        );
+
+        let dfs = [6.0, 10.0, 20.0];
+        let expected_sum = dfs.iter().map(|df| df / (df - 2.0)).sum::<f64>();
+        let expected = 2.0 * expected_sum / (expected_sum - dfs.len() as f64);
+        assert_relative_eq!(
+            satterthwaite_f_denominator_df(&dfs, 1.0e-8).unwrap(),
+            expected,
+            epsilon = 1e-12
+        );
+        assert!(satterthwaite_f_denominator_df(&[], 1.0e-8).is_none());
+        assert!(satterthwaite_f_denominator_df(&[0.0], 1.0e-8).is_none());
+    }
+
     #[cfg(not(feature = "nlopt"))]
     #[test]
     fn test_native_default_satterthwaite_rows_are_finite_with_realistic_tolerances() {
@@ -22096,6 +22659,56 @@ mod tests {
         assert_eq!(family.family_label, "days");
         assert_eq!(family.restriction_rows, 1);
         assert_eq!(family.coefficient_count, model.coef_names().len());
+    }
+
+    #[test]
+    fn test_lmm_fixed_effect_term_hypotheses_have_explicit_type_semantics() {
+        let model = typed_term_test_fixture();
+        let names = model.coef_names();
+        let x_index = names.iter().position(|name| name == "x").unwrap();
+
+        let type_i = model.fixed_effect_term_hypotheses_for_type(FixedEffectTermTestType::TypeI);
+        let type_ii = model.fixed_effect_term_hypotheses_for_type(FixedEffectTermTestType::TypeII);
+        let type_iii =
+            model.fixed_effect_term_hypotheses_for_type(FixedEffectTermTestType::TypeIII);
+
+        let x_type_i = hypothesis_by_label(&type_i, "x");
+        let x_type_ii = hypothesis_by_label(&type_ii, "x");
+        let x_type_iii = hypothesis_by_label(&type_iii, "x");
+        let interaction_type_ii = hypothesis_by_label(&type_ii, "x:z");
+
+        assert_eq!(x_type_iii.l.values.nrows(), 1);
+        assert_eq!(x_type_iii.l.values.ncols(), names.len());
+        for col in 0..names.len() {
+            let expected = if col == x_index { 1.0 } else { 0.0 };
+            assert_relative_eq!(x_type_iii.l.values[(0, col)], expected, epsilon = 1.0e-12);
+        }
+
+        assert!(
+            matrices_differ(&x_type_i.l.values, &x_type_iii.l.values, 1.0e-9),
+            "Type I x hypothesis should not collapse to the Type III coefficient block in the interaction fixture"
+        );
+        assert!(
+            matrices_differ(&x_type_ii.l.values, &x_type_iii.l.values, 1.0e-9),
+            "Type II x hypothesis should not collapse to the Type III coefficient block in the interaction fixture"
+        );
+        assert_eq!(interaction_type_ii.l.values.nrows(), 1);
+        assert_eq!(interaction_type_ii.l.values.ncols(), names.len());
+
+        let table = model.fixed_effect_term_inference_table_for_type(
+            FixedEffectTestMethod::Satterthwaite,
+            FixedEffectTermTestType::TypeII,
+        );
+        let x_row = table
+            .rows
+            .iter()
+            .find(|row| row.label == "x")
+            .expect("Type II table should include x term row");
+        assert_eq!(x_row.kind, FixedEffectInferenceRowKind::Term);
+        assert!(x_row
+            .notes
+            .iter()
+            .any(|note| note.contains("fixed-effect term test type: type_ii")));
     }
 
     #[test]

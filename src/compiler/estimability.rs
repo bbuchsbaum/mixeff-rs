@@ -421,6 +421,14 @@ pub enum FixedEffectTestMethod {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum FixedEffectTermTestType {
+    TypeI,
+    TypeII,
+    TypeIII,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ReliabilityGrade {
     High,
     Moderate,

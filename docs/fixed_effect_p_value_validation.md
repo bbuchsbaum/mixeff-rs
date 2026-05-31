@@ -16,6 +16,8 @@ The validation target is the row-level Rust contract consumed by R:
 - `test_contrast_with_method(..., Satterthwaite)`
 - `test_contrast_with_method(..., KenwardRoger)`
 - `test_contrast_with_bootstrap_payload(...)`
+- `fixed_effect_term_hypotheses_for_type(...)`
+- `fixed_effect_term_inference_table_for_type(...)`
 - `fixed_effect_inference_table()` and bridge table `fixed_effect_inference`
 
 ## Current Validation Coverage
@@ -23,9 +25,10 @@ The validation target is the row-level Rust contract consumed by R:
 | Method | Current coverage | Reference or oracle | Residual gap |
 |---|---|---|---|
 | `asymptotic_wald_z` | Explicit scalar contrast tests, coefficient-table consistency checks, unavailable p-value gating, and a bounded H0 simulation smoke test. | Internal `coeftable()`/`test_contrast()` identity, standard normal formula, and fixed-seed null simulation. | Add a compact row-level table test that asserts Wald rows match `coeftable()` exactly when requested explicitly. |
-| `satterthwaite` | Scalar LMM rows have parity fixtures, boundary/rank-deficient unavailable-reason tests, and a bounded H0 simulation smoke test. `auto` prefers Satterthwaite only after derivative and parity prerequisites. | `vendor/lmerTestR` fixtures in `tests/fixtures/compiler_contract/satterthwaite_lmer_test_parity_v1.json` plus fixed-seed null simulation. | Broaden simulation cases only if runtime remains acceptable. |
+| `satterthwaite` | Scalar LMM rows have parity fixtures, boundary/rank-deficient unavailable-reason tests, and a bounded H0 simulation smoke test. Explicit multi-df LMM rows now emit a single F statistic with numerator df equal to effective restriction rank and denominator df combined from per-direction Satterthwaite dfs. `auto` prefers Satterthwaite only after derivative and parity prerequisites. | `vendor/lmerTestR` fixtures in `tests/fixtures/compiler_contract/satterthwaite_lmer_test_parity_v1.json`, direct joint-Wald F oracle tests, lmerTest `contestMD` denominator-df formula tests, and fixed-seed null simulation. | Add compact external multi-df `lmerTest` fixture parity if one remains stable across platforms; broaden simulation cases only if runtime remains acceptable. |
 | `kenward_roger` | Explicit scalar and multi-df rows have fixture coverage, no-fallback tests, denominator-df tests, active-basis contrast mapping coverage, and a bounded H0 simulation smoke test for a scalar row. | `pbkrtest`/`lmerTest` fixture in `tests/fixtures/compiler_contract/kenward_roger_pbkrtest_parity_v1.json` plus fixed-seed null simulation. | Multi-df rows still document unscaled F parity. |
 | `bootstrap` | Explicit payload rows validate `fixed_effect_null` target shape, null simulate/refit/payload row construction, replicate accounting, continuity-corrected p-value, MCSE notes, coefficient-row fallback, contrast-row supplied statistics, and too-few-replicate unavailable reasons. | Rust-owned null payload contract in `docs/bootstrap_fixed_effect_contract.md` plus fixed-seed null simulation. | Broaden to larger/adaptive bootstrap calibration only if runtime and statistical-power rationale are documented. |
+| term hypotheses | Rust exposes Type I, Type II, and Type III fixed-effect term hypotheses and term inference tables. Type III remains the default `fixed_effect_term_hypotheses()` behavior; Type I/II use Doolittle model-matrix contrast bases. | Rust semantic test with an interaction fixture verifies Type I/II differ from the Type III coefficient-block hypothesis and that typed term rows carry their requested type note. | Add R wrapper tests that `anova(type=...)` dispatches to the typed Rust surface rather than relabeling a single table. |
 | unsupported cases | Rank-deficient, predictive, regularized, post-selection, missing-SE, boundary, and method-prerequisite failures return labeled unavailable rows. | Rust row status/reason tests and compiler-contract fixtures. | Keep new unsupported reasons covered by focused tests whenever the method surface grows. |
 
 ## Simulation Follow-Ups

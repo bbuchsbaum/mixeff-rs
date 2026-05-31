@@ -216,6 +216,16 @@ canonicalize to the same label, while distinct user-facing terms should remain
 distinct. R should display this row label directly and treat it as stable for a
 given serialized artifact.
 
+Callers that need ANOVA-style term semantics should use
+`fixed_effect_term_hypotheses_for_type(...)` or
+`fixed_effect_term_inference_table_for_type(...)` with an explicit
+`FixedEffectTermTestType`. Type I uses the sequential fitted-model-matrix
+Doolittle contrast basis, Type II uses the marginal Doolittle basis after
+moving the tested term and containing higher-order terms to the end, and Type
+III preserves the existing coefficient-block hypothesis. The default
+`fixed_effect_term_hypotheses()` and `fixed_effect_term_inference_table()`
+surfaces remain Type III for compatibility.
+
 ## Method Policy
 
 ### Method Auto Precedence
@@ -246,7 +256,7 @@ than through a parallel R-only path.
 
 | Method | Support commitment | Required prerequisites before availability |
 |---|---|---|
-| `satterthwaite` | Supported for eligible LMM fixed-effect scalar contrasts after derivative/covariance certificates exist. | `docs/satterthwaite_scalar_contract.md`: `varpar = c(theta, sigma)`, `deviance_varpar`, `vcov_beta(varpar)`, `jac_vcov_beta`, `vcov_varpar`, finite-difference validation, reliability diagnostics, `lmerTestR` parity fixtures. |
+| `satterthwaite` | Supported for eligible LMM fixed-effect scalar contrasts and explicit multi-df fixed-effect hypotheses after derivative/covariance certificates exist. | `docs/satterthwaite_scalar_contract.md` plus lmerTest `contestMD` multi-df extension: `varpar = c(theta, sigma)`, `deviance_varpar`, `vcov_beta(varpar)`, `jac_vcov_beta`, `vcov_varpar`, finite-difference validation, reliability diagnostics, scalar `lmerTestR` parity fixtures, and multi-df denominator-df formula tests. |
 | `kenward_roger` | Supported for eligible explicit LMM scalar and multi-df fixed-effect hypotheses. KR is opt-in for schema `1.0.0`. | `docs/kenward_roger_contract.md`: Sigma/G decomposition, adjusted fixed-effect covariance, denominator-df/F-statistic implementation, explicit no-fallback behavior, `pbkrtest` parity fixtures, singular-adjustment fallback policy. |
 | `bootstrap` | Supported as explicit calibration for fixed-effect contrasts and model-comparison rows after certified bootstrap result payloads exist. | `docs/bootstrap_fixed_effect_contract.md`: stable simulation/refit path, null-constrained fixed-effect simulation target, replicate accounting, failed-refit policy, Monte Carlo error reporting, boundary-rate summary, reproducibility/seed record. |
 
@@ -290,8 +300,9 @@ the specific row's estimate, standard error, estimability, or requested method.
 ### Lane 2: Satterthwaite Support
 
 Satterthwaite p-values are in scope for supported LMM classes after the required
-derivative and covariance-parameter uncertainty inputs are certified. The MVP
-should target scalar fixed-effect contrasts first.
+derivative and covariance-parameter uncertainty inputs are certified. The Rust
+engine supports eligible scalar fixed-effect contrasts and explicit multi-df
+fixed-effect hypotheses.
 
 The binding scalar-contrast implementation contract is
 `docs/satterthwaite_scalar_contract.md`, derived from the vendored
@@ -311,7 +322,7 @@ Prerequisites:
 Initial supported scope:
 
 - Gaussian LMMs
-- scalar fixed-effect contrasts
+- scalar fixed-effect contrasts and explicit multi-df fixed-effect hypotheses
 - interior or certificate-compatible active manifold
 - no residual covariance structures beyond the current iid Gaussian residual
   model
@@ -320,16 +331,17 @@ Output:
 
 ```text
 method = satterthwaite
-statistic_name = t
-numerator_df = null
+statistic_name = t or f
+numerator_df = null for scalar t rows; effective restriction rank for F rows
 denominator_df = <denominator df>
 reliability = moderate or low
 ```
 
-Unsupported rows fall back to `asymptotic_wald_z` only when the user requested
-`method = "auto"` and the Wald prerequisites are met. Explicit
+Unsupported scalar rows fall back to `asymptotic_wald_z` only when the user
+requested `method = "auto"` and the Wald prerequisites are met. Explicit
 `method = "satterthwaite"` requests return `p_value = null` with a reason if
-Satterthwaite prerequisites fail.
+Satterthwaite prerequisites fail. Unsupported multi-df Satterthwaite rows return
+unavailable rather than degrading to a row-wise Wald result.
 
 Satterthwaite is considered available only when the derivative path,
 covariance-parameter uncertainty, active-manifold certificate, and row-level
@@ -449,7 +461,9 @@ notes = ["asymptotic Wald z is a labeled fallback, not a finite-sample correctio
 9. [x] Add Satterthwaite request scaffolding and derivative support. Eligible
    scalar Gaussian LMM fixed-effect rows now use certified Satterthwaite
    inference by default through `auto`, with labeled Wald fallback and explicit
-   unavailable reasons when Satterthwaite prerequisites fail.
+   unavailable reasons when Satterthwaite prerequisites fail. Explicit multi-df
+   Satterthwaite requests now emit a single F row using eigen-directions of
+   `L V_beta L'` and the lmerTest denominator-df aggregation rule.
 10. [x] Add KR rows only after adjusted-covariance and denominator-df
     certificates exist. Explicit KR scalar and multi-df rows are now wired,
     KR-labeled unavailable rows do not fall back silently, and `pbkrtest`
@@ -475,6 +489,9 @@ notes = ["asymptotic Wald z is a labeled fallback, not a finite-sample correctio
     `fixed_effect_contrast_inference_table(hypotheses, method)` helper so
     bridge callers do not reconstruct `FixedEffectInferenceRow` from
     `FixedEffectTest`.
+16. [x] Add explicit Type I, Type II, and Type III fixed-effect term
+    hypothesis APIs so wrapper `anova(type=...)` calls can request distinct
+    Rust-owned hypotheses rather than relabeling the same term table.
 
 ## Mote Work Breakdown
 
@@ -509,6 +526,7 @@ Umbrella issue: `bd-01KQASCG9KZH36RNTPAHHH2NA9`.
 | `bd-01KQATC0Y1SFMQTXB09C16DEK3` | Blocked on simulation child motes | Validate fixed-effect p-value methods against internal, `lmerTest`, `pbkrtest`, and simulation references. |
 | `bd-01KQBF0ZMP9NK20G0EDJGBW53Q` | Done | Add bounded H0 simulation smoke tests for Wald/Satterthwaite/KR type-I behavior. |
 | `bd-01KQBF0ZNDDVSJWZX2R810ND54` | Done | Add a bootstrap fixed-effect calibration fixture using `fixed_effect_null` simulation and certified payload rows. |
+| `bd-01KSZQXYV10ADCDXRM4SESY6J3` | Done | Add multi-df Satterthwaite F rows and explicit Type I/II/III fixed-effect term-test hypotheses. |
 
 ## Acceptance Criteria
 
@@ -534,7 +552,9 @@ External R wrapper:
 
 Finite-sample:
 
-- Satterthwaite rows are emitted only with derivative/covariance certificates.
+- Satterthwaite rows are emitted only with derivative/covariance certificates;
+  multi-df rows additionally report F numerator df as the effective restriction
+  rank and denominator df from the per-direction Satterthwaite aggregation.
 - KR rows are emitted only with adjusted covariance and denominator-df
   certificates.
 - Supported Satterthwaite/KR fixtures have parity tests against
