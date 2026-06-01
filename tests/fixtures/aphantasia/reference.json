@@ -1,0 +1,1580 @@
+{
+  "schema": {
+    "name": "mixeff.aphantasia_fixture_reference",
+    "version": "1"
+  },
+  "provenance": {
+    "manuscript_root": "/Users/bbuchsbaum/Dropbox/manuscripts/Loo_aphantasia/revision3",
+    "raw_cache": ".cache/raw_trial_analysis.rds",
+    "supplemental_cache": ".cache/supplemental.rds",
+    "supplemental_s3_cache": ".cache/supp_S3.rds",
+    "supplemental_s9_cache": ".cache/supp_S9.rds",
+    "anonymization": {
+      "participant_hash": "md5",
+      "salt_label": "mixeff-aphantasia-revision3-v1",
+      "hash_prefix": "p_",
+      "hash_chars": 16
+    }
+  },
+  "excluded_participants": [
+    "p_9749b44da9cc992a",
+    "p_5cda394316d265f5",
+    "p_425fa18995ad0072",
+    "p_90ef6fca9418f9d5"
+  ],
+  "counts": {
+    "trials": 25916,
+    "participants": 76,
+    "metadata_rows": 76,
+    "primary_trials": 17280,
+    "sensitivity_trials": 18240,
+    "intact_trials": 5760,
+    "combined_trials": 23040,
+    "rt_trials": 9971
+  },
+  "tolerances": {
+    "glmm": {
+      "fixef_abs": 0.025,
+      "logLik_rel": 0.001,
+      "AIC_rel": 0.001
+    },
+    "lmm": {
+      "fixef_abs": 0.0001,
+      "logLik_rel": 1e-05,
+      "AIC_rel": 1e-05
+    }
+  },
+  "sample": {
+    "primary_meta": [
+      {
+        "participant": "2818",
+        "aphantasia": "yes",
+        "age": 18,
+        "score_sum": 160,
+        "source": "reddit",
+        "vviq_standard": 32,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "4316",
+        "aphantasia": "yes",
+        "age": 32,
+        "score_sum": 160,
+        "source": "reddit",
+        "vviq_standard": 32,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "AC71",
+        "aphantasia": "yes",
+        "age": 51,
+        "score_sum": 160,
+        "source": "reddit",
+        "vviq_standard": 32,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "AE83",
+        "aphantasia": "yes",
+        "age": 40,
+        "score_sum": 160,
+        "source": "reddit",
+        "vviq_standard": 32,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "AJ25",
+        "aphantasia": "no",
+        "age": 25,
+        "score_sum": 48,
+        "source": "reddit",
+        "vviq_standard": 144,
+        "group": "Control"
+      },
+      {
+        "participant": "AM99",
+        "aphantasia": "yes",
+        "age": 32,
+        "score_sum": 144,
+        "source": "reddit",
+        "vviq_standard": 48,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "BLH83",
+        "aphantasia": "yes",
+        "age": 39,
+        "score_sum": 160,
+        "source": "reddit",
+        "vviq_standard": 32,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "CJ90",
+        "aphantasia": "yes",
+        "age": 32,
+        "score_sum": 158,
+        "source": "reddit",
+        "vviq_standard": 34,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "CL75",
+        "aphantasia": "yes",
+        "age": 48,
+        "score_sum": 160,
+        "source": "reddit",
+        "vviq_standard": 32,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "CL78",
+        "aphantasia": "yes",
+        "age": 46,
+        "score_sum": 106,
+        "source": "reddit",
+        "vviq_standard": 86,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "CW89",
+        "aphantasia": "yes",
+        "age": 33,
+        "score_sum": 160,
+        "source": "reddit",
+        "vviq_standard": 32,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "DA56",
+        "aphantasia": "yes",
+        "age": 66,
+        "score_sum": 160,
+        "source": "reddit",
+        "vviq_standard": 32,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "DD42",
+        "aphantasia": "yes",
+        "age": 40,
+        "score_sum": 160,
+        "source": "reddit",
+        "vviq_standard": 32,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "EE27",
+        "aphantasia": "yes",
+        "age": 42,
+        "score_sum": 160,
+        "source": "reddit",
+        "vviq_standard": 32,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "G744",
+        "aphantasia": "yes",
+        "age": 31,
+        "score_sum": 155,
+        "source": "reddit",
+        "vviq_standard": 37,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "HC85",
+        "aphantasia": "yes",
+        "age": 38,
+        "score_sum": 160,
+        "source": "reddit",
+        "vviq_standard": 32,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "jc84",
+        "aphantasia": "yes",
+        "age": 38,
+        "score_sum": 160,
+        "source": "reddit",
+        "vviq_standard": 32,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "JV",
+        "aphantasia": "no",
+        "score_sum": 84,
+        "source": "reddit",
+        "vviq_standard": 108,
+        "group": "Control"
+      },
+      {
+        "participant": "Kb03",
+        "aphantasia": "yes",
+        "age": 42,
+        "score_sum": 159,
+        "source": "reddit",
+        "vviq_standard": 33,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "kc99",
+        "aphantasia": "yes",
+        "age": 23,
+        "score_sum": 127,
+        "source": "reddit",
+        "vviq_standard": 65,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "KH77",
+        "aphantasia": "yes",
+        "age": 45,
+        "score_sum": 160,
+        "source": "reddit",
+        "vviq_standard": 32,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "MM1986",
+        "aphantasia": "yes",
+        "age": 36,
+        "score_sum": 157,
+        "source": "reddit",
+        "vviq_standard": 35,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "ra71",
+        "aphantasia": "yes",
+        "age": 52,
+        "score_sum": 157,
+        "source": "reddit",
+        "vviq_standard": 35,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "ramm",
+        "aphantasia": "yes",
+        "age": 47,
+        "score_sum": 160,
+        "source": "reddit",
+        "vviq_standard": 32,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "TP60",
+        "aphantasia": "yes",
+        "age": 63,
+        "score_sum": 160,
+        "source": "reddit",
+        "vviq_standard": 32,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "TR18",
+        "aphantasia": "yes",
+        "age": 34,
+        "score_sum": 102,
+        "source": "reddit",
+        "vviq_standard": 90,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "1141",
+        "aphantasia": "no",
+        "age": 37,
+        "score_sum": 67,
+        "source": "facebook",
+        "vviq_standard": 125,
+        "group": "Control"
+      },
+      {
+        "participant": "3918",
+        "aphantasia": "yes",
+        "age": 55,
+        "score_sum": 160,
+        "source": "facebook",
+        "vviq_standard": 32,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "AA83",
+        "aphantasia": "yes",
+        "age": 39,
+        "score_sum": 160,
+        "source": "facebook",
+        "vviq_standard": 32,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "DB84",
+        "aphantasia": "yes",
+        "age": 38,
+        "score_sum": 160,
+        "source": "facebook",
+        "vviq_standard": 32,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "DF77",
+        "aphantasia": "yes",
+        "age": 38,
+        "score_sum": 160,
+        "source": "facebook",
+        "vviq_standard": 32,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "LC66",
+        "aphantasia": "yes",
+        "age": 77,
+        "score_sum": 160,
+        "source": "facebook",
+        "vviq_standard": 32,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "LK01",
+        "aphantasia": "yes",
+        "age": 56,
+        "score_sum": 160,
+        "source": "facebook",
+        "vviq_standard": 32,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "SF53",
+        "aphantasia": "yes",
+        "age": 69,
+        "score_sum": 160,
+        "source": "facebook",
+        "vviq_standard": 32,
+        "group": "Aphantasia"
+      },
+      {
+        "participant": "56671468d87e9100052f7f8b",
+        "aphantasia": "no",
+        "age": 29,
+        "source": "prolific",
+        "group": "Control"
+      },
+      {
+        "participant": "59360314da541f000146f49f",
+        "aphantasia": "no",
+        "age": 35,
+        "source": "prolific",
+        "group": "Control"
+      },
+      {
+        "participant": "5aa83a71f6dfdd0001eb1690",
+        "aphantasia": "no",
+        "age": 33,
+        "source": "prolific",
+        "group": "Control"
+      },
+      {
+        "participant": "5b846b97d0315b0001d30ea2",
+        "aphantasia": "no",
+        "age": 23,
+        "source": "prolific",
+        "group": "Control"
+      },
+      {
+        "participant": "5cc1ef6c0e3aaf001690cecc",
+        "aphantasia": "no",
+        "age": 24,
+        "source": "prolific",
+        "group": "Control"
+      },
+      {
+        "participant": "5d453e8723a5bb0001492546",
+        "aphantasia": "no",
+        "age": 29,
+        "source": "prolific",
+        "group": "Control"
+      },
+      {
+        "participant": "5e52f052fedced045c73cb72",
+        "aphantasia": "no",
+        "age": 30,
+        "source": "prolific",
+        "group": "Control"
+      },
+      {
+        "participant": "5f483afd936e951d89408736",
+        "aphantasia": "no",
+        "age": 27,
+        "source": "prolific",
+        "group": "Control"
+      },
+      {
+        "participant": "5fac291cf23656176df5c680",
+        "aphantasia": "no",
+        "age": 29,
+        "source": "prolific",
+        "group": "Control"
+      },
+      {
+        "participant": "600ce60e21d8ec241417d3a4",
+        "aphantasia": "no",
+        "age": 28,
+        "source": "prolific",
+        "group": "Control"
+      },
+      {
+        "participant": "600f37dd7222cf0f2cf43322",
+        "aphantasia": "no",
+        "age": 24,
+        "source": "prolific",
+        "group": "Control"
+      },
+      {
+        "participant": "60c1027492de3b44ad9cb833",
+        "aphantasia": "no",
+        "age": 29,
+        "source": "prolific",
+        "group": "Control"
+      },
+      {
+        "participant": "61086469e5457fed4f164b8e",
+        "aphantasia": "no",
+        "age": 31,
+        "source": "prolific",
+        "group": "Control"
+      },
+      {
+        "participant": "6110c3de4d73c26eb588091f",
+        "aphantasia": "no",
+        "age": 20,
+        "source": "prolific",
+        "group": "Control"
+      },
+      {
+        "participant": "61365f766033bc62f92053dc",
+        "aphantasia": "no",
+        "age": 30,
+        "source": "prolific",
+        "group": "Control"
+      },
+      {
+        "participant": "631c8e97db06f601f81bd82f",
+        "aphantasia": "no",
+        "age": 26,
+        "source": "prolific",
+        "group": "Control"
+      },
+      {
+        "participant": "Minh",
+        "aphantasia": "no",
+        "source": "prolific",
+        "group": "Control"
+      },
+      {
+        "participant": "562eb896733ea000051638c6",
+        "aphantasia": "no",
+        "age": 46,
+        "score_sum": 60,
+        "source": "prolific",
+        "vviq_standard": 132,
+        "group": "Control"
+      },
+      {
+        "participant": "573f59f150f5e6000dcc4963",
+        "aphantasia": "no",
+        "age": 56,
+        "score_sum": 77,
+        "source": "prolific",
+        "vviq_standard": 115,
+        "group": "Control"
+      },
+      {
+        "participant": "5898e520979a590001d21df2",
+        "aphantasia": "no",
+        "age": 45,
+        "score_sum": 93,
+        "source": "prolific",
+        "vviq_standard": 99,
+        "group": "Control"
+      },
+      {
+        "participant": "594ef8ef6d3780000120d4d9",
+        "aphantasia": "no",
+        "age": 55,
+        "score_sum": 85,
+        "source": "prolific",
+        "vviq_standard": 107,
+        "group": "Control"
+      },
+      {
+        "participant": "59a1a661ec2f75000124eea6",
+        "aphantasia": "no",
+        "age": 38,
+        "score_sum": 96,
+        "source": "prolific",
+        "vviq_standard": 96,
+        "group": "Control"
+      },
+      {
+        "participant": "5a766fb01904200001556d05",
+        "aphantasia": "no",
+        "age": 42,
+        "score_sum": 90,
+        "source": "prolific",
+        "vviq_standard": 102,
+        "group": "Control"
+      },
+      {
+        "participant": "5c1150e31e7d6900018207ef",
+        "aphantasia": "no",
+        "age": 77,
+        "score_sum": 32,
+        "source": "prolific",
+        "vviq_standard": 160,
+        "group": "Control"
+      },
+      {
+        "participant": "5cfcf4575c147c0001d33c95",
+        "aphantasia": "no",
+        "age": 63,
+        "score_sum": 57,
+        "source": "prolific",
+        "vviq_standard": 135,
+        "group": "Control"
+      },
+      {
+        "participant": "5d30559f95d88f0019378e9c",
+        "aphantasia": "no",
+        "age": 39,
+        "score_sum": 94,
+        "source": "prolific",
+        "vviq_standard": 98,
+        "group": "Control"
+      },
+      {
+        "participant": "5ee32976afc30b4bff630695",
+        "aphantasia": "no",
+        "age": 39,
+        "score_sum": 86,
+        "source": "prolific",
+        "vviq_standard": 106,
+        "group": "Control"
+      },
+      {
+        "participant": "5eee77689e63ac330681ffe9",
+        "aphantasia": "no",
+        "age": 42,
+        "score_sum": 95,
+        "source": "prolific",
+        "vviq_standard": 97,
+        "group": "Control"
+      },
+      {
+        "participant": "5f582a0071a90f3972ee9a09",
+        "aphantasia": "no",
+        "age": 48,
+        "score_sum": 86,
+        "source": "prolific",
+        "vviq_standard": 106,
+        "group": "Control"
+      },
+      {
+        "participant": "5fbe3cca89f2c20cb19d5efd",
+        "aphantasia": "no",
+        "age": 38,
+        "score_sum": 68,
+        "source": "prolific",
+        "vviq_standard": 124,
+        "group": "Control"
+      },
+      {
+        "participant": "6105823b1105583143943a67",
+        "aphantasia": "no",
+        "age": 47,
+        "score_sum": 83,
+        "source": "prolific",
+        "vviq_standard": 109,
+        "group": "Control"
+      },
+      {
+        "participant": "6148c0a6e2353cbbac1cd506",
+        "aphantasia": "no",
+        "age": 69,
+        "score_sum": 32,
+        "source": "prolific",
+        "vviq_standard": 160,
+        "group": "Control"
+      },
+      {
+        "participant": "616c056b42e788ef31efc4b0",
+        "aphantasia": "no",
+        "age": 38,
+        "score_sum": 85,
+        "source": "prolific",
+        "vviq_standard": 107,
+        "group": "Control"
+      },
+      {
+        "participant": "62696b4c3d25b18ffff47d0d",
+        "aphantasia": "no",
+        "age": 40,
+        "score_sum": 64,
+        "source": "prolific",
+        "vviq_standard": 128,
+        "group": "Control"
+      },
+      {
+        "participant": "62a9e6239265d1af95b7ae05",
+        "aphantasia": "no",
+        "age": 65,
+        "score_sum": 32,
+        "source": "prolific",
+        "vviq_standard": 160,
+        "group": "Control"
+      },
+      {
+        "participant": "62f0477d75b93e5cb2fdb8ac",
+        "aphantasia": "no",
+        "age": 52,
+        "score_sum": 91,
+        "source": "prolific",
+        "vviq_standard": 101,
+        "group": "Control"
+      },
+      {
+        "participant": "640105daa923d3f5f2669039",
+        "aphantasia": "no",
+        "age": 40,
+        "score_sum": 55,
+        "source": "prolific",
+        "vviq_standard": 137,
+        "group": "Control"
+      },
+      {
+        "participant": "640fa957aa990bdba22ef220",
+        "aphantasia": "no",
+        "age": 51,
+        "score_sum": 91,
+        "source": "prolific",
+        "vviq_standard": 101,
+        "group": "Control"
+      }
+    ],
+    "sample_summary": [
+      {
+        "group": "Aphantasia",
+        "n": 31,
+        "age_mean": 43.225806451612904,
+        "age_sd": 13.147140823310483,
+        "age_min": 18,
+        "age_max": 77
+      },
+      {
+        "group": "Control",
+        "n": 41,
+        "age_mean": 39.46153846153846,
+        "age_sd": 13.647529473452142,
+        "age_min": 20,
+        "age_max": 77
+      }
+    ],
+    "vviq_summary": [
+      {
+        "group": "Aphantasia",
+        "n": 31,
+        "mean": 37.645161290322584,
+        "sd": 14.927711115230789,
+        "min": 32,
+        "max": 90
+      },
+      {
+        "group": "Control",
+        "n": 24,
+        "mean": 119.04166666666667,
+        "sd": 21.072296188756141,
+        "min": 96,
+        "max": 160
+      }
+    ],
+    "vviq_missing_counts": [
+      {
+        "group": "Aphantasia",
+        "vviq_missing": false,
+        "n": 31
+      },
+      {
+        "group": "Control",
+        "vviq_missing": false,
+        "n": 24
+      },
+      {
+        "group": "Control",
+        "vviq_missing": true,
+        "n": 17
+      }
+    ]
+  },
+  "quality": [
+    {
+      "analyzed_trials": 17280,
+      "participants": 72,
+      "items": 320,
+      "trials_per_participant": 240,
+      "nonresponses": 29,
+      "nonresponse_rate": 0.001678240740740741
+    }
+  ],
+  "models": {
+    "primary": {
+      "model_type": "glmm",
+      "formula": "correct ~ group * mask * soa_s + block + (1 + mask + soa_s || participant) + (1 | item)",
+      "family": "binomial(logit)",
+      "subset": "bubbled == yes, non-missing correct, intermediate VVIQ controls excluded",
+      "source": "raw_trial_analysis.rds",
+      "nobs": 17280,
+      "logLik": -9966.0620255233407,
+      "AIC": 19962.124051046681,
+      "BIC": 20078.483626682053,
+      "fixef": {
+        "(Intercept)": 0.4559010473908375,
+        "groupaphant": 0.1996142554021444,
+        "maskmasked": -0.3003808342696673,
+        "soa_s": 0.3904524716647302,
+        "block2": 0.1063977333340187,
+        "groupaphant:maskmasked": -0.1666397257831928,
+        "groupaphant:soa_s": -0.057513699335874,
+        "maskmasked:soa_s": 0.07416382927403165,
+        "groupaphant:maskmasked:soa_s": 0.106418237142727
+      },
+      "theta": {
+        "item.(Intercept)": 1.066550222882132,
+        "participant.soa_s": 0.0698017686972148,
+        "participant.maskunmasked": 0.5107400743009235,
+        "participant.maskmasked.maskunmasked": 0.3790585574188877,
+        "participant.maskmasked": 0.08471074166802681,
+        "participant.(Intercept)": 0.297546908578858
+      }
+    },
+    "sensitivity": {
+      "model_type": "glmm",
+      "formula": "correct ~ group * mask * soa_s + block + (1 + mask + soa_s || participant) + (1 | item)",
+      "family": "binomial(logit)",
+      "subset": "bubbled == yes, non-missing correct, intermediate VVIQ controls assigned to control",
+      "source": "raw_trial_analysis.rds",
+      "nobs": 18240,
+      "logLik": -10524.029254886666,
+      "AIC": 21078.058509773331,
+      "BIC": 21195.229093727758,
+      "fixef": {
+        "(Intercept)": 0.4695132945221634,
+        "groupaphant": 0.191596307303163,
+        "maskmasked": -0.3239985050664742,
+        "soa_s": 0.3972350920021239,
+        "block2": 0.09860260392485425,
+        "groupaphant:maskmasked": -0.1436164288983404,
+        "groupaphant:soa_s": -0.06412660822980225,
+        "maskmasked:soa_s": 0.04921277142051935,
+        "groupaphant:maskmasked:soa_s": 0.1316741633618333
+      },
+      "theta": {
+        "item.(Intercept)": 1.068265073093339,
+        "participant.soa_s": 0.08089778436642542,
+        "participant.maskunmasked": 0.4798995010472629,
+        "participant.maskmasked.maskunmasked": 0.3367778777480315,
+        "participant.maskmasked": 0.08964545404959302,
+        "participant.(Intercept)": 0.3247933782274318
+      }
+    },
+    "intact": {
+      "model_type": "glmm",
+      "formula": "correct ~ group * mask * soa_s + block + (1 + mask + soa_s || participant) + (1 | item)",
+      "family": "binomial(logit)",
+      "subset": "bubbled == no, non-missing correct, intermediate VVIQ controls excluded",
+      "source": "raw_trial_analysis.rds",
+      "nobs": 5760,
+      "logLik": -1297.8855539491306,
+      "AIC": 2625.7711078982611,
+      "BIC": 2725.65149920361,
+      "fixef": {
+        "(Intercept)": 3.554609823390916,
+        "groupaphant": 0.3322470816178814,
+        "maskmasked": -0.1131254428790397,
+        "soa_s": 0.2406404821036062,
+        "block2": 0.1433560032321256,
+        "groupaphant:maskmasked": 0.01052790934095148,
+        "groupaphant:soa_s": 0.225816745054035,
+        "maskmasked:soa_s": 0.4542539956512108,
+        "groupaphant:maskmasked:soa_s": -0.4478632474571931
+      },
+      "theta": {
+        "item.(Intercept)": 1.506988612903417,
+        "participant.soa_s": 0.5156626191820546,
+        "participant.maskunmasked": 0.9350989330923332,
+        "participant.maskmasked.maskunmasked": 0.9488292385331001,
+        "participant.maskmasked": 0,
+        "participant.(Intercept)": 4.372341038540467e-08
+      }
+    },
+    "combined": {
+      "model_type": "glmm",
+      "formula": "correct ~ group * mask * soa_s * stimtype + block + (1 + mask + soa_s || participant) + (1 | item)",
+      "family": "binomial(logit)",
+      "subset": "all stimuli, non-missing correct, intermediate VVIQ controls excluded",
+      "source": "raw_trial_analysis.rds",
+      "nobs": 23040,
+      "logLik": -11284.046284852095,
+      "AIC": 22614.092569704189,
+      "BIC": 22799.127273344817,
+      "fixef": {
+        "(Intercept)": 3.104545460811509,
+        "groupaphant": 0.2526887517689135,
+        "maskmasked": -0.1585261242826611,
+        "soa_s": 0.2736157620115877,
+        "stimtypeoccluded": -2.649861197322089,
+        "block2": 0.1182900959047752,
+        "groupaphant:maskmasked": -0.001536755674125984,
+        "groupaphant:soa_s": 0.2197833545530147,
+        "maskmasked:soa_s": 0.3642519832140668,
+        "groupaphant:stimtypeoccluded": -0.05175643065177487,
+        "maskmasked:stimtypeoccluded": -0.1432388216534168,
+        "soa_s:stimtypeoccluded": 0.1202535278877023,
+        "groupaphant:maskmasked:soa_s": -0.4016397879841223,
+        "groupaphant:maskmasked:stimtypeoccluded": -0.1677332619980613,
+        "groupaphant:soa_s:stimtypeoccluded": -0.2782191746045895,
+        "maskmasked:soa_s:stimtypeoccluded": -0.2903300112181649,
+        "groupaphant:maskmasked:soa_s:stimtypeoccluded": 0.5105109589430566
+      },
+      "theta": {
+        "item.(Intercept)": 1.151895898039061,
+        "participant.soa_s": 0.09135240514236211,
+        "participant.maskunmasked": 0.4583396899603748,
+        "participant.maskmasked.maskunmasked": 0.3125031504858162,
+        "participant.maskmasked": 8.509615040182939e-05,
+        "participant.(Intercept)": 0.4004889448009537
+      }
+    },
+    "rt": {
+      "model_type": "lmm",
+      "formula": "log_rt ~ group * mask * soa_s + block + (1 | participant) + (1 | item)",
+      "family": "gaussian",
+      "subset": "primary occluded correct trials with finite positive RT",
+      "source": "raw_trial_analysis.rds",
+      "nobs": 9971,
+      "logLik": -12171.760524132565,
+      "AIC": 24367.521048265131,
+      "BIC": 24454.010282171075,
+      "fixef": {
+        "(Intercept)": -0.8624058015836382,
+        "groupaphant": 0.2447853673562072,
+        "maskmasked": 0.01413176767391208,
+        "soa_s": -0.03528288942785127,
+        "block2": -0.08257793436966268,
+        "groupaphant:maskmasked": 0.02487408920814494,
+        "groupaphant:soa_s": -0.0236310971899933,
+        "maskmasked:soa_s": 0.001645082808460109,
+        "groupaphant:maskmasked:soa_s": -0.01744654276087575
+      },
+      "theta": {
+        "item.(Intercept)": 0.178152108142887,
+        "participant.(Intercept)": 0.5206853866173307
+      }
+    },
+    "S1_intercept_only": {
+      "model_type": "glmm",
+      "formula": "correct ~ group * mask * soa_s + block + (1 | participant) + (1 | item)",
+      "family": "binomial(logit)",
+      "subset": "S1_intercept_only",
+      "source": "tools/build-aphantasia-fixture.R",
+      "nobs": 17280,
+      "logLik": -9970.6971973530672,
+      "AIC": 19963.394394706134,
+      "BIC": 20048.724750172074,
+      "fixef": {
+        "(Intercept)": 0.4518216674047559,
+        "groupaphant": 0.1980708156879213,
+        "maskmasked": -0.2977996090139491,
+        "soa_s": 0.3859266982434525,
+        "block2": 0.1065451550710978,
+        "groupaphant:maskmasked": -0.1628255716677448,
+        "groupaphant:soa_s": -0.05599458446470184,
+        "maskmasked:soa_s": 0.08119308007996535,
+        "groupaphant:maskmasked:soa_s": 0.1048886413432802
+      },
+      "theta": {
+        "item.(Intercept)": 1.064226006621922,
+        "participant.(Intercept)": 0.5354787246987339
+      }
+    },
+    "S1_current_uncorrelated_slopes": {
+      "model_type": "glmm",
+      "formula": "correct ~ group * mask * soa_s + block + (1 + mask + soa_s || participant) + (1 | item)",
+      "family": "binomial(logit)",
+      "subset": "S1_current_uncorrelated_slopes",
+      "source": "tools/build-aphantasia-fixture.R",
+      "nobs": 17280,
+      "logLik": -9966.0620255233407,
+      "AIC": 19962.124051046681,
+      "BIC": 20078.483626682053,
+      "fixef": {
+        "(Intercept)": 0.4559010473908375,
+        "groupaphant": 0.1996142554021444,
+        "maskmasked": -0.3003808342696673,
+        "soa_s": 0.3904524716647302,
+        "block2": 0.1063977333340187,
+        "groupaphant:maskmasked": -0.1666397257831928,
+        "groupaphant:soa_s": -0.057513699335874,
+        "maskmasked:soa_s": 0.07416382927403165,
+        "groupaphant:maskmasked:soa_s": 0.106418237142727
+      },
+      "theta": {
+        "item.(Intercept)": 1.066550222882132,
+        "participant.soa_s": 0.0698017686972148,
+        "participant.maskunmasked": 0.5107400743009235,
+        "participant.maskmasked.maskunmasked": 0.3790585574188877,
+        "participant.maskmasked": 0.08471074166802681,
+        "participant.(Intercept)": 0.297546908578858
+      }
+    },
+    "S1_correlated_slopes": {
+      "model_type": "glmm",
+      "formula": "correct ~ group * mask * soa_s + block + (1 + mask + soa_s | participant) + (1 | item)",
+      "family": "binomial(logit)",
+      "subset": "S1_correlated_slopes",
+      "source": "tools/build-aphantasia-fixture.R",
+      "nobs": 17280,
+      "logLik": -9960.8299688519201,
+      "AIC": 19953.65993770384,
+      "BIC": 20077.776818381568,
+      "fixef": {
+        "(Intercept)": 0.4593026247743426,
+        "groupaphant": 0.1986062942403944,
+        "maskmasked": -0.3016417119831831,
+        "soa_s": 0.3917357161926833,
+        "block2": 0.106338880511544,
+        "groupaphant:maskmasked": -0.1645004963063141,
+        "groupaphant:soa_s": -0.05498511236537672,
+        "maskmasked:soa_s": 0.07260545474689004,
+        "groupaphant:maskmasked:soa_s": 0.1039732277091946
+      },
+      "theta": {
+        "item.(Intercept)": 1.066073888944527,
+        "participant.(Intercept)": 0.5934085319416968,
+        "participant.maskmasked.(Intercept)": -0.1165084327357418,
+        "participant.soa_s.(Intercept)": 0.06728504928405266,
+        "participant.maskmasked": 0.109708971510516,
+        "participant.soa_s.maskmasked": -0.03654880295047765,
+        "participant.soa_s": 1.05805302060869e-05
+      }
+    },
+    "S1_item_mask_slope": {
+      "model_type": "glmm",
+      "formula": "correct ~ group * mask * soa_s + block + (1 + mask + soa_s || participant) + (1 + mask | item)",
+      "family": "binomial(logit)",
+      "subset": "S1_item_mask_slope",
+      "source": "tools/build-aphantasia-fixture.R",
+      "nobs": 17280,
+      "logLik": -9956.826271283373,
+      "AIC": 19947.652542566746,
+      "BIC": 20079.526728286834,
+      "fixef": {
+        "(Intercept)": 0.4982305607412455,
+        "groupaphant": 0.2055963713555351,
+        "maskmasked": -0.32291406662142,
+        "soa_s": 0.4000590394618276,
+        "block2": 0.0561192762747613,
+        "groupaphant:maskmasked": -0.1725154347087307,
+        "groupaphant:soa_s": -0.05899690071636418,
+        "maskmasked:soa_s": 0.05715358427443908,
+        "groupaphant:maskmasked:soa_s": 0.1054006269721845
+      },
+      "theta": {
+        "item.(Intercept)": 1.167206917064089,
+        "item.maskmasked.(Intercept)": -0.2014365050333143,
+        "item.maskmasked": 0.263386232932348,
+        "participant.soa_s": 0.0694181964187018,
+        "participant.maskunmasked": 0.4913742901277394,
+        "participant.maskmasked.maskunmasked": 0.3149296588714107,
+        "participant.maskmasked": 0.001140695188817607,
+        "participant.(Intercept)": 0.3609196716548491
+      }
+    },
+    "S1_maximal": {
+      "model_type": "glmm",
+      "formula": "correct ~ group * mask * soa_s + block + (1 + mask * soa_s | participant) + (1 + group | item)",
+      "family": "binomial(logit)",
+      "subset": "S1_maximal",
+      "source": "tools/build-aphantasia-fixture.R",
+      "nobs": 17280,
+      "logLik": -9952.2552648495548,
+      "AIC": 19948.51052969911,
+      "BIC": 20119.171240630985,
+      "fixef": {
+        "(Intercept)": 0.4629921027427527,
+        "groupaphant": 0.2324626611541594,
+        "maskmasked": -0.2948266543886608,
+        "soa_s": 0.3857561973049708,
+        "block2": 0.07615190691951441,
+        "groupaphant:maskmasked": -0.1820571665184022,
+        "groupaphant:soa_s": -0.04191496758103633,
+        "maskmasked:soa_s": 0.06996992222518179,
+        "groupaphant:maskmasked:soa_s": 0.1165960736486406
+      },
+      "theta": {
+        "item.(Intercept)": 0.9942575169879779,
+        "item.groupaphant.(Intercept)": 0.1788432044931523,
+        "item.groupaphant": 3.16947672416879e-07,
+        "participant.(Intercept)": 0.5927077034274087,
+        "participant.maskmasked.(Intercept)": -0.1138472351939553,
+        "participant.soa_s.(Intercept)": 0.04051989603488555,
+        "participant.maskmasked:soa_s.(Intercept)": 0.05018123485947341,
+        "participant.maskmasked": 0.1108093662014088,
+        "participant.soa_s.maskmasked": -0.046006923163099,
+        "participant.maskmasked:soa_s.maskmasked": 0.01979102438551194,
+        "participant.soa_s": 0.04845462122986023,
+        "participant.maskmasked:soa_s.soa_s": -0.1151082806310378,
+        "participant.maskmasked:soa_s": 0
+      }
+    },
+    "S7_age_covariate": {
+      "model_type": "glmm",
+      "formula": "correct ~ group * mask * soa_s + block + (1 + mask + soa_s || participant) + (1 | item) + age_z",
+      "family": "binomial(logit)",
+      "subset": "primary occluded trials with non-missing age plus age_z",
+      "source": "tools/build-aphantasia-fixture.R",
+      "nobs": 16800,
+      "logLik": -9649.8597555660617,
+      "AIC": 19331.719511132123,
+      "BIC": 19455.385657778384,
+      "fixef": {
+        "(Intercept)": 0.4577414890432712,
+        "groupaphant": 0.2359896470404774,
+        "maskmasked": -0.3264295781755229,
+        "soa_s": 0.4022534381941463,
+        "block2": 0.1111690485887111,
+        "age_z": -0.2560779914750753,
+        "groupaphant:maskmasked": -0.1386403890806239,
+        "groupaphant:soa_s": -0.06837630756240536,
+        "maskmasked:soa_s": 0.06908071452974179,
+        "groupaphant:maskmasked:soa_s": 0.1142083233208314
+      },
+      "theta": {
+        "item.(Intercept)": 1.081990063659574,
+        "participant.soa_s": 0.03641161427301663,
+        "participant.maskunmasked": 0.4346478311572796,
+        "participant.maskmasked.maskunmasked": 0.3861192315212278,
+        "participant.maskmasked": 0.1015269136508806,
+        "participant.(Intercept)": 0.2036906236232712
+      }
+    },
+    "S9_age_matched_subset": {
+      "model_type": "glmm",
+      "formula": "correct ~ group * mask * soa_s + block + (1 + mask + soa_s || participant) + (1 | item)",
+      "family": "binomial(logit)",
+      "subset": "aphantasia plus prolific_control_age_match controls",
+      "source": "tools/build-aphantasia-fixture.R",
+      "nobs": 12480,
+      "logLik": -7204.0065951966753,
+      "AIC": 14438.013190393351,
+      "BIC": 14549.491430022203,
+      "fixef": {
+        "(Intercept)": 0.3832867268967449,
+        "groupaphant": 0.267193166244538,
+        "maskmasked": -0.2403164743308019,
+        "soa_s": 0.4239050423774659,
+        "block2": 0.1227507249137254,
+        "groupaphant:maskmasked": -0.2286204936838145,
+        "groupaphant:soa_s": -0.08786404403715151,
+        "maskmasked:soa_s": 0.02752038349342014,
+        "groupaphant:maskmasked:soa_s": 0.1494603854401344
+      },
+      "theta": {
+        "item.(Intercept)": 1.090895951064087,
+        "participant.soa_s": 0.0383152447929994,
+        "participant.maskunmasked": 0.5939477528355805,
+        "participant.maskmasked.maskunmasked": 0.5339323105694244,
+        "participant.maskmasked": 0,
+        "participant.(Intercept)": 0.001133275070909339
+      }
+    },
+    "S9_age_matched_subset_age_covariate": {
+      "model_type": "glmm",
+      "formula": "correct ~ group * mask * soa_s + block + (1 + mask + soa_s || participant) + (1 | item) + age_z",
+      "family": "binomial(logit)",
+      "subset": "age-matched subset plus age_z",
+      "source": "tools/build-aphantasia-fixture.R",
+      "nobs": 12480,
+      "logLik": -7193.7938995236254,
+      "AIC": 14419.587799047251,
+      "BIC": 14538.497921318025,
+      "fixef": {
+        "(Intercept)": 0.4791148298624297,
+        "groupaphant": 0.1024798056979157,
+        "maskmasked": -0.2396853920363504,
+        "soa_s": 0.4217718901787799,
+        "block2": 0.1231012163011056,
+        "age_z": -0.3516901314312706,
+        "groupaphant:maskmasked": -0.2260253331259289,
+        "groupaphant:soa_s": -0.08738300954677608,
+        "maskmasked:soa_s": 0.03152023526351052,
+        "groupaphant:maskmasked:soa_s": 0.1490969999571644
+      },
+      "theta": {
+        "item.(Intercept)": 1.090163377810201,
+        "participant.soa_s": 0.03869955740726934,
+        "participant.maskunmasked": 0.3011958581969703,
+        "participant.maskmasked.maskunmasked": 0.299162703565659,
+        "participant.maskmasked": 0,
+        "participant.(Intercept)": 0.3292708250873652
+      }
+    }
+  },
+  "inference": {
+    "primary_dd": [
+      {
+        "where": "centered_soa",
+        "estimate": -0.1666397257831928,
+        "SE": 0.08079477962008014,
+        "z": -2.062506099611632,
+        "p": 0.03915957743986744,
+        "lower": -0.3249974938385499,
+        "upper": -0.00828195772783577
+      },
+      {
+        "where": "25_ms",
+        "estimate": -0.3391448155438578,
+        "SE": 0.1400191898391794,
+        "z": -2.422130966001063,
+        "p": 0.01542978860992645,
+        "lower": -0.6135824276286495,
+        "upper": -0.06470720345906628
+      }
+    ],
+    "sensitivity_dd": [
+      {
+        "where": "centered_soa",
+        "estimate": -0.1436164288983404,
+        "SE": 0.08053879822514162,
+        "z": -1.783195578569087,
+        "p": 0.07455447196507906,
+        "lower": -0.301472473419618,
+        "upper": 0.01423961562293719
+      },
+      {
+        "where": "25_ms",
+        "estimate": -0.3570619676866104,
+        "SE": 0.1380206149907997,
+        "z": -2.587019103707165,
+        "p": 0.009681022464627747,
+        "lower": -0.6275823730685779,
+        "upper": -0.08654156230464299
+      }
+    ],
+    "intact_dd": [
+      {
+        "where": "centered_soa",
+        "estimate": 0.01052790934095148,
+        "SE": 0.2577212873401568,
+        "z": 0.04084997964120863,
+        "p": 0.9674154945942892,
+        "lower": -0.4946058138457559,
+        "upper": 0.5156616325276588
+      },
+      {
+        "where": "25_ms",
+        "estimate": 0.7364769609340777,
+        "SE": 0.4054270414910207,
+        "z": 1.816546223028364,
+        "p": 0.06928662415178059,
+        "lower": -0.0581600403883229,
+        "upper": 1.531113962256478
+      }
+    ],
+    "combined_did_diff": [
+      {
+        "where": "centered_soa",
+        "estimate": -0.1677332619980613,
+        "SE": 0.2522535163340302,
+        "z": -0.6649392422183386,
+        "p": 0.5060893548654761,
+        "lower": -0.6621501540127606,
+        "upper": 0.3266836300166379
+      },
+      {
+        "where": "25_ms",
+        "estimate": -0.9952829212011332,
+        "SE": 0.3979577272714268,
+        "z": -2.500976493220098,
+        "p": 0.01238513987461335,
+        "lower": -1.77528006665313,
+        "upper": -0.2152857757491367
+      }
+    ],
+    "S1": [
+      {
+        "spec": "intercept-only",
+        "where": "centered_soa",
+        "estimate": -0.1628255716677448,
+        "SE": 0.07161347217669081,
+        "z": -2.27367235128619,
+        "p": 0.02298569374699078,
+        "lower": -0.3031879771340588,
+        "upper": -0.02246316620143077,
+        "note": "ok"
+      },
+      {
+        "spec": "intercept-only",
+        "where": "25_ms",
+        "estimate": -0.3328511704335795,
+        "SE": 0.1349570363837755,
+        "z": -2.466349138603305,
+        "p": 0.01364982138027152,
+        "lower": -0.5973669617457794,
+        "upper": -0.06833537912137955,
+        "note": "ok"
+      },
+      {
+        "spec": "current (||)",
+        "where": "centered_soa",
+        "estimate": -0.1666397257831928,
+        "SE": 0.08079477962008014,
+        "z": -2.062506099611632,
+        "p": 0.03915957743986744,
+        "lower": -0.3249974938385499,
+        "upper": -0.00828195772783577,
+        "note": "ok"
+      },
+      {
+        "spec": "current (||)",
+        "where": "25_ms",
+        "estimate": -0.3391448155438578,
+        "SE": 0.1400191898391794,
+        "z": -2.422130966001063,
+        "p": 0.01542978860992645,
+        "lower": -0.6135824276286495,
+        "upper": -0.06470720345906628,
+        "note": "ok"
+      },
+      {
+        "spec": "correlated slopes",
+        "where": "centered_soa",
+        "estimate": -0.1645004963063141,
+        "SE": 0.08119780716627006,
+        "z": -2.025922891851793,
+        "p": 0.04277268697439679,
+        "lower": -0.3236481983522034,
+        "upper": -0.005352794260424759,
+        "note": "singular"
+      },
+      {
+        "spec": "correlated slopes",
+        "where": "25_ms",
+        "estimate": -0.3330421998737697,
+        "SE": 0.1397648065035459,
+        "z": -2.382875977189009,
+        "p": 0.01717798054024558,
+        "lower": -0.6069812206207197,
+        "upper": -0.05910317912681973,
+        "note": "singular"
+      },
+      {
+        "spec": "item mask-slope",
+        "where": "centered_soa",
+        "estimate": -0.1725154347087307,
+        "SE": 0.0832223549475043,
+        "z": -2.072945842707184,
+        "p": 0.03817732000333759,
+        "lower": -0.3356312504058391,
+        "upper": -0.009399619011622257,
+        "note": "ok"
+      },
+      {
+        "spec": "item mask-slope",
+        "where": "25_ms",
+        "estimate": -0.3433709676027906,
+        "SE": 0.1417939592075754,
+        "z": -2.421619154452991,
+        "p": 0.01545153452188412,
+        "lower": -0.6212871276496384,
+        "upper": -0.0654548075559428,
+        "note": "ok"
+      },
+      {
+        "spec": "maximal",
+        "where": "centered_soa",
+        "estimate": -0.1820571665184022,
+        "SE": 0.08132021121328351,
+        "z": -2.238768982546168,
+        "p": 0.02517095144667295,
+        "lower": -0.3414447804964379,
+        "upper": -0.02266955254036654,
+        "note": "singular"
+      },
+      {
+        "spec": "maximal",
+        "where": "25_ms",
+        "estimate": -0.3710606370750885,
+        "SE": 0.150759129744513,
+        "z": -2.461281367860865,
+        "p": 0.01384417466849376,
+        "lower": -0.666548531374334,
+        "upper": -0.07557274277584308,
+        "note": "singular"
+      }
+    ],
+    "S3": [
+      {
+        "where": "25_ms",
+        "est_min": -0.3817873523328289,
+        "est_med": -0.3402432395413141,
+        "est_max": -0.2820783036002235,
+        "p_min": 0.006945034707769324,
+        "p_max": 0.04321461108571664,
+        "n_sign_flips": 0
+      },
+      {
+        "where": "centered_soa",
+        "est_min": -0.1860102588124853,
+        "est_med": -0.1661570977825251,
+        "est_max": -0.1393540486924347,
+        "p_min": 0.01862305408484255,
+        "p_max": 0.07596313245694195,
+        "n_sign_flips": 0
+      }
+    ],
+    "S6": {
+      "cells": [
+        {
+          "group": "control",
+          "unmasked": 0.6245954496204875,
+          "masked": 0.5519911630900337,
+          "cost_pp": 7.260428653045381,
+          "soa": "centered"
+        },
+        {
+          "group": "aphant",
+          "unmasked": 0.6701169760358983,
+          "masked": 0.5601309703780935,
+          "cost_pp": 10.998600565780482,
+          "soa": "centered"
+        },
+        {
+          "group": "control",
+          "unmasked": 0.4690825757022768,
+          "masked": 0.3671579179374963,
+          "cost_pp": 10.192465776478056,
+          "soa": "25_ms"
+        },
+        {
+          "group": "aphant",
+          "unmasked": 0.542153920966148,
+          "masked": 0.3564675800540601,
+          "cost_pp": 18.568634091208793,
+          "soa": "25_ms"
+        }
+      ],
+      "did_pp": [
+        {
+          "soa": "centered",
+          "control": 7.260428653045381,
+          "aphant": 10.998600565780482,
+          "did_pp": 3.738171912735101
+        },
+        {
+          "soa": "25_ms",
+          "control": 10.192465776478056,
+          "aphant": 18.568634091208793,
+          "did_pp": 8.376168314730737
+        }
+      ],
+      "odds_ratio": [
+        {
+          "where": "centered_soa",
+          "estimate": -0.1666397257831928,
+          "OR": 0.8465045301633228,
+          "OR_lo": 0.7225291644145415,
+          "OR_hi": 0.9917522432020548,
+          "p": 0.03915957743986744
+        },
+        {
+          "where": "25_ms",
+          "estimate": -0.3391448155438578,
+          "OR": 0.7123792780264049,
+          "OR_lo": 0.5414078363741298,
+          "OR_hi": 0.9373418736605323,
+          "p": 0.01542978860992645
+        }
+      ]
+    },
+    "S7": {
+      "source_table": [
+        {
+          "source": "facebook",
+          "aphantasia": "no",
+          "Freq": 1
+        },
+        {
+          "source": "prolific",
+          "aphantasia": "no",
+          "Freq": 38
+        },
+        {
+          "source": "reddit",
+          "aphantasia": "no",
+          "Freq": 2
+        },
+        {
+          "source": "facebook",
+          "aphantasia": "yes",
+          "Freq": 7
+        },
+        {
+          "source": "prolific",
+          "aphantasia": "yes",
+          "Freq": 4
+        },
+        {
+          "source": "reddit",
+          "aphantasia": "yes",
+          "Freq": 24
+        }
+      ],
+      "age_matched_source": "no age-matched source level found",
+      "age_covariate": [
+        {
+          "estimate": -0.1386381086810275,
+          "SE": 0.07742055051424974,
+          "z": -1.790714581078964,
+          "p": 0.07333910863487957,
+          "lower": -0.290382387688957,
+          "upper": 0.01310617032690203,
+          "where": "centered_soa",
+          "spec": "age_covariate"
+        },
+        {
+          "estimate": -0.3237651407957837,
+          "SE": 0.1392377959505754,
+          "z": -2.325267637177401,
+          "p": 0.02005765365345828,
+          "lower": -0.5966712208589116,
+          "upper": -0.05085906073265584,
+          "where": "25_ms",
+          "spec": "age_covariate"
+        }
+      ]
+    },
+    "S9": {
+      "folder_table": [
+        {
+          "folder": "aphantasia_facebook",
+          "Freq": 8
+        },
+        {
+          "folder": "aphantasia_reddit",
+          "Freq": 26
+        },
+        {
+          "folder": "prolific_control",
+          "Freq": 17
+        },
+        {
+          "folder": "prolific_control_age_match",
+          "Freq": 25
+        }
+      ],
+      "n_aphant": 31,
+      "n_age_matched_controls": 21,
+      "composition": [
+        {
+          "grp": "aphant",
+          "n": 31,
+          "age_mean": 43.225806451612904,
+          "age_sd": 13.147140823310481,
+          "age_min": 18,
+          "age_max": 77
+        },
+        {
+          "grp": "control_age_matched",
+          "n": 21,
+          "age_mean": 49.047619047619051,
+          "age_sd": 11.37310947136354,
+          "age_min": 38,
+          "age_max": 77
+        }
+      ],
+      "age_diff_p": 0.09584752810581645,
+      "did_matched": [
+        {
+          "estimate": -0.2286167918850468,
+          "SE": 0.08678045603948435,
+          "z": -2.634427177716468,
+          "p": 0.008427938037684752,
+          "lower": -0.3987064857224362,
+          "upper": -0.05852709804765746,
+          "where": "centered_soa",
+          "spec": "age_matched_subset"
+        },
+        {
+          "estimate": -0.4708978459413928,
+          "SE": 0.161392367210445,
+          "z": -2.917720670937139,
+          "p": 0.003526000570348004,
+          "lower": -0.7872268856738651,
+          "upper": -0.1545688062089206,
+          "where": "25_ms",
+          "spec": "age_matched_subset"
+        }
+      ],
+      "did_matched_age_cov": [
+        {
+          "estimate": -0.2260262948558184,
+          "SE": 0.08509648398112478,
+          "z": -2.656117906186973,
+          "p": 0.007904597177514329,
+          "lower": -0.392815403458823,
+          "upper": -0.05923718625281388,
+          "where": "centered_soa",
+          "spec": "age_matched_subset + age_z"
+        },
+        {
+          "estimate": -0.4677167927525093,
+          "SE": 0.16051117929783,
+          "z": -2.913920356193112,
+          "p": 0.003569209522425613,
+          "lower": -0.7823187041762562,
+          "upper": -0.1531148813287625,
+          "where": "25_ms",
+          "spec": "age_matched_subset + age_z"
+        }
+      ],
+      "cell_means": [
+        {
+          "group": "control",
+          "unmasked": 0.6093725514278971,
+          "masked": 0.5509119625994249,
+          "cost_pp": 5.846058882847228,
+          "soa": "centered"
+        },
+        {
+          "group": "aphant",
+          "unmasked": 0.6708106719695222,
+          "masked": 0.5604325295536008,
+          "cost_pp": 11.037814241592137,
+          "soa": "centered"
+        },
+        {
+          "group": "control",
+          "unmasked": 0.4396753681909187,
+          "masked": 0.3711215800965712,
+          "cost_pp": 6.855378809434754,
+          "soa": "25_ms"
+        },
+        {
+          "group": "aphant",
+          "unmasked": 0.541685358345568,
+          "masked": 0.3569338696595313,
+          "cost_pp": 18.475148868603668,
+          "soa": "25_ms"
+        }
+      ]
+    }
+  }
+}
