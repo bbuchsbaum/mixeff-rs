@@ -153,11 +153,10 @@ statistical approximation as `lme4::glmer`'s joint Laplace fit, and it can be
 less accurate for inference on overdispersed or observation-level-random-effect
 models. `fast=false` selects a labelled joint path: Laplace for `n_agq <= 1`,
 and AGQ for valid single-scalar random-effect GLMMs with `n_agq > 1`. NLopt
-builds use BOBYQA; dependency-light builds use the native COBYLA joint path,
-which is slower but gives users a documented route to the joint Laplace
-objective when fast-PIRLS is not adequate. Any joint attempt or fast-PIRLS
-fallback is labelled in optimizer status and diagnostics rather than silently
-presented as ordinary `lme4` parity.
+builds use BOBYQA; dependency-light builds use the native TrustBQ joint path
+with `max_feval` honored for bounded audit runs. Any joint attempt or
+fast-PIRLS fallback is labelled in optimizer status and diagnostics rather
+than silently presented as ordinary `lme4` parity.
 
 ## License
 

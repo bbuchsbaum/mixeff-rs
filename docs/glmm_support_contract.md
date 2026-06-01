@@ -42,8 +42,11 @@ models and observation-level random-effect models.
 `n_agq > 1`. It estimates `[β; θ]` on a joint objective with response
 constants retained, records stationarity and covariance evidence when the
 joint path certifies, and otherwise returns a labelled fast-PIRLS fallback.
-NLopt builds use BOBYQA; dependency-light builds use native COBYLA so users
+NLopt builds use BOBYQA; dependency-light builds use native TrustBQ so users
 still have a documented joint-Laplace route when fast-PIRLS is not adequate.
+For dependency-light builds, caller `max_feval` is honored for the joint phase
+so downstream wrappers can run bounded slow-audit attempts instead of waiting
+for the full default budget.
 The prerequisites for promoting any GLMM row — objective convention,
 derivative/stationarity evidence, covariance-certificate compatibility,
 fallback policy, and lockstep scorecard tests — are specified in
@@ -60,6 +63,10 @@ mode rather than requiring wrappers to infer it. The stable summary fields are:
 - `response_constants`: `dropped` for the supported fast path and labelled
   fallback, `included` for joint objectives.
 - `n_agq`: the requested/effective quadrature count.
+- `optimizer_convergence_status`: typed optimizer status label such as
+  `converged`, `budget_exhausted`, `roundoff_limited`, or `failed`.
+- `optimizer_feval`, `optimizer_max_feval`, `optimizer_fit_log_len`: optional
+  evaluation-budget instrumentation for wrappers and parity ledgers.
 - `fallback_status`: `fallback_fast_pirls` only when an uncertified joint
   attempt returned the deterministic fast-PIRLS fallback.
 
@@ -122,9 +129,9 @@ GLMM artifacts must report finite-sample LMM inference as unsupported.
 
 The Rust crate's default release build enables NLopt. Dependency-light
 downstream builds can use `--no-default-features`, where the native LMM
-optimizer is TrustBQ and GLMMs use the existing native COBYLA / PatternSearch
-backends. PRIMA remains an optional development backend, not a required runtime
-dependency.
+optimizer is TrustBQ, GLMM joint Laplace uses native TrustBQ, and remaining
+GLMM fallback/profiled paths stay on the native fallbacks. PRIMA remains an
+optional development backend, not a required runtime dependency.
 
 Artifacts and summaries must record:
 

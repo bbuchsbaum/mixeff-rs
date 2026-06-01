@@ -25,6 +25,11 @@ use crate::formula::Formula;
 use crate::model::data::DataFrame;
 use crate::model::linear::{CovarianceKktClassification, LinearMixedModel};
 use crate::model::traits::{Family, LinkFunction, MixedModelFit, RandomEffectTermInfo};
+#[cfg(not(feature = "nlopt"))]
+use crate::optimizer::trust_bq::{
+    minimize_with_progress as minimize_trust_bq_with_progress, TrustBqOptions, TrustBqProgress,
+    TrustBqStopReason,
+};
 use crate::stats::{BlockDescription, ModelSummary, VarCorr};
 use crate::types::{FitLogEntry, MatrixBlock, OptSummary, Optimizer, ReMat};
 use crate::unstable_internal_method;
@@ -1545,7 +1550,8 @@ impl GeneralizedLinearMixedModel {
         let start_beta = self.beta.as_slice().to_vec();
         let start_theta = self.theta.clone();
         let profiled_start_objective = self.deviance_with_response_constants(n_agq);
-        let maxeval = joint_glmm_default_maxeval(start_beta.len() + start_theta.len());
+        let n_joint_params = start_beta.len() + start_theta.len();
+        let maxeval = joint_glmm_configured_maxeval(&self.lmm.optsum, n_joint_params);
         self.fit_joint_glmm_from_start(
             start_beta,
             start_theta,
@@ -1671,11 +1677,9 @@ impl GeneralizedLinearMixedModel {
             &gradient,
             2.0e-2,
         );
-        if let Some(fallback) = uncertified_joint_fallback(
-            &certificate,
-            &me.lmm.optsum.return_value,
-            fallback_fast_pirls,
-        ) {
+        if let Some(fallback) =
+            uncertified_joint_fallback(&certificate, &me.lmm.optsum, fallback_fast_pirls)
+        {
             *me = fallback;
             me.refresh_binomial_separation_diagnostics();
             me.refresh_near_unit_random_effect_correlation_diagnostics();
@@ -1707,105 +1711,86 @@ impl GeneralizedLinearMixedModel {
 
         let mut lower_bounds = vec![f64::NEG_INFINITY; n_beta];
         lower_bounds.extend(self.lmm.lower_bounds());
-        self.lmm.optsum.optimizer = Optimizer::Cobyla;
-        self.lmm.optsum.backend = Optimizer::Cobyla.canonical_backend();
+        let upper_bounds = vec![f64::INFINITY; n_params];
+        self.lmm.optsum.optimizer = Optimizer::TrustBq;
+        self.lmm.optsum.backend = Optimizer::TrustBq.canonical_backend();
         self.lmm.optsum.finitial = profiled_start_objective;
+        self.lmm.optsum.max_feval = maxeval as i64;
+        let ftol_abs = self.lmm.optsum.ftol_abs.max(1.0e-7);
+        let ftol_rel = self.lmm.optsum.ftol_rel.max(1.0e-10);
+        let initial_radius = joint_glmm_trust_bq_initial_radius(&initial, n_beta);
 
-        let best_params: Rc<RefCell<Vec<f64>>> = Rc::new(RefCell::new(initial.clone()));
-        let best_fmin: Rc<Cell<f64>> = Rc::new(Cell::new(f64::INFINITY));
-        let feval_count: Rc<Cell<i64>> = Rc::new(Cell::new(0i64));
+        let invalid_objective = profiled_start_objective.abs().max(1.0)
+            + 1.0e6 * (1.0 + profiled_start_objective.abs());
+        let best_params = RefCell::new(initial.clone());
+        let best_fmin = Cell::new(profiled_start_objective);
         let fit_log: Rc<RefCell<Vec<FitLogEntry>>> = Rc::new(RefCell::new(Vec::new()));
 
-        let bounds: Vec<(f64, f64)> = lower_bounds.iter().map(|&lo| (lo, f64::INFINITY)).collect();
-        let constraint_fns: Vec<Box<dyn cobyla::Func<()>>> = lower_bounds
-            .iter()
-            .enumerate()
-            .filter(|(_, &lo)| lo > f64::NEG_INFINITY)
-            .map(|(i, &lo)| {
-                Box::new(move |x: &[f64], _: &mut ()| -> f64 { x[i] - lo })
-                    as Box<dyn cobyla::Func<()>>
-            })
-            .collect();
-        let cons_refs: Vec<&dyn cobyla::Func<()>> =
-            constraint_fns.iter().map(|f| f.as_ref()).collect();
-        let stop_tol = cobyla::StopTols {
-            ftol_rel: self.lmm.optsum.ftol_rel.min(1.0e-10),
-            ftol_abs: self.lmm.optsum.ftol_abs.max(1.0e-7),
-            xtol_rel: self.lmm.optsum.xtol_rel,
-            xtol_abs: vec![1.0e-5; n_params],
-        };
-
         let model = std::cell::RefCell::new(self);
-        let objective_fn = |params: &[f64], _data: &mut ()| -> f64 {
-            feval_count.set(feval_count.get() + 1);
-            let objective = model
+        let mut objective_fn = |params: &[f64]| -> Result<f64> {
+            let raw_objective = model
                 .borrow_mut()
                 .joint_glmm_deviance_at_params(params, n_beta, n_agq);
+            let objective = if raw_objective.is_finite() {
+                raw_objective
+            } else {
+                invalid_objective
+            };
             fit_log.borrow_mut().push(FitLogEntry {
                 theta: params.to_vec(),
                 objective,
             });
-            if objective < best_fmin.get() {
+            if raw_objective.is_finite() && objective < best_fmin.get() {
                 best_fmin.set(objective);
                 *best_params.borrow_mut() = params.to_vec();
             }
-            objective
+            Ok(objective)
         };
+        let mut progress_fn = |_progress: &TrustBqProgress<'_>| -> Result<bool> { Ok(false) };
 
-        let result = cobyla::minimize(
-            objective_fn,
+        let result = minimize_trust_bq_with_progress(
             &initial,
-            &bounds,
-            &cons_refs,
-            (),
-            maxeval as usize,
-            cobyla::RhoBeg::All(0.5),
-            Some(stop_tol),
-        );
+            &lower_bounds,
+            &upper_bounds,
+            TrustBqOptions {
+                initial_radius,
+                final_radius: 1.0e-5,
+                max_evaluations: maxeval.max(1) as usize,
+                ftol_abs,
+                ftol_rel,
+                max_cross_terms: 0,
+                stall_iterations: 3,
+                stall_ftol_abs: 1.0e-6,
+                stall_ftol_rel: 1.0e-8,
+                stall_requires_stable_x: false,
+                reuse_samples: true,
+                ..TrustBqOptions::default()
+            },
+            &mut objective_fn,
+            &mut progress_fn,
+        )?;
 
-        let (mut params, status_label) = match result {
-            Ok((status, x_opt, fmin)) if fmin.is_finite() => {
-                (x_opt, Self::cobyla_success_status_label(status))
-            }
-            Ok((status, _x_opt, _fmin)) if best_fmin.get().is_finite() => (
-                best_params.borrow().clone(),
-                Self::cobyla_success_status_label(status),
-            ),
-            Ok((status, x_opt, _fmin)) => (x_opt, Self::cobyla_success_status_label(status)),
-            Err((status @ cobyla::FailStatus::RoundoffLimited, _x_opt, _fmin))
-                if best_fmin.get().is_finite() =>
-            {
-                (
-                    best_params.borrow().clone(),
-                    format!("FAILED:{}", Self::cobyla_fail_status_label(status)),
-                )
-            }
-            Err((status, x_opt, fmin)) if fmin.is_finite() => (
-                x_opt,
-                format!("FAILED:{}", Self::cobyla_fail_status_label(status)),
-            ),
-            Err((status, _x_opt, _fmin)) if best_fmin.get().is_finite() => (
-                best_params.borrow().clone(),
-                format!("FAILED:{}", Self::cobyla_fail_status_label(status)),
-            ),
-            Err((_status, _x_opt, _fmin)) => {
-                return Err(MixedModelError::Optimization(
-                    "native COBYLA joint GLMM optimization failed before finding a finite objective"
-                        .to_string(),
-                ));
-            }
+        let logged_best_params = best_params.into_inner();
+        let logged_best_fmin = best_fmin.get();
+        let mut params = if logged_best_fmin.is_finite() && logged_best_fmin <= result.fmin {
+            logged_best_params
+        } else {
+            result.x
         };
-
         let me = model.into_inner();
         let final_objective = me.joint_glmm_deviance_at_params(&params, n_beta, n_agq);
         me.refresh_dispersion();
         let status_prefix = joint_glmm_status_prefix(n_agq);
-        me.lmm.optsum.return_value = format!("{status_prefix}:{status_label}");
+        me.lmm.optsum.return_value = format!(
+            "{status_prefix}:{}",
+            trust_bq_status_label(result.stop_reason)
+        );
         me.lmm.optsum.n_agq = n_agq;
-        me.lmm.optsum.feval = feval_count.get();
+        me.lmm.optsum.feval = result.fevals as i64;
         me.lmm.optsum.max_feval = maxeval as i64;
         me.lmm.optsum.fit_log = rc_refcell_into_inner_or_clone(fit_log);
         me.lmm.optsum.fmin = final_objective;
+        me.lmm.optsum.final_trust_radius = Some(result.final_radius);
         me.lmm.optsum.final_params = std::mem::take(&mut params);
 
         let mut lower_bounds = vec![f64::NEG_INFINITY; n_beta];
@@ -1839,11 +1824,9 @@ impl GeneralizedLinearMixedModel {
             &gradient,
             2.0e-2,
         );
-        if let Some(fallback) = uncertified_joint_fallback(
-            &certificate,
-            &me.lmm.optsum.return_value,
-            fallback_fast_pirls,
-        ) {
+        if let Some(fallback) =
+            uncertified_joint_fallback(&certificate, &me.lmm.optsum, fallback_fast_pirls)
+        {
             *me = fallback;
             me.refresh_binomial_separation_diagnostics();
             me.refresh_near_unit_random_effect_correlation_diagnostics();
@@ -2841,11 +2824,44 @@ fn joint_glmm_default_maxeval(_n_params: usize) -> u32 {
 
 #[cfg(not(feature = "nlopt"))]
 fn joint_glmm_default_maxeval(n_params: usize) -> u32 {
-    // Native COBYLA is the dependency-light escape hatch for GLMMs where the
-    // profiled fast-PIRLS surface is known to miss the lme4 joint optimum.
-    // It needs a larger default budget than NLopt BOBYQA, especially once
-    // fixed effects join theta in the search vector.
-    (2_000usize + 200usize * n_params.max(1)).min(20_000) as u32
+    // Native TrustBQ uses local quadratic models, so it should need far fewer
+    // objective calls than the previous COBYLA fallback while still leaving
+    // enough budget for mixed beta/theta scales on large-intercept Bernoulli
+    // models.
+    (500usize + 80usize * n_params.max(1)).min(8_000) as u32
+}
+
+fn joint_glmm_configured_maxeval(optsum: &OptSummary, n_params: usize) -> u32 {
+    if optsum.max_feval > 0 {
+        optsum.max_feval.min(u32::MAX as i64).max(1) as u32
+    } else {
+        joint_glmm_default_maxeval(n_params)
+    }
+}
+
+#[cfg(not(feature = "nlopt"))]
+fn joint_glmm_trust_bq_initial_radius(initial: &[f64], n_beta: usize) -> f64 {
+    let beta_scale = initial
+        .iter()
+        .take(n_beta)
+        .map(|value| value.abs())
+        .fold(0.0_f64, f64::max)
+        .max(1.0);
+    // Keep beta moves large enough to repair high-baseline intercept starts,
+    // but do not let one large coefficient make theta probes excessive.
+    (0.25 * beta_scale).clamp(0.25, 1.0)
+}
+
+#[cfg(not(feature = "nlopt"))]
+fn trust_bq_status_label(status: TrustBqStopReason) -> &'static str {
+    match status {
+        TrustBqStopReason::RadiusBelowTolerance => "RADIUS_REACHED",
+        TrustBqStopReason::ObjectiveTolerance => "FTOL_REACHED",
+        TrustBqStopReason::MaxEvaluations => "MAXEVAL_REACHED",
+        TrustBqStopReason::StepBelowTolerance => "XTOL_REACHED",
+        TrustBqStopReason::ObjectiveStagnation => "FTOL_REACHED",
+        TrustBqStopReason::CertifiedConvergence => "FTOL_REACHED",
+    }
 }
 
 fn glmm_block_index(row: usize, col: usize) -> usize {
@@ -3066,7 +3082,7 @@ fn annotate_glmm_singular_covariance_status(
 
 fn uncertified_joint_fallback(
     joint_certificate: &OptimizerCertificate,
-    joint_return_code: &str,
+    joint_optsum: &OptSummary,
     fallback_fast_pirls: Option<GeneralizedLinearMixedModel>,
 ) -> Option<GeneralizedLinearMixedModel> {
     if joint_certificate.evidence.optimizer_stop.acceptable_stop
@@ -3078,6 +3094,7 @@ fn uncertified_joint_fallback(
         return None;
     }
     let mut fallback = fallback_fast_pirls?;
+    let joint_return_code = joint_optsum.return_value.clone();
     let fast_return_code = fallback.lmm.optsum.return_value.clone();
     let fallback_prefix = if joint_return_code.starts_with("JOINT_AGQ") {
         "JOINT_AGQ_FALLBACK_FAST_PIRLS"
@@ -3112,6 +3129,26 @@ fn uncertified_joint_fallback(
     diagnostic.payload.insert(
         "fast_pirls_return_code".to_string(),
         serde_json::json!(fast_return_code),
+    );
+    diagnostic.payload.insert(
+        "joint_optimizer".to_string(),
+        serde_json::json!(joint_optsum.optimizer_name()),
+    );
+    diagnostic.payload.insert(
+        "joint_optimizer_backend".to_string(),
+        serde_json::json!(joint_optsum.backend_name()),
+    );
+    diagnostic.payload.insert(
+        "joint_feval".to_string(),
+        serde_json::json!(joint_optsum.feval),
+    );
+    diagnostic.payload.insert(
+        "joint_max_feval".to_string(),
+        serde_json::json!(joint_optsum.max_feval),
+    );
+    diagnostic.payload.insert(
+        "joint_fmin".to_string(),
+        serde_json::json!(joint_optsum.fmin),
     );
     fallback
         .lmm
@@ -4583,6 +4620,7 @@ mod tests {
         let formula = parse_formula("use_num ~ 1 + (1 | urban_dist)").unwrap();
         let mut model =
             GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+        model.lmm.optsum.max_feval = 80;
 
         model.fit_with_options(false, 1, false).unwrap();
 
@@ -4592,12 +4630,29 @@ mod tests {
             model.lmm.optsum.return_value
         );
         assert_eq!(model.lmm.optsum.backend.label(), "native");
+        let trust_bq_attempted = model.lmm.optsum.optimizer == Optimizer::TrustBq
+            || model
+                .lmm
+                .compiler_artifact
+                .diagnostics
+                .iter()
+                .any(|diagnostic| {
+                    diagnostic.code == DiagnosticCode::OptimizerRecovery
+                        && diagnostic.payload.get("joint_optimizer")
+                            == Some(&serde_json::json!("trust_bq"))
+                });
+        assert!(
+            trust_bq_attempted,
+            "native fast=false should attempt the TrustBQ joint optimizer or record it in fallback diagnostics"
+        );
         let metadata = model
             .lmm
             .compiler_artifact
             .glmm_fit_metadata
             .as_ref()
             .expect("native fast=false fit should record GLMM metadata");
+        assert_eq!(metadata.optimizer_max_feval, Some(80));
+        assert!(metadata.optimizer_feval.unwrap_or_default() >= 0);
         assert!(
             matches!(
                 metadata.estimation_method.as_str(),
@@ -4611,12 +4666,119 @@ mod tests {
         let formula = parse_formula("use_num ~ 1 + (1 | urban_dist)").unwrap();
         let mut model =
             GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+        model.lmm.optsum.max_feval = 80;
         model.fit_with_options(false, 7, false).unwrap();
         assert!(
             model.lmm.optsum.return_value.contains("JOINT_AGQ"),
             "valid scalar-RE AGQ should also use the labelled native joint path, got {}",
             model.lmm.optsum.return_value
         );
+    }
+
+    #[cfg(not(feature = "nlopt"))]
+    #[test]
+    fn test_glmm_joint_laplace_honors_configured_max_feval_without_nlopt() {
+        let data = contra_fixture();
+        let formula = parse_formula("use_num ~ 1 + (1 | urban_dist)").unwrap();
+        let mut model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+        model.fit_with_options_impl(1, false).unwrap();
+        let start_beta = model.beta.as_slice().to_vec();
+        let start_theta = model.theta.clone();
+        let start_objective = model.deviance_with_response_constants(1);
+
+        model
+            .fit_joint_glmm_from_start(start_beta, start_theta, start_objective, 1, 3, None)
+            .unwrap();
+
+        assert_eq!(model.lmm.optsum.optimizer, Optimizer::TrustBq);
+        assert_eq!(model.lmm.optsum.max_feval, 3);
+        assert!(model.lmm.optsum.feval <= 3);
+        assert!(
+            model.lmm.optsum.return_value.contains("MAXEVAL_REACHED"),
+            "forced tiny budget should report maxeval, got {}",
+            model.lmm.optsum.return_value
+        );
+        let metadata = model
+            .lmm
+            .compiler_artifact
+            .glmm_fit_metadata
+            .as_ref()
+            .expect("joint fit should record GLMM metadata");
+        assert_eq!(metadata.optimizer, "trust_bq");
+        assert_eq!(metadata.optimizer_feval, Some(model.lmm.optsum.feval));
+        assert_eq!(metadata.optimizer_max_feval, Some(3));
+        assert_eq!(
+            metadata.optimizer_fit_log_len,
+            Some(model.lmm.optsum.fit_log.len())
+        );
+        assert_eq!(metadata.optimizer_convergence_status, "budget_exhausted");
+    }
+
+    #[cfg(not(feature = "nlopt"))]
+    #[test]
+    fn test_budgeted_native_joint_laplace_records_high_baseline_multi_re_metadata() {
+        let mut correct = Vec::new();
+        let mut x = Vec::new();
+        let mut participant = Vec::new();
+        let mut item = Vec::new();
+        for subj in 0..8 {
+            let subj_shift = (subj as f64 - 3.5) * 0.08;
+            for trial in 0..8 {
+                let xv = if trial % 2 == 0 { -0.5 } else { 0.5 };
+                let item_id = trial % 4;
+                let eta = 2.8 + 0.35 * xv + subj_shift - 0.04 * item_id as f64;
+                let p = 1.0 / (1.0 + (-eta).exp());
+                let deterministic_u = ((subj * 17 + trial * 11) % 101) as f64 / 101.0;
+                correct.push((deterministic_u < p) as i32 as f64);
+                x.push(xv);
+                participant.push(format!("s{subj}"));
+                item.push(format!("i{item_id}"));
+            }
+        }
+        let mut data = DataFrame::new();
+        data.add_numeric("correct", correct).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_categorical("participant", participant).unwrap();
+        data.add_categorical("item", item).unwrap();
+        let formula =
+            parse_formula("correct ~ 1 + x + (1 + x || participant) + (1 | item)").unwrap();
+        let mut model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+        model.lmm.optsum.max_feval = 40;
+
+        model.fit_with_options(false, 1, false).unwrap();
+
+        assert!(
+            model.lmm.optsum.return_value.contains("JOINT_LAPLACE"),
+            "budgeted high-baseline multi-RE fit should attempt the labelled joint route, got {}",
+            model.lmm.optsum.return_value
+        );
+        let metadata = model
+            .lmm
+            .compiler_artifact
+            .glmm_fit_metadata
+            .as_ref()
+            .expect("budgeted joint route should record GLMM metadata");
+        assert_eq!(metadata.n_agq, 1);
+        assert_eq!(metadata.optimizer_max_feval, Some(40));
+        assert!(metadata.optimizer_feval.unwrap_or_default() <= 40);
+        assert!(matches!(
+            metadata.estimation_method.as_str(),
+            "joint_laplace" | "fallback_fast_pirls"
+        ));
+        let trust_bq_attempted = model.lmm.optsum.optimizer == Optimizer::TrustBq
+            || model
+                .lmm
+                .compiler_artifact
+                .diagnostics
+                .iter()
+                .any(|diagnostic| {
+                    diagnostic.code == DiagnosticCode::OptimizerRecovery
+                        && diagnostic.payload.get("joint_optimizer")
+                            == Some(&serde_json::json!("trust_bq"))
+                });
+        assert!(trust_bq_attempted);
     }
 
     #[cfg(feature = "nlopt")]

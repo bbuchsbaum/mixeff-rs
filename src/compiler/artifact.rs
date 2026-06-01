@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::model::data::DataFrame;
-use crate::types::OptSummary;
+use crate::types::{ConvergenceStatus, OptSummary};
 
 use super::audit::{audit_design, DesignAudit, OptimizerCertificate};
 use super::diagnostics::{Diagnostic, DiagnosticCode};
@@ -174,6 +174,13 @@ pub struct GlmmFitMetadata {
     pub optimizer_backend: String,
     pub optimizer: String,
     pub optimizer_status: String,
+    pub optimizer_convergence_status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optimizer_feval: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optimizer_max_feval: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optimizer_fit_log_len: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_status: Option<String>,
 }
@@ -224,8 +231,23 @@ impl GlmmFitMetadata {
             optimizer_backend: opt.backend_name().to_string(),
             optimizer: opt.optimizer_name().to_string(),
             optimizer_status: status.to_string(),
+            optimizer_convergence_status: convergence_status_label(opt.convergence_status())
+                .to_string(),
+            optimizer_feval: (opt.feval >= 0).then_some(opt.feval),
+            optimizer_max_feval: (opt.max_feval > 0).then_some(opt.max_feval),
+            optimizer_fit_log_len: (!opt.fit_log.is_empty()).then_some(opt.fit_log.len()),
             fallback_status: fallback_status.map(str::to_string),
         }
+    }
+}
+
+fn convergence_status_label(status: ConvergenceStatus) -> &'static str {
+    match status {
+        ConvergenceStatus::Converged => "converged",
+        ConvergenceStatus::BudgetExhausted => "budget_exhausted",
+        ConvergenceStatus::RoundoffLimited => "roundoff_limited",
+        ConvergenceStatus::Failed => "failed",
+        ConvergenceStatus::NotRun => "not_run",
     }
 }
 

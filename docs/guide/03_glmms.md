@@ -57,11 +57,11 @@ observation-level-random-effect models.
 
 `fast=false` selects a labelled joint path: Laplace for `n_agq <= 1`, and AGQ
 for valid single-scalar random-effect GLMMs with `n_agq > 1`. NLopt builds use
-BOBYQA; dependency-light builds use the native COBYLA joint path, which is
-slower but gives users a documented route to the joint Laplace objective when
-fast-PIRLS is not adequate. Any joint attempt or fast-PIRLS fallback is
-labelled in the optimizer status and diagnostics — it is never silently
-presented as ordinary `lme4` parity.
+BOBYQA; dependency-light builds use the native TrustBQ joint path. Caller
+`max_feval` is honored for bounded joint attempts, and the fit artifact records
+evaluation counts and typed convergence status. Any joint attempt or
+fast-PIRLS fallback is labelled in the optimizer status and diagnostics — it is
+never silently presented as ordinary `lme4` parity.
 
 This is the project's no-fake-statistics stance applied to GLMMs: the
 approximation actually used is always recoverable from the fit, so a reported
