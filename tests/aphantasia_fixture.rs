@@ -129,6 +129,46 @@ fn aphantasia_budget_grid() -> Vec<i64> {
     }
 }
 
+fn max_abs_fixef_drift(model: &GeneralizedLinearMixedModel, reference: &Value) -> f64 {
+    let expected = reference["fixef"]
+        .as_object()
+        .expect("reference fixef must be an object");
+    let ref_beta = |name: &str| {
+        expected
+            .get(name)
+            .and_then(Value::as_f64)
+            .unwrap_or_else(|| panic!("reference fixef `{name}` missing or non-numeric"))
+    };
+    let b0 = ref_beta("(Intercept)");
+    let b_group = ref_beta("groupaphant");
+    let b_mask = ref_beta("maskmasked");
+    let b_soa = ref_beta("soa_s");
+    let b_block = ref_beta("block2");
+    let b_group_mask = ref_beta("groupaphant:maskmasked");
+    let b_group_soa = ref_beta("groupaphant:soa_s");
+    let b_mask_soa = ref_beta("maskmasked:soa_s");
+    let b_group_mask_soa = ref_beta("groupaphant:maskmasked:soa_s");
+
+    let expected_native = [
+        b0 + b_group + b_mask + b_group_mask,
+        -b_group - b_group_mask,
+        -b_mask - b_group_mask,
+        b_soa + b_group_soa + b_mask_soa + b_group_mask_soa,
+        b_group_mask,
+        -b_group_soa - b_group_mask_soa,
+        -b_mask_soa - b_group_mask_soa,
+        b_group_mask_soa,
+        b_block,
+    ];
+
+    model
+        .coef()
+        .iter()
+        .zip(expected_native.iter())
+        .map(|(actual, expected)| (actual - expected).abs())
+        .fold(0.0_f64, f64::max)
+}
+
 #[cfg(all(not(feature = "nlopt"), feature = "unstable-internals"))]
 fn fallback_joint_metric<'a>(
     model: &'a GeneralizedLinearMixedModel,
@@ -220,6 +260,7 @@ fn intact_native_joint_budget_grid_reports_real_fixture_progress() {
         GeneralizedLinearMixedModel::new(formula.clone(), &data, Family::Bernoulli, None).unwrap();
     profiled.fit_with_options(true, 1, false).unwrap();
     let profiled_gap = (profiled.loglikelihood() - reference_loglik).abs();
+    let profiled_fixef_drift = max_abs_fixef_drift(&profiled, intact_ref);
 
     let budgets = aphantasia_budget_grid();
     assert!(
@@ -239,17 +280,41 @@ fn intact_native_joint_budget_grid_reports_real_fixture_progress() {
         let joint_fmin = fallback_joint_metric(&joint, "joint_fmin")
             .and_then(Value::as_f64)
             .unwrap_or_else(|| joint.objective());
+        let joint_fixef_drift = max_abs_fixef_drift(&joint, intact_ref);
         eprintln!(
-            "aphantasia intact budget={max_feval} joint_feval={} final_feval={} joint_fmin={} loglik={} gap={} profiled_gap={} status={}",
+            "aphantasia intact budget={max_feval} joint_feval={} final_feval={} joint_fmin={} loglik={} gap={} profiled_gap={} fixef_drift={} profiled_fixef_drift={} coef_names={:?} coef={:?} status={}",
             joint_feval,
             joint.lmm().optsum().feval,
             joint_fmin,
             joint.loglikelihood(),
             joint_gap,
             profiled_gap,
+            joint_fixef_drift,
+            profiled_fixef_drift,
+            joint.coef_names(),
+            joint.coef(),
             joint.lmm().optsum().return_value
         );
         assert!(joint_feval <= max_feval);
         assert!(joint_gap.is_finite());
+        assert!(joint_fixef_drift.is_finite());
+        assert!(
+            joint_gap <= profiled_gap,
+            "joint budget path should improve the lme4 logLik gap: joint={joint_gap}, profiled={profiled_gap}"
+        );
+        assert!(
+            joint_fixef_drift <= profiled_fixef_drift,
+            "joint budget path should improve fixed-effect drift: joint={joint_fixef_drift}, profiled={profiled_fixef_drift}"
+        );
+        if max_feval >= 40 {
+            assert!(
+                joint_gap < 0.5,
+                "budget >= 40 should close most of the intact logLik gap; got {joint_gap}"
+            );
+            assert!(
+                joint_fixef_drift < 0.1,
+                "budget >= 40 should reduce intact max fixed-effect drift below 0.1; got {joint_fixef_drift}"
+            );
+        }
     }
 }

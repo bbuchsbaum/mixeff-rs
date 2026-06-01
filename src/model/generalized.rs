@@ -1801,6 +1801,26 @@ impl GeneralizedLinearMixedModel {
             &lower_bounds,
             Some(me.lmm.dims.n),
         );
+        if joint_certificate_requires_fallback(&certificate)
+            && joint_candidate_materially_improves_profiled_start(&me.lmm.optsum)
+        {
+            let final_objective = me.joint_glmm_deviance_at_params(&params, n_beta, n_agq);
+            me.refresh_dispersion();
+            me.lmm.optsum.fmin = final_objective;
+            me.lmm.optsum.final_params = std::mem::take(&mut params);
+            certificate = OptimizerCertificate::from_opt_summary_with_context(
+                &me.lmm.optsum,
+                &me.lmm.optsum.final_params,
+                &lower_bounds,
+                Some(me.lmm.dims.n),
+            );
+            record_uncertified_joint_candidate_diagnostic(&mut certificate, &me.lmm.optsum);
+            me.lmm.compiler_artifact.optimizer_certificate = Some(certificate);
+            me.record_glmm_fit_metadata();
+            me.refresh_binomial_separation_diagnostics();
+            me.refresh_near_unit_random_effect_correlation_diagnostics();
+            return Ok(me);
+        }
         if fallback_fast_pirls.is_some() && joint_certificate_requires_fallback(&certificate) {
             if let Some(fallback) =
                 uncertified_joint_fallback(&certificate, &me.lmm.optsum, fallback_fast_pirls.take())
@@ -3184,6 +3204,64 @@ fn joint_certificate_requires_fallback(joint_certificate: &OptimizerCertificate)
             joint_certificate.status,
             crate::compiler::FitStatus::NotOptimized | crate::compiler::FitStatus::NotAssessed
         )
+}
+
+#[cfg(not(feature = "nlopt"))]
+fn joint_candidate_materially_improves_profiled_start(optsum: &OptSummary) -> bool {
+    let (Some(initial), Some(final_value)) = (
+        optsum.finitial.is_finite().then_some(optsum.finitial),
+        optsum.fmin.is_finite().then_some(optsum.fmin),
+    ) else {
+        return false;
+    };
+    if final_value >= initial {
+        return false;
+    }
+    let scale = initial.abs().max(final_value.abs()).max(1.0);
+    let tolerance =
+        (optsum.ftol_abs.max(1.0e-8) + optsum.ftol_rel.max(1.0e-10) * scale).max(1.0e-8) * 10.0;
+    initial - final_value > tolerance
+}
+
+#[cfg(not(feature = "nlopt"))]
+fn record_uncertified_joint_candidate_diagnostic(
+    certificate: &mut OptimizerCertificate,
+    optsum: &OptSummary,
+) {
+    let objective_delta = optsum.finitial - optsum.fmin;
+    let mut diagnostic = Diagnostic::new(
+        DiagnosticCode::OptimizerNonconvergence,
+        DiagnosticSeverity::Warning,
+        DiagnosticStage::Certification,
+        "returning improved joint GLMM candidate after budget exhaustion; convergence is not certified",
+    )
+    .with_suggested_actions(vec![
+        "treat fixed effects and log-likelihood as a budget-limited joint-Laplace candidate, not a certified optimizer convergence".to_string(),
+        "increase max_feval or compare against an external joint-Laplace reference before promoting this row to strict parity".to_string(),
+    ]);
+    diagnostic.payload.insert(
+        "fit_mode".to_string(),
+        serde_json::json!("uncertified_joint_candidate"),
+    );
+    diagnostic.payload.insert(
+        "scorecard_class".to_string(),
+        serde_json::json!("budget_limited_joint_candidate"),
+    );
+    diagnostic.payload.insert(
+        "objective_delta".to_string(),
+        serde_json::json!(objective_delta),
+    );
+    diagnostic
+        .payload
+        .insert("joint_fmin".to_string(), serde_json::json!(optsum.fmin));
+    diagnostic
+        .payload
+        .insert("joint_feval".to_string(), serde_json::json!(optsum.feval));
+    diagnostic.payload.insert(
+        "joint_max_feval".to_string(),
+        serde_json::json!(optsum.max_feval),
+    );
+    certificate.diagnostics.push(diagnostic);
 }
 
 fn binary_column_split(values: impl Iterator<Item = f64>) -> Option<BinaryColumnSplit> {
@@ -4791,6 +4869,23 @@ mod tests {
             metadata.estimation_method.as_str(),
             "joint_laplace" | "fallback_fast_pirls"
         ));
+        if metadata.estimation_method == "joint_laplace"
+            && model.lmm.optsum.return_value.contains("MAXEVAL_REACHED")
+        {
+            let certificate = model
+                .lmm
+                .compiler_artifact
+                .optimizer_certificate
+                .as_ref()
+                .expect("budget-limited joint candidate should retain certificate");
+            assert!(certificate.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == DiagnosticCode::OptimizerNonconvergence
+                    && diagnostic.payload.get("fit_mode")
+                        == Some(&serde_json::json!("uncertified_joint_candidate"))
+                    && diagnostic.payload.get("scorecard_class")
+                        == Some(&serde_json::json!("budget_limited_joint_candidate"))
+            }));
+        }
         let trust_bq_attempted = model.lmm.optsum.optimizer == Optimizer::TrustBq
             || model
                 .lmm

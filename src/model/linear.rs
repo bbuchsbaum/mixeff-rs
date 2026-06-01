@@ -16179,6 +16179,13 @@ mod tests {
         }
         model.set_theta(&theta).unwrap();
         model.update_l().unwrap();
+        let objective = model.objective_at_theta_for_certificate(&theta).unwrap();
+        model.optsum.return_value = "FTOL_REACHED".to_string();
+        model.optsum.feval = 1;
+        model.optsum.finitial = objective;
+        model.optsum.fmin = objective;
+        model.optsum.final_params = theta;
+        model.refresh_optimizer_certificate();
         model.refresh_effective_covariance_summaries();
 
         let summary = &model.compiler_artifact().effective_covariance[0];
