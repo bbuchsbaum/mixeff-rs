@@ -1702,6 +1702,7 @@ impl GeneralizedLinearMixedModel {
         maxeval: u32,
         fallback_fast_pirls: Option<Self>,
     ) -> Result<&mut Self> {
+        let mut fallback_fast_pirls = fallback_fast_pirls;
         let n_beta = self.beta.len();
         let n_theta = self.theta.len();
         let n_params = n_beta + n_theta;
@@ -1772,14 +1773,13 @@ impl GeneralizedLinearMixedModel {
 
         let logged_best_params = best_params.into_inner();
         let logged_best_fmin = best_fmin.get();
-        let mut params = if logged_best_fmin.is_finite() && logged_best_fmin <= result.fmin {
-            logged_best_params
-        } else {
-            result.x
-        };
+        let (mut params, candidate_objective) =
+            if logged_best_fmin.is_finite() && logged_best_fmin <= result.fmin {
+                (logged_best_params, logged_best_fmin)
+            } else {
+                (result.x, result.fmin)
+            };
         let me = model.into_inner();
-        let final_objective = me.joint_glmm_deviance_at_params(&params, n_beta, n_agq);
-        me.refresh_dispersion();
         let status_prefix = joint_glmm_status_prefix(n_agq);
         me.lmm.optsum.return_value = format!(
             "{status_prefix}:{}",
@@ -1789,13 +1789,34 @@ impl GeneralizedLinearMixedModel {
         me.lmm.optsum.feval = result.fevals as i64;
         me.lmm.optsum.max_feval = maxeval as i64;
         me.lmm.optsum.fit_log = rc_refcell_into_inner_or_clone(fit_log);
-        me.lmm.optsum.fmin = final_objective;
+        me.lmm.optsum.fmin = candidate_objective;
         me.lmm.optsum.final_trust_radius = Some(result.final_radius);
-        me.lmm.optsum.final_params = std::mem::take(&mut params);
+        me.lmm.optsum.final_params = params.clone();
 
         let mut lower_bounds = vec![f64::NEG_INFINITY; n_beta];
         lower_bounds.extend(me.lmm.lower_bounds());
         let mut certificate = OptimizerCertificate::from_opt_summary_with_context(
+            &me.lmm.optsum,
+            &me.lmm.optsum.final_params,
+            &lower_bounds,
+            Some(me.lmm.dims.n),
+        );
+        if fallback_fast_pirls.is_some() && joint_certificate_requires_fallback(&certificate) {
+            if let Some(fallback) =
+                uncertified_joint_fallback(&certificate, &me.lmm.optsum, fallback_fast_pirls.take())
+            {
+                *me = fallback;
+                me.refresh_binomial_separation_diagnostics();
+                me.refresh_near_unit_random_effect_correlation_diagnostics();
+                return Ok(me);
+            }
+        }
+
+        let final_objective = me.joint_glmm_deviance_at_params(&params, n_beta, n_agq);
+        me.refresh_dispersion();
+        me.lmm.optsum.fmin = final_objective;
+        me.lmm.optsum.final_params = std::mem::take(&mut params);
+        certificate = OptimizerCertificate::from_opt_summary_with_context(
             &me.lmm.optsum,
             &me.lmm.optsum.final_params,
             &lower_bounds,
@@ -3085,12 +3106,7 @@ fn uncertified_joint_fallback(
     joint_optsum: &OptSummary,
     fallback_fast_pirls: Option<GeneralizedLinearMixedModel>,
 ) -> Option<GeneralizedLinearMixedModel> {
-    if joint_certificate.evidence.optimizer_stop.acceptable_stop
-        && !matches!(
-            joint_certificate.status,
-            crate::compiler::FitStatus::NotOptimized | crate::compiler::FitStatus::NotAssessed
-        )
-    {
+    if !joint_certificate_requires_fallback(joint_certificate) {
         return None;
     }
     let mut fallback = fallback_fast_pirls?;
@@ -3160,6 +3176,14 @@ fn uncertified_joint_fallback(
     }
     fallback.record_glmm_fit_metadata();
     Some(fallback)
+}
+
+fn joint_certificate_requires_fallback(joint_certificate: &OptimizerCertificate) -> bool {
+    !joint_certificate.evidence.optimizer_stop.acceptable_stop
+        || matches!(
+            joint_certificate.status,
+            crate::compiler::FitStatus::NotOptimized | crate::compiler::FitStatus::NotAssessed
+        )
 }
 
 fn binary_column_split(values: impl Iterator<Item = f64>) -> Option<BinaryColumnSplit> {
