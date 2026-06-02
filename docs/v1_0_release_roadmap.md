@@ -88,7 +88,8 @@ The inference layer needs only connective tissue (Wald CIs, GLMM PB for binomial
 
 **Tests:** default features now include NLopt, so the default gate covers the
 BOBYQA/NEWUOA release optimizer path; `--no-default-features` remains the
-native TrustBQ/COBYLA fallback gate. Public-API negative test (`tests/public_api.rs`)
+native TrustBQ fallback gate, with explicit COBYLA coverage where still
+applicable. Public-API negative test (`tests/public_api.rs`)
 spawns a downstream `cargo check` to assert internal types aren't leaked —
 proper contract test. Boundary-LRT and profile-JSON contract tests are
 substantive.

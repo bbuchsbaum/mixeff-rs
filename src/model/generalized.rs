@@ -1487,7 +1487,7 @@ impl GeneralizedLinearMixedModel {
     /// θ and updates β through PIRLS. `fast = false` selects the certified
     /// joint path: joint Laplace for `n_agq <= 1`, and joint AGQ for valid
     /// single-scalar random-effect models with `n_agq > 1`. NLopt builds use
-    /// BOBYQA; dependency-light builds use native COBYLA.
+    /// BOBYQA; dependency-light builds use the native TrustBQ joint path.
     ///
     /// `n_agq` selects the deviance approximation: `1` (or `0`) means the
     /// Laplace approximation; values `>= 2` request `n_agq`-point adaptive
@@ -2083,7 +2083,7 @@ impl GeneralizedLinearMixedModel {
             Optimizer::PatternSearch => self.fit_native_pattern_search(n_agq),
             Optimizer::Cobyla => self.fit_native_cobyla(n_agq),
             Optimizer::TrustBq => Err(MixedModelError::Optimization(
-                "TrustBQ is currently wired for LMM theta optimization only; pick COBYLA or pattern_search for GLMMs"
+                "TrustBQ is reserved for the dependency-light fast=false joint GLMM path; pick COBYLA or pattern_search for fast-PIRLS GLMMs"
                     .to_string(),
             )),
             Optimizer::NloptBobyqa | Optimizer::NloptNewuoa => Err(MixedModelError::Optimization(

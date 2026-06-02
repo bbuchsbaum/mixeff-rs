@@ -115,7 +115,7 @@ The optimizer must define and record a deterministic fallback policy:
 - The joint path is labelled and row-scoped until it passes the external-engine
   parity gates (`comparison/parity_scorecard.toml` plus the
   divergence/scoreboard tests changed in lockstep). `fast = false` may use
-  NLopt BOBYQA or the native COBYLA dependency-light path, per
+  NLopt BOBYQA or the native TrustBQ dependency-light path, per
   `docs/glmm_support_contract.md`.
 - Promotion of any GLMM row from `documented_divergence` to
   `release_blocking_parity` requires: the `included` objective convention on

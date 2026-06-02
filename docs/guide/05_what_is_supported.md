@@ -82,8 +82,8 @@ subset:
 |---|---|---|
 | LMM, profiled (RE)ML via blocked-Cholesky PLS | Auto-dispatched (`PatternSearch`, `TrustBq`, `NloptBobyqa`, `NloptNewuoa`, `Cobyla`, or `PrimaBobyqa` when the `prima` feature is on) | Stable |
 | GLMM, profiled fast-PIRLS (`fast=true`, default) | PIRLS with Laplace/AGQ metadata in the fit summary | Stable, labelled |
-| GLMM, joint Laplace (`fast=false`, `n_agq <= 1`) | NLopt BOBYQA when available; native COBYLA in dependency-light builds | Stable, labelled |
-| GLMM, adaptive Gauss-Hermite (`fast=false`, `n_agq > 1`) | AGQ for valid single-scalar random-effect GLMMs; NLopt BOBYQA or native COBYLA optimizer | Stable, labelled |
+| GLMM, joint Laplace (`fast=false`, `n_agq <= 1`) | NLopt BOBYQA when available; native TrustBQ joint path in dependency-light builds | Stable, labelled |
+| GLMM, adaptive Gauss-Hermite (`fast=false`, `n_agq > 1`) | AGQ for valid single-scalar random-effect GLMMs; NLopt BOBYQA when available or native TrustBQ in dependency-light builds | Stable, labelled |
 
 The optimizer choice is made by the fit driver, not by callers. The chosen
 optimizer and convergence outcome are always recoverable from
