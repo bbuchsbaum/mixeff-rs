@@ -273,6 +273,14 @@
       "weights": null
     },
     {
+      "dataset": "rare_event_bernoulli",
+      "estimator": "Laplace",
+      "family": "Bernoulli",
+      "formula": "y ~ 1 + exposure + (1 | group)",
+      "link": "Logit",
+      "weights": null
+    },
+    {
       "dataset": "singular",
       "estimator": "REML",
       "family": "Gaussian",

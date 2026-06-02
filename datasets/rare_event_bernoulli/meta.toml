@@ -1,0 +1,40 @@
+name = "rare_event_bernoulli"
+source = "Synthetic deterministic rare-event Bernoulli fixture"
+license = "Generated fixture for mixeff-rs parity/benchmark testing"
+n_rows = 120
+description = """
+Small always-on binary Bernoulli/logit GLMM fixture with rare positive
+events. The design has 12 groups × 10 observations, 10 positive responses
+(8.3%), and six event-bearing groups. Events are deliberately spread across
+the exposure range while remaining clustered enough by group for lme4 to
+estimate a nonzero scalar random-intercept variance.
+
+This row exists to keep rare-event binary GLMM behavior visible in the
+comparison corpus without relying on the larger stress-gated tungara fixture
+or reusing the culcitalogreg small-N separation/AGQ row.
+"""
+
+[[columns]]
+name = "group"
+type = "categorical"
+levels = ["G01", "G02", "G03", "G04", "G05", "G06", "G07", "G08", "G09", "G10", "G11", "G12"]
+
+[[columns]]
+name = "exposure"
+type = "numeric"
+
+[[columns]]
+name = "y"
+type = "numeric"          # binary 0/1; loader treats as f64
+
+[[fits]]
+formula = "y ~ 1 + exposure + (1 | group)"
+family = "Bernoulli"
+link = "Logit"
+estimator = "Laplace"
+
+[tags]
+structure = ["random_intercept", "scalar_re", "glmm", "bernoulli_glmm", "binary_response", "rare_event"]
+family = "bernoulli"
+difficulty = "moderate"
+notes = "Synthetic always-on rare-event binary GLMM row: 10 positives / 120 observations."

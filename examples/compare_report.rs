@@ -155,6 +155,9 @@ fn known_glmm_numeric_classification(r: &ResultRecord) -> Option<&'static str> {
         ("grouseticks", "Laplace") => Some(
             "Poisson/Log multi-random-intercept row matches MixedModels.jl 5.3.0 fast=true profiled objective; lme4 beta gap is fast-PIRLS versus joint-estimate divergence",
         ),
+        ("rare_event_bernoulli", "Laplace") => Some(
+            "rare-event Bernoulli/Logit row uses the current fast-PIRLS profiled path; lme4 beta gap is tracked until certified joint GLMM optimization covers rare-event binary fixtures",
+        ),
         ("verbagg", "Laplace") => Some(
             "large crossed Binomial/Logit row matches MixedModels.jl 5.3.0 fast=true profiled objective; lme4 beta gap is fast-PIRLS versus joint-estimate divergence",
         ),

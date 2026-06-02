@@ -1,0 +1,10 @@
+# Pinned lme4 reference fit for the deterministic rare-event Bernoulli fixture.
+
+[[expected]]
+formula = "y ~ 1 + exposure + (1 | group)"
+estimator = "Laplace"
+beta = [-2.5166326691893066, 0.51481710467581188]
+re_sigmas = [0.36897346437632483]
+theta = [0.36897346437632483]
+objective = 67.460091728338298
+is_singular = false

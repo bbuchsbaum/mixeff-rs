@@ -118,6 +118,15 @@ const GROUSETICKS: ExpectedGlmmRow = ExpectedGlmmRow {
     status: "ok",
 };
 
+const RARE_EVENT_BERNOULLI: ExpectedGlmmRow = ExpectedGlmmRow {
+    dataset: "rare_event_bernoulli",
+    formula: "y ~ 1 + exposure + (1 | group)",
+    family: "Bernoulli",
+    link: "Logit",
+    estimator: "Laplace",
+    status: "ok",
+};
+
 const TUNGARA_STRESS: ExpectedGlmmRow = ExpectedGlmmRow {
     dataset: "tungara_single_caller",
     formula: "did_focal_follower_overlap_preceding_call_YN ~ 1 + preceding_caller_mass * distance + (1 | chorus_ID) + (1 + preceding_caller_mass | chorus_ID:focal_toe_clip_number)",
@@ -145,6 +154,7 @@ const EXPECTED_GLMM_ROWS: &[ExpectedGlmmRow] = &[
     CULCITA_BINOMIAL_AGQ,
     GOPHERDAT2,
     GROUSETICKS,
+    RARE_EVENT_BERNOULLI,
     TUNGARA_STRESS,
     VERBAGG,
 ];
@@ -1073,6 +1083,7 @@ fn glmm_report_contains_expected_numeric_classifications() {
     for required in [
         "small Binomial/Logit row uses the current fast-PIRLS profiled path",
         "Poisson/Log multi-random-intercept row matches MixedModels.jl 5.3.0 fast=true",
+        "rare-event Bernoulli/Logit row uses the current fast-PIRLS profiled path",
         "large crossed Binomial/Logit row matches MixedModels.jl 5.3.0 fast=true",
         "large Binomial/Logit random-intercept row matches MixedModels.jl 5.3.0 fast=true",
         "large Binomial/Logit random-slope row matches MixedModels.jl 5.3.0 fast=true",

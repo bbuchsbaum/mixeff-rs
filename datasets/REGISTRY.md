@@ -102,6 +102,7 @@ just verifies row counts and column types.
 | `cake`       |  270 | `lme4::cake`      | split-plot (recipe × temperature)   | gaussian   | easy       |
 | `gopherdat2` |   30 | Bolker mixedmodels-misc | scalar RE + Poisson with `offset(log(Area))` | poisson | moderate |
 | `culcitalogreg`| 80 | Bolker mixedmodels-misc | scalar RE + Bernoulli, 4-level treatment | binomial | moderate |
+| `rare_event_bernoulli`| 120 | Synthetic deterministic fixture | scalar RE + rare-event binary response | bernoulli | moderate |
 | `contraception`| 1934 | `MixedModels.jl :contra` | scalar + random-slope binomial GLMM, 60 districts | binomial | moderate |
 | `arabidopsis` |  625 | `lme4::Arabidopsis` | nested + scalar RE, overdispersed Poisson (var/mean ≈ 56) | poisson | moderate |
 | `verbagg`    | 7584 | `lme4::VerbAgg`   | crossed (id × item), 316 subjects   | binomial   | moderate   |

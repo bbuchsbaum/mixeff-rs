@@ -339,6 +339,17 @@ class = "release_blocking_parity"
 reference = "lme4"
 
 [[row]]
+dataset = "rare_event_bernoulli"
+formula = "y ~ 1 + exposure + (1 | group)"
+family = "Bernoulli"
+link = "Logit"
+estimator = "Laplace"
+class = "documented_divergence"
+reference = "fast_pirls_profiled_glmm"
+reason = "always-on rare-event binary Bernoulli row uses the current profiled fast-PIRLS GLMM path and remains non-lme4 until the certified joint GLMM optimizer covers rare-event Bernoulli fixtures"
+issue_id = "bd-01KRVGJYEHN7P250X4KZXBFBC1"
+
+[[row]]
 dataset = "rail"
 formula = "travel ~ 1 + (1 | Rail)"
 family = "Gaussian"

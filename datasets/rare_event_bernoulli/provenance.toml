@@ -1,0 +1,11 @@
+# Regeneration provenance for the rare-event Bernoulli fixture pin.
+
+tool = "lme4 2.0.1"
+tool_name = "lme4"
+tool_version = "2.0.1"
+r_version = "4.5.1"
+date = "2026-06-01T00:00:00Z"
+host = "Darwin/arm64"
+regenerator = "hand-authored deterministic synthetic fixture; refit with scripts/compare_lme4.R or the generation note in datasets/rare_event_bernoulli/meta.toml"
+optimizer = "bobyqa"
+notes = "Synthetic 12-group Bernoulli/logit random-intercept fixture with 10/120 positives (8.3%) and lme4 theta 0.36897346437632483."

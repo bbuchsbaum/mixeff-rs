@@ -929,6 +929,7 @@ mod tests {
             "nested_constant_response",
             "gopherdat2",
             "culcitalogreg",
+            "rare_event_bernoulli",
             "contraception",
             "mrk17_exp1",
             "insteval",
