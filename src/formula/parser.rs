@@ -22,7 +22,8 @@
 use thiserror::Error;
 
 use super::terms::{
-    FixedTerm, Formula, GroupingFactor, RandomTerm, RandomTermExpansion, RandomTermSource,
+    FixedTerm, Formula, GroupingFactor, RandomCovariance, RandomTerm, RandomTermExpansion,
+    RandomTermSource,
 };
 use super::transform::{parse_bare_call, parse_transform_arith, DerivedColumn, TransformFn};
 
@@ -363,7 +364,12 @@ fn tokenize(input: &str, derived: &mut Vec<DerivedColumn>) -> Result<Vec<Spanned
                 // `scale(`, `factor(`, …) is refused via the transform
                 // whitelist. A *space* before `(` (e.g. `x1 (1|g)`) is two
                 // terms, matching R — handled by the normal term path.
-                if i < len && chars[i] == '(' {
+                if i < len && chars[i] == '(' && is_covariance_wrapper_name(&word) {
+                    tokens.push(Spanned {
+                        token: Token::Ident(word),
+                        pos,
+                    });
+                } else if i < len && chars[i] == '(' {
                     let k = i;
                     let end = matching_paren(&chars, k)?;
                     let inner: String = chars[k + 1..end - 1].iter().collect();
@@ -473,6 +479,11 @@ impl Parser {
     /// Peek at the current token without consuming it.
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.cursor).map(|s| &s.token)
+    }
+
+    /// Peek one token beyond the current token without consuming it.
+    fn peek_next(&self) -> Option<&Token> {
+        self.tokens.get(self.cursor + 1).map(|s| &s.token)
     }
 
     /// Current position (for error messages).
@@ -618,6 +629,37 @@ impl Parser {
                     }
                     self.advance();
                     fixed.push(FixedTerm::NoIntercept);
+                    negate = false;
+                    expect_term = false;
+                    pending_operator = false;
+                }
+                Some(Token::Ident(name))
+                    if self.peek_next() == Some(&Token::LParen)
+                        && is_covariance_wrapper_name(name) =>
+                {
+                    if !expect_term {
+                        return Err(FormulaError::MissingTermSeparator(self.pos()));
+                    }
+                    if negate {
+                        return Err(FormulaError::NegatedRandomEffect(self.pos()));
+                    }
+                    let source_start = self.pos();
+                    let wrapper = if let Some(spanned) = self.advance() {
+                        if let Token::Ident(name) = &spanned.token {
+                            name.clone()
+                        } else {
+                            unreachable!()
+                        }
+                    } else {
+                        unreachable!()
+                    };
+                    let covariance = covariance_wrapper(&wrapper).ok_or_else(|| {
+                        FormulaError::Other(format!(
+                            "unknown random-effect covariance wrapper `{wrapper}`"
+                        ))
+                    })?;
+                    let rts = self.parse_random_term_with_covariance(source_start, covariance)?;
+                    random.extend(rts);
                     negate = false;
                     expect_term = false;
                     pending_operator = false;
@@ -774,6 +816,14 @@ impl Parser {
     /// - `(1 | a*b)` becomes `(1 | a) + (1 | b) + (1 | a:b)`
     fn parse_random_term(&mut self) -> Result<Vec<RandomTerm>, FormulaError> {
         let source_start = self.pos();
+        self.parse_random_term_with_covariance(source_start, RandomCovariance::Full)
+    }
+
+    fn parse_random_term_with_covariance(
+        &mut self,
+        source_start: usize,
+        requested_covariance: RandomCovariance,
+    ) -> Result<Vec<RandomTerm>, FormulaError> {
         self.expect(&Token::LParen)?;
 
         // Collect tokens inside the parentheses to find the bar position.
@@ -848,6 +898,11 @@ impl Parser {
         {
             terms.insert(0, FixedTerm::Intercept);
         }
+        let covariance = if requested_covariance == RandomCovariance::Full && zerocorr {
+            RandomCovariance::Diagonal
+        } else {
+            requested_covariance
+        };
 
         // Parse grouping factor(s), expanding nested/crossed shorthand.
         let parsed_grouping = self.parse_grouping()?;
@@ -863,6 +918,7 @@ impl Parser {
                 terms: terms.clone(),
                 grouping,
                 zerocorr,
+                covariance,
                 source: Some(RandomTermSource {
                     written: written.clone(),
                     expansion: parsed_grouping.expansion,
@@ -924,6 +980,20 @@ impl Parser {
         } else {
             Ok(ParsedGrouping::new(vec![GroupingFactor::Single(first)]))
         }
+    }
+}
+
+fn is_covariance_wrapper_name(name: &str) -> bool {
+    covariance_wrapper(name).is_some()
+}
+
+fn covariance_wrapper(name: &str) -> Option<RandomCovariance> {
+    match name {
+        "us" => Some(RandomCovariance::Full),
+        "diag" => Some(RandomCovariance::Diagonal),
+        "cs" => Some(RandomCovariance::CompoundSymmetry),
+        "ar1" => Some(RandomCovariance::Ar1),
+        _ => None,
     }
 }
 
@@ -1305,10 +1375,37 @@ mod tests {
         assert_eq!(f.random_terms.len(), 1);
         let rt = &f.random_terms[0];
         assert!(rt.zerocorr);
+        assert_eq!(rt.covariance, RandomCovariance::Diagonal);
         assert_eq!(
             rt.terms,
             vec![FixedTerm::Intercept, FixedTerm::Column("x1".into())]
         );
+    }
+
+    #[test]
+    fn covariance_wrappers_parse_as_random_terms() {
+        let cases = [
+            ("us(1 + x1 | group)", RandomCovariance::Full, false),
+            ("diag(1 + x1 | group)", RandomCovariance::Diagonal, false),
+            (
+                "cs(1 + x1 | group)",
+                RandomCovariance::CompoundSymmetry,
+                false,
+            ),
+            ("ar1(0 + x1 | group)", RandomCovariance::Ar1, false),
+        ];
+
+        for (term, covariance, zerocorr) in cases {
+            let f = parse_formula(&format!("y ~ x1 + {term}")).unwrap();
+            assert_eq!(f.random_terms.len(), 1);
+            let rt = &f.random_terms[0];
+            assert_eq!(rt.covariance, covariance);
+            assert_eq!(rt.zerocorr, zerocorr);
+            assert_eq!(
+                rt.source.as_ref().map(|source| source.written.as_str()),
+                Some(term)
+            );
+        }
     }
 
     #[test]

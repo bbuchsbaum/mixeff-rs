@@ -37,7 +37,7 @@ use crate::compiler::{
     SupportedCovarianceDirection, DOMINANT_LOADING_THRESHOLD, INTERPRETABLE_GAP_TOLERANCE,
 };
 use crate::error::{MixedModelError, Result};
-use crate::formula::{FixedTerm, Formula, RandomTerm};
+use crate::formula::{FixedTerm, Formula, RandomCovariance, RandomTerm};
 use crate::model::data::{CategoricalCoding, Column, DataFrame};
 use crate::model::fixed_design::{
     DenseFixedDesign, FixedDesign, FixedDesignBackend, FixedDesignBackendPreference,
@@ -1057,6 +1057,7 @@ impl LinearMixedModel {
         if effective_formula.random_terms.is_empty() {
             return Err(MixedModelError::NoRandomEffects);
         }
+        refuse_unsupported_random_covariance(&effective_formula)?;
 
         let n = data.nrow();
 
@@ -9399,6 +9400,18 @@ fn random_effect_basis_coding(rt: &crate::formula::RandomTerm) -> BasisCoding {
     }
 }
 
+fn refuse_unsupported_random_covariance(formula: &Formula) -> Result<()> {
+    for term in &formula.random_terms {
+        if !term.covariance.is_supported_for_fit() {
+            return Err(MixedModelError::Unsupported(format!(
+                "structured random-effect covariance family `{}` is parsed but not fitted in v1.0; use `|`, `||`, or `diag(...)` for fitted models",
+                term.covariance.label()
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Build a ReMat from a random term specification and data.
 fn build_re_mat(rt: &crate::formula::RandomTerm, data: &DataFrame, n: usize) -> Result<ReMat> {
     use crate::formula::{FixedTerm, GroupingFactor};
@@ -9476,7 +9489,7 @@ fn build_re_mat(rt: &crate::formula::RandomTerm, data: &DataFrame, n: usize) -> 
 
     let mut remat = ReMat::new(group_name, refs, levels, cnames, z);
 
-    if rt.zerocorr {
+    if rt.zerocorr || matches!(rt.covariance, RandomCovariance::Diagonal) {
         remat.zerocorr();
     }
 
@@ -14770,7 +14783,7 @@ mod tests {
             .unwrap_err();
 
         match err {
-            MixedModelError::Optimization(message) => {
+            MixedModelError::Unsupported(message) => {
                 assert!(message.contains("`prima` feature"));
                 assert!(message.contains("libprimac"));
             }
@@ -15047,6 +15060,27 @@ mod tests {
         assert_eq!(audit.random_terms[0].group.name, "subj");
         assert_eq!(audit.random_terms[0].group.n_levels, Some(18));
         assert_eq!(audit.random_terms[0].requested_covariance_parameters, 3);
+    }
+
+    #[test]
+    fn test_lmm_refuses_structured_random_covariance_before_fit() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + ar1(0 + days | subj)").unwrap();
+        let err = LinearMixedModel::new(formula, &data, None).unwrap_err();
+        assert_eq!(err.code(), "unsupported");
+        assert!(err.to_string().contains("ar1"));
+        assert!(err.to_string().contains("not fitted in v1.0"));
+    }
+
+    #[test]
+    fn test_lmm_accepts_diag_wrapper_as_diagonal_covariance() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + diag(1 + days | subj)").unwrap();
+        let model = LinearMixedModel::new(formula, &data, None).unwrap();
+
+        assert_eq!(model.reterms.len(), 1);
+        assert_eq!(model.reterms[0].vsize, 2);
+        assert_eq!(model.reterms[0].n_theta(), 2);
     }
 
     #[test]

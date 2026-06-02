@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::formula::{FixedTerm, Formula, GroupingFactor, RandomTerm, RandomTermExpansion};
+use crate::formula::{
+    FixedTerm, Formula, GroupingFactor, RandomCovariance, RandomTerm, RandomTermExpansion,
+};
 
 use super::diagnostics::{Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticStage};
 use super::random_term_card::RoleOrigin;
@@ -30,6 +32,7 @@ pub struct RandomTermIr {
     pub group: GroupingFactorIr,
     pub basis: Vec<RandomCoefficient>,
     pub covariance: CovarianceForm,
+    pub covariance_support: CovarianceSupportStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_group: Option<String>,
     pub intercept: InterceptPolicy,
@@ -86,9 +89,60 @@ pub enum CovarianceForm {
     Scalar,
     Diagonal,
     Full,
-    Structured { kind: String },
+    Structured { kind: StructuredCovarianceKind },
     ReducedRank { rank: Option<usize> },
     Unsupported { reason: String },
+}
+
+impl CovarianceForm {
+    pub fn support_status(&self) -> CovarianceSupportStatus {
+        match self {
+            CovarianceForm::Scalar | CovarianceForm::Diagonal | CovarianceForm::Full => {
+                CovarianceSupportStatus::Supported
+            }
+            CovarianceForm::Structured { .. } => CovarianceSupportStatus::ParsedRefused,
+            CovarianceForm::ReducedRank { .. } => CovarianceSupportStatus::Future,
+            CovarianceForm::Unsupported { .. } => CovarianceSupportStatus::Unsupported,
+        }
+    }
+}
+
+/// v1 support status for a random-effect covariance family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CovarianceSupportStatus {
+    /// The family is fitted by the current engine.
+    Supported,
+    /// The syntax compiles into typed IR but fitting refuses before optimization.
+    ParsedRefused,
+    /// The artifact vocabulary is reserved for future fitted support.
+    Future,
+    /// The request is outside the compiler/fitting contract.
+    Unsupported,
+}
+
+/// Structured random-effect covariance families parsed for the v1.0
+/// covariance-pluggability contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StructuredCovarianceKind {
+    CompoundSymmetry,
+    Ar1,
+}
+
+impl StructuredCovarianceKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            StructuredCovarianceKind::CompoundSymmetry => "compound_symmetry",
+            StructuredCovarianceKind::Ar1 => "ar1",
+        }
+    }
+}
+
+impl std::fmt::Display for StructuredCovarianceKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.label())
+    }
 }
 
 /// Whether the random-coefficient basis includes an intercept.
@@ -273,6 +327,7 @@ impl RandomTermIr {
                     };
                     let split_basis = vec![coefficient];
                     let covariance = CovarianceForm::Scalar;
+                    let covariance_support = covariance.support_status();
                     let split_source = random_term_text(&split_basis, &group, split_intercept);
                     let story =
                         covariance_story(&group, &split_basis, &covariance, split_intercept);
@@ -281,6 +336,7 @@ impl RandomTermIr {
                         group: group.clone(),
                         basis: split_basis,
                         covariance,
+                        covariance_support,
                         block_group: block_group.clone(),
                         intercept: split_intercept,
                         role: GroupingRole::Unknown,
@@ -291,7 +347,8 @@ impl RandomTermIr {
                 .collect();
         }
 
-        let covariance = covariance_form(term.zerocorr, basis.len());
+        let covariance = covariance_form(term.covariance, basis.len());
+        let covariance_support = covariance.support_status();
         let story = covariance_story(&group, &basis, &covariance, intercept);
 
         vec![Self {
@@ -299,6 +356,7 @@ impl RandomTermIr {
             group,
             basis,
             covariance,
+            covariance_support,
             block_group: None,
             intercept,
             role: GroupingRole::Unknown,
@@ -672,14 +730,20 @@ fn intercept_policy(term: &RandomTerm) -> InterceptPolicy {
     }
 }
 
-fn covariance_form(zerocorr: bool, basis_len: usize) -> CovarianceForm {
-    match (zerocorr, basis_len) {
+fn covariance_form(covariance: RandomCovariance, basis_len: usize) -> CovarianceForm {
+    match (covariance, basis_len) {
         (_, 0) => CovarianceForm::Unsupported {
             reason: "empty basis".to_string(),
         },
-        (true, _) => CovarianceForm::Diagonal,
-        (_, 1) => CovarianceForm::Scalar,
-        (false, _) => CovarianceForm::Full,
+        (RandomCovariance::Full, 1) => CovarianceForm::Scalar,
+        (RandomCovariance::Full, _) => CovarianceForm::Full,
+        (RandomCovariance::Diagonal, _) => CovarianceForm::Diagonal,
+        (RandomCovariance::CompoundSymmetry, _) => CovarianceForm::Structured {
+            kind: StructuredCovarianceKind::CompoundSymmetry,
+        },
+        (RandomCovariance::Ar1, _) => CovarianceForm::Structured {
+            kind: StructuredCovarianceKind::Ar1,
+        },
     }
 }
 
@@ -763,6 +827,7 @@ mod tests {
         assert_eq!(term.group.label(), "subject");
         assert_eq!(term.intercept, InterceptPolicy::Included);
         assert_eq!(term.covariance, CovarianceForm::Full);
+        assert_eq!(term.covariance_support, CovarianceSupportStatus::Supported);
         assert_eq!(term.basis.len(), 2);
         assert_eq!(term.basis[0].kind, RandomCoefficientKind::Intercept);
         assert_eq!(term.basis[1].name, "x");
@@ -786,6 +851,45 @@ mod tests {
             model.random_terms[0].source_syntax.written.as_deref(),
             Some("(1 + x || subject)")
         );
+    }
+
+    #[test]
+    fn compiles_diag_wrapper_as_single_diagonal_block() {
+        let formula = parse_formula("y ~ x + diag(1 + x | subject)").unwrap();
+        let model = compile_formula_ir(&formula);
+        assert_eq!(model.random_terms.len(), 1);
+        let term = &model.random_terms[0];
+        assert_eq!(term.covariance, CovarianceForm::Diagonal);
+        assert_eq!(term.source_syntax.text, "diag(1 + x | subject)");
+        assert_eq!(term.block_group, None);
+    }
+
+    #[test]
+    fn compiles_structured_wrappers_as_typed_covariance_families() {
+        let cases = [
+            (
+                "y ~ x + cs(1 + x | subject)",
+                StructuredCovarianceKind::CompoundSymmetry,
+            ),
+            (
+                "y ~ x + ar1(0 + x | subject)",
+                StructuredCovarianceKind::Ar1,
+            ),
+        ];
+
+        for (source, kind) in cases {
+            let formula = parse_formula(source).unwrap();
+            let model = compile_formula_ir(&formula);
+            assert_eq!(model.random_terms.len(), 1);
+            assert_eq!(
+                model.random_terms[0].covariance,
+                CovarianceForm::Structured { kind }
+            );
+            assert_eq!(
+                model.random_terms[0].covariance_support,
+                CovarianceSupportStatus::ParsedRefused
+            );
+        }
     }
 
     #[test]

@@ -20,7 +20,9 @@ Appendix A rather than left as product ambiguity.
 
 In scope:
 
-- Surface syntax for random-effect blocks: `(re | g)`, `(re || g)`, with grouping forms `g`, `g1 & g2`, `g1 : g2`, `g1 / g2`, `g1 * g2`.
+- Surface syntax for random-effect blocks: `(re | g)`, `(re || g)`,
+  `us(re | g)`, `diag(re | g)`, `cs(re | g)`, and `ar1(re | g)`, with
+  grouping forms `g`, `g1 & g2`, `g1 : g2`, `g1 / g2`, `g1 * g2`.
 - Canonicalization of the parsed AST into a deterministic IR before materialization.
 - Random-effects basis construction (which columns go into `Z_g` for a term).
 - Grouping factor materialization (composite levels, empty cells, level ordering).
@@ -46,6 +48,10 @@ The parser accepts the following constructs. Every accepted construct lands in t
 |---|---|---|---|
 | Random block, correlated | `(1 + x \| g)` | `RandomTerm { terms, grouping: Single("g"), zerocorr: false }` | |
 | Random block, zero-correlation | `(1 + x \|\| g)` | `RandomTerm { ..., zerocorr: true }` | `\|\|` is a single token, see `parser.rs:527–529` |
+| Random block, explicit unstructured covariance | `us(1 + x \| g)` | `RandomTerm { covariance: Full, ... }` | Alias for the fitted full-covariance path |
+| Random block, diagonal covariance | `diag(1 + x \| g)` | `RandomTerm { covariance: Diagonal, zerocorr: false, ... }` | Fitted as one diagonal block; distinct from `\|\|` split-block diagnostics |
+| Random block, compound symmetry | `cs(1 + x \| g)` | `RandomTerm { covariance: CompoundSymmetry, ... }` | Parsed and refused for fitting in v1.0 |
+| Random block, AR(1) covariance | `ar1(0 + time \| g)` | `RandomTerm { covariance: Ar1, ... }` | Random-effect covariance; parsed and refused for fitting in v1.0 |
 | Single grouping | `(... \| g)` | `GroupingFactor::Single("g")` | |
 | Legacy interaction | `(... \| g1 & g2)` | `GroupingFactor::Interaction(...)` | `&` syntax preserved verbatim, `parser.rs:607–613` |
 | Cell grouping | `(... \| g1:g2)` | `GroupingFactor::Cell(...)` | `parser.rs:614–620` |
@@ -113,6 +119,39 @@ the two likely-intended alternatives (`(b|a)+(b|c)` for crossed mains;
 Reason: keeping `||` as a flag rather than rewriting to `(b1|g) + (0+b2|g)` preserves source syntax for diagnostics (R9) and keeps the term identifiable to ThetaMap as a single covariance block.
 
 Status: conforms.
+
+### R3a — Structured covariance wrappers
+
+The parser recognizes lme4-style random-effect covariance wrappers:
+
+- `us(...)` maps to the existing full lower-Cholesky covariance path.
+- `diag(...)` maps to one diagonal random-effect covariance block.
+- `cs(...)` and `ar1(...)` compile to typed structured covariance families,
+  but the fitting engine refuses them in v1.0 before `ReMat` materialization.
+
+This is random-effect covariance syntax. Residual correlation syntax such as
+`residual = ar1(time, subject)` remains outside this document and outside the
+v1.0 fitting surface.
+
+### R3b — Covariance family support status
+
+Random-effect covariance families compile to typed semantic IR and serialize a
+stable `covariance_support` label:
+
+| Family | Syntax / source | IR label | Support status | v1.0 fitting behavior |
+|---|---|---|---|---|
+| Scalar | `(1 | g)` or split `||` terms | `scalar` | `supported` | Fitted |
+| Diagonal | `diag(re | g)` or expanded `||` blocks | `diagonal` | `supported` | Fitted with diagonal `Lambda` slots |
+| Full / unstructured | `(re | g)`, `us(re | g)` | `full` | `supported` | Fitted with lower-Cholesky `Lambda` slots |
+| Compound symmetry | `cs(re | g)` | `structured:compound_symmetry` | `parsed_refused` | Parsed into typed IR; fitting refuses before optimization |
+| Random-effect AR(1) | `ar1(re | g)` | `structured:ar1` | `parsed_refused` | Parsed into typed IR; fitting refuses before optimization |
+| Reduced rank | certificate/effective-covariance summaries | `reduced_rank[:rank]` | `future` | Artifact vocabulary only; not a caller-requested fitted family in v1.0 |
+| Unsupported | invalid or empty covariance basis | `unsupported:<reason>` | `unsupported` | Refused or marked not assessable |
+
+`ThetaMap` and `covariance_parameter_traces` carry the same family/status
+labels. Structured `cs(...)` and `ar1(...)` traces deliberately use inactive
+`not_assessed` theta slots with `null` optimizer and VarCorr values; they are
+placeholders for source-to-artifact traceability, not fitted estimates.
 
 ### R4 — Intercept policy is first-class
 

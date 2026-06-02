@@ -53,6 +53,7 @@
           }
         ],
         "covariance": "full",
+        "covariance_support": "supported",
         "intercept": "included",
         "role": "unknown",
         "source_syntax": {
@@ -104,6 +105,7 @@
           }
         ],
         "covariance": "scalar",
+        "covariance_support": "supported",
         "block_group": "bg0",
         "intercept": "included",
         "role": "unknown",
@@ -137,6 +139,7 @@
           }
         ],
         "covariance": "scalar",
+        "covariance_support": "supported",
         "block_group": "bg0",
         "intercept": "omitted",
         "role": "unknown",
@@ -216,6 +219,8 @@
         "term_id": "r0",
         "term_index": 0,
         "group": "group",
+        "covariance_family": "scalar",
+        "support_status": "supported",
         "user_basis": [
           "intercept"
         ],
@@ -258,6 +263,8 @@
         "term_id": "r1",
         "term_index": 0,
         "group": "group",
+        "covariance_family": "scalar",
+        "support_status": "supported",
         "user_basis": [
           "x"
         ],
@@ -440,6 +447,8 @@
             "x"
           ],
           "covariance_family": "full",
+          "support_status": "supported",
+          "expected_parameter_count": 3,
           "source_syntax": "(1 + x | group)"
         }
       ],
@@ -556,6 +565,7 @@
       "optimizer_term_index": 0,
       "group": "group",
       "covariance_family": "scalar",
+      "covariance_support": "supported",
       "user_basis": [
         "intercept"
       ],
@@ -607,6 +617,7 @@
       "optimizer_term_index": 0,
       "group": "group",
       "covariance_family": "scalar",
+      "covariance_support": "supported",
       "user_basis": [
         "x"
       ],

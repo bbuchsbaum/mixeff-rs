@@ -48,6 +48,7 @@
           }
         ],
         "covariance": "scalar",
+        "covariance_support": "supported",
         "intercept": "included",
         "role": "unknown",
         "source_syntax": {
@@ -84,6 +85,7 @@
           }
         ],
         "covariance": "full",
+        "covariance_support": "supported",
         "intercept": "included",
         "role": "unknown",
         "source_syntax": {
@@ -124,6 +126,7 @@
           }
         ],
         "covariance": "full",
+        "covariance_support": "supported",
         "intercept": "included",
         "role": "unknown",
         "source_syntax": {
@@ -156,6 +159,7 @@
           }
         ],
         "covariance": "scalar",
+        "covariance_support": "supported",
         "block_group": "bg3",
         "intercept": "included",
         "role": "unknown",
@@ -189,6 +193,7 @@
           }
         ],
         "covariance": "scalar",
+        "covariance_support": "supported",
         "block_group": "bg3",
         "intercept": "omitted",
         "role": "unknown",
@@ -222,6 +227,7 @@
           }
         ],
         "covariance": "scalar",
+        "covariance_support": "supported",
         "intercept": "included",
         "role": "unknown",
         "source_syntax": {
@@ -253,6 +259,7 @@
           }
         ],
         "covariance": "scalar",
+        "covariance_support": "supported",
         "intercept": "omitted",
         "role": "unknown",
         "source_syntax": {
@@ -423,6 +430,8 @@
         "term_id": "r0",
         "term_index": 0,
         "group": "subject",
+        "covariance_family": "scalar",
+        "support_status": "supported",
         "user_basis": [
           "intercept"
         ],
@@ -464,6 +473,8 @@
         "term_id": "r1",
         "term_index": 1,
         "group": "school",
+        "covariance_family": "full_cholesky",
+        "support_status": "supported",
         "user_basis": [
           "intercept",
           "x"
@@ -545,6 +556,8 @@
         "term_id": "r2",
         "term_index": 2,
         "group": "school:class",
+        "covariance_family": "full_cholesky",
+        "support_status": "supported",
         "user_basis": [
           "intercept",
           "x"
@@ -626,6 +639,8 @@
         "term_id": "r3",
         "term_index": 3,
         "group": "batch",
+        "covariance_family": "scalar",
+        "support_status": "supported",
         "user_basis": [
           "intercept"
         ],
@@ -667,6 +682,8 @@
         "term_id": "r4",
         "term_index": 4,
         "group": "batch",
+        "covariance_family": "scalar",
+        "support_status": "supported",
         "user_basis": [
           "x"
         ],
@@ -708,6 +725,8 @@
         "term_id": "r5",
         "term_index": 5,
         "group": "item",
+        "covariance_family": "scalar",
+        "support_status": "supported",
         "user_basis": [
           "intercept"
         ],
@@ -749,6 +768,8 @@
         "term_id": "r6",
         "term_index": 6,
         "group": "item",
+        "covariance_family": "scalar",
+        "support_status": "supported",
         "user_basis": [
           "x"
         ],
@@ -1508,6 +1529,8 @@
             "intercept"
           ],
           "covariance_family": "scalar",
+          "support_status": "supported",
+          "expected_parameter_count": 1,
           "source_syntax": "(1 | subject)"
         },
         {
@@ -1523,6 +1546,8 @@
             "x"
           ],
           "covariance_family": "full",
+          "support_status": "supported",
+          "expected_parameter_count": 3,
           "source_syntax": "(1 + x | school)"
         },
         {
@@ -1539,6 +1564,8 @@
             "x"
           ],
           "covariance_family": "full",
+          "support_status": "supported",
+          "expected_parameter_count": 3,
           "source_syntax": "(1 + x | school:class)"
         },
         {
@@ -1553,6 +1580,8 @@
             "intercept"
           ],
           "covariance_family": "scalar",
+          "support_status": "supported",
+          "expected_parameter_count": 1,
           "source_syntax": "(1 | batch)"
         },
         {
@@ -1567,6 +1596,8 @@
             "x"
           ],
           "covariance_family": "scalar",
+          "support_status": "supported",
+          "expected_parameter_count": 1,
           "source_syntax": "(0 + x | batch)"
         },
         {
@@ -1581,6 +1612,8 @@
             "intercept"
           ],
           "covariance_family": "scalar",
+          "support_status": "supported",
+          "expected_parameter_count": 1,
           "source_syntax": "(1 | item)"
         },
         {
@@ -1595,6 +1628,8 @@
             "x"
           ],
           "covariance_family": "scalar",
+          "support_status": "supported",
+          "expected_parameter_count": 1,
           "source_syntax": "(0 + x | item)"
         }
       ],
@@ -2216,6 +2251,7 @@
       "optimizer_term_index": 0,
       "group": "subject",
       "covariance_family": "scalar",
+      "covariance_support": "supported",
       "user_basis": [
         "intercept"
       ],
@@ -2260,6 +2296,7 @@
       "optimizer_term_index": 1,
       "group": "school",
       "covariance_family": "full_cholesky",
+      "covariance_support": "supported",
       "user_basis": [
         "intercept",
         "x"
@@ -2306,6 +2343,7 @@
       "optimizer_term_index": 1,
       "group": "school",
       "covariance_family": "full_cholesky",
+      "covariance_support": "supported",
       "user_basis": [
         "intercept",
         "x"
@@ -2357,6 +2395,7 @@
       "optimizer_term_index": 1,
       "group": "school",
       "covariance_family": "full_cholesky",
+      "covariance_support": "supported",
       "user_basis": [
         "intercept",
         "x"
@@ -2412,6 +2451,7 @@
       "optimizer_term_index": 2,
       "group": "school:class",
       "covariance_family": "full_cholesky",
+      "covariance_support": "supported",
       "user_basis": [
         "intercept",
         "x"
@@ -2458,6 +2498,7 @@
       "optimizer_term_index": 2,
       "group": "school:class",
       "covariance_family": "full_cholesky",
+      "covariance_support": "supported",
       "user_basis": [
         "intercept",
         "x"
@@ -2509,6 +2550,7 @@
       "optimizer_term_index": 2,
       "group": "school:class",
       "covariance_family": "full_cholesky",
+      "covariance_support": "supported",
       "user_basis": [
         "intercept",
         "x"
@@ -2564,6 +2606,7 @@
       "optimizer_term_index": 3,
       "group": "batch",
       "covariance_family": "scalar",
+      "covariance_support": "supported",
       "user_basis": [
         "intercept"
       ],
@@ -2608,6 +2651,7 @@
       "optimizer_term_index": 4,
       "group": "batch",
       "covariance_family": "scalar",
+      "covariance_support": "supported",
       "user_basis": [
         "x"
       ],
@@ -2652,6 +2696,7 @@
       "optimizer_term_index": 5,
       "group": "item",
       "covariance_family": "scalar",
+      "covariance_support": "supported",
       "user_basis": [
         "intercept"
       ],
@@ -2696,6 +2741,7 @@
       "optimizer_term_index": 6,
       "group": "item",
       "covariance_family": "scalar",
+      "covariance_support": "supported",
       "user_basis": [
         "x"
       ],

@@ -7,7 +7,7 @@ use crate::types::{ConvergenceStatus, OptSummary};
 use super::audit::{audit_design, DesignAudit, OptimizerCertificate};
 use super::diagnostics::{Diagnostic, DiagnosticCode};
 use super::estimability::{EstimabilityAssessment, ReliabilityGrade};
-use super::ir::SemanticModel;
+use super::ir::{CovarianceSupportStatus, SemanticModel};
 use super::policy::{
     recommend_policy, CompilerPolicy, CompilerThresholds, PolicyAction, PolicyRecommendation,
     RandomStrategy,
@@ -758,6 +758,7 @@ pub struct ModelRandomTermState {
     pub semantic_basis: Vec<String>,
     pub optimizer_basis: Vec<String>,
     pub covariance: String,
+    pub covariance_support: CovarianceSupportStatus,
     pub basis_dimension: usize,
     pub covariance_parameters: Option<usize>,
     pub information_status: Option<String>,
@@ -877,6 +878,7 @@ pub struct CovarianceParameterTrace {
     pub optimizer_term_index: usize,
     pub group: String,
     pub covariance_family: CovarianceFamily,
+    pub covariance_support: CovarianceSupportStatus,
     pub user_basis: Vec<String>,
     pub optimizer_basis: Vec<String>,
     pub theta: ThetaSlotTrace,
@@ -1337,6 +1339,7 @@ fn parameter_trace_for_slot(
         semantic_term_index,
         optimizer_term_index,
         group: block.group.clone(),
+        covariance_support: covariance_family.support_status(),
         covariance_family,
         user_basis: block.user_basis.clone(),
         optimizer_basis: block.optimizer_basis.clone(),
@@ -1395,6 +1398,10 @@ fn varcorr_entries_for_slot(
     lambda: Option<&Vec<Vec<f64>>>,
     sd_scale: Option<f64>,
 ) -> Vec<VarCorrEntryTrace> {
+    if let CovarianceFamily::Structured { kind } = covariance_family {
+        return structured_varcorr_entries_for_slot(slot, basis, &kind);
+    }
+
     let mut entries = Vec::new();
     let row_basis = basis_label(basis, slot.lambda_row);
     entries.push(VarCorrEntryTrace {
@@ -1419,6 +1426,27 @@ fn varcorr_entries_for_slot(
     }
 
     entries
+}
+
+fn structured_varcorr_entries_for_slot(
+    slot: &ThetaSlot,
+    basis: &[String],
+    kind: &str,
+) -> Vec<VarCorrEntryTrace> {
+    match slot.local_index {
+        0 => vec![VarCorrEntryTrace {
+            kind: VarCorrEntryKind::StandardDeviation,
+            label: format!("sd({kind}.scale)"),
+            basis: basis.to_vec(),
+            value: None,
+        }],
+        _ => vec![VarCorrEntryTrace {
+            kind: VarCorrEntryKind::Correlation,
+            label: format!("corr({kind}.structure)"),
+            basis: basis.to_vec(),
+            value: None,
+        }],
+    }
 }
 
 fn row_std_dev(lambda: Option<&Vec<Vec<f64>>>, row: usize, sd_scale: f64) -> Option<f64> {
@@ -1641,6 +1669,7 @@ fn random_term_states(
                 semantic_basis,
                 optimizer_basis,
                 covariance: covariance_label(&term.covariance),
+                covariance_support: term.covariance_support,
                 basis_dimension,
                 covariance_parameters: audit
                     .map(|audit| audit.requested_covariance_parameters)
@@ -1835,6 +1864,43 @@ mod tests {
         assert_eq!(block.user_basis, vec!["cond".to_string()]);
         assert_eq!(block.optimizer_basis, optimizer_basis[0].clone());
         assert_eq!(artifact.theta_maps[0].n_free(), 6);
+    }
+
+    #[test]
+    fn compiled_artifact_traces_structured_covariance_placeholders() {
+        let formula = parse_formula("y ~ x + ar1(0 + x | subject)").unwrap();
+        let semantic = compile_formula_ir(&formula);
+        let artifact = CompiledModelArtifact::new(formula.to_string(), semantic);
+        let value = serde_json::to_value(&artifact).unwrap();
+
+        assert_eq!(
+            value["semantic_model"]["random_terms"][0]["covariance_support"],
+            "parsed_refused"
+        );
+        assert_eq!(value["theta_maps"][0]["family"], "structured");
+        assert_eq!(
+            value["theta_maps"][0]["map"]["covariance_family"],
+            serde_json::json!({"structured": {"kind": "ar1"}})
+        );
+        assert_eq!(
+            value["theta_maps"][0]["map"]["support_status"],
+            "parsed_refused"
+        );
+        assert_eq!(artifact.theta_maps[0].n_free(), 0);
+        assert_eq!(artifact.covariance_parameter_traces.len(), 1);
+        assert_eq!(
+            value["covariance_parameter_traces"][0]["covariance_support"],
+            "parsed_refused"
+        );
+        assert_eq!(
+            value["covariance_parameter_traces"][0]["theta"]["status"],
+            "not_assessed"
+        );
+        assert!(value["covariance_parameter_traces"][0]["theta"]["global_index"].is_null());
+        assert_eq!(
+            value["covariance_parameter_traces"][0]["varcorr_entries"][0]["value"],
+            serde_json::Value::Null
+        );
     }
 
     #[test]

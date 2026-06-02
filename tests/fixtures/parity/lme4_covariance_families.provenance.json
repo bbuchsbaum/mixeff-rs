@@ -1,0 +1,9 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-06-02T13:38:42Z",
+  "crate_commit": "6197ff62d714e4da35eaf6c2e6a72c12b919fbb7",
+  "regenerator": "scripts/regenerate_lme4_covariance_fixtures.R",
+  "source_case": "lme4::sleepstudy",
+  "reference_engine": "lme4 2.0.1",
+  "notes": "R 4.5.1; ML full and zero-correlation sleepstudy covariance-family fixtures"
+}

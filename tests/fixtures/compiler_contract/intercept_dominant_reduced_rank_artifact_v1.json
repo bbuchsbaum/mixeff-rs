@@ -149,6 +149,7 @@
           }
         ],
         "covariance": "full",
+        "covariance_support": "supported",
         "intercept": "included",
         "role": "unknown",
         "source_syntax": {
@@ -186,6 +187,8 @@
         "term_id": "r0",
         "term_index": 0,
         "group": "group",
+        "covariance_family": "full_cholesky",
+        "support_status": "supported",
         "user_basis": [
           "intercept",
           "x"
@@ -385,6 +388,8 @@
             "x"
           ],
           "covariance_family": "full",
+          "support_status": "supported",
+          "expected_parameter_count": 3,
           "source_syntax": "(1 + x | group)"
         }
       ],
@@ -523,6 +528,7 @@
       "optimizer_term_index": 0,
       "group": "group",
       "covariance_family": "full_cholesky",
+      "covariance_support": "supported",
       "user_basis": [
         "intercept",
         "x"
@@ -575,6 +581,7 @@
       "optimizer_term_index": 0,
       "group": "group",
       "covariance_family": "full_cholesky",
+      "covariance_support": "supported",
       "user_basis": [
         "intercept",
         "x"
@@ -632,6 +639,7 @@
       "optimizer_term_index": 0,
       "group": "group",
       "covariance_family": "full_cholesky",
+      "covariance_support": "supported",
       "user_basis": [
         "intercept",
         "x"

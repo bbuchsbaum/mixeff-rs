@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::artifact::ReductionTrigger;
-use super::ir::{CovarianceForm, RandomTermIr};
+use super::ir::{CovarianceForm, CovarianceSupportStatus, RandomTermIr};
 
 pub const THETA_MAP_SCHEMA: &str = "mixedmodels.theta_map";
 pub const THETA_MAP_SCHEMA_VERSION: u32 = 1;
@@ -39,6 +39,8 @@ pub struct ThetaMapBlock {
     pub term_id: String,
     pub term_index: usize,
     pub group: String,
+    pub covariance_family: CovarianceFamily,
+    pub support_status: CovarianceSupportStatus,
     pub user_basis: Vec<String>,
     pub optimizer_basis: Vec<String>,
     pub theta_slots: Vec<ThetaSlot>,
@@ -64,6 +66,7 @@ pub struct ThetaSlot {
 #[serde(rename_all = "snake_case")]
 pub enum ParameterConstraint {
     LowerBound { lower: f64 },
+    Interval { lower: f64, upper: f64 },
     Unconstrained,
     Fixed { value: f64 },
     NotAssessed,
@@ -152,18 +155,7 @@ impl ThetaMap {
     }
 
     pub fn family(&self) -> CovarianceFamily {
-        match self {
-            ThetaMap::Scalar(_) => CovarianceFamily::Scalar,
-            ThetaMap::Diagonal(_) => CovarianceFamily::Diagonal,
-            ThetaMap::FullCholesky(_) => CovarianceFamily::FullCholesky,
-            ThetaMap::Structured(_) => CovarianceFamily::Structured {
-                kind: "structured".to_string(),
-            },
-            ThetaMap::ReducedRank(_) => CovarianceFamily::ReducedRank { rank: None },
-            ThetaMap::Unsupported(_) => CovarianceFamily::Unsupported {
-                reason: "unsupported theta map".to_string(),
-            },
-        }
+        self.block().covariance_family.clone()
     }
 
     pub fn n_free(&self) -> usize {
@@ -200,6 +192,8 @@ impl ThetaMapBlock {
             term_id: term.id.clone(),
             term_index,
             group: term.group.label(),
+            covariance_family: family.clone(),
+            support_status: family.support_status(),
             user_basis,
             optimizer_basis,
             theta_slots,
@@ -233,6 +227,8 @@ impl ThetaMapBlock {
             term_id: term.id.clone(),
             term_index,
             group: term.group.label(),
+            covariance_family: CovarianceFamily::Scalar,
+            support_status: CovarianceSupportStatus::Supported,
             user_basis,
             optimizer_basis,
             theta_slots,
@@ -247,9 +243,9 @@ impl From<&CovarianceForm> for CovarianceFamily {
             CovarianceForm::Scalar => CovarianceFamily::Scalar,
             CovarianceForm::Diagonal => CovarianceFamily::Diagonal,
             CovarianceForm::Full => CovarianceFamily::FullCholesky,
-            CovarianceForm::Structured { kind } => {
-                CovarianceFamily::Structured { kind: kind.clone() }
-            }
+            CovarianceForm::Structured { kind } => CovarianceFamily::Structured {
+                kind: kind.label().to_string(),
+            },
             CovarianceForm::ReducedRank { rank } => CovarianceFamily::ReducedRank { rank: *rank },
             CovarianceForm::Unsupported { reason } => CovarianceFamily::Unsupported {
                 reason: reason.clone(),
@@ -265,6 +261,17 @@ impl CovarianceFamily {
             other => CovarianceFamily::from(other),
         }
     }
+
+    pub fn support_status(&self) -> CovarianceSupportStatus {
+        match self {
+            CovarianceFamily::Scalar
+            | CovarianceFamily::Diagonal
+            | CovarianceFamily::FullCholesky => CovarianceSupportStatus::Supported,
+            CovarianceFamily::Structured { .. } => CovarianceSupportStatus::ParsedRefused,
+            CovarianceFamily::ReducedRank { .. } => CovarianceSupportStatus::Future,
+            CovarianceFamily::Unsupported { .. } => CovarianceSupportStatus::Unsupported,
+        }
+    }
 }
 
 fn theta_slots_for_family(
@@ -277,9 +284,8 @@ fn theta_slots_for_family(
         CovarianceFamily::Scalar => scalar_slots(term_index, basis, global_start),
         CovarianceFamily::Diagonal => diagonal_slots(term_index, basis, global_start),
         CovarianceFamily::FullCholesky => full_cholesky_slots(term_index, basis, global_start),
-        CovarianceFamily::Structured { .. }
-        | CovarianceFamily::ReducedRank { .. }
-        | CovarianceFamily::Unsupported { .. } => Vec::new(),
+        CovarianceFamily::Structured { kind } => structured_slots(term_index, basis, kind),
+        CovarianceFamily::ReducedRank { .. } | CovarianceFamily::Unsupported { .. } => Vec::new(),
     }
 }
 
@@ -315,6 +321,45 @@ fn full_cholesky_slots(term_index: usize, basis: &[String], global_start: usize)
             local += 1;
         }
     }
+    slots
+}
+
+fn structured_slots(term_index: usize, basis: &[String], kind: &str) -> Vec<ThetaSlot> {
+    if basis.is_empty() {
+        return Vec::new();
+    }
+
+    let mut slots = vec![ThetaSlot {
+        global_index: None,
+        local_index: 0,
+        term_index,
+        basis_row: 0,
+        basis_col: 0,
+        lambda_row: 0,
+        lambda_col: 0,
+        name: format!("theta[{term_index}:{kind}.sd]"),
+        constraint: ParameterConstraint::LowerBound { lower: 0.0 },
+        status: ParameterStatus::NotAssessed,
+    }];
+
+    if basis.len() > 1 {
+        slots.push(ThetaSlot {
+            global_index: None,
+            local_index: 1,
+            term_index,
+            basis_row: 1,
+            basis_col: 0,
+            lambda_row: 1,
+            lambda_col: 0,
+            name: format!("theta[{term_index}:{kind}.correlation]"),
+            constraint: ParameterConstraint::Interval {
+                lower: -1.0,
+                upper: 1.0,
+            },
+            status: ParameterStatus::NotAssessed,
+        });
+    }
+
     slots
 }
 
@@ -461,6 +506,41 @@ mod tests {
             .theta_slots
             .iter()
             .all(|slot| slot.lambda_row == slot.lambda_col));
+    }
+
+    #[test]
+    fn structured_maps_carry_inactive_placeholder_slots() {
+        let formula = parse_formula("y ~ x + cs(1 + x | subject)").unwrap();
+        let semantic = compile_formula_ir(&formula);
+        let map = ThetaMap::from_random_term(0, &semantic.random_terms[0], 0);
+
+        assert!(matches!(map, ThetaMap::Structured(_)));
+        assert_eq!(
+            map.family(),
+            CovarianceFamily::Structured {
+                kind: "compound_symmetry".to_string()
+            }
+        );
+        assert_eq!(
+            map.block().support_status,
+            CovarianceSupportStatus::ParsedRefused
+        );
+        assert_eq!(map.n_free(), 0);
+        assert_eq!(map.block().theta_slots.len(), 2);
+        assert!(
+            map.block()
+                .theta_slots
+                .iter()
+                .all(|slot| slot.global_index.is_none()
+                    && slot.status == ParameterStatus::NotAssessed)
+        );
+        assert_eq!(
+            map.block().theta_slots[1].constraint,
+            ParameterConstraint::Interval {
+                lower: -1.0,
+                upper: 1.0
+            }
+        );
     }
 
     #[test]

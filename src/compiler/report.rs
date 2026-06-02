@@ -904,7 +904,11 @@ fn covariance_parameter_count(covariance: &CovarianceForm, basis_size: usize) ->
         CovarianceForm::Scalar => 1,
         CovarianceForm::Diagonal => basis_size,
         CovarianceForm::Full => basis_size * (basis_size + 1) / 2,
-        CovarianceForm::Structured { .. } => basis_size,
+        CovarianceForm::Structured { .. } => match basis_size {
+            0 => 0,
+            1 => 1,
+            _ => 2,
+        },
         CovarianceForm::ReducedRank { rank } => rank.unwrap_or(1) * basis_size,
         CovarianceForm::Unsupported { .. } => 0,
     }

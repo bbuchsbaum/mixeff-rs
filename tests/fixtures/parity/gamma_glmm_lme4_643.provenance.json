@@ -1,0 +1,9 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-06-02T13:38:33Z",
+  "crate_commit": "6197ff62d714e4da35eaf6c2e6a72c12b919fbb7",
+  "regenerator": "scripts/regenerate_julia_parity_fixtures.jl  (or scripts/parity_pathologies.{R,jl})",
+  "source_case": null,
+  "reference_engine": null,
+  "notes": "Backfilled by examples/backfill_fixture_provenance — original generation context lost. Refresh by running the regenerator command above."
+}

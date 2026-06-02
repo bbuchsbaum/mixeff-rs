@@ -47,6 +47,7 @@
           }
         ],
         "covariance": "scalar",
+        "covariance_support": "supported",
         "intercept": "included",
         "role": "unknown",
         "source_syntax": {
@@ -78,6 +79,7 @@
           }
         ],
         "covariance": "scalar",
+        "covariance_support": "supported",
         "intercept": "included",
         "role": "unknown",
         "source_syntax": {
@@ -120,6 +122,8 @@
         "term_id": "r0",
         "term_index": 0,
         "group": "plate",
+        "covariance_family": "scalar",
+        "support_status": "supported",
         "user_basis": [
           "intercept"
         ],
@@ -161,6 +165,8 @@
         "term_id": "r1",
         "term_index": 1,
         "group": "sample",
+        "covariance_family": "scalar",
+        "support_status": "supported",
         "user_basis": [
           "intercept"
         ],
@@ -349,6 +355,8 @@
             "intercept"
           ],
           "covariance_family": "scalar",
+          "support_status": "supported",
+          "expected_parameter_count": 1,
           "source_syntax": "(1 | plate)"
         },
         {
@@ -363,6 +371,8 @@
             "intercept"
           ],
           "covariance_family": "scalar",
+          "support_status": "supported",
+          "expected_parameter_count": 1,
           "source_syntax": "(1 | sample)"
         }
       ],
@@ -450,6 +460,7 @@
       "optimizer_term_index": 0,
       "group": "plate",
       "covariance_family": "scalar",
+      "covariance_support": "supported",
       "user_basis": [
         "intercept"
       ],
@@ -500,6 +511,7 @@
       "optimizer_term_index": 1,
       "group": "sample",
       "covariance_family": "scalar",
+      "covariance_support": "supported",
       "user_basis": [
         "intercept"
       ],

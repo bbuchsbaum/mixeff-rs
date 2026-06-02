@@ -73,8 +73,17 @@ subset:
 | `(re | g1:g2)` | Cell-level grouping factor | Stable |
 | `(re | g1/g2)` | Nested grouping expansion | Stable |
 | `(re | g1*g2)` | Main grouping factors plus cell expansion | Stable |
+| `us(re | g)` | Explicit unstructured random-effect covariance | Stable alias for `(re | g)` |
+| `diag(re | g)` | Diagonal random-effect covariance | Stable |
+| `cs(re | g)`, `ar1(re | g)` | Structured random-effect covariance syntax | Parsed and refused for fitting in v1.0 |
 | `I(expr)` and other in-formula transforms | Stateless arithmetic subset | Stable (minimal subset) |
 | Full `I()` / model.matrix transformations | — | Out of scope |
+
+Random-effect covariance artifacts serialize stable support labels:
+`supported` for scalar, diagonal, and full/unstructured fitted families;
+`parsed_refused` for `cs(...)` and `ar1(...)`; `future` for reserved
+reduced-rank artifact vocabulary; and `unsupported` for invalid or empty
+covariance bases.
 
 ## Estimation
 

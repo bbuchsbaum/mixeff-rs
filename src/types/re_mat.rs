@@ -66,6 +66,34 @@ pub struct ReMat {
     pub vsize: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReMatCovarianceKernel {
+    FullCholesky,
+    Diagonal,
+}
+
+impl ReMatCovarianceKernel {
+    fn theta_indices(self, vsize: usize) -> Vec<usize> {
+        match self {
+            ReMatCovarianceKernel::FullCholesky => lower_triangular_indices(vsize),
+            ReMatCovarianceKernel::Diagonal => diagonal_indices(vsize),
+        }
+    }
+
+    fn zero_inactive_lambda(self, lambda: &mut DMatrix<f64>) {
+        if self == ReMatCovarianceKernel::Diagonal {
+            let n = lambda.nrows();
+            for row in 0..n {
+                for col in 0..n {
+                    if row != col {
+                        lambda[(row, col)] = 0.0;
+                    }
+                }
+            }
+        }
+    }
+}
+
 impl ReMat {
     /// Construct a new `ReMat` with identity `Λ`.
     ///
@@ -120,9 +148,7 @@ impl ReMat {
         // Identity lambda (s × s)
         let lambda = DMatrix::identity(vsize, vsize);
 
-        // Compute the indices of the lower-triangular elements in
-        // column-major order (the free parameters of Λ).
-        let inds = lower_triangular_indices(vsize);
+        let inds = ReMatCovarianceKernel::FullCholesky.theta_indices(vsize);
 
         // Build the sparse adjoint matrix.
         let adj_a = build_sparse_adjoint(&refs, &z, vsize, n_lvl, n_obs);
@@ -309,17 +335,12 @@ impl ReMat {
     /// Sets all off-diagonal elements of `Λ` to zero and updates `inds`
     /// to contain only the diagonal positions.
     pub fn zerocorr(&mut self) {
-        let s = self.vsize;
-        // Zero out off-diagonal
-        for i in 0..s {
-            for j in 0..s {
-                if i != j {
-                    self.lambda[(i, j)] = 0.0;
-                }
-            }
-        }
-        // Update inds to diagonal-only
-        self.inds = (0..s).map(|k| k * s + k).collect();
+        self.set_covariance_kernel(ReMatCovarianceKernel::Diagonal);
+    }
+
+    fn set_covariance_kernel(&mut self, kernel: ReMatCovarianceKernel) {
+        kernel.zero_inactive_lambda(&mut self.lambda);
+        self.inds = kernel.theta_indices(self.vsize);
     }
 }
 
@@ -337,6 +358,10 @@ fn lower_triangular_indices(s: usize) -> Vec<usize> {
         }
     }
     inds
+}
+
+fn diagonal_indices(s: usize) -> Vec<usize> {
+    (0..s).map(|k| k * s + k).collect()
 }
 
 /// Convert a column-major linear index to (row, col) subscripts for
@@ -499,6 +524,31 @@ mod tests {
         let theta = re.get_theta();
         assert!((theta[0] - 2.0).abs() < 1e-12);
         assert!((theta[1] - 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_covariance_kernel_patterns_own_theta_indices() {
+        assert_eq!(
+            ReMatCovarianceKernel::FullCholesky.theta_indices(3),
+            vec![0, 1, 2, 4, 5, 8]
+        );
+        assert_eq!(
+            ReMatCovarianceKernel::Diagonal.theta_indices(3),
+            vec![0, 4, 8]
+        );
+    }
+
+    #[test]
+    fn test_diagonal_kernel_preserves_diagonal_theta_values() {
+        let mut re = make_vector_remat();
+        re.set_theta(&[2.0, 0.5, 3.0]).unwrap();
+
+        re.set_covariance_kernel(ReMatCovarianceKernel::Diagonal);
+
+        assert_eq!(re.inds, vec![0, 3]);
+        assert_eq!(re.get_theta(), vec![2.0, 3.0]);
+        assert_eq!(re.lower_bound(), vec![0.0, 0.0]);
+        assert_eq!(re.lambda[(1, 0)], 0.0);
     }
 
     #[test]

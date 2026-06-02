@@ -64,9 +64,9 @@ pub use estimability::{
 };
 pub use explain::{explain_model, ModelExplanation};
 pub use ir::{
-    compile_formula_ir, CovarianceForm, CovarianceStory, GroupingFactorIr, GroupingRole,
-    InterceptPolicy, RandomCoefficient, RandomCoefficientKind, RandomTermIr, SemanticModel,
-    SourceSyntax,
+    compile_formula_ir, CovarianceForm, CovarianceStory, CovarianceSupportStatus, GroupingFactorIr,
+    GroupingRole, InterceptPolicy, RandomCoefficient, RandomCoefficientKind, RandomTermIr,
+    SemanticModel, SourceSyntax, StructuredCovarianceKind,
 };
 pub use policy::{
     recommend_policy, CompilerPolicy, CompilerThresholds, PolicyAction, PolicyRecommendation,

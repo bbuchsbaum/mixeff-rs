@@ -10,8 +10,8 @@ use super::diagnostics::{
     Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticStage, FitStatus,
 };
 use super::ir::{
-    CovarianceForm, GroupingFactorIr, InterceptPolicy, RandomCoefficient, RandomCoefficientKind,
-    RandomTermIr, SemanticModel,
+    CovarianceForm, CovarianceSupportStatus, GroupingFactorIr, InterceptPolicy, RandomCoefficient,
+    RandomCoefficientKind, RandomTermIr, SemanticModel,
 };
 
 pub const DESIGN_AUDIT_SCHEMA: &str = "mixedmodels.design_audit";
@@ -168,6 +168,8 @@ pub struct CovarianceKernelAudit {
     pub has_intercept: bool,
     pub basis: Vec<String>,
     pub covariance_family: String,
+    pub support_status: CovarianceSupportStatus,
+    pub expected_parameter_count: usize,
     pub source_syntax: String,
 }
 
@@ -584,6 +586,11 @@ fn covariance_kernel_audit(term: &RandomTermIr) -> CovarianceKernelAudit {
         has_intercept,
         basis,
         covariance_family: covariance_family_label(&effective_covariance),
+        support_status: effective_covariance.support_status(),
+        expected_parameter_count: requested_covariance_parameters(
+            &effective_covariance,
+            term.basis.len(),
+        ),
         source_syntax: term.source_syntax.text.clone(),
     }
 }
@@ -1424,6 +1431,10 @@ fn audit_random_term(
         basis_dimension,
         requested_covariance_parameters,
     );
+    if let Some(diagnostic) = unsupported_structured_covariance_diagnostic(term) {
+        global_diagnostics.push(diagnostic.clone());
+        diagnostics.push(diagnostic);
+    }
 
     for basis_audit in &basis {
         if basis_audit.supported == Some(false) {
@@ -1471,6 +1482,34 @@ fn audit_random_term(
         basis,
         diagnostics,
     }
+}
+
+fn unsupported_structured_covariance_diagnostic(term: &RandomTermIr) -> Option<Diagnostic> {
+    let CovarianceForm::Structured { kind } = &term.covariance else {
+        return None;
+    };
+    let family = kind.label();
+    let mut diagnostic = Diagnostic::new(
+        DiagnosticCode::Unsupported,
+        DiagnosticSeverity::Error,
+        DiagnosticStage::DesignAudit,
+        format!(
+            "structured random-effect covariance family `{family}` is parsed but not fitted in v1.0"
+        ),
+    )
+    .with_affected_terms(vec![term.source_syntax.user_text().to_string()])
+    .with_suggested_actions(vec![
+        "use an unstructured `|` random-effect term or diagonal `diag(...)` / `||` term for fitted v1.0 models".to_string(),
+        "keep the structured term as an expected-refuse fixture until fitted covariance kernels land".to_string(),
+    ]);
+    diagnostic
+        .payload
+        .insert("covariance_family".to_string(), serde_json::json!(family));
+    diagnostic.payload.insert(
+        "support_status".to_string(),
+        serde_json::json!("parsed_refused"),
+    );
+    Some(diagnostic)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2265,8 +2304,20 @@ fn requested_covariance_parameters(covariance: &CovarianceForm, basis_size: usiz
         CovarianceForm::Scalar => usize::from(basis_size > 0),
         CovarianceForm::Diagonal => basis_size,
         CovarianceForm::Full => basis_size * (basis_size + 1) / 2,
-        CovarianceForm::Structured { .. } | CovarianceForm::ReducedRank { .. } => 0,
+        CovarianceForm::Structured { kind } => structured_covariance_parameters(*kind, basis_size),
+        CovarianceForm::ReducedRank { rank } => rank.unwrap_or(1).saturating_mul(basis_size),
         CovarianceForm::Unsupported { .. } => 0,
+    }
+}
+
+fn structured_covariance_parameters(
+    _kind: super::ir::StructuredCovarianceKind,
+    basis_size: usize,
+) -> usize {
+    match basis_size {
+        0 => 0,
+        1 => 1,
+        _ => 2,
     }
 }
 
@@ -3081,6 +3132,39 @@ mod tests {
         assert_close(budget.effective_n.rows_per_covariance_parameter, 18.0);
         assert!(!budget.effective_n.total_rows_can_mislead);
         assert!(budget.effective_n.recommendation.contains("sufficient"));
+    }
+
+    #[test]
+    fn design_audit_flags_structured_covariance_as_parsed_refused() {
+        let formula = parse_formula("y ~ x + cs(1 + x | subject)").unwrap();
+        let semantic = compile_formula_ir(&formula);
+        let audit = audit_design(&semantic, &many_subject_data(12));
+
+        let diagnostic = audit
+            .diagnostics
+            .iter()
+            .find(|diagnostic| {
+                diagnostic.code == DiagnosticCode::Unsupported
+                    && diagnostic
+                        .payload
+                        .get("covariance_family")
+                        .is_some_and(|value| value == "compound_symmetry")
+            })
+            .expect("structured covariance refusal diagnostic");
+        assert_eq!(diagnostic.severity, DiagnosticSeverity::Error);
+        assert_eq!(diagnostic.stage, DiagnosticStage::DesignAudit);
+        assert_eq!(
+            diagnostic.payload.get("support_status"),
+            Some(&serde_json::json!("parsed_refused"))
+        );
+        assert_eq!(
+            audit.covariance_kernels.kernels[0].support_status,
+            CovarianceSupportStatus::ParsedRefused
+        );
+        assert_eq!(
+            audit.covariance_kernels.kernels[0].expected_parameter_count,
+            2
+        );
     }
 
     #[test]

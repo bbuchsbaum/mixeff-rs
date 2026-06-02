@@ -70,9 +70,54 @@ pub struct RandomTerm {
     /// If `true`, the `||` (zero-correlation) syntax was used, meaning the
     /// covariance between random-effect terms is forced to zero.
     pub zerocorr: bool,
+    /// Requested covariance family for this random-effect block. Ordinary
+    /// `|` syntax uses [`RandomCovariance::Full`], `||` uses
+    /// [`RandomCovariance::Diagonal`], and lme4-style wrappers such as
+    /// `cs(...)` / `ar1(...)` use the corresponding structured family.
+    pub covariance: RandomCovariance,
     /// Source text and parser-level canonicalization metadata, when the term
     /// came from the formula parser rather than a manually constructed AST.
     pub source: Option<RandomTermSource>,
+}
+
+/// Requested random-effect covariance family.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RandomCovariance {
+    /// Unstructured full lower-Cholesky covariance.
+    Full,
+    /// Diagonal covariance in the compiled random-effect basis.
+    Diagonal,
+    /// Compound-symmetry covariance. Parsed for v1.0 contract readiness but
+    /// refused by the current fitting engine.
+    CompoundSymmetry,
+    /// Random-effect autoregressive order-one covariance. Parsed for v1.0
+    /// contract readiness but refused by the current fitting engine.
+    Ar1,
+}
+
+impl RandomCovariance {
+    pub fn label(self) -> &'static str {
+        match self {
+            RandomCovariance::Full => "full",
+            RandomCovariance::Diagonal => "diagonal",
+            RandomCovariance::CompoundSymmetry => "compound_symmetry",
+            RandomCovariance::Ar1 => "ar1",
+        }
+    }
+
+    pub fn wrapper(self) -> Option<&'static str> {
+        match self {
+            RandomCovariance::Full => None,
+            RandomCovariance::Diagonal => Some("diag"),
+            RandomCovariance::CompoundSymmetry => Some("cs"),
+            RandomCovariance::Ar1 => Some("ar1"),
+        }
+    }
+
+    pub fn is_supported_for_fit(self) -> bool {
+        matches!(self, RandomCovariance::Full | RandomCovariance::Diagonal)
+    }
 }
 
 /// The grouping factor for a random-effect term.
@@ -224,14 +269,20 @@ impl fmt::Display for GroupingFactor {
 
 impl fmt::Display for RandomTerm {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let bar = if self.zerocorr { "||" } else { "|" };
         let terms = self
             .terms
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join(" + ");
-        write!(f, "({terms} {bar} {})", self.grouping)
+        if self.zerocorr {
+            let bar = if self.zerocorr { "||" } else { "|" };
+            write!(f, "({terms} {bar} {})", self.grouping)
+        } else if let Some(wrapper) = self.covariance.wrapper() {
+            write!(f, "{wrapper}({terms} | {})", self.grouping)
+        } else {
+            write!(f, "({terms} | {})", self.grouping)
+        }
     }
 }
 
@@ -260,6 +311,7 @@ mod tests {
                 terms: vec![FixedTerm::Intercept, FixedTerm::Column("days".to_string())],
                 grouping: GroupingFactor::Single("subj".to_string()),
                 zerocorr: false,
+                covariance: RandomCovariance::Full,
                 source: None,
             }],
             derived: Vec::new(),
@@ -283,6 +335,7 @@ mod tests {
                     "item".to_string(),
                 ]),
                 zerocorr: true,
+                covariance: RandomCovariance::Diagonal,
                 source: None,
             }],
             derived: Vec::new(),
