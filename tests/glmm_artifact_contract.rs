@@ -68,6 +68,64 @@ fn poisson_correlated_slope_contract_data() -> DataFrame {
     data
 }
 
+fn osf_willingness_study1b_wait_data() -> DataFrame {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/parity/osf_willingness_to_wait_study1b.csv");
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_path(&path)
+        .unwrap_or_else(|error| panic!("read {path:?}: {error}"));
+
+    let headers = rdr
+        .headers()
+        .unwrap_or_else(|error| panic!("read headers from {path:?}: {error}"))
+        .clone();
+    let index = |name: &str| -> usize {
+        headers
+            .iter()
+            .position(|candidate| candidate == name)
+            .unwrap_or_else(|| panic!("{path:?} is missing required column `{name}`"))
+    };
+    let id_idx = index("ID");
+    let title_idx = index("Title");
+    let wait_idx = index("wait_choice");
+    let enjoyment_idx = index("Enjoyment");
+
+    let mut wait_choice = Vec::new();
+    let mut enjoyment = Vec::new();
+    let mut id = Vec::new();
+    let mut title = Vec::new();
+    for record in rdr.records() {
+        let record = record.unwrap_or_else(|error| panic!("read record from {path:?}: {error}"));
+        wait_choice.push(
+            record[wait_idx]
+                .parse::<f64>()
+                .unwrap_or_else(|error| panic!("parse wait_choice in {path:?}: {error}")),
+        );
+        enjoyment.push(
+            record[enjoyment_idx]
+                .parse::<f64>()
+                .unwrap_or_else(|error| panic!("parse Enjoyment in {path:?}: {error}")),
+        );
+        id.push(record[id_idx].to_string());
+        title.push(record[title_idx].to_string());
+    }
+
+    let mean_enjoyment = enjoyment.iter().sum::<f64>() / enjoyment.len() as f64;
+    let enjoyment_centered = enjoyment
+        .into_iter()
+        .map(|value| value - mean_enjoyment)
+        .collect::<Vec<_>>();
+
+    let mut data = DataFrame::new();
+    data.add_numeric("wait_choice", wait_choice).unwrap();
+    data.add_numeric("Enjoyment_centered", enjoyment_centered)
+        .unwrap();
+    data.add_categorical("ID", id).unwrap();
+    data.add_categorical("Title", title).unwrap();
+    data
+}
+
 fn bernoulli_separation_contract_data() -> DataFrame {
     let mut y = Vec::new();
     let mut x = Vec::new();
@@ -628,6 +686,118 @@ fn joint_laplace_glmm_wald_rows_match_glmer_on_correlated_random_slopes() {
         .wald_confint(0.95)
         .iter()
         .all(|row| row.lower.is_finite() && row.upper.is_finite() && row.lower < row.upper));
+}
+
+#[test]
+fn joint_laplace_glmm_wald_rows_match_glmer_on_osf_study1b_correlated_slopes() {
+    if std::env::var_os("MIXEFF_RUN_OSF_WALD_PARITY").is_none() {
+        return;
+    }
+
+    let data = osf_willingness_study1b_wait_data();
+    let formula = parse_formula(
+        "wait_choice ~ 1 + Enjoyment_centered + \
+         (1 + Enjoyment_centered | ID) + (1 + Enjoyment_centered | Title)",
+    )
+    .unwrap();
+    let mut model = GeneralizedLinearMixedModel::new(
+        formula,
+        &data,
+        Family::Bernoulli,
+        Some(LinkFunction::Logit),
+    )
+    .unwrap();
+
+    model.fit_with_options(false, 1, false).unwrap();
+
+    let artifact = model.compiler_artifact();
+    let metadata = artifact
+        .glmm_fit_metadata
+        .as_ref()
+        .expect("joint-laplace OSF GLMM artifact should expose fit metadata");
+    assert_eq!(metadata.estimation_method, "joint_laplace");
+    assert_eq!(metadata.objective_definition, "joint_glmm_laplace_deviance");
+    assert_eq!(metadata.response_constants, "included");
+    let availability = &artifact.model_boundary.inference_availability;
+    let first_reason = artifact
+        .fixed_effect_inference_table
+        .as_ref()
+        .and_then(|table| table.rows.first())
+        .and_then(|row| row.reason.as_deref());
+    assert!(
+        matches!(
+            availability,
+            InferenceAvailability::Available { ref method }
+            if method == "asymptotic_wald_z_joint_laplace_active_hessian"
+        ),
+        "OSF study1b correlated-slope GLMM Wald rows were not certified: availability={availability:?}, first_reason={first_reason:?}"
+    );
+    assert_eq!(
+        model.theta().len(),
+        6,
+        "two correlated random-slope terms should exercise six covariance parameters"
+    );
+
+    // lme4 2.0.1 reference:
+    // glmer(wait_choice ~ 1 + Enjoyment_centered
+    //       + (1 + Enjoyment_centered | ID)
+    //       + (1 + Enjoyment_centered | Title),
+    //       study1b, binomial(logit), nAGQ = 1,
+    //       control = glmerControl(optimizer = "bobyqa"))
+    let lme4_reference = [
+        (
+            "(Intercept)",
+            -1.6946010298834349,
+            0.37647010448086149,
+            -4.5012897696623950,
+        ),
+        (
+            "Enjoyment_centered",
+            1.0296271533640451,
+            0.10953315541246519,
+            9.4001414410715540,
+        ),
+    ];
+    let inference = artifact
+        .fixed_effect_inference_table
+        .as_ref()
+        .expect("joint-laplace OSF GLMM should carry Wald rows");
+    assert_eq!(inference.rows.len(), lme4_reference.len());
+    for row in &inference.rows {
+        assert_eq!(row.method, FixedEffectInferenceMethod::AsymptoticWaldZ);
+        assert_eq!(row.status, FixedEffectInferenceStatus::Available);
+        assert_eq!(row.reliability, ReliabilityGrade::Moderate);
+
+        let (_, expected_estimate, expected_se, expected_z) = lme4_reference
+            .iter()
+            .find(|(label, _, _, _)| *label == row.label)
+            .copied()
+            .expect("reference row should exist");
+        let estimate = row.estimate.unwrap();
+        let std_error = row.std_error.unwrap();
+        let statistic = row.statistic.unwrap();
+        assert!(
+            (estimate - expected_estimate).abs() <= 5.0e-3,
+            "{} estimate diverged from lme4 reference: observed {}, expected {}",
+            row.label,
+            estimate,
+            expected_estimate
+        );
+        assert!(
+            (std_error - expected_se).abs() <= 5.0e-3,
+            "{} SE diverged from lme4 reference: observed {}, expected {}",
+            row.label,
+            std_error,
+            expected_se
+        );
+        assert!(
+            (statistic - expected_z).abs() <= 5.0e-2,
+            "{} Wald statistic diverged from lme4 reference: observed {}, expected {}",
+            row.label,
+            statistic,
+            expected_z
+        );
+    }
 }
 
 #[test]

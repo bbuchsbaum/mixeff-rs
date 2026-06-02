@@ -1365,21 +1365,33 @@ impl GeneralizedLinearMixedModel {
     /// optimizer probes tolerate it). `Err` is reserved for hard linear-
     /// algebra/state failures.
     pub fn pirls(&mut self, vary_beta: bool, verbose: bool) -> Result<bool> {
+        self.pirls_with_options(vary_beta, verbose, GLMM_PIRLS_MAX_ITER, true)
+    }
+
+    fn pirls_with_options(
+        &mut self,
+        vary_beta: bool,
+        verbose: bool,
+        max_iter: usize,
+        reset_modes: bool,
+    ) -> Result<bool> {
         // Mirrors MixedModels.jl/src/generalizedlinearmixedmodel.jl pirls!
         // (lines 614-669): step-halving toward the previous accepted iterate
         // whenever a fresh IRLS step would worsen the Laplace objective. Keeps
         // the outer optimizer's view of obj(θ) consistent across probes —
         // without this, BOBYQA on multi-RE GLMM surfaces (e.g. grouseticks
         // Poisson) sees noisy values and reports `RoundoffLimited`.
-        let max_iter = 10;
         let tol = 1.0e-5;
         let max_halvings = 10;
 
         let n = self.y.len();
 
-        // Initialise u to zero; keep existing β.
-        for u in self.u.iter_mut() {
-            u.fill(0.0);
+        // Reset the conditional modes when callers need deterministic probe
+        // values instead of path-dependent warm starts.
+        if reset_modes {
+            for u in self.u.iter_mut() {
+                u.fill(0.0);
+            }
         }
         for (i, rt) in self.lmm.reterms.iter().enumerate() {
             self.b[i] = &rt.lambda * &self.u[i];
@@ -1406,7 +1418,7 @@ impl GeneralizedLinearMixedModel {
         // soft-barrier search away from valid boundary fits.
         let mut converged = false;
 
-        for iter in 0..max_iter {
+        for iter in 0..max_iter.max(1) {
             // --- Compute IRLS weights and working response ---
             for obs in 0..n {
                 let mu_obs = self.mu[obs];
@@ -2754,6 +2766,37 @@ impl GeneralizedLinearMixedModel {
         }
     }
 
+    fn joint_glmm_deviance_at_params_for_hessian(
+        &mut self,
+        params: &[f64],
+        n_beta: usize,
+        n_agq: usize,
+    ) -> std::result::Result<f64, String> {
+        if params.len() != n_beta + self.theta.len() {
+            return Err(format!(
+                "parameter vector has length {}, expected {} fixed effects plus {} covariance parameters",
+                params.len(),
+                n_beta,
+                self.theta.len()
+            ));
+        }
+        if !params.iter().all(|value| value.is_finite()) {
+            return Err("parameter vector contains non-finite values".to_string());
+        }
+
+        self.beta = DVector::from_column_slice(&params[..n_beta]);
+        let theta = &params[n_beta..];
+        self.update_pirls_at_theta_with_options(theta, false, GLMM_HESSIAN_PIRLS_MAX_ITER, true)
+            .map_err(|error| format!("conditional-mode PIRLS probe failed: {error}"))?;
+
+        let deviance = self.deviance_with_response_constants(n_agq);
+        if deviance.is_finite() {
+            Ok(deviance)
+        } else {
+            Err("probe objective is non-finite after the certification PIRLS probe".to_string())
+        }
+    }
+
     fn joint_laplace_finite_difference_gradient(
         &mut self,
         params: &[f64],
@@ -3033,6 +3076,7 @@ impl GeneralizedLinearMixedModel {
             &params,
             &lower_bounds,
             &active_indices,
+            true,
         )?;
         let certification = certify_glmm_joint_hessian(&hessian)?;
         let beta_covariance = 2.0 * certification.inverse.view((0, 0), (p, p)).into_owned();
@@ -3128,6 +3172,7 @@ impl GeneralizedLinearMixedModel {
             params,
             lower_bounds,
             &active_indices,
+            false,
         )
     }
 
@@ -3136,17 +3181,38 @@ impl GeneralizedLinearMixedModel {
         params: &[f64],
         lower_bounds: &[f64],
         active_indices: &[usize],
+        use_hessian_certification_probe: bool,
     ) -> std::result::Result<DMatrix<f64>, String> {
         let n = active_indices.len();
         let p = self.beta.len();
         let n_agq = self.lmm.optsum.n_agq;
-        let base = self.joint_glmm_deviance_at_params(params, p, n_agq);
-        if !base.is_finite() {
-            let _ = self.joint_glmm_deviance_at_params(params, p, n_agq);
-            return Err(
-                "joint-laplace GLMM Hessian certificate base objective is non-finite".to_string(),
-            );
+
+        macro_rules! eval_hessian_probe {
+            ($probe:expr, $context:expr) => {
+                if use_hessian_certification_probe {
+                    match self.joint_glmm_deviance_at_params_for_hessian($probe, p, n_agq) {
+                        Ok(value) => value,
+                        Err(reason) => {
+                            let _ = self.joint_glmm_deviance_at_params(params, p, n_agq);
+                            return Err(format!("{}: {}", $context, reason));
+                        }
+                    }
+                } else {
+                    let value = self.joint_glmm_deviance_at_params($probe, p, n_agq);
+                    if value.is_finite() {
+                        value
+                    } else {
+                        let _ = self.joint_glmm_deviance_at_params(params, p, n_agq);
+                        return Err(format!("{} is non-finite", $context));
+                    }
+                }
+            };
         }
+
+        let base = eval_hessian_probe!(
+            params,
+            "joint-laplace GLMM Hessian certificate base objective"
+        );
 
         let mut steps = Vec::with_capacity(n);
         for &index in active_indices {
@@ -3177,17 +3243,22 @@ impl GeneralizedLinearMixedModel {
             let hi = steps[active_i];
             let mut plus = params.to_vec();
             plus[i] += hi;
-            let f_plus = self.joint_glmm_deviance_at_params(&plus, p, n_agq);
+            let f_plus = eval_hessian_probe!(
+                &plus,
+                format!(
+                    "joint-laplace GLMM Hessian diagonal plus probe for parameter {}",
+                    i + 1
+                )
+            );
             let mut minus = params.to_vec();
             minus[i] -= hi;
-            let f_minus = self.joint_glmm_deviance_at_params(&minus, p, n_agq);
-            if !f_plus.is_finite() || !f_minus.is_finite() {
-                let _ = self.joint_glmm_deviance_at_params(params, p, n_agq);
-                return Err(format!(
-                    "joint-laplace GLMM Hessian diagonal probe for parameter {} is non-finite",
+            let f_minus = eval_hessian_probe!(
+                &minus,
+                format!(
+                    "joint-laplace GLMM Hessian diagonal minus probe for parameter {}",
                     i + 1
-                ));
-            }
+                )
+            );
             hessian[(active_i, active_i)] = (f_plus - 2.0 * base + f_minus) / (hi * hi);
 
             for active_j in 0..active_i {
@@ -3196,34 +3267,50 @@ impl GeneralizedLinearMixedModel {
                 let mut pp = params.to_vec();
                 pp[i] += hi;
                 pp[j] += hj;
-                let f_pp = self.joint_glmm_deviance_at_params(&pp, p, n_agq);
+                let f_pp = eval_hessian_probe!(
+                    &pp,
+                    format!(
+                        "joint-laplace GLMM Hessian off-diagonal ++ probe for parameters {} and {}",
+                        i + 1,
+                        j + 1
+                    )
+                );
 
                 let mut pm = params.to_vec();
                 pm[i] += hi;
                 pm[j] -= hj;
-                let f_pm = self.joint_glmm_deviance_at_params(&pm, p, n_agq);
+                let f_pm = eval_hessian_probe!(
+                    &pm,
+                    format!(
+                        "joint-laplace GLMM Hessian off-diagonal +- probe for parameters {} and {}",
+                        i + 1,
+                        j + 1
+                    )
+                );
 
                 let mut mp = params.to_vec();
                 mp[i] -= hi;
                 mp[j] += hj;
-                let f_mp = self.joint_glmm_deviance_at_params(&mp, p, n_agq);
+                let f_mp = eval_hessian_probe!(
+                    &mp,
+                    format!(
+                        "joint-laplace GLMM Hessian off-diagonal -+ probe for parameters {} and {}",
+                        i + 1,
+                        j + 1
+                    )
+                );
 
                 let mut mm = params.to_vec();
                 mm[i] -= hi;
                 mm[j] -= hj;
-                let f_mm = self.joint_glmm_deviance_at_params(&mm, p, n_agq);
-
-                if ![f_pp, f_pm, f_mp, f_mm]
-                    .iter()
-                    .all(|value| value.is_finite())
-                {
-                    let _ = self.joint_glmm_deviance_at_params(params, p, n_agq);
-                    return Err(format!(
-                        "joint-laplace GLMM Hessian off-diagonal probe for parameters {} and {} is non-finite",
+                let f_mm = eval_hessian_probe!(
+                    &mm,
+                    format!(
+                        "joint-laplace GLMM Hessian off-diagonal -- probe for parameters {} and {}",
                         i + 1,
                         j + 1
-                    ));
-                }
+                    )
+                );
                 let value = (f_pp - f_pm - f_mp + f_mm) / (4.0 * hi * hj);
                 hessian[(active_i, active_j)] = value;
                 hessian[(active_j, active_i)] = value;
@@ -3893,6 +3980,16 @@ impl GeneralizedLinearMixedModel {
 
     /// Returns whether the inner PIRLS converged (see [`Self::pirls`]).
     fn update_pirls_at_theta(&mut self, theta: &[f64], vary_beta: bool) -> Result<bool> {
+        self.update_pirls_at_theta_with_options(theta, vary_beta, GLMM_PIRLS_MAX_ITER, true)
+    }
+
+    fn update_pirls_at_theta_with_options(
+        &mut self,
+        theta: &[f64],
+        vary_beta: bool,
+        max_iter: usize,
+        reset_modes: bool,
+    ) -> Result<bool> {
         if theta.len() != self.theta.len() {
             return Err(MixedModelError::DimensionMismatch(format!(
                 "theta vector length {} does not match fitted GLMM theta length {}",
@@ -3908,10 +4005,7 @@ impl GeneralizedLinearMixedModel {
         self.lmm.set_theta(theta)?;
         self.lmm.update_l()?;
         self.theta = theta.to_vec();
-        for u in self.u.iter_mut() {
-            u.fill(0.0);
-        }
-        let converged = self.pirls(vary_beta, false)?;
+        let converged = self.pirls_with_options(vary_beta, false, max_iter, reset_modes)?;
         Ok(converged)
     }
 
@@ -5593,6 +5687,9 @@ struct GlmmFixedEffectInferenceArtifacts {
     table: FixedEffectInferenceTable,
     covariance: Option<FixedEffectCovarianceMatrix>,
 }
+
+const GLMM_PIRLS_MAX_ITER: usize = 10;
+const GLMM_HESSIAN_PIRLS_MAX_ITER: usize = 50;
 
 fn glmm_hessian_step(value: f64) -> f64 {
     1.0e-4 * value.abs().max(1.0)
