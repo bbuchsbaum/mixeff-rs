@@ -25,6 +25,8 @@ pub enum Family {
     Binomial,
     /// Poisson response for counts.
     Poisson,
+    /// Negative-binomial NB2 response for overdispersed counts.
+    NegativeBinomial,
     /// Gamma response for positive continuous outcomes.
     Gamma,
     /// Inverse-Gaussian response for positive continuous outcomes.
@@ -59,6 +61,7 @@ impl Family {
             Family::Bernoulli => LinkFunction::Logit,
             Family::Binomial => LinkFunction::Logit,
             Family::Poisson => LinkFunction::Log,
+            Family::NegativeBinomial => LinkFunction::Log,
             Family::Gamma => LinkFunction::Inverse,
             Family::InverseGaussian => LinkFunction::Inverse,
         }
@@ -78,6 +81,7 @@ impl Family {
             Family::Normal => 1.0,
             Family::Bernoulli | Family::Binomial => mu * (1.0 - mu),
             Family::Poisson => mu,
+            Family::NegativeBinomial => mu + mu * mu,
             Family::Gamma => mu * mu,
             Family::InverseGaussian => mu * mu * mu,
         }
@@ -342,6 +346,7 @@ mod tests {
     fn test_family_variance_functions() {
         assert_eq!(Family::Normal.variance(2.0), 1.0);
         assert_eq!(Family::Poisson.variance(2.0), 2.0);
+        assert_eq!(Family::NegativeBinomial.variance(2.0), 6.0);
         assert_eq!(Family::Gamma.variance(2.0), 4.0);
         assert_eq!(Family::InverseGaussian.variance(2.0), 8.0);
         assert_eq!(Family::Bernoulli.variance(0.25), 0.1875);

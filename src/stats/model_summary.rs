@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 use statrs::distribution::{ChiSquared, ContinuousCDF};
+use std::collections::BTreeMap;
 
 use crate::compiler::GlmmFitMetadata;
 use crate::model::traits::MixedModelFit;
@@ -71,6 +72,9 @@ pub struct FitSummaryPayload {
     pub n_agq: Option<usize>,
     /// Fallback status for GLMM fitting, when a fallback path was used.
     pub fallback_status: Option<String>,
+    /// Fixed or estimated response-family parameters, when applicable.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub family_parameters: BTreeMap<String, f64>,
     /// Number of objective evaluations.
     pub feval: i64,
     /// Fixed-effect coefficient table.
@@ -128,7 +132,7 @@ impl ModelSummary {
 
     /// Construct a summary from a generalized linear mixed model.
     pub fn from_generalized_model(model: &GeneralizedLinearMixedModel) -> Self {
-        let scale = model.dispersion(false);
+        let scale = model.random_effect_scale();
         let residual_label = if model.family.has_dispersion() {
             Some("Dispersion")
         } else {
@@ -310,7 +314,7 @@ impl FitSummaryPayload {
 
     /// Build a fit-summary payload from a fitted or pre-fit generalized model.
     pub fn from_generalized_model(model: &GeneralizedLinearMixedModel) -> Self {
-        Self::from_parts(
+        let mut payload = Self::from_parts(
             "generalized_linear_mixed_model",
             model,
             model.family_kind().map(family_label),
@@ -322,7 +326,18 @@ impl FitSummaryPayload {
             ),
             model.varcorr(),
             ModelSummary::from_generalized_model(model),
-        )
+        );
+        if let Some(metadata) = model.compiler_artifact().glmm_fit_metadata.as_ref() {
+            payload.family_parameters = metadata.family_parameters.clone();
+        } else if let Some(theta) = model.negative_binomial_theta() {
+            payload
+                .family_parameters
+                .insert("negative_binomial_theta".to_string(), theta);
+            payload
+                .family_parameters
+                .insert("negative_binomial_variance_power".to_string(), 2.0);
+        }
+        payload
     }
 
     fn from_parts<M: MixedModelFit>(
@@ -370,6 +385,10 @@ impl FitSummaryPayload {
             fallback_status: glmm_metadata
                 .as_ref()
                 .and_then(|metadata| metadata.fallback_status.clone()),
+            family_parameters: glmm_metadata
+                .as_ref()
+                .map(|metadata| metadata.family_parameters.clone())
+                .unwrap_or_default(),
             feval: opt.feval,
             coefficients,
             varcorr,
@@ -384,6 +403,7 @@ fn family_label(family: crate::model::traits::Family) -> &'static str {
         crate::model::traits::Family::Bernoulli => "bernoulli",
         crate::model::traits::Family::Binomial => "binomial",
         crate::model::traits::Family::Poisson => "poisson",
+        crate::model::traits::Family::NegativeBinomial => "negative_binomial",
         crate::model::traits::Family::Gamma => "gamma",
         crate::model::traits::Family::InverseGaussian => "inverse_gaussian",
     }

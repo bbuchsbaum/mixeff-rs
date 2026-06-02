@@ -16,6 +16,10 @@ system optimizer dependency. Supported families and links are:
   proportions.
 - Bernoulli and Binomial with probit and complementary log-log links.
 - Poisson with log and square-root links.
+- Negative-binomial NB2 with log link when a positive fixed size parameter
+  `theta` is supplied by the caller. This is the
+  `MASS::negative.binomial(theta)`-style route; glmer.nb-style outer
+  estimation of `theta` is not part of this slice.
 - Gamma with log link.
 
 `Family::InverseGaussian` (and the Gaussian-GLMM non-identity link paths) are
@@ -28,6 +32,11 @@ the SemVer-covered GLMM contract for 1.0.
 
 Offsets are fixed linear-predictor offsets. Observation weights are supported
 where the family semantics define them, including binomial trial weights.
+Negative-binomial GLMMs use NB2 variance `V(mu) = mu + mu^2 / theta`.
+Artifacts and fit summaries record the fixed family parameter under
+`glmm_fit_metadata.family_parameters.negative_binomial_theta`; `dispersion()`
+returns this fixed `theta` for wrapper compatibility. It is not treated as a
+residual scale and must not rescale VarCorr output.
 
 `fast = true` is the supported fitting mode. It is a profiled fast-PIRLS
 approximation: the current engine profiles the fixed effects through PIRLS
@@ -136,6 +145,7 @@ optional development backend, not a required runtime dependency.
 Artifacts and summaries must record:
 
 - Family and link.
+- Family parameters, when applicable (currently fixed NB2 `theta`).
 - Objective approximation boundary (Laplace or AGQ semantics).
 - Requested/effective `n_agq`.
 - Optimizer name and backend.

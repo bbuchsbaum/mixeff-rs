@@ -71,6 +71,12 @@ pub struct GeneralizedLinearMixedModel {
     /// `dispersion(true)` returns sigma squared. Non-dispersion GLMM families
     /// keep this at 1.
     dispersion: f64,
+    /// Fixed NB2 size/dispersion parameter for negative-binomial GLMMs.
+    ///
+    /// This is the `theta` in `Var(Y | b) = mu + mu^2 / theta`. The first
+    /// supported NB slice accepts caller-supplied theta; glmer.nb-style theta
+    /// profiling is intentionally left for a later optimizer slice.
+    negative_binomial_theta: Option<f64>,
 
     /// Distribution family.
     pub family: Family,
@@ -197,6 +203,7 @@ pub struct GeneralizedLinearMixedModelBuilder<'a> {
     data: &'a DataFrame,
     family: Family,
     link: Option<LinkFunction>,
+    negative_binomial_theta: Option<f64>,
     weights: Option<Vec<f64>>,
     offset: Option<Vec<f64>>,
     compiler_policy: Option<CompilerPolicy>,
@@ -210,6 +217,7 @@ impl<'a> GeneralizedLinearMixedModelBuilder<'a> {
             data,
             family,
             link: None,
+            negative_binomial_theta: None,
             weights: None,
             offset: None,
             compiler_policy: None,
@@ -219,6 +227,17 @@ impl<'a> GeneralizedLinearMixedModelBuilder<'a> {
     /// Override the link (defaults to the family's canonical link).
     pub fn link(mut self, link: LinkFunction) -> Self {
         self.link = Some(link);
+        self
+    }
+
+    /// Supply a fixed NB2 size/dispersion parameter for
+    /// [`Family::NegativeBinomial`].
+    ///
+    /// This enables the smaller `MASS::negative.binomial(theta)`-style mode:
+    /// the model is estimated conditional on `theta`, and no outer theta
+    /// profiling is attempted.
+    pub fn negative_binomial_theta(mut self, theta: f64) -> Self {
+        self.negative_binomial_theta = Some(theta);
         self
     }
 
@@ -243,11 +262,12 @@ impl<'a> GeneralizedLinearMixedModelBuilder<'a> {
     /// Construct the (unfitted) model.
     pub fn build(self) -> Result<GeneralizedLinearMixedModel> {
         let policy = self.compiler_policy.unwrap_or_default();
-        let mut model = GeneralizedLinearMixedModel::new_with_compiler_policy(
+        let mut model = GeneralizedLinearMixedModel::new_with_policy_internal(
             self.formula,
             self.data,
             self.family,
             self.link,
+            self.negative_binomial_theta,
             policy,
         )?;
         if let Some(offset) = self.offset {
@@ -311,7 +331,28 @@ impl GeneralizedLinearMixedModel {
         family: Family,
         link: Option<LinkFunction>,
     ) -> Result<Self> {
-        Self::new_with_policy_internal(formula, data, family, link, CompilerPolicy::default())
+        Self::new_with_policy_internal(formula, data, family, link, None, CompilerPolicy::default())
+    }
+
+    /// Construct a negative-binomial NB2 GLMM with a fixed size parameter.
+    ///
+    /// `theta` must be positive and finite. It is not estimated by this
+    /// constructor; the fit is conditional on the supplied value, matching the
+    /// smaller `MASS::negative.binomial(theta)` route. The default link is log.
+    pub fn new_negative_binomial(
+        formula: Formula,
+        data: &DataFrame,
+        theta: f64,
+        link: Option<LinkFunction>,
+    ) -> Result<Self> {
+        Self::new_with_policy_internal(
+            formula,
+            data,
+            Family::NegativeBinomial,
+            link,
+            Some(theta),
+            CompilerPolicy::default(),
+        )
     }
 
     /// Construct a GLMM with per-observation case weights.
@@ -330,8 +371,14 @@ impl GeneralizedLinearMixedModel {
         link: Option<LinkFunction>,
         weights: Vec<f64>,
     ) -> Result<Self> {
-        let mut model =
-            Self::new_with_policy_internal(formula, data, family, link, CompilerPolicy::default())?;
+        let mut model = Self::new_with_policy_internal(
+            formula,
+            data,
+            family,
+            link,
+            None,
+            CompilerPolicy::default(),
+        )?;
         validate_case_weights(&weights, model.y.len())?;
         model.wt = weights;
         model.initialize_beta_from_response();
@@ -350,8 +397,14 @@ impl GeneralizedLinearMixedModel {
         link: Option<LinkFunction>,
         offset: Vec<f64>,
     ) -> Result<Self> {
-        let mut model =
-            Self::new_with_policy_internal(formula, data, family, link, CompilerPolicy::default())?;
+        let mut model = Self::new_with_policy_internal(
+            formula,
+            data,
+            family,
+            link,
+            None,
+            CompilerPolicy::default(),
+        )?;
         model.set_offset(offset)?;
         Ok(model)
     }
@@ -377,6 +430,7 @@ impl GeneralizedLinearMixedModel {
         data: &DataFrame,
         family: Family,
         link: Option<LinkFunction>,
+        negative_binomial_theta: Option<f64>,
         compiler_policy: CompilerPolicy,
     ) -> Result<Self> {
         let link = link.unwrap_or_else(|| family.canonical_link());
@@ -388,6 +442,8 @@ impl GeneralizedLinearMixedModel {
             ));
         }
         validate_supported_glmm_family_link(family, link)?;
+        let negative_binomial_theta =
+            validate_negative_binomial_theta(family, negative_binomial_theta)?;
 
         // Data-boundary seam: lower the stateless in-formula transforms into
         // synthetic numeric columns here too, so the GLMM response-domain
@@ -472,7 +528,8 @@ impl GeneralizedLinearMixedModel {
             y,
             offset,
             wt: Vec::new(),
-            dispersion: 1.0,
+            dispersion: negative_binomial_theta.unwrap_or(1.0),
+            negative_binomial_theta,
             family,
             link,
             devc: vec![0.0; agq_len],
@@ -493,7 +550,32 @@ impl GeneralizedLinearMixedModel {
         link: Option<LinkFunction>,
         compiler_policy: CompilerPolicy,
     ) -> Result<Self> {
-        Self::new_with_policy_internal(formula, data, family, link, compiler_policy)
+        Self::new_with_policy_internal(formula, data, family, link, None, compiler_policy)
+    }
+
+    /// Fixed NB2 theta used by a negative-binomial GLMM, when applicable.
+    pub fn negative_binomial_theta(&self) -> Option<f64> {
+        self.negative_binomial_theta
+    }
+
+    fn require_negative_binomial_theta(&self) -> Result<f64> {
+        self.negative_binomial_theta.ok_or_else(|| {
+            MixedModelError::InvalidArgument(
+                "negative-binomial GLMM requires a positive fixed theta".to_string(),
+            )
+        })
+    }
+
+    pub(crate) fn random_effect_scale(&self) -> f64 {
+        if self.family.has_dispersion() {
+            self.dispersion(false)
+        } else {
+            1.0
+        }
+    }
+
+    fn variance(&self, mu: f64) -> f64 {
+        glmm_variance(self.family, mu, self.negative_binomial_theta)
     }
 
     /// Round-trippable compiler artifact attached to the internal model.
@@ -618,7 +700,11 @@ impl GeneralizedLinearMixedModel {
         use rand_distr::{Binomial, Distribution, Gamma as GammaDistribution, Normal, Poisson};
 
         match self.family {
-            Family::Bernoulli | Family::Binomial | Family::Poisson | Family::Gamma => {}
+            Family::Bernoulli
+            | Family::Binomial
+            | Family::Poisson
+            | Family::NegativeBinomial
+            | Family::Gamma => {}
             Family::InverseGaussian | Family::Normal => {
                 return Err(MixedModelError::Unsupported(format!(
                     "{:?} GLMM parametric bootstrap is not implemented; no certified \
@@ -635,6 +721,11 @@ impl GeneralizedLinearMixedModel {
                 )));
             }
             Some(phi)
+        } else {
+            None
+        };
+        let negative_binomial_theta = if matches!(self.family, Family::NegativeBinomial) {
+            Some(self.require_negative_binomial_theta()?)
         } else {
             None
         };
@@ -697,6 +788,24 @@ impl GeneralizedLinearMixedModel {
                         })?
                         .sample(rng);
                 }
+                Family::NegativeBinomial => {
+                    let theta = negative_binomial_theta.expect("NB theta computed above");
+                    let mean = mu.max(f64::MIN_POSITIVE);
+                    let lambda = GammaDistribution::new(theta, mean / theta)
+                        .map_err(|e| {
+                            MixedModelError::InvalidArgument(format!(
+                                "negative-binomial gamma-mixture draw failed at observation {i}: {e}"
+                            ))
+                        })?
+                        .sample(rng);
+                    *yi = Poisson::new(lambda.max(f64::MIN_POSITIVE))
+                        .map_err(|e| {
+                            MixedModelError::InvalidArgument(format!(
+                                "negative-binomial poisson draw failed at observation {i}: {e}"
+                            ))
+                        })?
+                        .sample(rng);
+                }
                 Family::Gamma => {
                     let phi = gamma_phi.expect("Gamma phi computed above");
                     let mean = if mu > 0.0 {
@@ -728,7 +837,7 @@ impl GeneralizedLinearMixedModel {
 
     /// Variance-covariance summary for the fitted random effects.
     pub fn varcorr(&self) -> VarCorr {
-        let scale = self.dispersion(false);
+        let scale = self.random_effect_scale();
         let residual_sd = if self.family.has_dispersion() {
             Some(scale)
         } else {
@@ -795,6 +904,12 @@ impl GeneralizedLinearMixedModel {
                     2.0 * (y * (y / mu).ln() - (y - mu))
                 }
             }
+            Family::NegativeBinomial => negative_binomial_deviance_component(
+                y,
+                mu,
+                self.negative_binomial_theta
+                    .expect("negative-binomial GLMM stores fixed theta"),
+            ),
             Family::Normal => (y - mu).powi(2),
             Family::Gamma => {
                 // Gamma requires μ > 0, but an inverse-link Gamma GLMM can
@@ -895,15 +1010,17 @@ impl GeneralizedLinearMixedModel {
                 } else {
                     self.wt[obs]
                 };
-                (sqrtwts[obs], working_y[obs]) = pirls_working_observation_with_offset(
-                    self.family,
-                    self.link,
-                    y_obs,
-                    eta_obs,
-                    mu_obs,
-                    case_w,
-                    self.offset[obs],
-                );
+                (sqrtwts[obs], working_y[obs]) =
+                    pirls_working_observation_with_offset_and_family_parameters(
+                        self.family,
+                        self.link,
+                        self.negative_binomial_theta,
+                        y_obs,
+                        eta_obs,
+                        mu_obs,
+                        case_w,
+                        self.offset[obs],
+                    );
             }
 
             // --- Update the LMM with new IRLS weights ---
@@ -1129,6 +1246,19 @@ impl GeneralizedLinearMixedModel {
                 let count_term = if y == 0.0 { 0.0 } else { y * mu.ln() };
                 -2.0 * (count_term - mu - ln_gamma(y + 1.0))
             }
+            Family::NegativeBinomial => {
+                let theta = self
+                    .negative_binomial_theta
+                    .expect("negative-binomial GLMM stores fixed theta");
+                let loglik = ln_gamma(y + theta) - ln_gamma(theta) - ln_gamma(y + 1.0)
+                    + theta * (theta / (theta + mu)).ln()
+                    + if y == 0.0 {
+                        0.0
+                    } else {
+                        y * (mu / (theta + mu)).ln()
+                    };
+                -2.0 * loglik
+            }
             Family::Gamma => {
                 let phi = self.dispersion(true).max(f64::MIN_POSITIVE);
                 let shape = 1.0 / phi;
@@ -1152,8 +1282,9 @@ impl GeneralizedLinearMixedModel {
     /// objective and the same conditional objective with response constants
     /// retained.
     ///
-    /// For Poisson and binomial-family GLMMs this is an observation-only
-    /// constant. Dispersion families also depend on the current scale
+    /// For Poisson, negative-binomial, and binomial-family GLMMs this is an
+    /// observation-only constant once family parameters are fixed.
+    /// Dispersion families also depend on the current scale
     /// convention, so callers should treat those values as explicit metadata
     /// rather than as a cross-engine parity claim.
     pub fn response_constants_offset(&self) -> f64 {
@@ -2209,7 +2340,15 @@ impl GeneralizedLinearMixedModel {
     }
 
     fn record_glmm_fit_metadata(&mut self) {
-        let metadata = GlmmFitMetadata::from_opt_summary(&self.lmm.optsum);
+        let mut metadata = GlmmFitMetadata::from_opt_summary(&self.lmm.optsum);
+        if let Some(theta) = self.negative_binomial_theta {
+            metadata
+                .family_parameters
+                .insert("negative_binomial_theta".to_string(), theta);
+            metadata
+                .family_parameters
+                .insert("negative_binomial_variance_power".to_string(), 2.0);
+        }
         self.record_fast_pirls_parity_scope_diagnostic(&metadata);
         self.lmm.compiler_artifact.glmm_fit_metadata = Some(metadata);
         self.lmm.compiler_artifact.fixed_effect_covariance_matrix =
@@ -2783,6 +2922,9 @@ impl GeneralizedLinearMixedModel {
     }
 
     fn estimated_dispersion_scale(&self) -> f64 {
+        if let Some(theta) = self.negative_binomial_theta {
+            return theta;
+        }
         if !self.family.has_dispersion() {
             return 1.0;
         }
@@ -2797,7 +2939,7 @@ impl GeneralizedLinearMixedModel {
         let mut total = 0.0;
         for obs in 0..self.y.len() {
             let mu = self.mu[obs];
-            let variance = self.family.variance(mu);
+            let variance = self.variance(mu);
             if !variance.is_finite() || variance <= 0.0 {
                 continue;
             }
@@ -3707,6 +3849,7 @@ fn format_column_value(value: f64) -> String {
     }
 }
 
+#[cfg(test)]
 fn pirls_working_observation(
     family: Family,
     link: LinkFunction,
@@ -3715,9 +3858,21 @@ fn pirls_working_observation(
     mu: f64,
     case_weight: f64,
 ) -> (f64, f64) {
+    pirls_working_observation_with_family_parameters(family, link, None, y, eta, mu, case_weight)
+}
+
+fn pirls_working_observation_with_family_parameters(
+    family: Family,
+    link: LinkFunction,
+    negative_binomial_theta: Option<f64>,
+    y: f64,
+    eta: f64,
+    mu: f64,
+    case_weight: f64,
+) -> (f64, f64) {
     let (working_mu, eta_for_derivative) = bounded_pirls_mean_and_eta(family, link, mu, eta);
     let dmu_deta = link.mu_eta(eta_for_derivative);
-    let var_mu = family.variance(working_mu);
+    let var_mu = glmm_variance(family, working_mu, negative_binomial_theta);
     let weight = if dmu_deta.is_finite() && var_mu.is_finite() && var_mu > 0.0 {
         case_weight * dmu_deta * dmu_deta / var_mu
     } else {
@@ -3731,6 +3886,7 @@ fn pirls_working_observation(
     (weight.max(0.0).sqrt(), eta + resid)
 }
 
+#[cfg(test)]
 fn pirls_working_observation_with_offset(
     family: Family,
     link: LinkFunction,
@@ -3745,13 +3901,35 @@ fn pirls_working_observation_with_offset(
     (sqrt_weight, working_response - offset)
 }
 
+fn pirls_working_observation_with_offset_and_family_parameters(
+    family: Family,
+    link: LinkFunction,
+    negative_binomial_theta: Option<f64>,
+    y: f64,
+    eta: f64,
+    mu: f64,
+    case_weight: f64,
+    offset: f64,
+) -> (f64, f64) {
+    let (sqrt_weight, working_response) = pirls_working_observation_with_family_parameters(
+        family,
+        link,
+        negative_binomial_theta,
+        y,
+        eta,
+        mu,
+        case_weight,
+    );
+    (sqrt_weight, working_response - offset)
+}
+
 fn bounded_pirls_mean_and_eta(family: Family, link: LinkFunction, mu: f64, eta: f64) -> (f64, f64) {
     const BOUNDED_MEAN_EPS: f64 = 1e-15;
     const LOG_LINK_ETA_BOUND: f64 = 30.0;
     if matches!(family, Family::Bernoulli | Family::Binomial) {
         let bounded_mu = mu.clamp(BOUNDED_MEAN_EPS, 1.0 - BOUNDED_MEAN_EPS);
         (bounded_mu, link.link(bounded_mu))
-    } else if family == Family::Poisson {
+    } else if matches!(family, Family::Poisson | Family::NegativeBinomial) {
         match link {
             LinkFunction::Log => {
                 let bounded_eta = eta.clamp(-LOG_LINK_ETA_BOUND, LOG_LINK_ETA_BOUND);
@@ -3776,6 +3954,26 @@ fn bounded_pirls_mean_and_eta(family: Family, link: LinkFunction, mu: f64, eta: 
     } else {
         (mu, eta)
     }
+}
+
+fn glmm_variance(family: Family, mu: f64, negative_binomial_theta: Option<f64>) -> f64 {
+    match family {
+        Family::NegativeBinomial => {
+            let theta = negative_binomial_theta
+                .unwrap_or(1.0)
+                .max(f64::MIN_POSITIVE);
+            mu + mu * mu / theta
+        }
+        _ => family.variance(mu),
+    }
+}
+
+fn negative_binomial_deviance_component(y: f64, mu: f64, theta: f64) -> f64 {
+    let mu = mu.max(f64::MIN_POSITIVE);
+    let theta = theta.max(f64::MIN_POSITIVE);
+    let first = if y == 0.0 { 0.0 } else { y * (y / mu).ln() };
+    let second = (y + theta) * ((y + theta) / (mu + theta)).ln();
+    2.0 * (first - second)
 }
 
 fn pirls_converged(obj: f64, accepted_obj: f64, tol: f64) -> bool {
@@ -3825,6 +4023,7 @@ fn validate_supported_glmm_family_link(family: Family, link: LinkFunction) -> Re
             )
         }
         Family::Poisson => matches!(link, LinkFunction::Log | LinkFunction::Sqrt),
+        Family::NegativeBinomial => matches!(link, LinkFunction::Log),
         // Dispersion-family GLMMs predate this explicit binary/Poisson support
         // matrix; keep their existing sensible links while preserving the
         // Normal+Identity LMM redirect above.
@@ -3843,6 +4042,28 @@ fn validate_supported_glmm_family_link(family: Family, link: LinkFunction) -> Re
             family: family_label(family).to_string(),
             link: link_label(link).to_string(),
         })
+    }
+}
+
+fn validate_negative_binomial_theta(family: Family, theta: Option<f64>) -> Result<Option<f64>> {
+    match (family, theta) {
+        (Family::NegativeBinomial, Some(theta)) if theta.is_finite() && theta > 0.0 => {
+            Ok(Some(theta))
+        }
+        (Family::NegativeBinomial, Some(theta)) => Err(MixedModelError::InvalidArgument(format!(
+            "negative-binomial fixed theta must be positive and finite (got {theta})"
+        ))),
+        (Family::NegativeBinomial, None) => Err(MixedModelError::InvalidArgument(
+            "negative-binomial GLMM requires a positive fixed theta; use \
+             GeneralizedLinearMixedModel::new_negative_binomial(...) or \
+             GeneralizedLinearMixedModelBuilder::negative_binomial_theta(...)"
+                .to_string(),
+        )),
+        (_, Some(_)) => Err(MixedModelError::InvalidArgument(
+            "negative-binomial theta can only be supplied with Family::NegativeBinomial"
+                .to_string(),
+        )),
+        (_, None) => Ok(None),
     }
 }
 
@@ -3869,6 +4090,11 @@ fn validate_glmm_response_domain(family: Family, link: LinkFunction, y: &[f64]) 
         if family == Family::Poisson && value < 0.0 {
             return Err(MixedModelError::InvalidArgument(format!(
                 "poisson GLMM response must be non-negative; index {idx} has {value}"
+            )));
+        }
+        if family == Family::NegativeBinomial && !is_nonnegative_integer_response(value) {
+            return Err(MixedModelError::InvalidArgument(format!(
+                "negative-binomial GLMM response must be a non-negative integer count; index {idx} has {value}"
             )));
         }
         if matches!(family, Family::Gamma | Family::InverseGaussian) && value <= 0.0 {
@@ -3903,7 +4129,9 @@ fn initial_response_mean(family: Family, y: &DVector<f64>, weights: &[f64]) -> O
     let mean = weighted_sum / weight_sum;
     Some(match family {
         Family::Bernoulli | Family::Binomial => mean.clamp(1e-6, 1.0 - 1e-6),
-        Family::Poisson | Family::Gamma | Family::InverseGaussian => mean.max(1e-6),
+        Family::Poisson | Family::NegativeBinomial | Family::Gamma | Family::InverseGaussian => {
+            mean.max(1e-6)
+        }
         Family::Normal => mean.max(0.0),
     })
 }
@@ -3911,7 +4139,9 @@ fn initial_response_mean(family: Family, y: &DVector<f64>, weights: &[f64]) -> O
 fn initial_mean_for_link(family: Family, mean: f64) -> f64 {
     match family {
         Family::Bernoulli | Family::Binomial => mean.clamp(1e-6, 1.0 - 1e-6),
-        Family::Poisson | Family::Gamma | Family::InverseGaussian => mean.max(1e-6),
+        Family::Poisson | Family::NegativeBinomial | Family::Gamma | Family::InverseGaussian => {
+            mean.max(1e-6)
+        }
         Family::Normal => mean.max(0.0),
     }
 }
@@ -3922,6 +4152,7 @@ fn family_label(family: Family) -> &'static str {
         Family::Bernoulli => "bernoulli",
         Family::Binomial => "binomial",
         Family::Poisson => "poisson",
+        Family::NegativeBinomial => "negative_binomial",
         Family::Gamma => "gamma",
         Family::InverseGaussian => "inverse_gaussian",
     }
@@ -4039,6 +4270,9 @@ impl MixedModelFit for GeneralizedLinearMixedModel {
     }
 
     fn dispersion(&self, sqr: bool) -> f64 {
+        if let Some(theta) = self.negative_binomial_theta {
+            return theta;
+        }
         if sqr {
             self.dispersion * self.dispersion
         } else {
@@ -4070,6 +4304,7 @@ mod tests {
     use crate::model::data::DataFrame;
     use crate::model::linear::FitToleranceOverrides;
     use approx::assert_relative_eq;
+    use rand::SeedableRng;
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
     fn agq_poisson_fixture() -> GeneralizedLinearMixedModel {
@@ -4605,6 +4840,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_negative_binomial_pirls_uses_fixed_theta_variance() {
+        let theta = 4.0;
+        let eta = 2.0_f64.ln();
+        let mu = 2.0;
+        let (sqrtw, z) = pirls_working_observation_with_family_parameters(
+            Family::NegativeBinomial,
+            LinkFunction::Log,
+            Some(theta),
+            3.0,
+            eta,
+            mu,
+            1.0,
+        );
+
+        let expected_variance = mu + mu * mu / theta;
+        let expected_sqrtw = (mu * mu / expected_variance).sqrt();
+        assert_relative_eq!(sqrtw, expected_sqrtw, epsilon = 1e-12);
+        assert_relative_eq!(z, eta + 0.5, epsilon = 1e-12);
+    }
+
     fn gamma_dispersion_fixture() -> DataFrame {
         let mut y = Vec::new();
         let mut x = Vec::new();
@@ -4616,6 +4872,30 @@ mod tests {
                 let eta = 1.2 + 0.25 * xv + group_effects[g];
                 let wiggle = 1.0 + 0.06 * ((g + obs) % 3) as f64;
                 y.push(eta.exp() * wiggle);
+                x.push(xv);
+                group.push(format!("g{}", g + 1));
+            }
+        }
+
+        let mut data = DataFrame::new();
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_categorical("group", group).unwrap();
+        data
+    }
+
+    fn negative_binomial_fixture() -> DataFrame {
+        let mut y = Vec::new();
+        let mut x = Vec::new();
+        let mut group = Vec::new();
+        let group_effects = [-0.35, 0.1, 0.25, -0.05];
+        for g in 0..4 {
+            for obs in 0..6 {
+                let xv = obs as f64 - 2.5;
+                let eta = 1.0 + 0.18 * xv + group_effects[g];
+                let base = eta.exp();
+                let overdispersion_bump = if (g + obs) % 3 == 0 { 2.0 } else { 0.0 };
+                y.push((base + overdispersion_bump).round().max(0.0));
                 x.push(xv);
                 group.push(format!("g{}", g + 1));
             }
@@ -4671,6 +4951,110 @@ mod tests {
         assert_eq!(model.family, Family::Gamma);
         assert_eq!(model.dispersion(false), 1.0);
         assert_eq!(model.dispersion(true), 1.0);
+    }
+
+    #[test]
+    fn test_negative_binomial_constructor_requires_fixed_theta() {
+        let data = negative_binomial_fixture();
+        let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
+
+        let missing_theta = GeneralizedLinearMixedModel::new(
+            formula.clone(),
+            &data,
+            Family::NegativeBinomial,
+            None,
+        )
+        .expect_err("plain NB constructor should require fixed theta");
+        match missing_theta {
+            MixedModelError::InvalidArgument(message) => {
+                assert!(message.contains("negative-binomial"));
+                assert!(message.contains("fixed theta"));
+            }
+            other => panic!("expected InvalidArgument error, got {other:?}"),
+        }
+
+        let bad_theta =
+            GeneralizedLinearMixedModel::new_negative_binomial(formula.clone(), &data, 0.0, None)
+                .expect_err("NB theta must be positive");
+        match bad_theta {
+            MixedModelError::InvalidArgument(message) => {
+                assert!(message.contains("positive"));
+                assert!(message.contains("theta"));
+            }
+            other => panic!("expected InvalidArgument error, got {other:?}"),
+        }
+
+        let bad_link = GeneralizedLinearMixedModel::new_negative_binomial(
+            formula,
+            &data,
+            2.5,
+            Some(LinkFunction::Sqrt),
+        )
+        .expect_err("fixed-theta NB only supports log link in this slice");
+        match bad_link {
+            MixedModelError::UnsupportedFamilyLink { family, link } => {
+                assert_eq!(family, "negative_binomial");
+                assert_eq!(link, "sqrt");
+            }
+            other => panic!("expected UnsupportedFamilyLink error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_negative_binomial_fixed_theta_fit_records_metadata() {
+        let data = negative_binomial_fixture();
+        let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
+        let mut model =
+            GeneralizedLinearMixedModel::new_negative_binomial(formula, &data, 2.5, None).unwrap();
+        model.lmm.optsum.max_feval = 80;
+
+        model.fit_with_options(true, 1, false).unwrap();
+
+        assert_eq!(model.family, Family::NegativeBinomial);
+        assert_eq!(model.link, LinkFunction::Log);
+        assert_eq!(model.negative_binomial_theta(), Some(2.5));
+        assert_eq!(model.dispersion(false), 2.5);
+        assert_eq!(model.dispersion(true), 2.5);
+        assert_eq!(model.dof(), model.lmm.feterm.rank + model.lmm.parmap.len());
+        assert!(model.objective().is_finite());
+        assert!(model.loglikelihood().is_finite());
+
+        let metadata = model
+            .compiler_artifact()
+            .glmm_fit_metadata
+            .as_ref()
+            .expect("fitted NB GLMM should record fit metadata");
+        assert_eq!(
+            metadata.family_parameters.get("negative_binomial_theta"),
+            Some(&2.5)
+        );
+        assert_eq!(
+            metadata
+                .family_parameters
+                .get("negative_binomial_variance_power"),
+            Some(&2.0)
+        );
+        assert_eq!(
+            model
+                .compiler_artifact()
+                .model_boundary
+                .response_distribution,
+            "negative_binomial"
+        );
+        let payload = crate::stats::FitSummaryPayload::from_generalized_model(&model);
+        assert_eq!(
+            payload.family_parameters.get("negative_binomial_theta"),
+            Some(&2.5)
+        );
+
+        let vc = model.varcorr();
+        assert!(vc.residual_sd.is_none());
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let y_sim = model.simulate_response(&mut rng).unwrap();
+        assert_eq!(y_sim.len(), model.nobs());
+        assert!(y_sim
+            .iter()
+            .all(|value| is_nonnegative_integer_response(*value)));
     }
 
     #[test]

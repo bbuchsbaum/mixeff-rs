@@ -67,9 +67,9 @@ pub fn restore_replicates<R: Read>(
 /// fresh draw of the random effects (see
 /// [`GeneralizedLinearMixedModel::simulate_response`]), refit a clone of the
 /// template GLMM, and record its objective, dispersion, β, standard errors,
-/// and θ. Supported for Bernoulli, Binomial, Poisson, and Gamma responses.
-/// InverseGaussian and Normal-as-GLM are refused until they have certified
-/// family-specific response simulators.
+/// and θ. Supported for Bernoulli, Binomial, Poisson, fixed-theta
+/// NegativeBinomial, and Gamma responses. InverseGaussian and Normal-as-GLM
+/// are refused until they have certified family-specific response simulators.
 ///
 /// A replicate whose refit fails numerically is recorded with `NaN`
 /// objective/σ/SE (matching the LMM [`parametricbootstrap`] convention) so
@@ -88,7 +88,11 @@ pub fn parametricbootstrap_glmm<R: rand::Rng>(
     }
 
     match model.family {
-        Family::Bernoulli | Family::Binomial | Family::Poisson | Family::Gamma => {}
+        Family::Bernoulli
+        | Family::Binomial
+        | Family::Poisson
+        | Family::NegativeBinomial
+        | Family::Gamma => {}
         Family::InverseGaussian | Family::Normal => {
             return Err(MixedModelError::Unsupported(format!(
                 "{:?} GLMM parametric bootstrap is not implemented; no certified \

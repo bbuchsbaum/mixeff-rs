@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::model::data::DataFrame;
 use crate::types::{ConvergenceStatus, OptSummary};
@@ -165,7 +166,7 @@ impl ModelBoundary {
 /// This is intentionally separate from optimizer certificates: it records which
 /// GLMM objective family was actually returned, even when a failed joint
 /// attempt falls back to the supported fast-PIRLS path.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GlmmFitMetadata {
     pub estimation_method: String,
     pub objective_definition: String,
@@ -187,6 +188,8 @@ pub struct GlmmFitMetadata {
     pub caller_set_fields: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_status: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub family_parameters: BTreeMap<String, f64>,
 }
 
 impl GlmmFitMetadata {
@@ -245,6 +248,7 @@ impl GlmmFitMetadata {
                 .then(|| opt.optimizer_source_name().to_string()),
             caller_set_fields: opt.caller_set_fields.clone(),
             fallback_status: fallback_status.map(str::to_string),
+            family_parameters: BTreeMap::new(),
         }
     }
 }
