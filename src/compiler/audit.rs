@@ -2941,6 +2941,38 @@ mod tests {
     }
 
     #[test]
+    fn optimizer_certificate_accepts_joint_radius_stop() {
+        let params = vec![0.4, 0.8];
+        let lower_bounds = vec![f64::NEG_INFINITY, 0.0];
+        let mut optsum = OptSummary::new(params.clone());
+        optsum.return_value = "JOINT_LAPLACE:RADIUS_REACHED".to_string();
+        optsum.finitial = 23.4;
+        optsum.fmin = 22.8;
+        optsum.feval = 18;
+        optsum.max_feval = 200;
+        optsum.final_params = params.clone();
+        optsum.final_trust_radius = Some(1.0e-5);
+
+        let certificate = OptimizerCertificate::from_opt_summary_with_context(
+            &optsum,
+            &params,
+            &lower_bounds,
+            Some(64),
+        );
+
+        assert!(
+            certificate.evidence.optimizer_stop.acceptable_stop,
+            "TrustBQ radius convergence should be accepted after unwrapping the joint GLMM status"
+        );
+        assert_eq!(certificate.status, FitStatus::ConvergedInterior);
+        assert!(!certificate.evidence.optimizer_stop.budget_exhausted);
+        assert_eq!(
+            certificate.evidence.optimizer_stop.return_code.as_deref(),
+            Some("JOINT_LAPLACE:RADIUS_REACHED")
+        );
+    }
+
+    #[test]
     fn design_audit_reports_full_rank_fixed_effects() {
         let formula = parse_formula("y ~ x + (1 | subject)").unwrap();
         let semantic = compile_formula_ir(&formula);
@@ -4541,7 +4573,7 @@ fn optimizer_stop_is_acceptable(return_value: &str) -> bool {
     }
     matches!(
         return_value,
-        "SUCCESS" | "FTOL_REACHED" | "XTOL_REACHED" | "STOPVAL_REACHED"
+        "SUCCESS" | "FTOL_REACHED" | "XTOL_REACHED" | "STOPVAL_REACHED" | "RADIUS_REACHED"
     )
 }
 

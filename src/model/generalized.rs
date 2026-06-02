@@ -3909,7 +3909,7 @@ fn joint_certificate_requires_fallback(joint_certificate: &OptimizerCertificate)
     !joint_certificate.evidence.optimizer_stop.acceptable_stop
         || matches!(
             joint_certificate.status,
-            crate::compiler::FitStatus::NotOptimized | crate::compiler::FitStatus::NotAssessed
+            crate::compiler::FitStatus::NotOptimized
         )
 }
 
@@ -4861,6 +4861,10 @@ mod tests {
         );
 
         assert_eq!(certificate.status, crate::compiler::FitStatus::NotOptimized);
+        assert!(
+            joint_certificate_requires_fallback(&certificate),
+            "assessed stationarity failure should still trigger labelled fallback"
+        );
         assert!(certificate.checks.iter().any(|check| {
             matches!(
                 check,
@@ -4954,6 +4958,55 @@ mod tests {
                 .return_value
                 .starts_with("JOINT_LAPLACE_FALLBACK_FAST_PIRLS"),
             "non-finite joint objective should return the labelled fallback result"
+        );
+    }
+
+    #[test]
+    fn joint_glmm_not_assessed_stationarity_keeps_joint_candidate() {
+        let params = vec![1.2, -0.25, 0.42, 0.68];
+        let lower_bounds = vec![f64::NEG_INFINITY, f64::NEG_INFINITY, 0.0, 0.0];
+
+        let mut optsum = OptSummary::new(params.clone());
+        optsum.optimizer = Optimizer::TrustBq;
+        optsum.backend = Optimizer::TrustBq.canonical_backend();
+        optsum.return_value = "JOINT_LAPLACE:FTOL_REACHED".to_string();
+        optsum.finitial = 1137.42;
+        optsum.fmin = 1136.50;
+        optsum.feval = 578;
+        optsum.max_feval = 1140;
+        optsum.final_params = params.clone();
+
+        let mut certificate = OptimizerCertificate::from_opt_summary_with_context(
+            &optsum,
+            &params,
+            &lower_bounds,
+            Some(1427),
+        );
+        certificate.status = crate::compiler::FitStatus::NotAssessed;
+        certificate.mark_derivative_checks_not_assessed(
+            "objective gradient is not exposed by the current derivative-free optimizer path",
+        );
+
+        assert!(
+            certificate.evidence.optimizer_stop.acceptable_stop,
+            "an acceptable optimizer stop with unassessed derivatives is not a hard optimizer failure"
+        );
+        assert!(
+            matches!(
+                certificate.evidence.gradient.method,
+                EvidenceMethod::NotAssessed { .. }
+            ),
+            "regression must exercise the no-gradient/not-assessed derivative path"
+        );
+        assert!(
+            !joint_certificate_requires_fallback(&certificate),
+            "not-assessed stationarity should not be conflated with an assessed optimizer failure"
+        );
+
+        let fallback = agq_poisson_fixture();
+        assert!(
+            uncertified_joint_fallback(&certificate, &optsum, Some(fallback)).is_none(),
+            "acceptable joint candidates with unassessed stationarity should remain joint fits"
         );
     }
 
