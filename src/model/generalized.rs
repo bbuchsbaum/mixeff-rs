@@ -10,7 +10,6 @@
 
 use nalgebra::{DMatrix, DVector};
 use statrs::function::gamma::ln_gamma;
-#[cfg(not(feature = "nlopt"))]
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -23,9 +22,8 @@ use crate::compiler::{
 use crate::error::{MixedModelError, Result};
 use crate::formula::Formula;
 use crate::model::data::DataFrame;
-use crate::model::linear::{CovarianceKktClassification, LinearMixedModel};
+use crate::model::linear::{CovarianceKktClassification, LinearMixedModel, OptimizerControl};
 use crate::model::traits::{Family, LinkFunction, MixedModelFit, RandomEffectTermInfo};
-#[cfg(not(feature = "nlopt"))]
 use crate::optimizer::trust_bq::{
     minimize_with_progress as minimize_trust_bq_with_progress, TrustBqOptions, TrustBqProgress,
     TrustBqStopReason,
@@ -86,6 +84,71 @@ pub struct GeneralizedLinearMixedModel {
     sd: Vec<f64>,
     /// Multipliers for AGQ.
     mult: Vec<f64>,
+}
+
+/// Options controlling how a GLMM is fit.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct GlmmFitOptions {
+    /// `true` for the profiled fast-PIRLS path; `false` for labelled joint
+    /// Laplace/AGQ.
+    pub fast: bool,
+    /// Number of adaptive Gauss-Hermite quadrature points. `1` means Laplace.
+    pub n_agq: usize,
+    /// Whether to emit verbose progress from paths that support it.
+    pub verbose: bool,
+    /// Optional audit-recorded optimizer controls.
+    pub optimizer_control: OptimizerControl,
+}
+
+impl Default for GlmmFitOptions {
+    fn default() -> Self {
+        Self {
+            fast: true,
+            n_agq: 1,
+            verbose: false,
+            optimizer_control: OptimizerControl::default(),
+        }
+    }
+}
+
+impl GlmmFitOptions {
+    /// Default fast-PIRLS Laplace options.
+    pub fn fast_laplace() -> Self {
+        Self::default()
+    }
+
+    /// Labelled joint-Laplace options.
+    pub fn joint_laplace() -> Self {
+        Self {
+            fast: false,
+            ..Self::default()
+        }
+    }
+
+    /// Set the AGQ point count.
+    pub fn with_n_agq(mut self, n_agq: usize) -> Self {
+        self.n_agq = n_agq;
+        self
+    }
+
+    /// Set verbose progress reporting.
+    pub fn with_verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
+    }
+
+    /// Attach optimizer controls to these GLMM fit options.
+    pub fn with_optimizer_control(mut self, control: OptimizerControl) -> Self {
+        self.optimizer_control = control;
+        self
+    }
+
+    /// Request a specific optimizer while leaving other controls at default.
+    pub fn with_optimizer(mut self, optimizer: Optimizer) -> Self {
+        self.optimizer_control = self.optimizer_control.with_optimizer(optimizer);
+        self
+    }
 }
 
 /// Fluent builder for [`GeneralizedLinearMixedModel`].
@@ -202,6 +265,16 @@ impl<'a> GeneralizedLinearMixedModelBuilder<'a> {
     pub fn fit(self) -> Result<GeneralizedLinearMixedModel> {
         let mut model = self.build()?;
         model.fit()?;
+        Ok(model)
+    }
+
+    /// Construct and fit the model in one step with explicit GLMM options.
+    pub fn fit_with_glmm_options(
+        self,
+        options: GlmmFitOptions,
+    ) -> Result<GeneralizedLinearMixedModel> {
+        let mut model = self.build()?;
+        model.fit_with_glmm_options(options)?;
         Ok(model)
     }
 }
@@ -1444,7 +1517,7 @@ impl GeneralizedLinearMixedModel {
 
     /// Fit the GLMM.
     pub fn fit(&mut self) -> Result<&mut Self> {
-        self.fit_with_options(true, 1, false)
+        self.fit_with_glmm_options(GlmmFitOptions::default())
     }
 
     /// Refit the GLMM to a new response vector from the recorded initial θ.
@@ -1500,17 +1573,48 @@ impl GeneralizedLinearMixedModel {
         n_agq: usize,
         verbose: bool,
     ) -> Result<&mut Self> {
+        self.fit_with_glmm_options(GlmmFitOptions {
+            fast,
+            n_agq,
+            verbose,
+            optimizer_control: OptimizerControl::default(),
+        })
+    }
+
+    /// Fit with explicit GLMM options.
+    pub fn fit_with_glmm_options(&mut self, options: GlmmFitOptions) -> Result<&mut Self> {
+        let GlmmFitOptions {
+            fast,
+            n_agq,
+            verbose,
+            optimizer_control,
+        } = options;
         if let Err(error) = self.validate_agq(n_agq) {
             self.record_invalid_agq_diagnostic(n_agq, &error.to_string());
             return Err(error);
         }
-        if !fast {
-            return self.fit_joint_glmm_with_response_constants(n_agq, verbose);
-        }
         if self.lmm.optsum.feval > 0 {
             return Err(MixedModelError::AlreadyFitted);
         }
+        self.lmm.apply_optimizer_control(&optimizer_control)?;
+        if let Some(start_theta) = &optimizer_control.start_theta {
+            self.theta = start_theta.clone();
+        }
+        if !fast {
+            return self.fit_joint_glmm_with_response_constants(n_agq, verbose);
+        }
         self.fit_with_options_impl(n_agq, verbose)
+    }
+
+    fn configure_profile_start_optimizer(&mut self) {
+        let optimizer = default_fast_glmm_optimizer();
+        self.lmm.optsum.optimizer = optimizer;
+        self.lmm.optsum.backend = optimizer.canonical_backend();
+        self.lmm.optsum.optimizer_source = crate::types::OptimizerSource::Auto;
+        self.lmm
+            .optsum
+            .caller_set_fields
+            .retain(|field| field != "optimizer");
     }
 
     /// Labelled joint GLMM Laplace fit.
@@ -1541,17 +1645,33 @@ impl GeneralizedLinearMixedModel {
             return Err(MixedModelError::AlreadyFitted);
         }
         self.validate_agq(n_agq)?;
+        let joint_optimizer = self
+            .lmm
+            .optsum
+            .caller_selected_optimizer()
+            .unwrap_or_else(default_joint_glmm_optimizer);
+        validate_joint_glmm_optimizer(joint_optimizer)?;
+        let saved_optimizer_source = self.lmm.optsum.optimizer_source;
+        let saved_caller_set_fields = self.lmm.optsum.caller_set_fields.clone();
 
         // Use the supported fast path as the deterministic start. This keeps
         // the joint optimizer focused on whether [β; θ] can improve the same
         // included-constants objective for the requested approximation.
+        if self.lmm.optsum.caller_selected_optimizer().is_some() {
+            self.configure_profile_start_optimizer();
+        }
         self.fit_with_options_impl(n_agq, verbose)?;
         let fallback_fast_pirls = self.clone();
         let start_beta = self.beta.as_slice().to_vec();
         let start_theta = self.theta.clone();
         let profiled_start_objective = self.deviance_with_response_constants(n_agq);
         let n_joint_params = start_beta.len() + start_theta.len();
-        let maxeval = joint_glmm_configured_maxeval(&self.lmm.optsum, n_joint_params);
+        self.lmm.optsum.optimizer = joint_optimizer;
+        self.lmm.optsum.backend = joint_optimizer.canonical_backend();
+        self.lmm.optsum.optimizer_source = saved_optimizer_source;
+        self.lmm.optsum.caller_set_fields = saved_caller_set_fields;
+        let maxeval =
+            joint_glmm_configured_maxeval_for(&self.lmm.optsum, n_joint_params, joint_optimizer);
         self.fit_joint_glmm_from_start(
             start_beta,
             start_theta,
@@ -1562,8 +1682,70 @@ impl GeneralizedLinearMixedModel {
         )
     }
 
-    #[cfg(feature = "nlopt")]
     fn fit_joint_glmm_from_start(
+        &mut self,
+        start_beta: Vec<f64>,
+        start_theta: Vec<f64>,
+        profiled_start_objective: f64,
+        n_agq: usize,
+        maxeval: u32,
+        fallback_fast_pirls: Option<Self>,
+    ) -> Result<&mut Self> {
+        let optimizer = self
+            .lmm
+            .optsum
+            .caller_selected_optimizer()
+            .unwrap_or_else(|| match self.lmm.optsum.optimizer {
+                Optimizer::TrustBq | Optimizer::NloptBobyqa => self.lmm.optsum.optimizer,
+                _ => default_joint_glmm_optimizer(),
+            });
+        self.lmm.optsum.optimizer = optimizer;
+        self.lmm.optsum.backend = optimizer.canonical_backend();
+        match optimizer {
+            Optimizer::TrustBq => self.fit_joint_glmm_from_start_trust_bq(
+                start_beta,
+                start_theta,
+                profiled_start_objective,
+                n_agq,
+                maxeval,
+                fallback_fast_pirls,
+            ),
+            Optimizer::NloptBobyqa => {
+                #[cfg(feature = "nlopt")]
+                {
+                    self.fit_joint_glmm_from_start_nlopt_bobyqa(
+                        start_beta,
+                        start_theta,
+                        profiled_start_objective,
+                        n_agq,
+                        maxeval,
+                        fallback_fast_pirls,
+                    )
+                }
+                #[cfg(not(feature = "nlopt"))]
+                {
+                    let _ = (
+                        start_beta,
+                        start_theta,
+                        profiled_start_objective,
+                        n_agq,
+                        maxeval,
+                        fallback_fast_pirls,
+                    );
+                    Err(MixedModelError::Unsupported(
+                        "joint GLMM NloptBobyqa requires the `nlopt` feature; rebuild with `--features nlopt` or pick TrustBq"
+                            .to_string(),
+                    ))
+                }
+            }
+            optimizer => Err(MixedModelError::Unsupported(format!(
+                "Optimizer::{optimizer:?} is not wired for joint GLMM fits; pick TrustBq or NloptBobyqa where available"
+            ))),
+        }
+    }
+
+    #[cfg(feature = "nlopt")]
+    fn fit_joint_glmm_from_start_nlopt_bobyqa(
         &mut self,
         start_beta: Vec<f64>,
         start_theta: Vec<f64>,
@@ -1586,6 +1768,27 @@ impl GeneralizedLinearMixedModel {
         self.lmm.optsum.optimizer = Optimizer::NloptBobyqa;
         self.lmm.optsum.backend = Optimizer::NloptBobyqa.canonical_backend();
         self.lmm.optsum.finitial = profiled_start_objective;
+        let ftol_rel = if self.lmm.optsum.caller_set_field("ftol_rel") {
+            self.lmm.optsum.ftol_rel
+        } else {
+            1e-10
+        };
+        let ftol_abs = if self.lmm.optsum.caller_set_field("ftol_abs") {
+            self.lmm.optsum.ftol_abs
+        } else {
+            1e-7
+        };
+        let xtol_rel = self
+            .lmm
+            .optsum
+            .caller_set_field("xtol_rel")
+            .then_some(self.lmm.optsum.xtol_rel);
+        let mut initial_step = vec![0.1; n_beta];
+        if self.lmm.optsum.caller_set_field("initial_step") {
+            initial_step.extend(self.lmm.optsum.initial_step.clone());
+        } else {
+            initial_step.extend(vec![0.5; n_theta]);
+        }
 
         let feval_count = std::cell::Cell::new(0i64);
         let fit_log: Rc<RefCell<Vec<FitLogEntry>>> = Rc::new(RefCell::new(Vec::new()));
@@ -1610,11 +1813,12 @@ impl GeneralizedLinearMixedModel {
             (),
         );
         optimizer.set_lower_bounds(&lower_bounds).ok();
-        optimizer.set_ftol_rel(1e-10).ok();
-        optimizer.set_ftol_abs(1e-7).ok();
+        optimizer.set_ftol_rel(ftol_rel).ok();
+        optimizer.set_ftol_abs(ftol_abs).ok();
+        if let Some(xtol_rel) = xtol_rel {
+            optimizer.set_xtol_rel(xtol_rel).ok();
+        }
         optimizer.set_maxeval(maxeval).ok();
-        let mut initial_step = vec![0.1; n_beta];
-        initial_step.extend(vec![0.5; n_theta]);
         optimizer.set_initial_step(&initial_step).ok();
 
         let mut params = initial;
@@ -1692,8 +1896,7 @@ impl GeneralizedLinearMixedModel {
         Ok(me)
     }
 
-    #[cfg(not(feature = "nlopt"))]
-    fn fit_joint_glmm_from_start(
+    fn fit_joint_glmm_from_start_trust_bq(
         &mut self,
         start_beta: Vec<f64>,
         start_theta: Vec<f64>,
@@ -2082,18 +2285,18 @@ impl GeneralizedLinearMixedModel {
         match self.lmm.optsum.optimizer {
             Optimizer::PatternSearch => self.fit_native_pattern_search(n_agq),
             Optimizer::Cobyla => self.fit_native_cobyla(n_agq),
-            Optimizer::TrustBq => Err(MixedModelError::Optimization(
+            Optimizer::TrustBq => Err(MixedModelError::Unsupported(
                 "TrustBQ is reserved for the dependency-light fast=false joint GLMM path; pick COBYLA or pattern_search for fast-PIRLS GLMMs"
                     .to_string(),
             )),
-            Optimizer::NloptBobyqa | Optimizer::NloptNewuoa => Err(MixedModelError::Optimization(
+            Optimizer::NloptBobyqa | Optimizer::NloptNewuoa => Err(MixedModelError::Unsupported(
                 "NLopt GLMM optimizers require the `nlopt` feature; rebuild with `--features nlopt` or pick a native optimizer"
                     .to_string(),
             )),
             Optimizer::PrimaBobyqa
             | Optimizer::PrimaCobyla
             | Optimizer::PrimaLincoa
-            | Optimizer::PrimaNewuoa => Err(MixedModelError::Optimization(
+            | Optimizer::PrimaNewuoa => Err(MixedModelError::Unsupported(
                 "PRIMA GLMM optimizers are not wired; pick a native optimizer".to_string(),
             )),
         }
@@ -2103,11 +2306,70 @@ impl GeneralizedLinearMixedModel {
     fn fit_with_options_impl(&mut self, n_agq: usize, _verbose: bool) -> Result<&mut Self> {
         use nlopt::{Algorithm as NloptAlgorithm, Nlopt, Target as NloptTarget};
 
+        match self.lmm.optsum.caller_selected_optimizer() {
+            Some(Optimizer::PatternSearch) => return self.fit_native_pattern_search(n_agq),
+            Some(Optimizer::Cobyla) => return self.fit_native_cobyla(n_agq),
+            Some(Optimizer::NloptBobyqa) | None => {}
+            Some(Optimizer::TrustBq) => {
+                return Err(MixedModelError::Unsupported(
+                    "TrustBQ is reserved for fast=false joint GLMM fits; pick Cobyla, pattern_search, or NloptBobyqa for fast-PIRLS GLMMs"
+                        .to_string(),
+                ));
+            }
+            Some(Optimizer::NloptNewuoa) => {
+                return Err(MixedModelError::Unsupported(
+                    "NloptNewuoa is unconstrained and is not wired for bounded fast-PIRLS GLMM theta optimization; pick NloptBobyqa"
+                        .to_string(),
+                ));
+            }
+            Some(
+                Optimizer::PrimaBobyqa
+                | Optimizer::PrimaCobyla
+                | Optimizer::PrimaLincoa
+                | Optimizer::PrimaNewuoa,
+            ) => {
+                return Err(MixedModelError::Unsupported(
+                    "PRIMA GLMM optimizers are not wired; pick Cobyla, pattern_search, or NloptBobyqa"
+                        .to_string(),
+                ));
+            }
+        }
+
         let n_theta = self.theta.len();
         let lb = self.lmm.lower_bounds();
         let initial_theta = self.lmm.optsum.initial.clone();
         self.lmm.optsum.optimizer = Optimizer::NloptBobyqa;
         self.lmm.optsum.backend = Optimizer::NloptBobyqa.canonical_backend();
+        let ftol_rel = if self.lmm.optsum.caller_set_field("ftol_rel") {
+            self.lmm.optsum.ftol_rel
+        } else {
+            1e-12
+        };
+        let ftol_abs = if self.lmm.optsum.caller_set_field("ftol_abs") {
+            self.lmm.optsum.ftol_abs
+        } else {
+            1e-8
+        };
+        let xtol_rel = self
+            .lmm
+            .optsum
+            .caller_set_field("xtol_rel")
+            .then_some(self.lmm.optsum.xtol_rel);
+        let xtol_abs = self
+            .lmm
+            .optsum
+            .caller_set_field("xtol_abs")
+            .then(|| self.lmm.optsum.xtol_abs.clone());
+        let maxeval = if self.lmm.optsum.max_feval > 0 {
+            self.lmm.optsum.max_feval.min(u32::MAX as i64).max(1) as u32
+        } else {
+            500
+        };
+        let initial_step = if self.lmm.optsum.caller_set_field("initial_step") {
+            self.lmm.optsum.initial_step.clone()
+        } else {
+            vec![0.75; n_theta]
+        };
 
         let feval_count = std::cell::Cell::new(0i64);
         let fit_log: Rc<RefCell<Vec<FitLogEntry>>> = Rc::new(RefCell::new(Vec::with_capacity(
@@ -2145,13 +2407,18 @@ impl GeneralizedLinearMixedModel {
         // way to 1e-8 before exploring multi-dim moves, which on multi-RE
         // GLMM surfaces (e.g. grouseticks Poisson) caused premature
         // termination at the initial θ with status `XtolReached`.
-        optimizer.set_ftol_rel(1e-12).ok();
-        optimizer.set_ftol_abs(1e-8).ok();
-        optimizer.set_maxeval(500).ok();
+        optimizer.set_ftol_rel(ftol_rel).ok();
+        optimizer.set_ftol_abs(ftol_abs).ok();
+        if let Some(xtol_rel) = xtol_rel {
+            optimizer.set_xtol_rel(xtol_rel).ok();
+        }
+        if let Some(xtol_abs) = &xtol_abs {
+            optimizer.set_xtol_abs(xtol_abs).ok();
+        }
+        optimizer.set_maxeval(maxeval).ok();
         // Mirror the LMM cobyla initial step default; without an explicit
         // initial step BOBYQA falls back to per-axis defaults that may be
         // too small for parameters near the lower bound.
-        let initial_step = vec![0.75; n_theta];
         optimizer.set_initial_step(&initial_step).ok();
 
         let mut theta = initial_theta;
@@ -2187,7 +2454,6 @@ impl GeneralizedLinearMixedModel {
         Ok(me)
     }
 
-    #[cfg(not(feature = "nlopt"))]
     fn fit_native_cobyla(&mut self, n_agq: usize) -> Result<&mut Self> {
         let lb = self.lmm.lower_bounds();
         let initial_theta = self.lmm.optsum.initial.clone();
@@ -2305,7 +2571,6 @@ impl GeneralizedLinearMixedModel {
         Ok(me)
     }
 
-    #[cfg(not(feature = "nlopt"))]
     fn fit_native_pattern_search(&mut self, n_agq: usize) -> Result<&mut Self> {
         let lower_bounds = self.lmm.lower_bounds();
         let n_theta = self.theta.len();
@@ -2694,7 +2959,6 @@ impl GeneralizedLinearMixedModel {
         diagnostics
     }
 
-    #[cfg(not(feature = "nlopt"))]
     fn cobyla_success_status_label(status: cobyla::SuccessStatus) -> String {
         match status {
             cobyla::SuccessStatus::Success => "SUCCESS".to_string(),
@@ -2706,7 +2970,6 @@ impl GeneralizedLinearMixedModel {
         }
     }
 
-    #[cfg(not(feature = "nlopt"))]
     fn cobyla_fail_status_label(status: cobyla::FailStatus) -> String {
         match status {
             cobyla::FailStatus::Failure => "FAILURE".to_string(),
@@ -2792,7 +3055,6 @@ fn rc_refcell_into_inner_or_clone<T: Clone>(value: Rc<RefCell<Vec<T>>>) -> Vec<T
     }
 }
 
-#[cfg(not(feature = "nlopt"))]
 fn project_theta_to_bounds(theta: &mut [f64], lower_bounds: &[f64]) {
     for (value, lower) in theta.iter_mut().zip(lower_bounds.iter()) {
         if lower.is_finite() && *value < *lower {
@@ -2801,14 +3063,12 @@ fn project_theta_to_bounds(theta: &mut [f64], lower_bounds: &[f64]) {
     }
 }
 
-#[cfg(not(feature = "nlopt"))]
 fn steps_are_small(step: &[f64], step_tol: &[f64]) -> bool {
     step.iter()
         .zip(step_tol.iter())
         .all(|(step, tol)| *step <= *tol)
 }
 
-#[cfg(not(feature = "nlopt"))]
 fn record_pattern_search_eval(
     model: &mut GeneralizedLinearMixedModel,
     theta: &[f64],
@@ -2858,13 +3118,29 @@ fn glmm_objective_includes_response_constants(return_value: &str) -> bool {
         || return_value.starts_with("EXPERIMENTAL_JOINT_FAILED:")
 }
 
-#[cfg(feature = "nlopt")]
-fn joint_glmm_default_maxeval(_n_params: usize) -> u32 {
-    200
+fn default_fast_glmm_optimizer() -> Optimizer {
+    #[cfg(feature = "nlopt")]
+    {
+        Optimizer::NloptBobyqa
+    }
+    #[cfg(not(feature = "nlopt"))]
+    {
+        Optimizer::Cobyla
+    }
 }
 
-#[cfg(not(feature = "nlopt"))]
-fn joint_glmm_default_maxeval(n_params: usize) -> u32 {
+fn default_joint_glmm_optimizer() -> Optimizer {
+    #[cfg(feature = "nlopt")]
+    {
+        Optimizer::NloptBobyqa
+    }
+    #[cfg(not(feature = "nlopt"))]
+    {
+        Optimizer::TrustBq
+    }
+}
+
+fn trust_bq_joint_glmm_default_maxeval(n_params: usize) -> u32 {
     // Native TrustBQ uses local quadratic models, so it should need far fewer
     // objective calls than the previous COBYLA fallback while still leaving
     // enough budget for mixed beta/theta scales on large-intercept Bernoulli
@@ -2872,15 +3148,48 @@ fn joint_glmm_default_maxeval(n_params: usize) -> u32 {
     (500usize + 80usize * n_params.max(1)).min(8_000) as u32
 }
 
-fn joint_glmm_configured_maxeval(optsum: &OptSummary, n_params: usize) -> u32 {
-    if optsum.max_feval > 0 {
-        optsum.max_feval.min(u32::MAX as i64).max(1) as u32
-    } else {
-        joint_glmm_default_maxeval(n_params)
+fn joint_glmm_default_maxeval_for(optimizer: Optimizer, n_params: usize) -> u32 {
+    match optimizer {
+        Optimizer::TrustBq => trust_bq_joint_glmm_default_maxeval(n_params),
+        Optimizer::NloptBobyqa => 200,
+        _ => trust_bq_joint_glmm_default_maxeval(n_params),
     }
 }
 
-#[cfg(not(feature = "nlopt"))]
+fn joint_glmm_configured_maxeval_for(
+    optsum: &OptSummary,
+    n_params: usize,
+    optimizer: Optimizer,
+) -> u32 {
+    if optsum.max_feval > 0 {
+        optsum.max_feval.min(u32::MAX as i64).max(1) as u32
+    } else {
+        joint_glmm_default_maxeval_for(optimizer, n_params)
+    }
+}
+
+fn validate_joint_glmm_optimizer(optimizer: Optimizer) -> Result<()> {
+    match optimizer {
+        Optimizer::TrustBq => Ok(()),
+        Optimizer::NloptBobyqa => {
+            #[cfg(feature = "nlopt")]
+            {
+                Ok(())
+            }
+            #[cfg(not(feature = "nlopt"))]
+            {
+                Err(MixedModelError::Unsupported(
+                    "joint GLMM NloptBobyqa requires the `nlopt` feature; rebuild with `--features nlopt` or pick TrustBq"
+                        .to_string(),
+                ))
+            }
+        }
+        other => Err(MixedModelError::Unsupported(format!(
+            "Optimizer::{other:?} is not wired for joint GLMM fits; pick TrustBq or NloptBobyqa where available"
+        ))),
+    }
+}
+
 fn joint_glmm_trust_bq_initial_radius(initial: &[f64], n_beta: usize) -> f64 {
     let beta_scale = initial
         .iter()
@@ -2893,7 +3202,6 @@ fn joint_glmm_trust_bq_initial_radius(initial: &[f64], n_beta: usize) -> f64 {
     (0.25 * beta_scale).clamp(0.25, 1.0)
 }
 
-#[cfg(not(feature = "nlopt"))]
 fn trust_bq_status_label(status: TrustBqStopReason) -> &'static str {
     match status {
         TrustBqStopReason::RadiusBelowTolerance => "RADIUS_REACHED",
@@ -3206,7 +3514,6 @@ fn joint_certificate_requires_fallback(joint_certificate: &OptimizerCertificate)
         )
 }
 
-#[cfg(not(feature = "nlopt"))]
 fn joint_candidate_materially_improves_profiled_start(optsum: &OptSummary) -> bool {
     let (Some(initial), Some(final_value)) = (
         optsum.finitial.is_finite().then_some(optsum.finitial),
@@ -3223,7 +3530,6 @@ fn joint_candidate_materially_improves_profiled_start(optsum: &OptSummary) -> bo
     initial - final_value > tolerance
 }
 
-#[cfg(not(feature = "nlopt"))]
 fn record_uncertified_joint_candidate_diagnostic(
     certificate: &mut OptimizerCertificate,
     optsum: &OptSummary,
@@ -3762,6 +4068,7 @@ mod tests {
     use super::*;
     use crate::formula::parse_formula;
     use crate::model::data::DataFrame;
+    use crate::model::linear::FitToleranceOverrides;
     use approx::assert_relative_eq;
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -5104,6 +5411,67 @@ mod tests {
         df.add_categorical("livch", livch).unwrap();
         df.add_categorical("urban_dist", urban_dist).unwrap();
         df
+    }
+
+    #[test]
+    fn glmm_fast_options_record_caller_native_optimizer_override() {
+        let data = contra_fixture();
+        let formula = parse_formula("use_num ~ 1 + (1 | urban_dist)").unwrap();
+        let mut model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+        let control = OptimizerControl::auto()
+            .with_optimizer(Optimizer::Cobyla)
+            .with_max_feval(120)
+            .with_tolerances(FitToleranceOverrides::default().with_ftol_abs(1.0e-8));
+
+        model
+            .fit_with_glmm_options(GlmmFitOptions::fast_laplace().with_optimizer_control(control))
+            .unwrap();
+
+        assert_eq!(model.lmm.optsum.optimizer, Optimizer::Cobyla);
+        assert_eq!(model.lmm.optsum.optimizer_source_name(), "caller");
+        assert!(model.lmm.optsum.caller_set_field("optimizer"));
+        assert!(model.lmm.optsum.caller_set_field("max_feval"));
+
+        let certificate = model
+            .lmm
+            .optimizer_certificate()
+            .expect("GLMM fit should attach optimizer certificate");
+        assert_eq!(certificate.optimizer_control.optimizer_source, "caller");
+        assert!(certificate
+            .optimizer_control
+            .caller_set_fields
+            .iter()
+            .any(|field| field == "optimizer"));
+        let metadata = model
+            .lmm
+            .compiler_artifact
+            .glmm_fit_metadata
+            .as_ref()
+            .expect("GLMM fit should record metadata");
+        assert_eq!(metadata.optimizer, "cobyla");
+        assert_eq!(metadata.optimizer_source.as_deref(), Some("caller"));
+        assert!(metadata
+            .caller_set_fields
+            .iter()
+            .any(|field| field == "max_feval"));
+    }
+
+    #[test]
+    fn glmm_joint_options_reject_unwired_optimizer_before_fitting() {
+        let data = contra_fixture();
+        let formula = parse_formula("use_num ~ 1 + (1 | urban_dist)").unwrap();
+        let mut model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+
+        let err = model
+            .fit_with_glmm_options(
+                GlmmFitOptions::joint_laplace().with_optimizer(Optimizer::Cobyla),
+            )
+            .expect_err("joint GLMM Cobyla override should be unsupported");
+
+        assert_eq!(err.code(), "unsupported");
+        assert!(!model.is_fitted());
     }
 
     // ── GLMM parity tests (pirls.jl) ─────────────────────────────────────────

@@ -7,7 +7,8 @@
 //!
 //! - [`LinearMixedModelBuilder`] / [`LinearMixedModel`] — profiled (RE)ML via
 //!   a blocked Cholesky PLS step, with automatic optimizer selection.
-//!   [`FitOptions`] carries the ML/REML choice and tolerances.
+//!   [`FitOptions`] carries the ML/REML choice plus optional audit-recorded
+//!   optimizer controls.
 //! - [`GeneralizedLinearMixedModelBuilder`] /
 //!   [`GeneralizedLinearMixedModel`] — PIRLS for the conditional modes with
 //!   optional adaptive Gauss-Hermite quadrature; pick a [`Family`] and
@@ -32,13 +33,16 @@ pub use data::{
     CategoricalCoding, CategoricalColumn, CategoricalContrast, Column, ContrastSource, DataFrame,
     EncodedCategoricalColumn,
 };
-pub use generalized::{GeneralizedLinearMixedModel, GeneralizedLinearMixedModelBuilder};
+pub use generalized::{
+    GeneralizedLinearMixedModel, GeneralizedLinearMixedModelBuilder, GlmmFitOptions,
+};
 pub use linear::{
     parametricbootstrap, BootstrapFailedRefitPolicy, BootstrapInterval, BootstrapIntervalMethod,
     BootstrapQuantile, BootstrapRefitOptions, BootstrapReplicate, BootstrapRunMetadata,
     BootstrapRunPayload, BootstrapSeedRecord, BootstrapTarget, BootstrapTargetKind, FitOptions,
-    FixedEffectBootstrapOptions, FixedEffectNullBootstrapTarget, FixedEffectNullCovariancePolicy,
-    LinearMixedModel, LinearMixedModelBuilder, MixedModelBootstrap, ModelCriterion, NewReLevels,
+    FitToleranceOverrides, FixedEffectBootstrapOptions, FixedEffectNullBootstrapTarget,
+    FixedEffectNullCovariancePolicy, LinearMixedModel, LinearMixedModelBuilder,
+    MixedModelBootstrap, ModelCriterion, NewReLevels, OptimizerChoice, OptimizerControl,
     BOOTSTRAP_RUN_SCHEMA, BOOTSTRAP_RUN_SCHEMA_VERSION,
 };
 pub use summary_estimates::{ResidualSource, SamplingVarianceScale, SummaryEstimateOptions};

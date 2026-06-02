@@ -53,9 +53,10 @@ assert_eq!(model.coef_names(), vec!["(Intercept)".to_string(), "x".to_string()])
    `*`, `:`, `/`, `(re | g)`, `(re || g)` (zero-correlation), and
    `(re | g1 & g2)` interactions. `0 +` / `-1` / `1 +` control the intercept.
 3. [`LinearMixedModelBuilder`](crate::model::LinearMixedModelBuilder) chooses
-   the optimizer automatically based on the θ dimension — callers do not pick
-   it. [`FitOptions`](crate::model::FitOptions) carries the ML/REML choice and
-   tolerances.
+   the optimizer automatically based on the θ dimension by default.
+   [`FitOptions`](crate::model::FitOptions) carries the ML/REML choice plus a
+   narrow, audit-recorded [`OptimizerControl`](crate::model::OptimizerControl)
+   escape hatch for recourse, warm starts, and tolerance overrides.
 
 The lower-level form is still available and purely additive:
 

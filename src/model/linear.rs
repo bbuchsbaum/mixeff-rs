@@ -56,7 +56,7 @@ use crate::types::matrix_block::{
 };
 #[cfg(feature = "prima")]
 use crate::types::opt_summary::OptimizerBackend;
-use crate::types::{FeMat, FeTerm, FitLogEntry, OptSummary, Optimizer, ReMat};
+use crate::types::{FeMat, FeTerm, FitLogEntry, OptSummary, Optimizer, OptimizerSource, ReMat};
 use crate::unstable_internal_method;
 
 /// A fitted (or constructed but unfitted) linear mixed-effects model.
@@ -687,17 +687,162 @@ impl ModelCriterion {
     }
 }
 
+/// Optional caller choice for the optimizer used by a fit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum OptimizerChoice {
+    /// Keep the fit driver's automatic optimizer selection.
+    #[default]
+    Auto,
+    /// Request a specific optimizer. Unsupported choices return a typed error
+    /// instead of silently falling back.
+    Named(Optimizer),
+}
+
+impl OptimizerChoice {
+    fn named(self) -> Option<Optimizer> {
+        match self {
+            OptimizerChoice::Auto => None,
+            OptimizerChoice::Named(optimizer) => Some(optimizer),
+        }
+    }
+}
+
+/// Optional convergence-tolerance overrides for a fit.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
+pub struct FitToleranceOverrides {
+    /// Relative tolerance on the objective.
+    pub ftol_rel: Option<f64>,
+    /// Absolute tolerance on the objective.
+    pub ftol_abs: Option<f64>,
+    /// Relative tolerance on optimizer parameters.
+    pub xtol_rel: Option<f64>,
+    /// Per-parameter absolute tolerance on optimizer parameters.
+    pub xtol_abs: Option<Vec<f64>>,
+    /// Per-parameter initial optimizer step size.
+    pub initial_step: Option<Vec<f64>>,
+}
+
+impl FitToleranceOverrides {
+    /// Set the relative objective tolerance.
+    pub fn with_ftol_rel(mut self, value: f64) -> Self {
+        self.ftol_rel = Some(value);
+        self
+    }
+
+    /// Set the absolute objective tolerance.
+    pub fn with_ftol_abs(mut self, value: f64) -> Self {
+        self.ftol_abs = Some(value);
+        self
+    }
+
+    /// Set the relative parameter tolerance.
+    pub fn with_xtol_rel(mut self, value: f64) -> Self {
+        self.xtol_rel = Some(value);
+        self
+    }
+
+    /// Set per-parameter absolute tolerances.
+    pub fn with_xtol_abs(mut self, values: Vec<f64>) -> Self {
+        self.xtol_abs = Some(values);
+        self
+    }
+
+    /// Set per-parameter initial optimizer steps.
+    pub fn with_initial_step(mut self, values: Vec<f64>) -> Self {
+        self.initial_step = Some(values);
+        self
+    }
+}
+
+/// Narrow, audit-recorded caller control over optimizer setup.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
+pub struct OptimizerControl {
+    /// Optimizer selection. Defaults to [`OptimizerChoice::Auto`].
+    pub optimizer: OptimizerChoice,
+    /// Optional convergence-tolerance overrides.
+    pub tolerances: FitToleranceOverrides,
+    /// Optional warm-start theta vector.
+    pub start_theta: Option<Vec<f64>>,
+    /// Optional maximum number of optimizer function evaluations.
+    pub max_feval: Option<usize>,
+}
+
+impl OptimizerControl {
+    /// Driver-selected optimizer and default tolerances.
+    pub fn auto() -> Self {
+        Self::default()
+    }
+
+    /// Request a specific optimizer.
+    pub fn with_optimizer(mut self, optimizer: Optimizer) -> Self {
+        self.optimizer = OptimizerChoice::Named(optimizer);
+        self
+    }
+
+    /// Attach tolerance overrides.
+    pub fn with_tolerances(mut self, tolerances: FitToleranceOverrides) -> Self {
+        self.tolerances = tolerances;
+        self
+    }
+
+    /// Set the warm-start theta vector.
+    pub fn with_start_theta(mut self, start_theta: Vec<f64>) -> Self {
+        self.start_theta = Some(start_theta);
+        self
+    }
+
+    /// Set the maximum number of optimizer function evaluations.
+    pub fn with_max_feval(mut self, max_feval: usize) -> Self {
+        self.max_feval = Some(max_feval);
+        self
+    }
+
+    fn caller_set_fields(&self) -> Vec<String> {
+        let mut fields = Vec::new();
+        if self.optimizer.named().is_some() {
+            fields.push("optimizer".to_string());
+        }
+        if self.tolerances.ftol_rel.is_some() {
+            fields.push("ftol_rel".to_string());
+        }
+        if self.tolerances.ftol_abs.is_some() {
+            fields.push("ftol_abs".to_string());
+        }
+        if self.tolerances.xtol_rel.is_some() {
+            fields.push("xtol_rel".to_string());
+        }
+        if self.tolerances.xtol_abs.is_some() {
+            fields.push("xtol_abs".to_string());
+        }
+        if self.tolerances.initial_step.is_some() {
+            fields.push("initial_step".to_string());
+        }
+        if self.start_theta.is_some() {
+            fields.push("start_theta".to_string());
+        }
+        if self.max_feval.is_some() {
+            fields.push("max_feval".to_string());
+        }
+        fields
+    }
+}
+
 /// Options controlling how a model is fit.
 ///
-/// The optimizer is always chosen by the fit driver (callers cannot override
-/// it — see the crate architecture notes), so this struct intentionally
-/// exposes only the estimation criterion. It is `#[non_exhaustive]` so new
-/// knobs can be added without a breaking change.
+/// By default the fit driver chooses the optimizer. [`OptimizerControl`] is a
+/// narrow opt-in escape hatch for recourse, warm starts, and explicit
+/// tolerance overrides; any supplied field is recorded in the optimizer
+/// certificate.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct FitOptions {
     /// ML or REML. Defaults to [`ModelCriterion::Ml`].
     pub criterion: ModelCriterion,
+    /// Optional audit-recorded optimizer controls.
+    pub optimizer_control: OptimizerControl,
 }
 
 impl FitOptions {
@@ -705,6 +850,7 @@ impl FitOptions {
     pub fn ml() -> Self {
         Self {
             criterion: ModelCriterion::Ml,
+            optimizer_control: OptimizerControl::default(),
         }
     }
 
@@ -712,7 +858,46 @@ impl FitOptions {
     pub fn reml() -> Self {
         Self {
             criterion: ModelCriterion::Reml,
+            optimizer_control: OptimizerControl::default(),
         }
+    }
+
+    /// Attach optimizer controls to these fit options.
+    pub fn with_optimizer_control(mut self, control: OptimizerControl) -> Self {
+        self.optimizer_control = control;
+        self
+    }
+
+    /// Request a specific optimizer while leaving other controls at default.
+    pub fn with_optimizer(mut self, optimizer: Optimizer) -> Self {
+        self.optimizer_control = self.optimizer_control.with_optimizer(optimizer);
+        self
+    }
+}
+
+fn validate_positive_control_value(name: &str, value: f64) -> Result<()> {
+    if value.is_finite() && value > 0.0 {
+        Ok(())
+    } else {
+        Err(MixedModelError::InvalidArgument(format!(
+            "{name} override must be finite and positive"
+        )))
+    }
+}
+
+fn validate_control_vector(name: &str, values: &[f64], n_theta: usize) -> Result<()> {
+    if values.len() != n_theta {
+        return Err(MixedModelError::InvalidArgument(format!(
+            "{name} length {} does not match theta length {n_theta}",
+            values.len()
+        )));
+    }
+    if values.iter().all(|value| value.is_finite() && *value > 0.0) {
+        Ok(())
+    } else {
+        Err(MixedModelError::InvalidArgument(format!(
+            "{name} values must be finite and positive"
+        )))
     }
 }
 
@@ -782,7 +967,7 @@ impl<'a> LinearMixedModelBuilder<'a> {
     /// Construct and fit the model in one step.
     pub fn fit(self, options: FitOptions) -> Result<LinearMixedModel> {
         let mut model = self.build()?;
-        model.fit(options.criterion.is_reml())?;
+        model.fit_with_options(options)?;
         Ok(model)
     }
 }
@@ -1430,6 +1615,8 @@ impl LinearMixedModel {
         optsum.max_time = previous.max_time;
         optsum.optimizer = previous.optimizer;
         optsum.backend = previous.backend;
+        optsum.optimizer_source = previous.optimizer_source;
+        optsum.caller_set_fields = previous.caller_set_fields;
         optsum.rhobeg = previous.rhobeg;
         optsum.rhoend = previous.rhoend;
         optsum.reml = previous.reml;
@@ -1465,7 +1652,7 @@ impl LinearMixedModel {
                     Some(self.optsum.max_feval.max(1) as usize),
                 )?;
                 #[cfg(not(feature = "nlopt"))]
-                return Err(MixedModelError::Optimization(
+                return Err(MixedModelError::Unsupported(
                     "Optimizer::NloptBobyqa requires the `nlopt` feature; \
                      rebuild with `--features nlopt` or pick a non-NLopt optimizer"
                         .to_string(),
@@ -1478,7 +1665,7 @@ impl LinearMixedModel {
                     Some(self.optsum.max_feval.max(1) as usize),
                 )?;
                 #[cfg(not(feature = "nlopt"))]
-                return Err(MixedModelError::Optimization(
+                return Err(MixedModelError::Unsupported(
                     "Optimizer::NloptNewuoa requires the `nlopt` feature; \
                      rebuild with `--features nlopt` or pick a non-NLopt optimizer"
                         .to_string(),
@@ -1491,7 +1678,7 @@ impl LinearMixedModel {
                     Some(self.optsum.max_feval.max(1) as usize),
                 )?;
                 #[cfg(not(feature = "prima"))]
-                return Err(MixedModelError::Optimization(
+                return Err(MixedModelError::Unsupported(
                     "Optimizer::PrimaBobyqa requires the `prima` feature and a system \
                      PRIMA C library (`libprimac`); rebuild with `--features prima` \
                      or pick a non-PRIMA optimizer"
@@ -1499,7 +1686,7 @@ impl LinearMixedModel {
                 ));
             }
             Optimizer::PrimaCobyla | Optimizer::PrimaLincoa | Optimizer::PrimaNewuoa => {
-                return Err(MixedModelError::Optimization(
+                return Err(MixedModelError::Unsupported(
                     "Only Optimizer::PrimaBobyqa is wired to the LMM optimizer path; \
                      PRIMA COBYLA, LINCOA, and NEWUOA are reserved for later backend parity work"
                         .to_string(),
@@ -2150,6 +2337,81 @@ impl LinearMixedModel {
     unstable_vis fn optsum_mut(&mut self) -> &mut OptSummary {
         &mut self.optsum
     }
+    }
+
+    pub(crate) fn apply_optimizer_control(&mut self, control: &OptimizerControl) -> Result<()> {
+        let n_theta = self.n_theta();
+
+        if let Some(value) = control.tolerances.ftol_rel {
+            validate_positive_control_value("ftol_rel", value)?;
+            self.optsum.ftol_rel = value;
+        }
+        if let Some(value) = control.tolerances.ftol_abs {
+            validate_positive_control_value("ftol_abs", value)?;
+            self.optsum.ftol_abs = value;
+        }
+        if let Some(value) = control.tolerances.xtol_rel {
+            validate_positive_control_value("xtol_rel", value)?;
+            self.optsum.xtol_rel = value;
+        }
+        if let Some(values) = &control.tolerances.xtol_abs {
+            validate_control_vector("xtol_abs", values, n_theta)?;
+            self.optsum.xtol_abs = values.clone();
+        }
+        if let Some(values) = &control.tolerances.initial_step {
+            validate_control_vector("initial_step", values, n_theta)?;
+            self.optsum.initial_step = values.clone();
+        }
+        if let Some(max_feval) = control.max_feval {
+            if max_feval == 0 {
+                return Err(MixedModelError::InvalidArgument(
+                    "max_feval override must be positive".to_string(),
+                ));
+            }
+            self.optsum.max_feval = i64::try_from(max_feval).map_err(|_| {
+                MixedModelError::InvalidArgument(
+                    "max_feval override exceeds the supported integer range".to_string(),
+                )
+            })?;
+        }
+        if let Some(start_theta) = &control.start_theta {
+            if start_theta.len() != n_theta {
+                return Err(MixedModelError::InvalidArgument(format!(
+                    "start_theta length {} does not match theta length {n_theta}",
+                    start_theta.len()
+                )));
+            }
+            if !start_theta.iter().all(|value| value.is_finite()) {
+                return Err(MixedModelError::InvalidArgument(
+                    "start_theta values must be finite".to_string(),
+                ));
+            }
+            for (index, (&value, &lower)) in start_theta
+                .iter()
+                .zip(self.lower_bounds().iter())
+                .enumerate()
+            {
+                if lower.is_finite() && value < lower {
+                    return Err(MixedModelError::InvalidArgument(format!(
+                        "start_theta[{index}] = {value} is below lower bound {lower}"
+                    )));
+                }
+            }
+            self.optsum.initial = start_theta.clone();
+            self.optsum.final_params = start_theta.clone();
+            self.set_theta(start_theta)?;
+            self.update_l()?;
+        }
+
+        if let Some(optimizer) = control.optimizer.named() {
+            self.optsum.optimizer = optimizer;
+            self.optsum.backend = optimizer.canonical_backend();
+            self.optsum.optimizer_source = OptimizerSource::Caller;
+        } else {
+            self.optsum.optimizer_source = OptimizerSource::Auto;
+        }
+        self.optsum.caller_set_fields = control.caller_set_fields();
+        Ok(())
     }
 
     /// Get the current θ parameter vector.
@@ -5681,9 +5943,20 @@ impl LinearMixedModel {
 
     /// Fit the model by optimizing θ to minimize the objective.
     pub fn fit(&mut self, reml: bool) -> Result<&mut Self> {
+        let options = if reml {
+            FitOptions::reml()
+        } else {
+            FitOptions::ml()
+        };
+        self.fit_with_options(options)
+    }
+
+    /// Fit the model with explicit options.
+    pub fn fit_with_options(&mut self, options: FitOptions) -> Result<&mut Self> {
         if self.optsum.feval > 0 {
             return Err(MixedModelError::AlreadyFitted);
         }
+        let reml = options.criterion.is_reml();
 
         // Check for constant response. Skipped for summary-estimate fits:
         // identical first-stage point estimates with different sampling
@@ -5728,7 +6001,13 @@ impl LinearMixedModel {
             });
         }
 
+        self.apply_optimizer_control(&options.optimizer_control)?;
         self.optsum.reml = reml;
+
+        if let Some(optimizer) = options.optimizer_control.optimizer.named() {
+            self.fit_with_forced_optimizer(reml, optimizer)?;
+            return Ok(self);
+        }
 
         // Initial objective evaluation (with one rescaling retry on a
         // non-finite value — see set_initial_objective_with_rescue).
@@ -18316,7 +18595,11 @@ mod tests {
                 parse_formula("yield ~ 1 + (1 | batch)").unwrap(),
                 &df,
             )
-            .fit(FitOptions { criterion })
+            .fit(if criterion.is_reml() {
+                FitOptions::reml()
+            } else {
+                FitOptions::ml()
+            })
             .unwrap();
 
             assert_eq!(
@@ -18330,6 +18613,79 @@ mod tests {
                 "builder objective must match direct ({criterion:?})"
             );
         }
+    }
+
+    #[test]
+    fn lmm_fit_options_record_caller_optimizer_tolerances_and_start() {
+        let df = dyestuff_fixture();
+        let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+        let mut cold = LinearMixedModel::new(formula.clone(), &df, None).unwrap();
+        cold.fit(true).unwrap();
+        let start_theta = cold.theta();
+
+        let mut warm = LinearMixedModel::new(formula, &df, None).unwrap();
+        let control = OptimizerControl::auto()
+            .with_optimizer(Optimizer::PatternSearch)
+            .with_start_theta(start_theta.clone())
+            .with_max_feval(1_000)
+            .with_tolerances(
+                FitToleranceOverrides::default()
+                    .with_ftol_abs(1.0e-10)
+                    .with_xtol_abs(vec![1.0e-8; start_theta.len()])
+                    .with_initial_step(vec![0.25; start_theta.len()]),
+            );
+
+        warm.fit_with_options(FitOptions::reml().with_optimizer_control(control))
+            .unwrap();
+
+        assert_eq!(warm.optsum.optimizer, Optimizer::PatternSearch);
+        assert_eq!(warm.optsum.optimizer_source_name(), "caller");
+        for field in [
+            "optimizer",
+            "start_theta",
+            "max_feval",
+            "ftol_abs",
+            "xtol_abs",
+            "initial_step",
+        ] {
+            assert!(
+                warm.optsum.caller_set_field(field),
+                "missing caller field {field:?}"
+            );
+        }
+        assert_relative_eq!(warm.objective(), cold.objective(), epsilon = 1.0e-5);
+
+        let certificate = warm
+            .optimizer_certificate()
+            .expect("fit should attach optimizer certificate");
+        assert_eq!(certificate.optimizer_control.optimizer_source, "caller");
+        assert!(certificate
+            .optimizer_control
+            .caller_set_fields
+            .iter()
+            .any(|field| field == "optimizer"));
+        let json = serde_json::to_value(certificate).unwrap();
+        assert_eq!(
+            json["optimizer_control"]["optimizer_source"],
+            serde_json::json!("caller")
+        );
+    }
+
+    #[test]
+    fn lmm_fit_options_reject_bad_start_theta_before_fitting() {
+        let df = dyestuff_fixture();
+        let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &df, None).unwrap();
+
+        let err =
+            model
+                .fit_with_options(FitOptions::reml().with_optimizer_control(
+                    OptimizerControl::auto().with_start_theta(vec![0.1, 0.2]),
+                ))
+                .expect_err("wrong-length start theta should be rejected");
+
+        assert_eq!(err.code(), "invalid_argument");
+        assert!(!model.is_fitted());
     }
 
     #[test]

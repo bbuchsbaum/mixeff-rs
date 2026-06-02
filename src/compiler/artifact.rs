@@ -182,6 +182,10 @@ pub struct GlmmFitMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub optimizer_fit_log_len: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub optimizer_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caller_set_fields: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_status: Option<String>,
 }
 
@@ -236,6 +240,10 @@ impl GlmmFitMetadata {
             optimizer_feval: (opt.feval >= 0).then_some(opt.feval),
             optimizer_max_feval: (opt.max_feval > 0).then_some(opt.max_feval),
             optimizer_fit_log_len: (!opt.fit_log.is_empty()).then_some(opt.fit_log.len()),
+            optimizer_source: (!opt.caller_set_fields.is_empty()
+                || opt.optimizer_source_name() != "auto")
+                .then(|| opt.optimizer_source_name().to_string()),
+            caller_set_fields: opt.caller_set_fields.clone(),
             fallback_status: fallback_status.map(str::to_string),
         }
     }

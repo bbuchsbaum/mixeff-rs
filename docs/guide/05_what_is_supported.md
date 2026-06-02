@@ -85,8 +85,14 @@ subset:
 | GLMM, joint Laplace (`fast=false`, `n_agq <= 1`) | NLopt BOBYQA when available; native TrustBQ joint path in dependency-light builds | Stable, labelled |
 | GLMM, adaptive Gauss-Hermite (`fast=false`, `n_agq > 1`) | AGQ for valid single-scalar random-effect GLMMs; NLopt BOBYQA when available or native TrustBQ in dependency-light builds | Stable, labelled |
 
-The optimizer choice is made by the fit driver, not by callers. The chosen
-optimizer and convergence outcome are always recoverable from
+The optimizer choice is made by the fit driver by default. Callers may use the
+narrow, opt-in [`OptimizerControl`](crate::model::OptimizerControl) surface to
+request an optimizer, convergence tolerances, `max_feval`, or a warm-start
+theta vector when they need recourse or reproducible refits. Unsupported
+optimizer/mode combinations return typed errors rather than silently falling
+back, and every caller-supplied control is recorded in the optimizer
+certificate. The chosen optimizer and convergence outcome are always
+recoverable from
 [`MixedModelFit::opt_summary`](crate::model::MixedModelFit::opt_summary). The
 GLMM `fast=true` default is **not** the same statistical approximation as
 `lme4::glmer`'s joint Laplace fit — see

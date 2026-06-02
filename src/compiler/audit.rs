@@ -3556,6 +3556,8 @@ pub struct OptimizerCertificate {
     pub objective_value: Option<f64>,
     pub iterations: Option<usize>,
     pub evidence: ConvergenceEvidence,
+    #[serde(default, skip_serializing_if = "OptimizerControlEvidence::is_default")]
+    pub optimizer_control: OptimizerControlEvidence,
     pub verification: Option<ConvergenceVerification>,
     pub free_gradient_norm: Option<f64>,
     pub projected_gradient_norm: Option<f64>,
@@ -3589,6 +3591,35 @@ pub struct OptimizerStopEvidence {
     pub initial_objective: Option<f64>,
     pub final_objective: Option<f64>,
     pub objective_delta: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OptimizerControlEvidence {
+    pub optimizer_source: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub caller_set_fields: Vec<String>,
+}
+
+impl Default for OptimizerControlEvidence {
+    fn default() -> Self {
+        Self {
+            optimizer_source: "auto".to_string(),
+            caller_set_fields: Vec::new(),
+        }
+    }
+}
+
+impl OptimizerControlEvidence {
+    pub fn is_default(&self) -> bool {
+        self.optimizer_source == "auto" && self.caller_set_fields.is_empty()
+    }
+
+    fn from_opt_summary(optsum: &OptSummary) -> Self {
+        Self {
+            optimizer_source: optsum.optimizer_source_name().to_string(),
+            caller_set_fields: optsum.caller_set_fields.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3732,6 +3763,7 @@ impl OptimizerCertificate {
             objective_value: None,
             iterations: None,
             evidence: ConvergenceEvidence::not_assessed(),
+            optimizer_control: OptimizerControlEvidence::default(),
             verification: None,
             free_gradient_norm: None,
             projected_gradient_norm: None,
@@ -3776,6 +3808,7 @@ impl OptimizerCertificate {
                 objective_value,
                 iterations,
                 evidence,
+                optimizer_control: OptimizerControlEvidence::from_opt_summary(optsum),
                 verification: None,
                 free_gradient_norm: None,
                 projected_gradient_norm: None,
@@ -3927,6 +3960,7 @@ impl OptimizerCertificate {
             objective_value,
             iterations,
             evidence,
+            optimizer_control: OptimizerControlEvidence::from_opt_summary(optsum),
             verification: None,
             free_gradient_norm: None,
             projected_gradient_norm: None,

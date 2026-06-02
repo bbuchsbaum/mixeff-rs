@@ -7,9 +7,10 @@ use mixeff_rs::model::{
     parametricbootstrap, BootstrapFailedRefitPolicy, BootstrapInterval, BootstrapIntervalMethod,
     BootstrapQuantile, BootstrapRefitOptions, BootstrapReplicate, BootstrapRunMetadata,
     BootstrapRunPayload, BootstrapSeedRecord, BootstrapTarget, BootstrapTargetKind,
-    CategoricalColumn, Column, DataFrame, Family, FixedEffectNullBootstrapTarget,
-    FixedEffectNullCovariancePolicy, GeneralizedLinearMixedModel, LinearMixedModel, LinkFunction,
-    MixedModelBootstrap, MixedModelFit, NewReLevels, RandomEffectTermInfo, BOOTSTRAP_RUN_SCHEMA,
+    CategoricalColumn, Column, DataFrame, Family, FitToleranceOverrides,
+    FixedEffectNullBootstrapTarget, FixedEffectNullCovariancePolicy, GeneralizedLinearMixedModel,
+    GlmmFitOptions, LinearMixedModel, LinkFunction, MixedModelBootstrap, MixedModelFit,
+    NewReLevels, OptimizerChoice, OptimizerControl, RandomEffectTermInfo, BOOTSTRAP_RUN_SCHEMA,
     BOOTSTRAP_RUN_SCHEMA_VERSION,
 };
 use mixeff_rs::stats::{
@@ -216,6 +217,10 @@ fn intended_model_barrel_exports_compile_for_downstream_users() {
     assert_type::<DataFrame>();
     assert_type::<GeneralizedLinearMixedModel>();
     assert_type::<LinearMixedModel>();
+    assert_type::<GlmmFitOptions>();
+    assert_type::<OptimizerChoice>();
+    assert_type::<OptimizerControl>();
+    assert_type::<FitToleranceOverrides>();
     assert_type::<NewReLevels>();
     assert_type::<BootstrapReplicate>();
     assert_type::<MixedModelBootstrap>();

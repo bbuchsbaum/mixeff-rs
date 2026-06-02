@@ -52,6 +52,16 @@ pub enum OptimizerBackend {
     Prima,
 }
 
+/// Source of the optimizer algorithm recorded in an [`OptSummary`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum OptimizerSource {
+    /// The fit driver selected the optimizer automatically.
+    Auto,
+    /// A caller explicitly requested the optimizer.
+    Caller,
+}
+
 impl Optimizer {
     /// Canonical backend for this optimizer.
     pub fn canonical_backend(self) -> OptimizerBackend {
@@ -212,6 +222,17 @@ pub struct OptSummary {
     /// `prima` Cargo feature and a system `libprimac`.
     pub backend: OptimizerBackend,
 
+    /// Whether the recorded optimizer was chosen automatically or requested
+    /// by the caller.
+    pub optimizer_source: OptimizerSource,
+
+    /// Stable labels for fit-control fields deliberately set by the caller.
+    ///
+    /// Empty means the fit used driver defaults. This is intentionally a
+    /// compact audit vector rather than a second copy of the numeric fields,
+    /// which are already present in this summary.
+    pub caller_set_fields: Vec<String>,
+
     // ---- PRIMA-specific tolerances ----
     /// PRIMA initial trust-region radius. Default `1.0`, matching
     /// MixedModels.jl. Ignored by NLopt and the in-tree backend.
@@ -273,6 +294,8 @@ impl OptSummary {
 
             optimizer: Optimizer::Cobyla,
             backend: OptimizerBackend::Native,
+            optimizer_source: OptimizerSource::Auto,
+            caller_set_fields: Vec::new(),
             // PRIMA defaults from MixedModels.jl: rhobeg = 1.0, rhoend = rhobeg / 1e6.
             rhobeg: 1.0,
             rhoend: 1e-6,
@@ -371,6 +394,29 @@ impl OptSummary {
         match self.optimizer.canonical_backend() {
             OptimizerBackend::Native => self.backend.label(),
             backend => backend.label(),
+        }
+    }
+
+    /// Label for the optimizer-selection source.
+    pub fn optimizer_source_name(&self) -> &'static str {
+        match self.optimizer_source {
+            OptimizerSource::Auto => "auto",
+            OptimizerSource::Caller => "caller",
+        }
+    }
+
+    /// Whether a named fit-control field was supplied by the caller.
+    pub fn caller_set_field(&self, field: &str) -> bool {
+        self.caller_set_fields
+            .iter()
+            .any(|candidate| candidate == field)
+    }
+
+    /// Caller-requested optimizer, if the optimizer was explicitly pinned.
+    pub fn caller_selected_optimizer(&self) -> Option<Optimizer> {
+        match self.optimizer_source {
+            OptimizerSource::Caller => Some(self.optimizer),
+            OptimizerSource::Auto => None,
         }
     }
 
