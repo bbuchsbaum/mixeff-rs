@@ -3872,11 +3872,13 @@ impl OptimizerCertificate {
         n_observations: Option<usize>,
     ) -> Self {
         let optimizer_name = Some(optsum.optimizer_name().to_string());
-        let objective_value = optsum.fmin.is_finite().then_some(optsum.fmin);
+        let objective_finite = optsum.fmin.is_finite();
+        let objective_value = objective_finite.then_some(optsum.fmin);
         let iterations = usize::try_from(optsum.feval).ok();
         let boundary_indices = boundary_parameter_indices(optsum, theta, lower_bounds);
-        let optimizer_ok = optimizer_stop_is_acceptable(&optsum.return_value)
+        let optimizer_stop_ok = optimizer_stop_is_acceptable(&optsum.return_value)
             && !optimizer_budget_exhausted(optsum);
+        let optimizer_ok = optimizer_stop_ok && objective_finite;
         let evidence = ConvergenceEvidence::from_opt_summary(
             optsum,
             theta,
@@ -3961,6 +3963,52 @@ impl OptimizerCertificate {
                 }
                 diagnostics.push(diagnostic);
             }
+        } else if !objective_finite {
+            checks.push(CertificateCheck::Failed {
+                code: "non_finite_objective".to_string(),
+                message:
+                    "optimizer did not certify convergence because the final objective is non-finite"
+                        .to_string(),
+            });
+            let mut diagnostic = Diagnostic::new(
+                DiagnosticCode::OptimizerNonconvergence,
+                DiagnosticSeverity::Warning,
+                DiagnosticStage::Certification,
+                "optimizer reported a stop but the final objective is non-finite; convergence is not certified",
+            )
+            .with_suggested_actions(vec![
+                "treat this fit as not optimized even if the optimizer return code looks acceptable"
+                    .to_string(),
+                "scale predictors or the response and compare against the original parameterization"
+                    .to_string(),
+                "try an alternate optimizer and compare the objective and theta".to_string(),
+            ]);
+            diagnostic.payload.insert(
+                "return_code".to_string(),
+                serde_json::json!(optsum.return_value),
+            );
+            diagnostic
+                .payload
+                .insert("objective_finite".to_string(), serde_json::json!(false));
+            diagnostic.payload.insert(
+                "objective_value".to_string(),
+                serde_json::json!(format!("{}", optsum.fmin)),
+            );
+            diagnostic.payload.insert(
+                "budget_exhausted".to_string(),
+                serde_json::json!(optimizer_budget_exhausted(optsum)),
+            );
+            diagnostic.payload.insert(
+                "function_evaluations".to_string(),
+                serde_json::json!(optsum.feval.max(0) as usize),
+            );
+            if optsum.max_feval > 0 {
+                diagnostic.payload.insert(
+                    "max_function_evaluations".to_string(),
+                    serde_json::json!(optsum.max_feval as usize),
+                );
+            }
+            diagnostics.push(diagnostic);
         } else {
             checks.push(CertificateCheck::Failed {
                 code: optsum.return_value.clone(),

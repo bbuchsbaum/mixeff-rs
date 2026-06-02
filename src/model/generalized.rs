@@ -3661,6 +3661,53 @@ fn annotate_glmm_covariance_status(
         return;
     }
 
+    if let Some(free_gradient_norm) = certificate.free_gradient_norm {
+        if !free_gradient_norm.is_finite() || free_gradient_norm > gradient_tolerance {
+            certificate.status = crate::compiler::FitStatus::NotOptimized;
+            if !certificate.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == DiagnosticCode::OptimizerNonconvergence
+                    && diagnostic
+                        .payload
+                        .get("stationarity_check")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("free_gradient_kkt")
+            }) {
+                let mut diagnostic = Diagnostic::new(
+                    DiagnosticCode::OptimizerNonconvergence,
+                    DiagnosticSeverity::Warning,
+                    DiagnosticStage::Certification,
+                    "GLMM joint optimizer stop failed finite-difference stationarity; convergence is not certified",
+                )
+                .with_suggested_actions(vec![
+                    "treat this joint GLMM result as not optimized until a tighter run or alternate optimizer certifies stationarity".to_string(),
+                    "fall back to the labelled fast-PIRLS GLMM result when available rather than reporting a silent interior convergence".to_string(),
+                ]);
+                diagnostic
+                    .payload
+                    .insert("fit_mode".to_string(), serde_json::json!("joint_glmm"));
+                diagnostic.payload.insert(
+                    "stationarity_check".to_string(),
+                    serde_json::json!("free_gradient_kkt"),
+                );
+                diagnostic.payload.insert(
+                    "free_gradient_norm".to_string(),
+                    serde_json::json!(free_gradient_norm),
+                );
+                diagnostic.payload.insert(
+                    "gradient_tolerance".to_string(),
+                    serde_json::json!(gradient_tolerance),
+                );
+                if let Some(return_code) = &certificate.evidence.optimizer_stop.return_code {
+                    diagnostic
+                        .payload
+                        .insert("return_code".to_string(), serde_json::json!(return_code));
+                }
+                certificate.diagnostics.push(diagnostic);
+            }
+            return;
+        }
+    }
+
     let boundary_tolerance = 1.0e-8;
     let theta_params = &params[n_beta..];
     let theta_lower = lower_bounds.get(n_beta..).unwrap_or(&[]);
@@ -4768,6 +4815,145 @@ mod tests {
             model.opt_summary().return_value.contains("MAXEVAL_REACHED"),
             "forced one-evaluation joint fit must report MAXEVAL_REACHED, got {}",
             model.opt_summary().return_value
+        );
+    }
+
+    #[test]
+    fn joint_glmm_stationarity_failure_is_not_converged_interior() {
+        let params = vec![1.41606, 0.08172, 0.45, 0.68];
+        let lower_bounds = vec![f64::NEG_INFINITY, f64::NEG_INFINITY, 0.0, 0.0];
+        let gradient = vec![3.5e-2, 1.0e-3, 0.0, 0.0];
+        let gradient_tolerance = 2.0e-2;
+
+        let mut optsum = OptSummary::new(params.clone());
+        optsum.optimizer = Optimizer::TrustBq;
+        optsum.backend = Optimizer::TrustBq.canonical_backend();
+        optsum.return_value = "JOINT_LAPLACE:FTOL_REACHED".to_string();
+        optsum.finitial = 2845.394;
+        optsum.fmin = 2845.394;
+        optsum.feval = 23;
+        optsum.max_feval = 5000;
+        optsum.final_params = params.clone();
+
+        let mut certificate = OptimizerCertificate::from_opt_summary_with_context(
+            &optsum,
+            &params,
+            &lower_bounds,
+            Some(2854),
+        );
+        certificate.apply_derivative_evidence(
+            OptimizerDerivativeEvidence {
+                method: EvidenceMethod::FiniteDifference,
+                gradient: gradient.clone(),
+                hessian: None,
+            },
+            gradient_tolerance,
+            1.0e-6,
+        );
+
+        annotate_glmm_covariance_status(
+            &mut certificate,
+            &params,
+            2,
+            &lower_bounds,
+            &gradient,
+            gradient_tolerance,
+        );
+
+        assert_eq!(certificate.status, crate::compiler::FitStatus::NotOptimized);
+        assert!(certificate.checks.iter().any(|check| {
+            matches!(
+                check,
+                crate::compiler::CertificateCheck::DerivativeMismatch { kind, .. }
+                    if kind == "free_gradient_kkt_mismatch"
+            )
+        }));
+        let diagnostic = certificate
+            .diagnostics
+            .iter()
+            .find(|diagnostic| {
+                diagnostic.code == DiagnosticCode::OptimizerNonconvergence
+                    && diagnostic
+                        .payload
+                        .get("stationarity_check")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("free_gradient_kkt")
+            })
+            .expect("failed stationarity should be reported as optimizer nonconvergence");
+        assert_eq!(
+            diagnostic.payload.get("return_code"),
+            Some(&serde_json::json!("JOINT_LAPLACE:FTOL_REACHED"))
+        );
+        assert_eq!(
+            diagnostic.payload.get("free_gradient_norm"),
+            Some(&serde_json::json!(3.5e-2))
+        );
+    }
+
+    #[test]
+    fn joint_glmm_nonfinite_objective_stop_is_not_converged_interior() {
+        let params = vec![448.9995, 0.79586, 0.42];
+        let lower_bounds = vec![f64::NEG_INFINITY, f64::NEG_INFINITY, 0.0];
+
+        let mut optsum = OptSummary::new(params.clone());
+        optsum.optimizer = Optimizer::TrustBq;
+        optsum.backend = Optimizer::TrustBq.canonical_backend();
+        optsum.return_value = "JOINT_LAPLACE:FTOL_REACHED".to_string();
+        optsum.finitial = 2540.376;
+        optsum.fmin = f64::INFINITY;
+        optsum.feval = 61;
+        optsum.max_feval = 5000;
+        optsum.final_params = params.clone();
+
+        let certificate = OptimizerCertificate::from_opt_summary_with_context(
+            &optsum,
+            &params,
+            &lower_bounds,
+            Some(5279),
+        );
+
+        assert_eq!(certificate.status, crate::compiler::FitStatus::NotOptimized);
+        assert_eq!(certificate.objective_value, None);
+        assert!(
+            !certificate.evidence.optimizer_stop.acceptable_stop,
+            "non-finite objective must invalidate an otherwise acceptable joint stop"
+        );
+        assert!(
+            joint_certificate_requires_fallback(&certificate),
+            "non-finite objective joint attempts should trigger the labelled fallback path"
+        );
+        assert!(certificate.checks.iter().any(|check| {
+            matches!(
+                check,
+                crate::compiler::CertificateCheck::Failed { code, .. }
+                    if code == "non_finite_objective"
+            )
+        }));
+        let diagnostic = certificate
+            .diagnostics
+            .iter()
+            .find(|diagnostic| {
+                diagnostic.code == DiagnosticCode::OptimizerNonconvergence
+                    && diagnostic
+                        .payload
+                        .get("objective_finite")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(false)
+            })
+            .expect("non-finite objective should be reported as optimizer nonconvergence");
+        assert_eq!(
+            diagnostic.payload.get("return_code"),
+            Some(&serde_json::json!("JOINT_LAPLACE:FTOL_REACHED"))
+        );
+
+        let fallback = agq_poisson_fixture();
+        let recovered = uncertified_joint_fallback(&certificate, &optsum, Some(fallback)).unwrap();
+        assert!(
+            recovered
+                .opt_summary()
+                .return_value
+                .starts_with("JOINT_LAPLACE_FALLBACK_FAST_PIRLS"),
+            "non-finite joint objective should return the labelled fallback result"
         );
     }
 
@@ -6109,7 +6295,7 @@ mod tests {
 
     #[cfg(feature = "nlopt")]
     #[test]
-    fn test_glmm_fast_false_nagq_uses_labelled_joint_agq_path() {
+    fn test_glmm_fast_false_nagq_uses_labelled_joint_agq_or_fallback_path() {
         let data = contra_fixture();
         let formula = parse_formula("use_num ~ 1 + (1 | urban_dist)").unwrap();
         let mut model =
@@ -6128,10 +6314,26 @@ mod tests {
             .glmm_fit_metadata
             .as_ref()
             .expect("fast=false AGQ fit should record GLMM metadata");
-        assert_eq!(metadata.estimation_method, "joint_agq");
-        assert_eq!(metadata.objective_definition, "joint_glmm_agq_deviance");
-        assert_eq!(metadata.response_constants, "included");
-        assert_eq!(metadata.n_agq, 7);
+        assert!(
+            matches!(
+                metadata.estimation_method.as_str(),
+                "joint_agq" | "fallback_fast_pirls"
+            ),
+            "fast=false AGQ must record either certified joint AGQ or a labelled fallback, got {:?}",
+            metadata
+        );
+        if metadata.estimation_method == "joint_agq" {
+            assert_eq!(metadata.objective_definition, "joint_glmm_agq_deviance");
+            assert_eq!(metadata.response_constants, "included");
+            assert_eq!(metadata.n_agq, 7);
+        } else {
+            assert_eq!(metadata.objective_definition, "profiled_glmm_deviance");
+            assert_eq!(metadata.response_constants, "dropped");
+            assert_eq!(
+                metadata.fallback_status.as_deref(),
+                Some("fallback_fast_pirls")
+            );
+        }
     }
 
     fn constant_response_fixture(y: Vec<f64>) -> DataFrame {

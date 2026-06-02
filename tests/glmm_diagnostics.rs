@@ -39,7 +39,7 @@ fn glmm_maxeval_stop_records_optimizer_nonconvergence_diagnostic() {
     let mut model =
         GeneralizedLinearMixedModel::new(formula, &data, Family::Gamma, Some(LinkFunction::Log))
             .unwrap();
-    model.lmm_mut().optsum.max_feval = 1;
+    model.lmm_mut().optsum_mut().max_feval = 1;
 
     model.fit_with_options(true, 1, false).unwrap();
 
@@ -49,7 +49,7 @@ fn glmm_maxeval_stop_records_optimizer_nonconvergence_diagnostic() {
         .as_ref()
         .expect("fitted GLMM should record an optimizer certificate");
     assert_eq!(certificate.status, FitStatus::NotOptimized);
-    assert_eq!(model.lmm().optsum.return_value, "MAXEVAL_REACHED");
+    assert_eq!(model.lmm().optsum().return_value, "MAXEVAL_REACHED");
     assert_eq!(
         certificate.evidence.optimizer_stop.return_code.as_deref(),
         Some("MAXEVAL_REACHED")
@@ -87,7 +87,7 @@ fn glmm_invalid_agq_request_records_stable_artifact_diagnostic() {
     let mut model =
         GeneralizedLinearMixedModel::new(formula, &data, Family::Gamma, Some(LinkFunction::Log))
             .unwrap();
-    let feval_before = model.lmm().optsum.feval;
+    let feval_before = model.lmm().optsum().feval;
 
     let err = model
         .fit_with_options(true, 7, false)
@@ -95,7 +95,7 @@ fn glmm_invalid_agq_request_records_stable_artifact_diagnostic() {
 
     assert!(err.to_string().contains("n_agq = 7"));
     assert_eq!(
-        model.lmm().optsum.feval,
+        model.lmm().optsum().feval,
         feval_before,
         "invalid AGQ request should fail before optimizer evaluations"
     );
@@ -127,9 +127,12 @@ fn glmm_final_pirls_failure_records_stable_artifact_diagnostic() {
     let mut model =
         GeneralizedLinearMixedModel::new(formula, &data, Family::Gamma, Some(LinkFunction::Log))
             .unwrap();
-    model.lmm_mut().optsum.optimizer = Optimizer::PatternSearch;
-    model.lmm_mut().optsum.initial = vec![f64::NAN];
-    model.lmm_mut().optsum.max_feval = 1;
+    {
+        let optsum = model.lmm_mut().optsum_mut();
+        optsum.optimizer = Optimizer::PatternSearch;
+        optsum.initial = vec![f64::NAN];
+        optsum.max_feval = 1;
+    }
 
     let err = model
         .fit_with_options(true, 1, false)
@@ -166,9 +169,12 @@ fn glmm_boundary_theta_records_boundary_parameter_diagnostic() {
     let mut model =
         GeneralizedLinearMixedModel::new(formula, &data, Family::Gamma, Some(LinkFunction::Log))
             .unwrap();
-    model.lmm_mut().optsum.optimizer = Optimizer::PatternSearch;
-    model.lmm_mut().optsum.initial = vec![0.0];
-    model.lmm_mut().optsum.max_feval = 1;
+    {
+        let optsum = model.lmm_mut().optsum_mut();
+        optsum.optimizer = Optimizer::PatternSearch;
+        optsum.initial = vec![0.0];
+        optsum.max_feval = 1;
+    }
 
     model.fit_with_options(true, 1, false).unwrap();
 
@@ -203,9 +209,12 @@ fn glmm_near_unit_random_effect_correlation_records_diagnostic() {
     let mut model =
         GeneralizedLinearMixedModel::new(formula, &data, Family::Gamma, Some(LinkFunction::Log))
             .unwrap();
-    model.lmm_mut().optsum.optimizer = Optimizer::PatternSearch;
-    model.lmm_mut().optsum.initial = vec![1.0, 1000.0, 0.001];
-    model.lmm_mut().optsum.max_feval = 1;
+    {
+        let optsum = model.lmm_mut().optsum_mut();
+        optsum.optimizer = Optimizer::PatternSearch;
+        optsum.initial = vec![1.0, 1000.0, 0.001];
+        optsum.max_feval = 1;
+    }
 
     model.fit_with_options(true, 1, false).unwrap();
 

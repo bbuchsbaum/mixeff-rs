@@ -231,9 +231,9 @@ fn test_cbpp_agq5_native_cobyla_fit_records_agq_contract() {
     assert_eq!(model.nobs(), expected.nobs);
     assert_eq!(model.dof(), expected.dof);
     assert_eq!(expected.formula, "proportion ~ 1 + period + (1 | herd)");
-    assert_eq!(model.lmm().optsum.optimizer, Optimizer::Cobyla);
-    assert_eq!(model.lmm().optsum.backend.label(), "native");
-    assert_eq!(model.lmm().optsum.n_agq, expected.n_agq);
+    assert_eq!(model.lmm().optsum().optimizer, Optimizer::Cobyla);
+    assert_eq!(model.lmm().optsum().backend.label(), "native");
+    assert_eq!(model.lmm().optsum().n_agq, expected.n_agq);
     assert!(model.objective().is_finite());
     assert!(model.deviance(1).is_finite());
     assert!(model.deviance(expected.n_agq).is_finite());
