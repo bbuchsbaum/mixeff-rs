@@ -2,6 +2,7 @@ use approx::assert_relative_eq;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use serde::Deserialize;
+use serde_json::Value;
 
 use mixeff_rs::formula::parse_formula;
 use mixeff_rs::model::data::DataFrame;
@@ -67,8 +68,161 @@ struct EngineReference {
     note: String,
 }
 
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct GammaIssue643Fixture {
+    schema_version: String,
+    source: String,
+    issue_url: String,
+    formula: String,
+    family: String,
+    link: String,
+    n_agq: usize,
+    nobs: usize,
+    data_recipe: Issue643Recipe,
+    data: Issue643Data,
+    observed_summary: DistributionSummary,
+    engines: Vec<Issue643EngineReference>,
+    stress_contract: Issue643StressContract,
+    notes: Vec<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct Issue643Recipe {
+    r_seed: u64,
+    n: usize,
+    y_distribution: String,
+    group_distribution: String,
+    groups: usize,
+}
+
+#[derive(Deserialize)]
+struct Issue643Data {
+    y: Vec<f64>,
+    group: Vec<usize>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct Issue643EngineReference {
+    engine: String,
+    status: String,
+    version: String,
+    beta: Value,
+    theta: Value,
+    theta_scale: String,
+    random_effect_sd: Option<f64>,
+    dispersion_phi: Option<f64>,
+    objective: Option<f64>,
+    loglik: Option<f64>,
+    simulation_summary: Option<DistributionSummary>,
+    verdict: String,
+    note: String,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Deserialize)]
+struct DistributionSummary {
+    mean: f64,
+    sd: f64,
+    min: f64,
+    max: f64,
+    q50: f64,
+    q90: f64,
+    q95: f64,
+    q99: f64,
+}
+
+#[derive(Deserialize)]
+struct Issue643StressContract {
+    max_reasonable_sim_q99: f64,
+    max_reasonable_sim_max: f64,
+    max_reasonable_bootstrap_mean_ratio: f64,
+    min_glmer_to_glmmtmb_theta_ratio: f64,
+}
+
 fn fixture() -> GammaGlmmFixture {
     serde_json::from_str(include_str!("fixtures/parity/gamma_glmm_engines.json")).unwrap()
+}
+
+fn lme4_issue_643_fixture() -> GammaIssue643Fixture {
+    serde_json::from_str(include_str!("fixtures/parity/gamma_glmm_lme4_643.json")).unwrap()
+}
+
+fn issue_643_engine<'a>(
+    fixture: &'a GammaIssue643Fixture,
+    engine_name: &str,
+) -> &'a Issue643EngineReference {
+    fixture
+        .engines
+        .iter()
+        .find(|engine| engine.engine == engine_name)
+        .unwrap_or_else(|| panic!("fixture records {engine_name} reference"))
+}
+
+fn scalar_or_first(value: &Value) -> f64 {
+    value
+        .as_f64()
+        .or_else(|| value.as_array().and_then(|values| values.first()?.as_f64()))
+        .expect("numeric scalar or first array element")
+}
+
+fn summarize(values: &[f64]) -> DistributionSummary {
+    assert!(!values.is_empty());
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    let sd = if values.len() > 1 {
+        let ss = values
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>();
+        (ss / (values.len() - 1) as f64).sqrt()
+    } else {
+        0.0
+    };
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).expect("finite sorted values"));
+    DistributionSummary {
+        mean,
+        sd,
+        min: sorted[0],
+        max: sorted[sorted.len() - 1],
+        q50: empirical_quantile(&sorted, 0.50),
+        q90: empirical_quantile(&sorted, 0.90),
+        q95: empirical_quantile(&sorted, 0.95),
+        q99: empirical_quantile(&sorted, 0.99),
+    }
+}
+
+fn empirical_quantile(sorted: &[f64], p: f64) -> f64 {
+    let h = (sorted.len() - 1) as f64 * p;
+    let lo = h.floor() as usize;
+    let hi = h.ceil() as usize;
+    if lo == hi {
+        sorted[lo]
+    } else {
+        let frac = h - lo as f64;
+        sorted[lo] * (1.0 - frac) + sorted[hi] * frac
+    }
+}
+
+fn lme4_issue_643_data(fixture: &GammaIssue643Fixture) -> DataFrame {
+    assert_eq!(fixture.data.y.len(), fixture.nobs);
+    assert_eq!(fixture.data.group.len(), fixture.nobs);
+
+    let mut data = DataFrame::new();
+    data.add_numeric("y", fixture.data.y.clone()).unwrap();
+    data.add_categorical(
+        "grp",
+        fixture
+            .data
+            .group
+            .iter()
+            .map(|group| format!("g{group}"))
+            .collect(),
+    )
+    .unwrap();
+    data
 }
 
 // toy: matches `fixtures/parity/gamma_glmm_engines.json`; row order is
@@ -362,6 +516,174 @@ fn test_gamma_glmm_parametric_bootstrap_is_seeded_and_positive() {
         }
         for (actual, want) in a.theta.iter().zip(b.theta.iter()) {
             assert_relative_eq!(*actual, *want, epsilon = 0.0);
+        }
+    }
+}
+
+#[test]
+fn test_lme4_issue_643_gamma_log_fixture_records_engine_divergence() {
+    let fixture = lme4_issue_643_fixture();
+    assert_eq!(fixture.schema_version, "1.0.0");
+    assert!(fixture.source.contains("set.seed(123)"));
+    assert_eq!(fixture.issue_url, "https://github.com/lme4/lme4/issues/643");
+    assert_eq!(fixture.formula, "y ~ 1 + (1 | grp)");
+    assert_eq!(fixture.family, "gamma");
+    assert_eq!(fixture.link, "log");
+    assert_eq!(fixture.data_recipe.r_seed, 123);
+    assert_eq!(fixture.data_recipe.n, 1000);
+    assert_eq!(fixture.data_recipe.groups, 20);
+    assert_eq!(fixture.data.y.len(), fixture.nobs);
+    assert_eq!(fixture.data.group.len(), fixture.nobs);
+    assert!(fixture.data.y.iter().all(|y| y.is_finite() && *y > 0.0));
+    assert!(fixture
+        .data
+        .group
+        .iter()
+        .all(|group| (1..=fixture.data_recipe.groups).contains(group)));
+
+    let observed = summarize(&fixture.data.y);
+    assert_relative_eq!(
+        observed.mean,
+        fixture.observed_summary.mean,
+        epsilon = 1e-15,
+        max_relative = 1e-15
+    );
+    assert_relative_eq!(
+        observed.max,
+        fixture.observed_summary.max,
+        epsilon = 1e-15,
+        max_relative = 1e-15
+    );
+    assert_relative_eq!(
+        observed.q99,
+        fixture.observed_summary.q99,
+        epsilon = 1e-14,
+        max_relative = 1e-14
+    );
+
+    let glmm_tmb = issue_643_engine(&fixture, "glmmTMB");
+    let mixedmodels = issue_643_engine(&fixture, "MixedModels.jl");
+    let glmer = issue_643_engine(&fixture, "lme4::glmer");
+
+    assert_eq!(glmm_tmb.status, "fit");
+    assert_eq!(
+        glmm_tmb.verdict,
+        "direct_mle_reference_with_local_tmb_warning"
+    );
+    assert!(glmm_tmb.note.contains("TMB package-version mismatch"));
+    assert!(glmm_tmb.version.contains("glmmTMB"));
+
+    assert_eq!(mixedmodels.status, "fit");
+    assert_eq!(
+        mixedmodels.verdict,
+        "supporting_reference_with_dispersion_warning"
+    );
+    assert!(mixedmodels
+        .note
+        .contains("dispersion-family results are not reliable"));
+    assert_relative_eq!(scalar_or_first(&mixedmodels.theta), 0.0, epsilon = 0.0);
+
+    assert_eq!(glmer.status, "fit");
+    assert_eq!(glmer.verdict, "documented_divergence");
+    assert!(glmer.note.contains("not as the sole oracle"));
+    assert!(glmer.version.contains("lme4"));
+
+    let glmm_tmb_theta = scalar_or_first(&glmm_tmb.theta);
+    let glmer_theta = scalar_or_first(&glmer.theta);
+    assert!(
+        glmm_tmb_theta < 1e-3,
+        "glmmTMB should put the random-intercept scale near zero; got {glmm_tmb_theta}"
+    );
+    assert!(
+        glmer_theta / glmm_tmb_theta >= fixture.stress_contract.min_glmer_to_glmmtmb_theta_ratio,
+        "lme4#643 sentinel should preserve the Gamma random-effect scale divergence: \
+         glmer={glmer_theta}, glmmTMB={glmm_tmb_theta}"
+    );
+    assert_relative_eq!(
+        scalar_or_first(&glmm_tmb.beta),
+        scalar_or_first(&mixedmodels.beta),
+        epsilon = 1e-6,
+        max_relative = 1e-6
+    );
+}
+
+#[test]
+fn test_lme4_issue_643_gamma_log_simulation_and_bootstrap_are_sane() {
+    let fixture = lme4_issue_643_fixture();
+    let data = lme4_issue_643_data(&fixture);
+    let model = fit_gamma_log(&data, &fixture.formula, fixture.n_agq);
+
+    assert_eq!(model.nobs(), fixture.nobs);
+    assert_eq!(model.fixef().len(), 1);
+    assert_eq!(model.theta().len(), 1);
+    assert!(model.objective().is_finite());
+    assert!(model.loglikelihood().is_finite());
+    assert!(model.dispersion(true).is_finite() && model.dispersion(true) > 0.0);
+    assert!(model.theta()[0].is_finite() && model.theta()[0] >= 0.0);
+
+    let glmm_tmb = issue_643_engine(&fixture, "glmmTMB");
+    assert_relative_eq!(
+        model.fixef()[0],
+        scalar_or_first(&glmm_tmb.beta),
+        epsilon = 0.25,
+        max_relative = 0.25
+    );
+
+    let mut rng = StdRng::seed_from_u64(0x6436_414d_4d41_2026);
+    for rep in 0..4 {
+        let y_sim = model.simulate_response(&mut rng).unwrap();
+        assert_eq!(y_sim.len(), fixture.nobs);
+        assert!(
+            y_sim.iter().all(|y| y.is_finite() && *y > 0.0),
+            "lme4#643 Gamma simulation replicate {rep} must stay positive and finite"
+        );
+        let sim = summarize(&y_sim);
+        assert!(
+            sim.max <= fixture.stress_contract.max_reasonable_sim_max,
+            "lme4#643 Gamma simulation replicate {rep} has an excessive tail max: {}",
+            sim.max
+        );
+        assert!(
+            sim.q99 <= fixture.stress_contract.max_reasonable_sim_q99,
+            "lme4#643 Gamma simulation replicate {rep} has an excessive q99: {}",
+            sim.q99
+        );
+        assert!(
+            sim.mean / fixture.observed_summary.mean
+                <= fixture.stress_contract.max_reasonable_bootstrap_mean_ratio,
+            "lme4#643 Gamma simulation replicate {rep} shifted away from the observed mean: \
+             observed={}, simulated={}",
+            fixture.observed_summary.mean,
+            sim.mean
+        );
+    }
+
+    let boot = parametricbootstrap_glmm(&mut rng, 2, &model).unwrap();
+    assert_eq!(boot.fits.len(), 2);
+    for (idx, fit) in boot.fits.iter().enumerate() {
+        assert!(
+            fit.objective.is_finite(),
+            "lme4#643 Gamma bootstrap replicate {idx} objective should refit cleanly"
+        );
+        assert!(
+            fit.sigma.is_finite() && fit.sigma > 0.0,
+            "lme4#643 Gamma bootstrap replicate {idx} dispersion should be positive"
+        );
+        assert_eq!(fit.beta.len(), 1);
+        assert_eq!(fit.theta.len(), 1);
+        assert!(fit.beta[0].is_finite());
+        assert!(fit.theta[0].is_finite() && fit.theta[0] >= 0.0);
+        assert!(
+            fit.beta[0].exp() / fixture.observed_summary.mean
+                <= fixture.stress_contract.max_reasonable_bootstrap_mean_ratio,
+            "lme4#643 Gamma bootstrap replicate {idx} fitted mean shifted too far: beta={}",
+            fit.beta[0]
+        );
+        for value in fit.se.iter() {
+            assert!(
+                value.is_finite(),
+                "lme4#643 Gamma bootstrap replicate {idx} SE should be finite"
+            );
         }
     }
 }
