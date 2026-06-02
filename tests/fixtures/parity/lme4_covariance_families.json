@@ -1,6 +1,6 @@
 {
   "source": "Local R/lme4 covariance-family fixture generated from lme4::sleepstudy.",
-  "generated_at": "2026-06-02T13:38:42Z",
+  "generated_at": "2026-06-02T13:56:29Z",
   "r_version": "4.5.1",
   "lme4_version": "2.0.1",
   "dataset": "lme4::sleepstudy",
@@ -93,6 +93,108 @@
           "sdcor": 25.5561229566256
         }
       ]
+    }
+  ],
+  "structured_refusals": [
+    {
+      "id": "sleepstudy_compound_symmetry_expected_refuse",
+      "rust_formula": "Reaction ~ 1 + Days + cs(1 + Days | Subject)",
+      "expected_status": "parsed_refused",
+      "covariance_family": "compound_symmetry",
+      "lme4_reference_role": "unstructured_full_cholesky_baseline; lme4 has no random-effect compound-symmetry covariance-family syntax",
+      "lme4_reference": {
+        "id": "sleepstudy_compound_symmetry_full_reference_ml",
+        "rust_formula": "Reaction ~ 1 + Days + cs(1 + Days | Subject)",
+        "lme4_formula": "Reaction ~ 1 + Days + (1 + Days | Subject)",
+        "reml": false,
+        "covariance_family": "full_cholesky",
+        "beta": [251.405104848483, 10.4672859595963],
+        "sigma": 25.5919070352053,
+        "theta": [0.929190605786122, 0.0181657547680123, 0.222643205629365],
+        "objective": 1751.93934448899,
+        "loglik": -875.969672244495,
+        "fitted_head": [254.220893869448, 273.763686606502, 293.306479343557, 312.849272080612, 332.392064817666, 351.934857554721, 371.477650291776, 391.02044302883, 410.563235765885, 430.10602850294],
+        "varcorr": [
+          {
+            "group": "Subject",
+            "var1": "(Intercept)",
+            "var2": null,
+            "vcov": 565.476966693934,
+            "sdcor": 23.7797596012646
+          },
+          {
+            "group": "Subject",
+            "var1": "Days",
+            "var2": null,
+            "vcov": 32.6817852515961,
+            "sdcor": 5.71679851416823
+          },
+          {
+            "group": "Subject",
+            "var1": "(Intercept)",
+            "var2": "Days",
+            "vcov": 11.0551224258567,
+            "sdcor": 0.0813210936322373
+          },
+          {
+            "group": "Residual",
+            "var1": null,
+            "var2": null,
+            "vcov": 654.945705698592,
+            "sdcor": 25.5919070352053
+          }
+        ]
+      }
+    },
+    {
+      "id": "sleepstudy_ar1_expected_refuse",
+      "rust_formula": "Reaction ~ 1 + Days + ar1(0 + Days | Subject)",
+      "expected_status": "parsed_refused",
+      "covariance_family": "ar1",
+      "lme4_reference_role": "unstructured_full_cholesky_baseline; lme4 has no random-effect AR(1) covariance-family syntax",
+      "lme4_reference": {
+        "id": "sleepstudy_ar1_full_reference_ml",
+        "rust_formula": "Reaction ~ 1 + Days + ar1(0 + Days | Subject)",
+        "lme4_formula": "Reaction ~ 1 + Days + (1 + Days | Subject)",
+        "reml": false,
+        "covariance_family": "full_cholesky",
+        "beta": [251.405104848483, 10.4672859595963],
+        "sigma": 25.5919070352053,
+        "theta": [0.929190605786122, 0.0181657547680123, 0.222643205629365],
+        "objective": 1751.93934448899,
+        "loglik": -875.969672244495,
+        "fitted_head": [254.220893869448, 273.763686606502, 293.306479343557, 312.849272080612, 332.392064817666, 351.934857554721, 371.477650291776, 391.02044302883, 410.563235765885, 430.10602850294],
+        "varcorr": [
+          {
+            "group": "Subject",
+            "var1": "(Intercept)",
+            "var2": null,
+            "vcov": 565.476966693934,
+            "sdcor": 23.7797596012646
+          },
+          {
+            "group": "Subject",
+            "var1": "Days",
+            "var2": null,
+            "vcov": 32.6817852515961,
+            "sdcor": 5.71679851416823
+          },
+          {
+            "group": "Subject",
+            "var1": "(Intercept)",
+            "var2": "Days",
+            "vcov": 11.0551224258567,
+            "sdcor": 0.0813210936322373
+          },
+          {
+            "group": "Residual",
+            "var1": null,
+            "var2": null,
+            "vcov": 654.945705698592,
+            "sdcor": 25.5919070352053
+          }
+        ]
+      }
     }
   ]
 }

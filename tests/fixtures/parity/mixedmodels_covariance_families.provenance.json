@@ -1,0 +1,9 @@
+{
+  "schema_version": "1.0",
+  "generated_at": "2026-06-02T13:56:35Z",
+  "crate_commit": "5535267d3f2522062012978d9a5365de616abdff",
+  "regenerator": "scripts/regenerate_mixedmodels_covariance_fixtures.jl",
+  "source_case": "MixedModels.dataset(:sleepstudy)",
+  "reference_engine": "MixedModels.jl 5.3.0",
+  "notes": "Julia 1.12.4; ML full and zerocorr sleepstudy covariance-family baselines"
+}

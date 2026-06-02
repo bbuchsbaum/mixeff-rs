@@ -153,6 +153,30 @@ labels. Structured `cs(...)` and `ar1(...)` traces deliberately use inactive
 `not_assessed` theta slots with `null` optimizer and VarCorr values; they are
 placeholders for source-to-artifact traceability, not fitted estimates.
 
+### R3c — Cross-engine covariance fixture policy
+
+The v1.0 covariance fixture policy separates supported-family parity from
+future structured-family conversion evidence:
+
+- `lme4` is the primary oracle for supported full and diagonal random-effect
+  covariance on the `sleepstudy` fixture. Its `(1 + Days | Subject)` and
+  `(1 + Days || Subject)` rows are expected-pass parity rows for Rust
+  `(1 + Days | Subject)` and `diag(1 + Days | Subject)`.
+- `MixedModels.jl` is a secondary supported-family baseline for the same full
+  and diagonal model families. Its diagonal syntax is
+  `zerocorr(1 + days | subj)`, not lme4's `||`; the fixture records this as a
+  baseline only, not as a structured-family oracle.
+- `cs(...)` and random-effect `ar1(...)` have expected-refuse rows in the lme4
+  covariance fixture. Those rows preserve the unstructured lme4 full-model
+  reference payload so a future fitted CS/AR1 implementation has a stable
+  conversion anchor, but the rows are not claimed to be lme4 CS/AR1 fits.
+
+Post-v1 fitted support must add actual covariance kernels, optimizer
+parameterizations, back-transforms, VarCorr labels, and engine-specific parity
+fixtures before changing either structured row from `parsed_refused` to
+`supported`. Residual AR(1) remains a different model component from
+random-effect AR(1) and needs its own syntax and fixtures.
+
 ### R4 — Intercept policy is first-class
 
 `InterceptPolicy ∈ { Included, Omitted }` is a property of every random term, set deterministically from the AST:

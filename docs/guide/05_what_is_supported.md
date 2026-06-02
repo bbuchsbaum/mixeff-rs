@@ -85,6 +85,14 @@ Random-effect covariance artifacts serialize stable support labels:
 reduced-rank artifact vocabulary; and `unsupported` for invalid or empty
 covariance bases.
 
+Covariance parity fixtures are engine-scoped. lme4 is the primary expected-pass
+oracle for supported full and diagonal `sleepstudy` random-effect covariance.
+MixedModels.jl contributes matching full and `zerocorr(...)` diagonal baseline
+rows, but it is not treated as a direct oracle for compound symmetry or
+random-effect AR(1). The checked-in structured rows are expected-refuse rows:
+they preserve full-model lme4 reference values for future conversion while
+asserting that Rust v1.0 refuses `cs(...)` and `ar1(...)` before fitting.
+
 ## Estimation
 
 | Path | Backend | Status |
@@ -131,6 +139,11 @@ contract.
 ## Explicitly out of scope (2.0 candidates)
 
 - Multivariate response (`cbind(y1, y2) ~ …`).
+- Fitted structured random-effect covariance families such as compound
+  symmetry and random-effect AR(1). v1.0 parses and reports them, then refuses
+  fitting with `parsed_refused` artifact status.
+- Residual-correlation structures such as residual AR(1); these are distinct
+  from random-effect covariance families.
 - Profile-likelihood CIs for GLMMs.
 - Parametric bootstrap for InverseGaussian and Normal-as-GLMM GLMMs.
 - Full `I()` / arbitrary formula-level transformations beyond the minimal

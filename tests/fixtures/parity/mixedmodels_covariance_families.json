@@ -1,0 +1,52 @@
+{
+  "source": "Local Julia/MixedModels.jl covariance-family baseline fixture generated from MixedModels.dataset(:sleepstudy).",
+  "generated_at": "2026-06-02T13:56:34Z",
+  "julia_version": "1.12.4",
+  "mixedmodels_version": "5.3.0",
+  "dataset": "MixedModels.dataset(:sleepstudy)",
+  "tolerances": {
+    "beta_abs": 0.00050000000000000001,
+    "sigma_abs": 0.00050000000000000001,
+    "theta_abs": 0.00050000000000000001,
+    "objective_abs": 0.0050000000000000001,
+    "loglik_abs": 0.0050000000000000001,
+    "fitted_abs": 0.00050000000000000001,
+    "std_dev_abs": 0.001,
+    "correlation_abs": 0.00050000000000000001
+  },
+  "cases": [
+    {
+      "id": "sleepstudy_full_ml",
+      "rust_formula": "Reaction ~ 1 + Days + (1 + Days | Subject)",
+      "mixedmodels_formula": "reaction ~ 1 + days + (1 + days | subj)",
+      "reml": false,
+      "covariance_family": "full_cholesky",
+      "oracle_role": "supported full/diagonal baseline only; MixedModels.jl does not provide CS or random-effect AR(1) covariance-family syntax",
+      "beta": [251.40510484848198, 10.467285959596087],
+      "sigma": 25.591798665755231,
+      "theta": [0.92923045228556611, 0.018164375118107465, 0.22264643697703476],
+      "objective": 1751.9393444640548,
+      "loglik": -875.96967223202739,
+      "fitted_head": [254.22067938817068, 273.76352035099455, 293.3063613138184, 312.84920227664225, 332.39204323946609, 351.93488420228999, 371.47772516511384, 391.02056612793774, 410.56340709076153, 430.10624805358543],
+      "std_dev": [23.780678648980881, 5.7168538572659724],
+      "correlations": [0.081313785959568716]
+    },
+    {
+      "id": "sleepstudy_diagonal_ml",
+      "rust_formula": "Reaction ~ 1 + Days + diag(1 + Days | Subject)",
+      "mixedmodels_formula": "reaction ~ 1 + days + zerocorr(1 + days | subj)",
+      "reml": false,
+      "covariance_family": "diagonal",
+      "oracle_role": "supported full/diagonal baseline only; MixedModels.jl does not provide CS or random-effect AR(1) covariance-family syntax",
+      "beta": [251.40510484848662, 10.467285959595511],
+      "sigma": 25.556134854957097,
+      "theta": [0.94581052774203112, 0.22692825155299093],
+      "objective": 1752.0032551398883,
+      "loglik": -876.00162756994416,
+      "fitted_head": [253.25975990266539, 272.96348069744806, 292.66720149223073, 312.3709222870134, 332.07464308179601, 351.77836387657868, 371.48208467136135, 391.18580546614396, 410.88952626092669, 430.59324705570936],
+      "std_dev": [24.171261394213488, 5.7994089990878637],
+      "correlations": [-0]
+    }
+  ],
+  "notes": ["MixedModels.jl uses zerocorr(...) for diagonal random-effect covariance; it does not parse lme4's || syntax in @formula.", "This fixture is a supported-family baseline, not a direct oracle for compound symmetry or random-effect AR(1)."]
+}

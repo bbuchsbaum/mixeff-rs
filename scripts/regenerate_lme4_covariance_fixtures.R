@@ -81,6 +81,36 @@ fixture <- list(
       "diagonal",
       diagonal_fit
     )
+  ),
+  structured_refusals = list(
+    list(
+      id = "sleepstudy_compound_symmetry_expected_refuse",
+      rust_formula = "Reaction ~ 1 + Days + cs(1 + Days | Subject)",
+      expected_status = "parsed_refused",
+      covariance_family = "compound_symmetry",
+      lme4_reference_role = "unstructured_full_cholesky_baseline; lme4 has no random-effect compound-symmetry covariance-family syntax",
+      lme4_reference = extract_case(
+        "sleepstudy_compound_symmetry_full_reference_ml",
+        "Reaction ~ 1 + Days + cs(1 + Days | Subject)",
+        "Reaction ~ 1 + Days + (1 + Days | Subject)",
+        "full_cholesky",
+        full_fit
+      )
+    ),
+    list(
+      id = "sleepstudy_ar1_expected_refuse",
+      rust_formula = "Reaction ~ 1 + Days + ar1(0 + Days | Subject)",
+      expected_status = "parsed_refused",
+      covariance_family = "ar1",
+      lme4_reference_role = "unstructured_full_cholesky_baseline; lme4 has no random-effect AR(1) covariance-family syntax",
+      lme4_reference = extract_case(
+        "sleepstudy_ar1_full_reference_ml",
+        "Reaction ~ 1 + Days + ar1(0 + Days | Subject)",
+        "Reaction ~ 1 + Days + (1 + Days | Subject)",
+        "full_cholesky",
+        full_fit
+      )
+    )
   )
 )
 
@@ -103,7 +133,12 @@ provenance <- list(
   source_case = "lme4::sleepstudy",
   reference_engine = sprintf("lme4 %s", as.character(packageVersion("lme4"))),
   notes = sprintf(
-    "R %s; ML full and zero-correlation sleepstudy covariance-family fixtures",
+    paste(
+      "R %s; ML full and zero-correlation sleepstudy covariance-family",
+      "fixtures plus cs/ar1 expected-refuse rows. lme4 has no direct",
+      "random-effect CS/AR(1) covariance syntax, so structured rows pin",
+      "the Rust v1.0 refusal contract rather than pass-oracle values."
+    ),
     getRversion()
   )
 )
