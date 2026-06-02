@@ -8,6 +8,10 @@ PRIMA is intentionally not a default dependency. Numeric PRIMA fits in Rust
 require `--features prima` and a system `libprimac`; default builds continue to
 use the existing native/NLopt paths.
 
+When `libprimac` is installed outside the platform linker defaults, set
+`PRIMA_DIR` to the PRIMA install prefix. `build.rs` adds
+`$PRIMA_DIR/lib` to the native link search path for `--features prima`.
+
 | Julia backend | Julia optimizer | Rust optimizer | Rust status |
 | --- | --- | --- | --- |
 | `prima` | `bobyqa` | `PrimaBobyqa` | `feature_gated_system_lib` |

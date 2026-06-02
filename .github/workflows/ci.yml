@@ -58,6 +58,16 @@ jobs:
       - name: Install NLopt build prerequisites
         if: matrix.name != 'no-default-features' && matrix.name != 'prima' && runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y cmake g++
+      - name: Install PRIMA C library
+        if: matrix.name == 'prima' && runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ gfortran
+          git clone --depth 1 --branch v0.7.2 https://github.com/libprima/prima.git "$RUNNER_TEMP/prima"
+          cmake -S "$RUNNER_TEMP/prima" -B "$RUNNER_TEMP/prima-build" -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/prima-install"
+          cmake --build "$RUNNER_TEMP/prima-build" --target install --parallel
+          echo "PRIMA_DIR=$RUNNER_TEMP/prima-install" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/prima-install/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
       - name: Run tests
         run: ${{ matrix.command }}
 

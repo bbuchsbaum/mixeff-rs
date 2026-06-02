@@ -115,7 +115,8 @@ The lower-level form (`LinearMixedModel::new(formula, &df, None)?` then
   NLopt can use `default-features = false` to keep the native TrustBQ LMM path
   and native GLMM fallbacks.
 - `prima`: routes bounded LMM θ optimization through the PRIMA C library
-  (BOBYQA). Expects a system PRIMA library visible to the linker.
+  (BOBYQA). Expects a system PRIMA library visible to the linker; if it is
+  installed under a custom prefix, set `PRIMA_DIR` to that prefix.
 - `unstable-internals`: exposes the in-flux internal surface (`compiler`,
   `datasets`, `pathology`) as public modules. **Not** covered by the SemVer
   guarantee — opt in only if you need it; it may change in any release.

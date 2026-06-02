@@ -1,92 +1,28 @@
-use std::ffi::{c_char, c_double, c_int, c_void, CStr};
+use std::ffi::{c_double, c_int, c_void};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::slice;
 
 use crate::error::{MixedModelError, Result};
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PrimaAlgorithm {
-    Bobyqa = 2,
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PrimaMessage {
-    None = 0,
-}
-
 type PrimaObj = Option<extern "C" fn(*const c_double, *mut c_double, *const c_void)>;
-type PrimaObjCon =
-    Option<extern "C" fn(*const c_double, *mut c_double, *mut c_double, *const c_void)>;
-type PrimaCallback = Option<
-    extern "C" fn(
-        c_int,
-        *const c_double,
-        c_double,
-        c_int,
-        c_int,
-        c_double,
-        c_int,
-        *const c_double,
-        *mut bool,
-    ),
->;
-
-#[repr(C)]
-struct PrimaProblem {
-    n: c_int,
-    calfun: PrimaObj,
-    calcfc: PrimaObjCon,
-    x0: *mut c_double,
-    xl: *mut c_double,
-    xu: *mut c_double,
-    m_ineq: c_int,
-    aineq: *mut c_double,
-    bineq: *mut c_double,
-    m_eq: c_int,
-    aeq: *mut c_double,
-    beq: *mut c_double,
-    m_nlcon: c_int,
-    f0: c_double,
-    nlconstr0: *mut c_double,
-}
-
-#[repr(C)]
-struct PrimaOptions {
-    rhobeg: c_double,
-    rhoend: c_double,
-    maxfun: c_int,
-    iprint: PrimaMessage,
-    ftarget: c_double,
-    npt: c_int,
-    ctol: c_double,
-    data: *mut c_void,
-    callback: PrimaCallback,
-}
-
-#[repr(C)]
-struct PrimaResult {
-    x: *mut c_double,
-    f: c_double,
-    cstrv: c_double,
-    nlconstr: *mut c_double,
-    nf: c_int,
-    status: c_int,
-    success: bool,
-    message: *const c_char,
-}
 
 extern "C" {
-    fn prima_init_problem(problem: *mut PrimaProblem, n: c_int) -> c_int;
-    fn prima_init_options(options: *mut PrimaOptions) -> c_int;
-    fn prima_minimize(
-        algorithm: PrimaAlgorithm,
-        problem: PrimaProblem,
-        options: PrimaOptions,
-        result: *mut PrimaResult,
+    fn prima_bobyqa(
+        calfun: PrimaObj,
+        data: *const c_void,
+        n: c_int,
+        x: *mut c_double,
+        f: *mut c_double,
+        xl: *const c_double,
+        xu: *const c_double,
+        nf: *mut c_int,
+        rhobeg: c_double,
+        rhoend: c_double,
+        ftarget: c_double,
+        maxfun: c_int,
+        npt: c_int,
+        iprint: c_int,
     ) -> c_int;
-    fn prima_free_result(result: *mut PrimaResult) -> c_int;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -163,27 +99,19 @@ where
     }
 
     let mut x0 = initial.to_vec();
-    let mut xl = lower_bounds.to_vec();
-    let mut xu = upper_bounds.to_vec();
-
-    // SAFETY: `PrimaProblem` is a `#[repr(C)]` plain-old-data struct from the
-    // PRIMA C API whose every field is valid when all-zero: raw pointers are
-    // null, integer/float fields are 0/0.0, and `Option<fn>` callbacks are
-    // `None` (null-optimized to 0). `prima_init_problem` is then called to
-    // populate it and its return code is checked immediately below, so the
-    // zeroed value is never observed by C in a half-initialized state.
-    let mut problem = unsafe { std::mem::MaybeUninit::<PrimaProblem>::zeroed().assume_init() };
-    let init_problem_rc = unsafe { prima_init_problem(&mut problem, n as c_int) };
-    if init_problem_rc != 0 {
-        return Err(MixedModelError::Optimization(format!(
-            "PRIMA init problem failed: {}",
-            prima_status_label(init_problem_rc)
-        )));
+    let xl = lower_bounds.to_vec();
+    let xu = upper_bounds.to_vec();
+    let npt = n.checked_mul(2).and_then(|value| value.checked_add(1));
+    let Some(npt) = npt else {
+        return Err(MixedModelError::Optimization(
+            "PRIMA BOBYQA problem size exceeds C API limits".to_string(),
+        ));
+    };
+    if npt > c_int::MAX as usize {
+        return Err(MixedModelError::Optimization(
+            "PRIMA BOBYQA problem size exceeds C API limits".to_string(),
+        ));
     }
-    problem.calfun = Some(objective_trampoline::<F>);
-    problem.x0 = x0.as_mut_ptr();
-    problem.xl = xl.as_mut_ptr();
-    problem.xu = xu.as_mut_ptr();
 
     let mut state = ObjectiveState {
         n,
@@ -191,55 +119,26 @@ where
         panicked: false,
     };
 
-    // SAFETY: as for `PrimaProblem` above — `PrimaOptions` is a `#[repr(C)]`
-    // POD struct, all-zero is a valid bit pattern (the `iprint` enum's
-    // `PrimaMessage::None` discriminant is 0), and `prima_init_options`
-    // populates it before use with its return code checked below.
-    let mut prima_options =
-        unsafe { std::mem::MaybeUninit::<PrimaOptions>::zeroed().assume_init() };
-    let init_options_rc = unsafe { prima_init_options(&mut prima_options) };
-    if init_options_rc != 0 {
-        return Err(MixedModelError::Optimization(format!(
-            "PRIMA init options failed: {}",
-            prima_status_label(init_options_rc)
-        )));
-    }
-    prima_options.rhobeg = options.rhobeg;
-    prima_options.rhoend = options.rhoend;
-    prima_options.maxfun = options.maxfun as c_int;
-    prima_options.iprint = PrimaMessage::None;
-    prima_options.data = (&mut state as *mut ObjectiveState<F>).cast::<c_void>();
-
-    // SAFETY: `PrimaResult` is a `#[repr(C)]` POD out-parameter; zeroed is a
-    // valid initial bit pattern (null `x`/`message` pointers, 0 counters).
-    // `prima_minimize` fills it; `minimize_rc` is validated before any field
-    // of `result` is read.
-    let mut result = unsafe { std::mem::MaybeUninit::<PrimaResult>::zeroed().assume_init() };
-    let minimize_rc =
-        unsafe { prima_minimize(PrimaAlgorithm::Bobyqa, problem, prima_options, &mut result) };
-
-    let x = if !result.x.is_null() {
-        unsafe { slice::from_raw_parts(result.x, n).to_vec() }
-    } else {
-        Vec::new()
-    };
-    let fmin = result.f;
-    let feval = i64::from(result.nf);
-    let result_status = result.status;
-    let success = result.success;
-    let message = if result.message.is_null() {
-        None
-    } else {
-        Some(
-            unsafe { CStr::from_ptr(result.message) }
-                .to_string_lossy()
-                .into_owned(),
+    let mut fmin = f64::NAN;
+    let mut feval = 0;
+    let status = unsafe {
+        prima_bobyqa(
+            Some(objective_trampoline::<F>),
+            (&mut state as *mut ObjectiveState<F>).cast::<c_void>(),
+            n as c_int,
+            x0.as_mut_ptr(),
+            &mut fmin,
+            xl.as_ptr(),
+            xu.as_ptr(),
+            &mut feval,
+            options.rhobeg,
+            options.rhoend,
+            f64::NEG_INFINITY,
+            options.maxfun as c_int,
+            npt as c_int,
+            0,
         )
     };
-
-    unsafe {
-        let _ = prima_free_result(&mut result);
-    }
 
     if state.panicked {
         return Err(MixedModelError::Optimization(
@@ -248,39 +147,23 @@ where
     }
     // PRIMA status codes in [0, 100) are normal stop reasons; <0 or >=100 are
     // hard failures (NaN/Inf, invalid input, …).
-    if !(0..100).contains(&minimize_rc) {
-        let detail = message
-            .as_deref()
-            .map(|msg| format!(" ({msg})"))
-            .unwrap_or_default();
+    if !(0..100).contains(&status) {
         return Err(MixedModelError::Optimization(format!(
-            "PRIMA BOBYQA failed: {}{}",
-            prima_status_label(minimize_rc),
-            detail
+            "PRIMA BOBYQA failed: {}",
+            prima_status_label(status),
         )));
     }
-    if x.len() != n || !fmin.is_finite() {
+    if x0.len() != n || !fmin.is_finite() {
         return Err(MixedModelError::Optimization(
             "PRIMA BOBYQA did not return a usable optimum".to_string(),
         ));
     }
-    if !success && matches!(result_status, -3..=-1 | 6..=8 | 100..=i32::MAX) {
-        let detail = message
-            .as_deref()
-            .map(|msg| format!(" ({msg})"))
-            .unwrap_or_default();
-        return Err(MixedModelError::Optimization(format!(
-            "PRIMA BOBYQA ended abnormally: {}{}",
-            prima_status_label(result_status),
-            detail
-        )));
-    }
 
     Ok(PrimaBobyqaResult {
-        x,
+        x: x0,
         fmin,
-        feval,
-        return_code: prima_status_label(result_status).to_string(),
+        feval: i64::from(feval),
+        return_code: prima_status_label(status).to_string(),
     })
 }
 
