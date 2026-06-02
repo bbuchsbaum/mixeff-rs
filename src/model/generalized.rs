@@ -812,6 +812,23 @@ impl GeneralizedLinearMixedModel {
         let mut payload =
             self.lmm
                 .predict_new_variance_with_level(newdata, new_re_levels, level)?;
+        let inner_lmm_scale = self.lmm.sigma();
+        let glmm_covariance_scale = self
+            .glmm_conditional_prediction_covariance_scale()
+            .ok_or_else(|| {
+                MixedModelError::InvalidArgument(
+                    "GLMM prediction covariance scale is non-finite".to_string(),
+                )
+            })?;
+        if !inner_lmm_scale.is_finite() || inner_lmm_scale <= 0.0 {
+            return Err(MixedModelError::InvalidArgument(format!(
+                "inner LMM prediction covariance scale must be positive and finite; got {inner_lmm_scale}"
+            )));
+        }
+        // The delegated LMM payload is scaled by the inner LMM's sigma()
+        // convention. GLMM predict(se.fit) parity follows lme4's GLMM scale:
+        // 1 for unscaled families and ML sqrt(pwrss / N) for scaled families.
+        let glmm_scale_multiplier = (glmm_covariance_scale / inner_lmm_scale).powi(2);
         let joint_laplace_conditional_variance =
             self.certified_joint_laplace_fixed_covariance().is_some();
         let certified_fixed_covariance = if joint_laplace_conditional_variance {
@@ -829,11 +846,11 @@ impl GeneralizedLinearMixedModel {
 
         let available_note = match scale {
             GlmmPredictionScale::Link => {
-                "GLMM link-scale fitted-mean prediction variance uses the final joint-laplace PIRLS/Laplace conditional-mode covariance over fixed and random effects; theta uncertainty and future-observation family variance are not included"
+                "GLMM link-scale fitted-mean prediction variance uses the final joint-laplace PIRLS/Laplace conditional-mode covariance over fixed and random effects, rescaled to the GLMM covariance scale; theta uncertainty and future-observation family variance are not included"
                     .to_string()
             }
             GlmmPredictionScale::Response => {
-                "GLMM response-scale fitted-mean prediction variance uses delta-method link propagation from the final joint-laplace PIRLS/Laplace conditional-mode covariance over fixed and random effects; theta uncertainty and future-observation family variance are not included"
+                "GLMM response-scale fitted-mean prediction variance uses delta-method link propagation from the final joint-laplace PIRLS/Laplace conditional-mode covariance over fixed and random effects, rescaled to the GLMM covariance scale; theta uncertainty and future-observation family variance are not included"
                     .to_string()
             }
         };
@@ -858,6 +875,21 @@ impl GeneralizedLinearMixedModel {
 
         for row in &mut payload.rows {
             row.prediction = predictions[row.row];
+            row.fixed_variance = row.fixed_variance.and_then(|value| {
+                clean_glmm_prediction_variance_component(value * glmm_scale_multiplier)
+            });
+            row.random_variance = row.random_variance.and_then(|value| {
+                clean_glmm_prediction_variance_component(value * glmm_scale_multiplier)
+            });
+            row.fixed_random_covariance = row
+                .fixed_random_covariance
+                .map(|value| value * glmm_scale_multiplier)
+                .filter(|value| value.is_finite());
+            row.combined_variance = row.combined_variance.and_then(|value| {
+                clean_glmm_prediction_variance_component(value * glmm_scale_multiplier)
+            });
+            row.se_fit = row.combined_variance.map(f64::sqrt);
+
             if let (Some(covariance), Some((raw_x, name_to_col))) =
                 (&certified_fixed_covariance, &certified_fixed_design)
             {
@@ -967,6 +999,18 @@ impl GeneralizedLinearMixedModel {
             ]
         };
         Ok(payload)
+    }
+
+    fn glmm_conditional_prediction_covariance_scale(&self) -> Option<f64> {
+        if !self.family.has_dispersion() {
+            return Some(1.0);
+        }
+        let pwrss = self.lmm.pwrss();
+        if !pwrss.is_finite() || pwrss < 0.0 {
+            return None;
+        }
+        let denom = self.y.len().max(1) as f64;
+        Some((pwrss / denom).max(f64::MIN_POSITIVE).sqrt())
     }
 
     fn certified_joint_laplace_fixed_covariance(&self) -> Option<DMatrix<f64>> {
@@ -8632,6 +8676,108 @@ mod tests {
         assert!(first.confidence_upper.unwrap() > first.prediction.unwrap());
         assert_eq!(first.prediction_lower, None);
         assert_eq!(first.prediction_upper, None);
+
+        let link_payload = model
+            .predict_new_variance(&data, GlmmPredictionScale::Link, NewReLevels::Error)
+            .unwrap();
+
+        // lme4 2.0.1 reference:
+        // glmer(y ~ 1 + x + (1 | group), data, family = Gamma(link = "log"),
+        //       nAGQ = 1, control = glmerControl(optimizer = "bobyqa"))
+        // predict(..., newdata = data[1:5,], re.form = NULL, se.fit = TRUE)
+        // emits lme4's documented approximation warning for se.fit.
+        let lme4_response_fit = [0.9529792, 1.1645747, 1.4231520, 1.7391427, 2.1252947];
+        let lme4_response_se = [0.01402705, 0.01476743, 0.01696936, 0.02205325, 0.03128255];
+        for (idx, (row, (expected_fit, expected_se))) in payload
+            .rows
+            .iter()
+            .take(lme4_response_fit.len())
+            .zip(lme4_response_fit.into_iter().zip(lme4_response_se))
+            .enumerate()
+        {
+            let fit = row.prediction.expect("response-scale GLMM prediction");
+            assert!(
+                (fit - expected_fit).abs() <= 5.0e-5_f64.max(5.0e-5 * expected_fit.abs()),
+                "response-scale lme4 fit parity row {idx}: observed {fit}, expected {expected_fit}"
+            );
+            let se_fit = row.se_fit.expect("response-scale GLMM se.fit");
+            assert!(
+                (se_fit - expected_se).abs() <= 5.0e-5_f64.max(5.0e-5 * expected_se.abs()),
+                "response-scale lme4 se.fit parity row {idx}: observed {se_fit}, expected {expected_se}"
+            );
+        }
+
+        let lme4_link_fit = [-0.0481622, 0.1523560, 0.3528741, 0.5533923, 0.7539105];
+        let lme4_link_se = [0.01471916, 0.01268053, 0.01192378, 0.01268053, 0.01471916];
+        let lme4_link_fixed = [
+            0.0006883062,
+            0.0006324485,
+            0.0006138292,
+            0.0006324485,
+            0.0006883062,
+        ];
+        let lme4_link_random = [0.0006815289; 5];
+        let lme4_link_cross = [-0.0005765908; 5];
+        let lme4_link_combined = [
+            0.0002166536,
+            0.0001607959,
+            0.0001421766,
+            0.0001607959,
+            0.0002166536,
+        ];
+        for (idx, (row, (expected_fit, expected_se))) in link_payload
+            .rows
+            .iter()
+            .take(lme4_link_fit.len())
+            .zip(lme4_link_fit.into_iter().zip(lme4_link_se))
+            .enumerate()
+        {
+            assert_eq!(row.status, PredictionVarianceStatus::Available);
+            let fit = row.prediction.expect("link-scale GLMM prediction");
+            assert!(
+                (fit - expected_fit).abs() <= 5.0e-5_f64.max(5.0e-5 * expected_fit.abs()),
+                "link-scale lme4 fit parity row {idx}: observed {fit}, expected {expected_fit}"
+            );
+            let se_fit = row.se_fit.expect("link-scale GLMM se.fit");
+            assert!(
+                (se_fit - expected_se).abs() <= 5.0e-5_f64.max(5.0e-5 * expected_se.abs()),
+                "link-scale lme4 se.fit parity row {idx}: observed {se_fit}, expected {expected_se}"
+            );
+            let fixed = row.fixed_variance.expect("link-scale GLMM fixed component");
+            assert!(
+                (fixed - lme4_link_fixed[idx]).abs()
+                    <= 1.0e-6_f64.max(1.0e-6 * lme4_link_fixed[idx].abs()),
+                "link-scale lme4 fixed component parity row {idx}: observed {fixed}, expected {}",
+                lme4_link_fixed[idx]
+            );
+            let random = row
+                .random_variance
+                .expect("link-scale GLMM random component");
+            assert!(
+                (random - lme4_link_random[idx]).abs()
+                    <= 1.0e-6_f64.max(1.0e-6 * lme4_link_random[idx].abs()),
+                "link-scale lme4 random component parity row {idx}: observed {random}, expected {}",
+                lme4_link_random[idx]
+            );
+            let cross = row
+                .fixed_random_covariance
+                .expect("link-scale GLMM fixed/random component");
+            assert!(
+                (cross - lme4_link_cross[idx]).abs()
+                    <= 1.0e-6_f64.max(1.0e-6 * lme4_link_cross[idx].abs()),
+                "link-scale lme4 fixed/random component parity row {idx}: observed {cross}, expected {}",
+                lme4_link_cross[idx]
+            );
+            let combined = row
+                .combined_variance
+                .expect("link-scale GLMM combined component");
+            assert!(
+                (combined - lme4_link_combined[idx]).abs()
+                    <= 1.0e-6_f64.max(1.0e-6 * lme4_link_combined[idx].abs()),
+                "link-scale lme4 combined component parity row {idx}: observed {combined}, expected {}",
+                lme4_link_combined[idx]
+            );
+        }
     }
 
     #[test]
