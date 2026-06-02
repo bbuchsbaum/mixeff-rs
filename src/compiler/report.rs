@@ -1427,9 +1427,12 @@ fn optimizer_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
         status: certification_quality_status(certificate),
         detail: evidence_quality_detail(&certificate.evidence.certification_quality),
     });
-    lines.push(convergence_next_steps_line(
+    let verification_surface =
+        ConvergenceVerificationSurface::for_model_kind(artifact.model_boundary.model_kind);
+    lines.push(convergence_next_steps_line_with_surface(
         certificate,
         &artifact.diagnostics,
+        verification_surface,
     ));
 
     let not_assessed = certificate
@@ -1467,7 +1470,10 @@ fn optimizer_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
         },
         detail: format!("{failed} failed; {mismatched} mismatch; {not_assessed} not assessed"),
     });
-    lines.push(convergence_verification_line(certificate));
+    lines.push(convergence_verification_line_with_surface(
+        certificate,
+        verification_surface,
+    ));
 
     AuditReportSection {
         title: "Optimizer".to_string(),
@@ -1614,6 +1620,7 @@ impl ConvergenceVerdict {
                     .compiler_policy
                     .thresholds
                     .convergence_derivative_nparmax,
+                ConvergenceVerificationSurface::for_model_kind(artifact.model_boundary.model_kind),
             ),
         }
     }
@@ -1660,6 +1667,7 @@ impl ConvergenceVerdict {
             certificate,
             diagnostics,
             DEFAULT_CONVERGENCE_DERIVATIVE_NPARMAX,
+            ConvergenceVerificationSurface::VerifyConvergenceApi,
         )
     }
 
@@ -1667,8 +1675,9 @@ impl ConvergenceVerdict {
         certificate: &super::audit::OptimizerCertificate,
         diagnostics: &[Diagnostic],
         derivative_nparmax: usize,
+        verification_surface: ConvergenceVerificationSurface,
     ) -> Self {
-        let optimizer = optimizer_summary(certificate, derivative_nparmax);
+        let optimizer = optimizer_summary(certificate, derivative_nparmax, verification_surface);
         let structural = structural_findings(diagnostics);
 
         if structural.is_empty() {
@@ -1754,6 +1763,8 @@ enum NextActionKind {
     BudgetOrAlternate,
     /// "run verify_convergence() to compare restart and alternate-optimizer agreement"
     SuggestVerify,
+    /// "compare tighter GLMM refits or alternate optimizer fits before relying on optimizer agreement"
+    CompareManualGlmmRefits,
     /// "gate inference on derivative-backed or finite-difference stationarity evidence"
     GateInferenceOnDerivative,
     /// "gate weak-identification claims until Hessian evidence is available"
@@ -1776,6 +1787,9 @@ impl NextActionKind {
             }
             NextActionKind::SuggestVerify => {
                 "run verify_convergence() to compare restart and alternate-optimizer agreement"
+            }
+            NextActionKind::CompareManualGlmmRefits => {
+                "compare tighter GLMM refits or alternate optimizer fits before relying on optimizer agreement"
             }
             NextActionKind::GateInferenceOnDerivative => {
                 "gate inference on derivative-backed or finite-difference stationarity evidence"
@@ -1805,6 +1819,7 @@ impl NextActionKind {
             self,
             NextActionKind::BudgetOrAlternate
                 | NextActionKind::SuggestVerify
+                | NextActionKind::CompareManualGlmmRefits
                 | NextActionKind::GateInferenceOnDerivative
         )
     }
@@ -1823,6 +1838,7 @@ impl NextActionKind {
             NextActionKind::BudgetOrAlternate => 0,
             NextActionKind::InspectEffectiveCovariance => 1,
             NextActionKind::SuggestVerify => 2,
+            NextActionKind::CompareManualGlmmRefits => 2,
             NextActionKind::GateInferenceOnDerivative => 3,
             NextActionKind::PredictorScalingOrSimplifyRe => 3,
             NextActionKind::CompareVerificationRuns => 5,
@@ -1839,6 +1855,9 @@ impl From<NextActionKind> for ConvergenceNextAction {
                 ConvergenceNextAction::IncreaseBudgetOrAlternateOptimizer
             }
             NextActionKind::SuggestVerify => ConvergenceNextAction::VerifyConvergence,
+            NextActionKind::CompareManualGlmmRefits => {
+                ConvergenceNextAction::CompareVerificationRuns
+            }
             NextActionKind::GateInferenceOnDerivative => {
                 ConvergenceNextAction::GateInferenceOnDerivativeEvidence
             }
@@ -1859,6 +1878,39 @@ impl From<NextActionKind> for ConvergenceNextAction {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConvergenceVerificationSurface {
+    VerifyConvergenceApi,
+    ManualGlmmRefit,
+}
+
+impl ConvergenceVerificationSurface {
+    fn for_model_kind(model_kind: ModelKind) -> Self {
+        match model_kind {
+            ModelKind::LinearMixedModel => Self::VerifyConvergenceApi,
+            ModelKind::GeneralizedLinearMixedModel => Self::ManualGlmmRefit,
+        }
+    }
+
+    fn missing_action(self) -> NextActionKind {
+        match self {
+            Self::VerifyConvergenceApi => NextActionKind::SuggestVerify,
+            Self::ManualGlmmRefit => NextActionKind::CompareManualGlmmRefits,
+        }
+    }
+
+    fn not_run_detail(self) -> &'static str {
+        match self {
+            Self::VerifyConvergenceApi => {
+                "not run; call verify_convergence() to compare bounded restarts and alternate optimizer fits"
+            }
+            Self::ManualGlmmRefit => {
+                "not run; GLMM bounded verification is not exposed in compiler v0; compare tighter GLMM refits or alternate optimizer fits if optimizer agreement matters"
+            }
+        }
+    }
+}
+
 /// Compact, level-aware summary of the optimizer dimension only. The
 /// verdict overlays this with structural findings; the audit lines
 /// (`convergence_interpretation`, `convergence_next_steps_line`) reuse
@@ -1873,6 +1925,7 @@ struct OptimizerSummary {
 fn optimizer_summary(
     certificate: &super::audit::OptimizerCertificate,
     derivative_nparmax: usize,
+    verification_surface: ConvergenceVerificationSurface,
 ) -> OptimizerSummary {
     let mut level = ConvergenceLevel::Certified;
     let mut clauses: Vec<String> = Vec::new();
@@ -2008,7 +2061,7 @@ fn optimizer_summary(
                 level = ConvergenceLevel::Ok;
             }
             clauses.push("verification not run".to_string());
-            actions.push(NextActionKind::SuggestVerify);
+            actions.push(verification_surface.missing_action());
         }
     }
 
@@ -2751,9 +2804,22 @@ fn convergence_interpretation(
     (status, parts.join("; "))
 }
 
+#[cfg(test)]
 fn convergence_next_steps_line(
     certificate: &super::audit::OptimizerCertificate,
     diagnostics: &[Diagnostic],
+) -> AuditReportLine {
+    convergence_next_steps_line_with_surface(
+        certificate,
+        diagnostics,
+        ConvergenceVerificationSurface::VerifyConvergenceApi,
+    )
+}
+
+fn convergence_next_steps_line_with_surface(
+    certificate: &super::audit::OptimizerCertificate,
+    diagnostics: &[Diagnostic],
+    verification_surface: ConvergenceVerificationSurface,
 ) -> AuditReportLine {
     let mut kinds: Vec<NextActionKind> = Vec::new();
 
@@ -2761,7 +2827,7 @@ fn convergence_next_steps_line(
         kinds.push(NextActionKind::BudgetOrAlternate);
     }
     if certificate.verification.is_none() {
-        kinds.push(NextActionKind::SuggestVerify);
+        kinds.push(verification_surface.missing_action());
     }
     if matches!(
         certificate.evidence.gradient.method,
@@ -2897,15 +2963,15 @@ fn action_status(certificate: &super::audit::OptimizerCertificate) -> AuditRepor
     }
 }
 
-fn convergence_verification_line(
+fn convergence_verification_line_with_surface(
     certificate: &super::audit::OptimizerCertificate,
+    verification_surface: ConvergenceVerificationSurface,
 ) -> AuditReportLine {
     let Some(verification) = &certificate.verification else {
         return AuditReportLine {
             label: "convergence verification".to_string(),
             status: AuditReportStatus::NotAssessed,
-            detail: "not run; call verify_convergence() to compare bounded restarts and alternate optimizer fits"
-                .to_string(),
+            detail: verification_surface.not_run_detail().to_string(),
         };
     };
 
@@ -3098,20 +3164,46 @@ fn diagnostics_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
 }
 
 fn report_diagnostics(artifact: &CompiledModelArtifact) -> Vec<Diagnostic> {
-    let mut diagnostics = artifact.diagnostics.clone();
+    let verification_surface =
+        ConvergenceVerificationSurface::for_model_kind(artifact.model_boundary.model_kind);
+    let mut diagnostics: Vec<Diagnostic> = artifact
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic_for_report(diagnostic, verification_surface))
+        .collect();
     if let Some(certificate) = &artifact.optimizer_certificate {
         for diagnostic in &certificate.diagnostics {
+            let diagnostic = diagnostic_for_report(diagnostic, verification_surface);
             let duplicate = diagnostics.iter().any(|existing| {
                 existing.code == diagnostic.code
                     && existing.message == diagnostic.message
                     && existing.affected_terms == diagnostic.affected_terms
             });
             if !duplicate {
-                diagnostics.push(diagnostic.clone());
+                diagnostics.push(diagnostic);
             }
         }
     }
     diagnostics
+}
+
+fn diagnostic_for_report(
+    diagnostic: &Diagnostic,
+    verification_surface: ConvergenceVerificationSurface,
+) -> Diagnostic {
+    let mut diagnostic = diagnostic.clone();
+    if verification_surface == ConvergenceVerificationSurface::ManualGlmmRefit {
+        let replacement = verification_surface.missing_action().text();
+        if diagnostic.message.contains("verify_convergence") {
+            diagnostic.message = replacement.to_string();
+        }
+        for action in &mut diagnostic.suggested_actions {
+            if action.contains("verify_convergence") {
+                *action = replacement.to_string();
+            }
+        }
+    }
+    diagnostic
 }
 
 fn max_status(left: AuditReportStatus, right: AuditReportStatus) -> AuditReportStatus {
@@ -3410,7 +3502,7 @@ fn diagnostic_code_label(code: &DiagnosticCode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compiler::{compile_formula_ir, CompiledModelArtifact};
+    use crate::compiler::{compile_formula_ir, CompiledModelArtifact, ModelBoundary};
     use crate::formula::parse_formula;
     use crate::model::data::DataFrame;
 
@@ -3783,6 +3875,15 @@ mod tests {
         cert
     }
 
+    fn fitted_artifact_with_boundary(boundary: ModelBoundary) -> CompiledModelArtifact {
+        let formula = parse_formula("y ~ x + (1 | subject)").unwrap();
+        let mut artifact =
+            CompiledModelArtifact::new(formula.to_string(), compile_formula_ir(&formula));
+        artifact.set_model_boundary(boundary);
+        artifact.optimizer_certificate = Some(clean_certificate());
+        artifact
+    }
+
     fn certificate_with_verification(
         status: ConvergenceVerificationStatus,
     ) -> OptimizerCertificate {
@@ -3871,6 +3972,65 @@ mod tests {
         assert_eq!(v.source, ConvergenceSource::Clean);
         let next = v.next_step.expect("verify hint expected");
         assert!(next.contains("verify_convergence"));
+    }
+
+    #[test]
+    fn glmm_artifact_without_verification_does_not_suggest_lmm_api() {
+        let mut artifact = fitted_artifact_with_boundary(ModelBoundary::glmm(
+            "poisson",
+            "log",
+            ObjectiveApproximation::Pirls,
+        ));
+        artifact
+            .optimizer_certificate
+            .as_mut()
+            .expect("synthetic fitted artifact has a certificate")
+            .diagnostics
+            .push(
+                Diagnostic::new(
+                    DiagnosticCode::OptimizerNotAssessed,
+                    DiagnosticSeverity::Info,
+                    DiagnosticStage::Certification,
+                    "optimizer certificate is unavailable before fitting",
+                )
+                .with_suggested_actions(vec![
+                    "run verify_convergence() after fitting if optimizer agreement matters"
+                        .to_string(),
+                ]),
+            );
+
+        let verdict = ConvergenceVerdict::for_artifact(&artifact);
+        assert_eq!(verdict.level, ConvergenceLevel::Ok);
+        assert_eq!(verdict.source, ConvergenceSource::Clean);
+        assert_eq!(
+            verdict.next_action,
+            Some(ConvergenceNextAction::CompareVerificationRuns)
+        );
+        let next = verdict
+            .next_step
+            .expect("GLMM should still give a reachable follow-up");
+        assert!(
+            !next.contains("verify_convergence"),
+            "GLMM verdict must not advertise the LMM-only API: {next}"
+        );
+        assert!(
+            next.contains("GLMM refits") && next.contains("alternate optimizer"),
+            "GLMM verdict should point to reachable refit comparison, got: {next}"
+        );
+
+        let report_text = ModelAuditReport::from_artifact(&artifact).to_text();
+        assert!(
+            !report_text.contains("verify_convergence"),
+            "GLMM audit report must not advertise the LMM-only API: {report_text}"
+        );
+        assert!(
+            report_text.contains("GLMM bounded verification is not exposed in compiler v0"),
+            "GLMM audit report should explain why the bounded-verification line is not callable: {report_text}"
+        );
+        assert!(
+            report_text.contains("compare tighter GLMM refits or alternate optimizer fits"),
+            "GLMM audit report should recommend reachable optimizer-agreement evidence: {report_text}"
+        );
     }
 
     #[test]

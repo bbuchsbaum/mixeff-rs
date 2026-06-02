@@ -82,10 +82,13 @@ post-hoc Hessian certification.
 
 ## Verification
 
-`verify_convergence()` compares bounded restarts and alternate optimizer runs.
-Agreement is reassuring metadata. Disagreement is reported as fragile or
-unstable verification and should be interpreted by comparing objective values,
-theta, beta, and effective covariance rank across runs.
+For LMMs, `verify_convergence()` compares bounded restarts and alternate
+optimizer runs. GLMM reports do not recommend that API because GLMM bounded
+verification is not exposed in compiler v0; compare tighter GLMM refits or
+alternate optimizer fits when optimizer agreement matters. Agreement is
+reassuring metadata. Disagreement is reported as fragile or unstable
+verification and should be interpreted by comparing objective values, theta,
+beta, and effective covariance rank across runs.
 
 ## Structural Fit Status
 
