@@ -164,6 +164,11 @@ pub enum PredictionVarianceMethod {
     /// geometry, but not the certified active-subspace Hessian requested for
     /// full GLMM Wald/parity claims.
     GlmmPirlsLaplaceWorkingDelta,
+    /// GLMM joint-Laplace fitted-mean delta-method approximation using the
+    /// final PIRLS/Laplace conditional-mode covariance over fixed and random
+    /// effects. The fitted-mean variance includes fixed, random, and cross
+    /// terms; future-observation family variance is not included.
+    GlmmJointLaplaceConditionalDelta,
     /// No certified prediction-variance method is available for this model.
     Unavailable,
 }

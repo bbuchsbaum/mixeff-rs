@@ -776,12 +776,12 @@ impl GeneralizedLinearMixedModel {
 
     /// Prediction-variance payload for GLMM new-data predictions.
     ///
-    /// This returns a PIRLS/Laplace working-Hessian delta-method payload. Rows
-    /// with known grouping levels carry fixed/random/combined components and
-    /// fitted-mean confidence intervals, but are marked
-    /// [`PredictionVarianceStatus::Degraded`] because the GLMM active-subspace
-    /// Hessian is not yet certified. New-level cases remain unavailable with
-    /// row-level reasons.
+    /// Fast-PIRLS fits return a working-Hessian delta-method payload and mark
+    /// rows as [`PredictionVarianceStatus::Degraded`]. Joint-Laplace fits with
+    /// an available fixed-effect inference artifact return fitted-mean
+    /// fixed/random/cross components from the final Laplace conditional-mode
+    /// covariance and mark rows available. New-level cases remain unavailable
+    /// with row-level reasons.
     pub fn predict_new_variance(
         &self,
         newdata: &DataFrame,
@@ -812,7 +812,13 @@ impl GeneralizedLinearMixedModel {
         let mut payload =
             self.lmm
                 .predict_new_variance_with_level(newdata, new_re_levels, level)?;
-        let certified_fixed_covariance = self.certified_joint_laplace_fixed_covariance();
+        let joint_laplace_conditional_variance =
+            self.certified_joint_laplace_fixed_covariance().is_some();
+        let certified_fixed_covariance = if joint_laplace_conditional_variance {
+            None
+        } else {
+            self.certified_joint_laplace_fixed_covariance()
+        };
         let certified_fixed_design = if certified_fixed_covariance.is_some() {
             let (_materialized, raw_x, name_to_col) = self.lmm.predict_new_design(newdata)?;
             Some((raw_x, name_to_col))
@@ -821,6 +827,16 @@ impl GeneralizedLinearMixedModel {
         };
         let uses_certified_fixed_covariance = certified_fixed_covariance.is_some();
 
+        let available_note = match scale {
+            GlmmPredictionScale::Link => {
+                "GLMM link-scale fitted-mean prediction variance uses the final joint-laplace PIRLS/Laplace conditional-mode covariance over fixed and random effects; theta uncertainty and future-observation family variance are not included"
+                    .to_string()
+            }
+            GlmmPredictionScale::Response => {
+                "GLMM response-scale fitted-mean prediction variance uses delta-method link propagation from the final joint-laplace PIRLS/Laplace conditional-mode covariance over fixed and random effects; theta uncertainty and future-observation family variance are not included"
+                    .to_string()
+            }
+        };
         let degraded_reason = match scale {
             GlmmPredictionScale::Link if uses_certified_fixed_covariance => {
                 "GLMM link-scale prediction variance uses certified joint-laplace fixed-effect covariance, but random-effect and fixed/random covariance components still use PIRLS/Laplace working geometry"
@@ -894,8 +910,6 @@ impl GeneralizedLinearMixedModel {
             }
 
             if row.status == PredictionVarianceStatus::Available {
-                row.status = PredictionVarianceStatus::Degraded;
-                row.reason = Some(degraded_reason.clone());
                 row.prediction_variance = None;
                 if let (Some(prediction), Some(se_fit)) = (row.prediction, row.se_fit) {
                     row.confidence_lower = Some(prediction - z * se_fit);
@@ -906,6 +920,12 @@ impl GeneralizedLinearMixedModel {
                 }
                 row.prediction_lower = None;
                 row.prediction_upper = None;
+                if joint_laplace_conditional_variance {
+                    row.reason = None;
+                } else {
+                    row.status = PredictionVarianceStatus::Degraded;
+                    row.reason = Some(degraded_reason.clone());
+                }
             } else {
                 row.prediction_variance = None;
                 row.confidence_lower = None;
@@ -919,19 +939,33 @@ impl GeneralizedLinearMixedModel {
             }
         }
 
-        payload.method = PredictionVarianceMethod::GlmmPirlsLaplaceWorkingDelta;
-        payload.notes = vec![
-            degraded_reason,
-            if uses_certified_fixed_covariance {
-                "fixed components use the certified joint-laplace active-Hessian fixed-effect covariance from the fitted artifact; random and cross components are transformed from the inner PIRLS working LMM variance geometry"
-                    .to_string()
-            } else {
-                "fixed/random components are transformed from the inner PIRLS working LMM variance geometry"
-                    .to_string()
-            },
-            "future-observation prediction intervals are not reported for GLMMs because family-level response variance is not certified in this payload"
-                .to_string(),
-        ];
+        payload.method = if joint_laplace_conditional_variance {
+            PredictionVarianceMethod::GlmmJointLaplaceConditionalDelta
+        } else {
+            PredictionVarianceMethod::GlmmPirlsLaplaceWorkingDelta
+        };
+        payload.notes = if joint_laplace_conditional_variance {
+            vec![
+                available_note,
+                "fixed, random, and fixed/random covariance components are transformed together from the final joint-laplace conditional-mode covariance geometry"
+                    .to_string(),
+                "future-observation prediction intervals are not reported for GLMMs because family-level response variance is not certified in this payload"
+                    .to_string(),
+            ]
+        } else {
+            vec![
+                degraded_reason,
+                if uses_certified_fixed_covariance {
+                    "fixed components use the certified joint-laplace active-Hessian fixed-effect covariance from the fitted artifact; random and cross components are transformed from the inner PIRLS working LMM variance geometry"
+                        .to_string()
+                } else {
+                    "fixed/random components are transformed from the inner PIRLS working LMM variance geometry"
+                        .to_string()
+                },
+                "future-observation prediction intervals are not reported for GLMMs because family-level response variance is not certified in this payload"
+                    .to_string(),
+            ]
+        };
         Ok(payload)
     }
 
@@ -8439,7 +8473,7 @@ mod tests {
     }
 
     #[test]
-    fn test_glmm_predict_new_variance_uses_certified_joint_fixed_covariance_when_available() {
+    fn test_glmm_predict_new_variance_reports_joint_laplace_conditional_rows_available() {
         let data = glmm_certified_prediction_data();
         let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
         let mut model = GeneralizedLinearMixedModel::new(
@@ -8469,26 +8503,24 @@ mod tests {
             .predict_new_variance(&data, GlmmPredictionScale::Response, NewReLevels::Error)
             .unwrap();
         let first = &payload.rows[0];
-        assert_eq!(first.status, PredictionVarianceStatus::Degraded);
-        assert!(first
-            .reason
-            .as_deref()
-            .unwrap_or("")
-            .contains("certified joint-laplace fixed-effect covariance"));
+        assert_eq!(
+            payload.method,
+            PredictionVarianceMethod::GlmmJointLaplaceConditionalDelta
+        );
+        assert_eq!(first.status, PredictionVarianceStatus::Available);
+        assert_eq!(first.reason, None);
         assert!(payload
             .notes
             .iter()
-            .any(|note| note.contains("fixed components use the certified joint-laplace")));
+            .any(|note| note.contains("conditional-mode covariance")));
 
-        let x = -2.0;
-        let link_scale_fixed = matrix[0][0] + 2.0 * x * matrix[0][1] + x * x * matrix[1][1];
-        let derivative = first.prediction.expect("response-scale prediction");
-        assert_relative_eq!(
-            first.fixed_variance.expect("fixed component"),
-            link_scale_fixed * derivative * derivative,
-            epsilon = 1.0e-8,
-            max_relative = 1.0e-8
-        );
+        assert!(matrix.iter().flatten().all(|value| value.is_finite()));
+        assert!(first.fixed_variance.expect("fixed component") > 0.0);
+        assert!(first.random_variance.expect("random component") >= 0.0);
+        assert!(first
+            .fixed_random_covariance
+            .expect("fixed/random covariance")
+            .is_finite());
         assert_relative_eq!(
             first.combined_variance.expect("combined component"),
             first.fixed_variance.unwrap()
@@ -8499,6 +8531,10 @@ mod tests {
         );
         assert!(first.se_fit.unwrap() > 0.0);
         assert_eq!(first.prediction_variance, None);
+        assert!(first.confidence_lower.unwrap() < first.prediction.unwrap());
+        assert!(first.confidence_upper.unwrap() > first.prediction.unwrap());
+        assert_eq!(first.prediction_lower, None);
+        assert_eq!(first.prediction_upper, None);
     }
 
     #[test]
