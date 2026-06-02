@@ -2973,6 +2973,37 @@ mod tests {
     }
 
     #[test]
+    fn optimizer_certificate_accepts_joint_ftol_at_budget_boundary() {
+        let params = vec![0.4, 0.8];
+        let lower_bounds = vec![f64::NEG_INFINITY, 0.0];
+        let mut optsum = OptSummary::new(params.clone());
+        optsum.return_value = "JOINT_LAPLACE:FTOL_REACHED".to_string();
+        optsum.finitial = 23.4;
+        optsum.fmin = 22.8;
+        optsum.feval = 578;
+        optsum.max_feval = 578;
+        optsum.final_params = params.clone();
+
+        let certificate = OptimizerCertificate::from_opt_summary_with_context(
+            &optsum,
+            &params,
+            &lower_bounds,
+            Some(64),
+        );
+
+        assert!(
+            certificate.evidence.optimizer_stop.acceptable_stop,
+            "a clean joint FTOL stop should not be downgraded just because feval equals max_feval"
+        );
+        assert_eq!(certificate.status, FitStatus::ConvergedInterior);
+        assert!(!certificate.evidence.optimizer_stop.budget_exhausted);
+        assert_eq!(
+            certificate.evidence.optimizer_stop.return_code.as_deref(),
+            Some("JOINT_LAPLACE:FTOL_REACHED")
+        );
+    }
+
+    #[test]
     fn design_audit_reports_full_rank_fixed_effects() {
         let formula = parse_formula("y ~ x + (1 | subject)").unwrap();
         let semantic = compile_formula_ir(&formula);
@@ -4582,6 +4613,15 @@ fn optimizer_budget_exhausted(optsum: &OptSummary) -> bool {
         .map(optimizer_stop_is_acceptable)
         .unwrap_or(false)
     {
+        return false;
+    }
+    if optimizer_joint_glmm_final_code(&optsum.return_value)
+        .map(optimizer_stop_is_acceptable)
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    if optimizer_stop_is_acceptable(&optsum.return_value) {
         return false;
     }
     let return_value = optimizer_joint_glmm_final_code(&optsum.return_value)

@@ -2154,6 +2154,16 @@ impl GeneralizedLinearMixedModel {
             &gradient,
             2.0e-2,
         );
+        if joint_certificate_requires_fallback(&certificate)
+            && joint_candidate_materially_improves_profiled_start(&me.lmm.optsum)
+        {
+            record_uncertified_joint_candidate_diagnostic(&mut certificate, &me.lmm.optsum);
+            me.lmm.compiler_artifact.optimizer_certificate = Some(certificate);
+            me.record_glmm_fit_metadata();
+            me.refresh_binomial_separation_diagnostics();
+            me.refresh_near_unit_random_effect_correlation_diagnostics();
+            return Ok(me);
+        }
         if let Some(fallback) =
             uncertified_joint_fallback(&certificate, &me.lmm.optsum, fallback_fast_pirls)
         {
@@ -2341,6 +2351,16 @@ impl GeneralizedLinearMixedModel {
             &gradient,
             2.0e-2,
         );
+        if joint_certificate_requires_fallback(&certificate)
+            && joint_candidate_materially_improves_profiled_start(&me.lmm.optsum)
+        {
+            record_uncertified_joint_candidate_diagnostic(&mut certificate, &me.lmm.optsum);
+            me.lmm.compiler_artifact.optimizer_certificate = Some(certificate);
+            me.record_glmm_fit_metadata();
+            me.refresh_binomial_separation_diagnostics();
+            me.refresh_near_unit_random_effect_correlation_diagnostics();
+            return Ok(me);
+        }
         if let Some(fallback) =
             uncertified_joint_fallback(&certificate, &me.lmm.optsum, fallback_fast_pirls)
         {
@@ -3934,14 +3954,47 @@ fn record_uncertified_joint_candidate_diagnostic(
     optsum: &OptSummary,
 ) {
     let objective_delta = optsum.finitial - optsum.fmin;
+    let budget_limited = certificate.evidence.optimizer_stop.budget_exhausted
+        || optsum.return_value.contains("MAXEVAL_REACHED")
+        || optsum.return_value.contains("MAXTIME_REACHED");
+    let stationarity_uncertified = certificate.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == DiagnosticCode::OptimizerNonconvergence
+            && diagnostic
+                .payload
+                .get("stationarity_check")
+                .and_then(serde_json::Value::as_str)
+                == Some("free_gradient_kkt")
+    });
+    let (message, scorecard_class, certification_gap, first_action) = if budget_limited {
+        (
+            "returning improved joint GLMM candidate after budget exhaustion; convergence is not certified",
+            "budget_limited_joint_candidate",
+            "budget_exhausted",
+            "treat fixed effects and log-likelihood as a budget-limited joint-Laplace candidate, not a certified optimizer convergence",
+        )
+    } else if stationarity_uncertified {
+        (
+            "returning improved joint GLMM candidate with uncertified stationarity; convergence is not certified",
+            "stationarity_uncertified_joint_candidate",
+            "stationarity_uncertified",
+            "treat fixed effects and log-likelihood as an uncertified joint-Laplace candidate, not a certified optimizer convergence",
+        )
+    } else {
+        (
+            "returning improved joint GLMM candidate without full optimizer certification",
+            "uncertified_joint_candidate",
+            "uncertified",
+            "treat fixed effects and log-likelihood as an uncertified joint-Laplace candidate until an external reference verifies it",
+        )
+    };
     let mut diagnostic = Diagnostic::new(
         DiagnosticCode::OptimizerNonconvergence,
         DiagnosticSeverity::Warning,
         DiagnosticStage::Certification,
-        "returning improved joint GLMM candidate after budget exhaustion; convergence is not certified",
+        message,
     )
     .with_suggested_actions(vec![
-        "treat fixed effects and log-likelihood as a budget-limited joint-Laplace candidate, not a certified optimizer convergence".to_string(),
+        first_action.to_string(),
         "increase max_feval or compare against an external joint-Laplace reference before promoting this row to strict parity".to_string(),
     ]);
     diagnostic.payload.insert(
@@ -3950,7 +4003,11 @@ fn record_uncertified_joint_candidate_diagnostic(
     );
     diagnostic.payload.insert(
         "scorecard_class".to_string(),
-        serde_json::json!("budget_limited_joint_candidate"),
+        serde_json::json!(scorecard_class),
+    );
+    diagnostic.payload.insert(
+        "certification_gap".to_string(),
+        serde_json::json!(certification_gap),
     );
     diagnostic.payload.insert(
         "objective_delta".to_string(),
@@ -5007,6 +5064,56 @@ mod tests {
         assert!(
             uncertified_joint_fallback(&certificate, &optsum, Some(fallback)).is_none(),
             "acceptable joint candidates with unassessed stationarity should remain joint fits"
+        );
+    }
+
+    #[test]
+    fn joint_glmm_ftol_at_budget_boundary_keeps_not_available_joint_candidate() {
+        let params = vec![1.2, -0.25, 0.42, 0.68];
+        let lower_bounds = vec![f64::NEG_INFINITY, f64::NEG_INFINITY, 0.0, 0.0];
+
+        let mut optsum = OptSummary::new(params.clone());
+        optsum.optimizer = Optimizer::TrustBq;
+        optsum.backend = Optimizer::TrustBq.canonical_backend();
+        optsum.return_value = "JOINT_LAPLACE:FTOL_REACHED".to_string();
+        optsum.finitial = 1137.42;
+        optsum.fmin = 1136.50;
+        optsum.feval = 578;
+        optsum.max_feval = 578;
+        optsum.final_params = params.clone();
+
+        let certificate = OptimizerCertificate::from_opt_summary_with_context(
+            &optsum,
+            &params,
+            &lower_bounds,
+            Some(1427),
+        );
+
+        assert!(
+            certificate.evidence.optimizer_stop.acceptable_stop,
+            "joint FTOL at the evaluation cap is a clean stop, not budget exhaustion"
+        );
+        assert!(!certificate.evidence.optimizer_stop.budget_exhausted);
+        assert_eq!(
+            certificate.status,
+            crate::compiler::FitStatus::ConvergedInterior
+        );
+        assert!(
+            matches!(
+                certificate.evidence.gradient.method,
+                EvidenceMethod::NotAvailable { .. }
+            ),
+            "regression must exercise the production no-gradient/NotAvailable path"
+        );
+        assert!(
+            !joint_certificate_requires_fallback(&certificate),
+            "production NotAvailable derivative evidence on an acceptable joint FTOL stop should not discard the joint candidate"
+        );
+
+        let fallback = agq_poisson_fixture();
+        assert!(
+            uncertified_joint_fallback(&certificate, &optsum, Some(fallback)).is_none(),
+            "acceptable joint candidates with NotAvailable derivatives should remain joint fits"
         );
     }
 
@@ -6252,7 +6359,7 @@ mod tests {
         data.add_categorical("participant", participant).unwrap();
         data.add_categorical("item", item).unwrap();
         let formula =
-            parse_formula("correct ~ 1 + x + (1 + x || participant) + (1 | item)").unwrap();
+            parse_formula("correct ~ 1 + x + (1 + x | participant) + (1 | item)").unwrap();
         let mut model =
             GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
         model.lmm.optsum.max_feval = 40;
@@ -6273,13 +6380,11 @@ mod tests {
         assert_eq!(metadata.n_agq, 1);
         assert_eq!(metadata.optimizer_max_feval, Some(40));
         assert!(metadata.optimizer_feval.unwrap_or_default() <= 40);
-        assert!(matches!(
-            metadata.estimation_method.as_str(),
-            "joint_laplace" | "fallback_fast_pirls"
-        ));
-        if metadata.estimation_method == "joint_laplace"
-            && model.lmm.optsum.return_value.contains("MAXEVAL_REACHED")
-        {
+        assert_eq!(
+            metadata.estimation_method, "joint_laplace",
+            "budgeted high-baseline multi-RE fit should keep the native joint candidate instead of returning the fast-PIRLS fallback"
+        );
+        if model.lmm.optsum.return_value.contains("MAXEVAL_REACHED") {
             let certificate = model
                 .lmm
                 .compiler_artifact
