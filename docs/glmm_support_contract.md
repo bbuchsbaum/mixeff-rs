@@ -16,10 +16,10 @@ system optimizer dependency. Supported families and links are:
   proportions.
 - Bernoulli and Binomial with probit and complementary log-log links.
 - Poisson with log and square-root links.
-- Negative-binomial NB2 with log link when a positive fixed size parameter
-  `theta` is supplied by the caller. This is the
-  `MASS::negative.binomial(theta)`-style route; glmer.nb-style outer
-  estimation of `theta` is not part of this slice.
+- Negative-binomial NB2 with log link. The engine supports both a positive
+  caller-supplied fixed size parameter `theta`
+  (`MASS::negative.binomial(theta)`-style) and explicit glmer.nb-style outer
+  estimation of `theta`.
 - Gamma with log link.
 
 `Family::InverseGaussian` (and the Gaussian-GLMM non-identity link paths) are
@@ -33,9 +33,13 @@ the SemVer-covered GLMM contract for 1.0.
 Offsets are fixed linear-predictor offsets. Observation weights are supported
 where the family semantics define them, including binomial trial weights.
 Negative-binomial GLMMs use NB2 variance `V(mu) = mu + mu^2 / theta`.
-Artifacts and fit summaries record the fixed family parameter under
-`glmm_fit_metadata.family_parameters.negative_binomial_theta`; `dispersion()`
-returns this fixed `theta` for wrapper compatibility. It is not treated as a
+Artifacts and fit summaries record the effective family parameter under
+`glmm_fit_metadata.family_parameters.negative_binomial_theta` and its
+provenance under
+`glmm_fit_metadata.family_parameter_sources.negative_binomial_theta`
+(`fixed` or `estimated`). Estimated-theta fits also record the initial theta,
+outer iteration count, and convergence flag as family parameters. `dispersion()`
+returns the effective `theta` for wrapper compatibility. It is not treated as a
 residual scale and must not rescale VarCorr output.
 
 `fast = true` is the supported fitting mode. It is a profiled fast-PIRLS
@@ -145,7 +149,8 @@ optional development backend, not a required runtime dependency.
 Artifacts and summaries must record:
 
 - Family and link.
-- Family parameters, when applicable (currently fixed NB2 `theta`).
+- Family parameters, when applicable (including fixed or estimated NB2
+  `theta` and its source).
 - Objective approximation boundary (Laplace or AGQ semantics).
 - Requested/effective `n_agq`.
 - Optimizer name and backend.

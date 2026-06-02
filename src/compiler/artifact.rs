@@ -190,6 +190,8 @@ pub struct GlmmFitMetadata {
     pub fallback_status: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub family_parameters: BTreeMap<String, f64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub family_parameter_sources: BTreeMap<String, String>,
 }
 
 impl GlmmFitMetadata {
@@ -249,6 +251,7 @@ impl GlmmFitMetadata {
             caller_set_fields: opt.caller_set_fields.clone(),
             fallback_status: fallback_status.map(str::to_string),
             family_parameters: BTreeMap::new(),
+            family_parameter_sources: BTreeMap::new(),
         }
     }
 }

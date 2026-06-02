@@ -71,12 +71,15 @@ pub struct GeneralizedLinearMixedModel {
     /// `dispersion(true)` returns sigma squared. Non-dispersion GLMM families
     /// keep this at 1.
     dispersion: f64,
-    /// Fixed NB2 size/dispersion parameter for negative-binomial GLMMs.
+    /// NB2 size/dispersion parameter for negative-binomial GLMMs.
     ///
     /// This is the `theta` in `Var(Y | b) = mu + mu^2 / theta`. The first
-    /// supported NB slice accepts caller-supplied theta; glmer.nb-style theta
-    /// profiling is intentionally left for a later optimizer slice.
+    /// supported modes either fix it from the caller or update it in an outer
+    /// glmer.nb-style iteration around the conditional GLMM fit.
     negative_binomial_theta: Option<f64>,
+    /// Whether the NB2 theta parameter was estimated by the engine rather
+    /// than supplied as a fixed family parameter.
+    negative_binomial_estimate_theta: bool,
 
     /// Distribution family.
     pub family: Family,
@@ -204,6 +207,7 @@ pub struct GeneralizedLinearMixedModelBuilder<'a> {
     family: Family,
     link: Option<LinkFunction>,
     negative_binomial_theta: Option<f64>,
+    negative_binomial_estimate_theta: bool,
     weights: Option<Vec<f64>>,
     offset: Option<Vec<f64>>,
     compiler_policy: Option<CompilerPolicy>,
@@ -218,6 +222,7 @@ impl<'a> GeneralizedLinearMixedModelBuilder<'a> {
             family,
             link: None,
             negative_binomial_theta: None,
+            negative_binomial_estimate_theta: false,
             weights: None,
             offset: None,
             compiler_policy: None,
@@ -238,6 +243,17 @@ impl<'a> GeneralizedLinearMixedModelBuilder<'a> {
     /// profiling is attempted.
     pub fn negative_binomial_theta(mut self, theta: f64) -> Self {
         self.negative_binomial_theta = Some(theta);
+        self.negative_binomial_estimate_theta = false;
+        self
+    }
+
+    /// Request glmer.nb-style estimation of the NB2 size parameter.
+    ///
+    /// `start_theta` is optional; when omitted, the constructor derives a
+    /// method-of-moments start from the response.
+    pub fn estimate_negative_binomial_theta(mut self, start_theta: Option<f64>) -> Self {
+        self.negative_binomial_theta = start_theta;
+        self.negative_binomial_estimate_theta = true;
         self
     }
 
@@ -268,6 +284,7 @@ impl<'a> GeneralizedLinearMixedModelBuilder<'a> {
             self.family,
             self.link,
             self.negative_binomial_theta,
+            self.negative_binomial_estimate_theta,
             policy,
         )?;
         if let Some(offset) = self.offset {
@@ -331,7 +348,15 @@ impl GeneralizedLinearMixedModel {
         family: Family,
         link: Option<LinkFunction>,
     ) -> Result<Self> {
-        Self::new_with_policy_internal(formula, data, family, link, None, CompilerPolicy::default())
+        Self::new_with_policy_internal(
+            formula,
+            data,
+            family,
+            link,
+            None,
+            false,
+            CompilerPolicy::default(),
+        )
     }
 
     /// Construct a negative-binomial NB2 GLMM with a fixed size parameter.
@@ -351,6 +376,29 @@ impl GeneralizedLinearMixedModel {
             Family::NegativeBinomial,
             link,
             Some(theta),
+            false,
+            CompilerPolicy::default(),
+        )
+    }
+
+    /// Construct a negative-binomial NB2 GLMM that estimates its size parameter.
+    ///
+    /// This is the engine-side analogue of `glmer.nb`: `start_theta`, when
+    /// supplied, seeds the outer theta iteration; otherwise a response-moment
+    /// start is used. The default link is log.
+    pub fn new_negative_binomial_estimated(
+        formula: Formula,
+        data: &DataFrame,
+        start_theta: Option<f64>,
+        link: Option<LinkFunction>,
+    ) -> Result<Self> {
+        Self::new_with_policy_internal(
+            formula,
+            data,
+            Family::NegativeBinomial,
+            link,
+            start_theta,
+            true,
             CompilerPolicy::default(),
         )
     }
@@ -377,6 +425,7 @@ impl GeneralizedLinearMixedModel {
             family,
             link,
             None,
+            false,
             CompilerPolicy::default(),
         )?;
         validate_case_weights(&weights, model.y.len())?;
@@ -403,6 +452,7 @@ impl GeneralizedLinearMixedModel {
             family,
             link,
             None,
+            false,
             CompilerPolicy::default(),
         )?;
         model.set_offset(offset)?;
@@ -431,6 +481,7 @@ impl GeneralizedLinearMixedModel {
         family: Family,
         link: Option<LinkFunction>,
         negative_binomial_theta: Option<f64>,
+        negative_binomial_estimate_theta: bool,
         compiler_policy: CompilerPolicy,
     ) -> Result<Self> {
         let link = link.unwrap_or_else(|| family.canonical_link());
@@ -442,8 +493,11 @@ impl GeneralizedLinearMixedModel {
             ));
         }
         validate_supported_glmm_family_link(family, link)?;
-        let negative_binomial_theta =
-            validate_negative_binomial_theta(family, negative_binomial_theta)?;
+        validate_negative_binomial_theta_request(
+            family,
+            negative_binomial_theta,
+            negative_binomial_estimate_theta,
+        )?;
 
         // Data-boundary seam: lower the stateless in-formula transforms into
         // synthetic numeric columns here too, so the GLMM response-domain
@@ -473,6 +527,12 @@ impl GeneralizedLinearMixedModel {
                 }
             }
         }
+        let negative_binomial_theta = initialize_negative_binomial_theta(
+            family,
+            negative_binomial_theta,
+            negative_binomial_estimate_theta,
+            data.numeric(&formula.response),
+        )?;
 
         // Build the internal LMM
         let mut lmm =
@@ -530,6 +590,7 @@ impl GeneralizedLinearMixedModel {
             wt: Vec::new(),
             dispersion: negative_binomial_theta.unwrap_or(1.0),
             negative_binomial_theta,
+            negative_binomial_estimate_theta,
             family,
             link,
             devc: vec![0.0; agq_len],
@@ -550,12 +611,17 @@ impl GeneralizedLinearMixedModel {
         link: Option<LinkFunction>,
         compiler_policy: CompilerPolicy,
     ) -> Result<Self> {
-        Self::new_with_policy_internal(formula, data, family, link, None, compiler_policy)
+        Self::new_with_policy_internal(formula, data, family, link, None, false, compiler_policy)
     }
 
     /// Fixed NB2 theta used by a negative-binomial GLMM, when applicable.
     pub fn negative_binomial_theta(&self) -> Option<f64> {
         self.negative_binomial_theta
+    }
+
+    /// Whether this negative-binomial GLMM estimates the NB2 theta parameter.
+    pub fn negative_binomial_theta_estimated(&self) -> bool {
+        self.negative_binomial_estimate_theta
     }
 
     fn require_negative_binomial_theta(&self) -> Result<f64> {
@@ -1731,10 +1797,86 @@ impl GeneralizedLinearMixedModel {
         if let Some(start_theta) = &optimizer_control.start_theta {
             self.theta = start_theta.clone();
         }
+        if self.family == Family::NegativeBinomial && self.negative_binomial_estimate_theta {
+            return self.fit_negative_binomial_estimated_theta(fast, n_agq, verbose);
+        }
         if !fast {
             return self.fit_joint_glmm_with_response_constants(n_agq, verbose);
         }
         self.fit_with_options_impl(n_agq, verbose)
+    }
+
+    fn fit_negative_binomial_estimated_theta(
+        &mut self,
+        fast: bool,
+        n_agq: usize,
+        verbose: bool,
+    ) -> Result<&mut Self> {
+        let initial_theta = self.require_negative_binomial_theta()?;
+        let mut current_theta = clamp_negative_binomial_theta(initial_theta);
+        let mut last_fit_theta = f64::NAN;
+        let mut update_iterations = 0usize;
+        let mut converged = false;
+
+        for iteration in 0..NEGATIVE_BINOMIAL_THETA_MAX_ITERS {
+            if self.lmm.optsum.feval > 0 {
+                self.reset_for_refit(None)?;
+            }
+            self.negative_binomial_theta = Some(current_theta);
+            self.fit_negative_binomial_conditional(fast, n_agq, verbose)?;
+            last_fit_theta = current_theta;
+
+            let next_theta = self.estimate_negative_binomial_theta_given_fit()?;
+            update_iterations = iteration + 1;
+            let relative_change = relative_theta_change(current_theta, next_theta);
+            if verbose {
+                eprintln!(
+                    "  NB theta outer iter {}: theta = {:.6}, updated = {:.6}, rel_change = {:.3e}",
+                    iteration + 1,
+                    current_theta,
+                    next_theta,
+                    relative_change
+                );
+            }
+            current_theta = next_theta;
+            if relative_change <= NEGATIVE_BINOMIAL_THETA_TOL {
+                converged = true;
+                break;
+            }
+        }
+
+        if relative_theta_change(last_fit_theta, current_theta)
+            > NEGATIVE_BINOMIAL_THETA_FINAL_REFIT_TOL
+        {
+            self.reset_for_refit(None)?;
+            self.negative_binomial_theta = Some(current_theta);
+            self.fit_negative_binomial_conditional(fast, n_agq, verbose)?;
+            last_fit_theta = current_theta;
+        }
+
+        self.negative_binomial_theta = Some(last_fit_theta);
+        self.refresh_dispersion();
+        self.record_negative_binomial_theta_estimation_metadata(
+            initial_theta,
+            last_fit_theta,
+            update_iterations,
+            converged,
+        );
+        Ok(self)
+    }
+
+    fn fit_negative_binomial_conditional(
+        &mut self,
+        fast: bool,
+        n_agq: usize,
+        verbose: bool,
+    ) -> Result<()> {
+        if fast {
+            self.fit_with_options_impl(n_agq, verbose)?;
+        } else {
+            self.fit_joint_glmm_with_response_constants(n_agq, verbose)?;
+        }
+        Ok(())
     }
 
     fn configure_profile_start_optimizer(&mut self) {
@@ -2348,11 +2490,64 @@ impl GeneralizedLinearMixedModel {
             metadata
                 .family_parameters
                 .insert("negative_binomial_variance_power".to_string(), 2.0);
+            metadata.family_parameter_sources.insert(
+                "negative_binomial_theta".to_string(),
+                if self.negative_binomial_estimate_theta {
+                    "estimated".to_string()
+                } else {
+                    "fixed".to_string()
+                },
+            );
+            metadata.family_parameter_sources.insert(
+                "negative_binomial_variance_power".to_string(),
+                "fixed".to_string(),
+            );
         }
         self.record_fast_pirls_parity_scope_diagnostic(&metadata);
         self.lmm.compiler_artifact.glmm_fit_metadata = Some(metadata);
         self.lmm.compiler_artifact.fixed_effect_covariance_matrix =
             Some(self.lmm.glmm_fixed_effect_covariance_matrix());
+    }
+
+    fn record_negative_binomial_theta_estimation_metadata(
+        &mut self,
+        initial_theta: f64,
+        final_theta: f64,
+        update_iterations: usize,
+        converged: bool,
+    ) {
+        if let Some(metadata) = &mut self.lmm.compiler_artifact.glmm_fit_metadata {
+            metadata
+                .family_parameters
+                .insert("negative_binomial_theta_initial".to_string(), initial_theta);
+            metadata.family_parameters.insert(
+                "negative_binomial_theta_outer_iterations".to_string(),
+                update_iterations as f64,
+            );
+            metadata.family_parameters.insert(
+                "negative_binomial_theta_outer_converged".to_string(),
+                if converged { 1.0 } else { 0.0 },
+            );
+            metadata
+                .family_parameters
+                .insert("negative_binomial_theta".to_string(), final_theta);
+            metadata.family_parameter_sources.insert(
+                "negative_binomial_theta".to_string(),
+                "estimated".to_string(),
+            );
+            metadata.family_parameter_sources.insert(
+                "negative_binomial_theta_initial".to_string(),
+                "method_of_moments_or_caller_start".to_string(),
+            );
+            metadata.family_parameter_sources.insert(
+                "negative_binomial_theta_outer_iterations".to_string(),
+                "estimated".to_string(),
+            );
+            metadata.family_parameter_sources.insert(
+                "negative_binomial_theta_outer_converged".to_string(),
+                "estimated".to_string(),
+            );
+        }
     }
 
     fn record_fast_pirls_parity_scope_diagnostic(&mut self, metadata: &GlmmFitMetadata) {
@@ -2933,6 +3128,21 @@ impl GeneralizedLinearMixedModel {
         let denom = self.y.len().saturating_sub(self.lmm.feterm.rank).max(1) as f64;
         let variance = (pearson / denom).max(f64::MIN_POSITIVE);
         variance.sqrt()
+    }
+
+    fn estimate_negative_binomial_theta_given_fit(&self) -> Result<f64> {
+        if self.family != Family::NegativeBinomial {
+            return Err(MixedModelError::InvalidArgument(
+                "negative-binomial theta estimation is only valid for Family::NegativeBinomial"
+                    .to_string(),
+            ));
+        }
+        let weights = (!self.wt.is_empty()).then_some(self.wt.as_slice());
+        Ok(estimate_negative_binomial_theta_conditional(
+            self.y.as_slice(),
+            self.mu.as_slice(),
+            weights,
+        ))
     }
 
     fn pearson_dispersion_numerator(&self) -> f64 {
@@ -3968,12 +4178,136 @@ fn glmm_variance(family: Family, mu: f64, negative_binomial_theta: Option<f64>) 
     }
 }
 
+const NEGATIVE_BINOMIAL_THETA_MIN: f64 = 1.0e-8;
+const NEGATIVE_BINOMIAL_THETA_MAX: f64 = 1.0e8;
+const NEGATIVE_BINOMIAL_THETA_MAX_ITERS: usize = 8;
+const NEGATIVE_BINOMIAL_THETA_TOL: f64 = 1.0e-5;
+const NEGATIVE_BINOMIAL_THETA_FINAL_REFIT_TOL: f64 = 1.0e-8;
+
+fn clamp_negative_binomial_theta(theta: f64) -> f64 {
+    theta.clamp(NEGATIVE_BINOMIAL_THETA_MIN, NEGATIVE_BINOMIAL_THETA_MAX)
+}
+
 fn negative_binomial_deviance_component(y: f64, mu: f64, theta: f64) -> f64 {
     let mu = mu.max(f64::MIN_POSITIVE);
     let theta = theta.max(f64::MIN_POSITIVE);
     let first = if y == 0.0 { 0.0 } else { y * (y / mu).ln() };
     let second = (y + theta) * ((y + theta) / (mu + theta)).ln();
     2.0 * (first - second)
+}
+
+fn negative_binomial_loglik_observation(y: f64, mu: f64, theta: f64) -> f64 {
+    let mu = mu.max(f64::MIN_POSITIVE);
+    let theta = theta.max(f64::MIN_POSITIVE);
+    ln_gamma(y + theta) - ln_gamma(theta) - ln_gamma(y + 1.0)
+        + theta * (theta / (theta + mu)).ln()
+        + if y == 0.0 {
+            0.0
+        } else {
+            y * (mu / (theta + mu)).ln()
+        }
+}
+
+fn negative_binomial_theta_moment_start(y: &[f64], weights: Option<&[f64]>) -> f64 {
+    let (sum_w, mean_num) =
+        y.iter()
+            .enumerate()
+            .fold((0.0, 0.0), |(sum_w, mean_num), (idx, &value)| {
+                let weight = weights
+                    .and_then(|weights| weights.get(idx).copied())
+                    .unwrap_or(1.0);
+                (sum_w + weight, mean_num + weight * value)
+            });
+    if sum_w <= 0.0 {
+        return 1.0;
+    }
+    let mean = mean_num / sum_w;
+    let variance = y.iter().enumerate().fold(0.0, |acc, (idx, &value)| {
+        let weight = weights
+            .and_then(|weights| weights.get(idx).copied())
+            .unwrap_or(1.0);
+        acc + weight * (value - mean).powi(2)
+    }) / sum_w.max(1.0);
+
+    if variance > mean && mean > 0.0 {
+        clamp_negative_binomial_theta(mean * mean / (variance - mean))
+    } else {
+        NEGATIVE_BINOMIAL_THETA_MAX.sqrt()
+    }
+}
+
+fn estimate_negative_binomial_theta_conditional(
+    y: &[f64],
+    mu: &[f64],
+    weights: Option<&[f64]>,
+) -> f64 {
+    if y.len() != mu.len() || y.is_empty() {
+        return 1.0;
+    }
+    let log_min = NEGATIVE_BINOMIAL_THETA_MIN.ln();
+    let log_max = NEGATIVE_BINOMIAL_THETA_MAX.ln();
+    let weighted_loglik = |log_theta: f64| -> f64 {
+        let theta = log_theta.exp();
+        let mut total = 0.0;
+        for (idx, (&y_i, &mu_i)) in y.iter().zip(mu.iter()).enumerate() {
+            let weight = weights
+                .and_then(|weights| weights.get(idx).copied())
+                .unwrap_or(1.0);
+            if !weight.is_finite() || weight <= 0.0 {
+                continue;
+            }
+            let contribution = negative_binomial_loglik_observation(y_i, mu_i, theta);
+            if !contribution.is_finite() {
+                return f64::NEG_INFINITY;
+            }
+            total += weight * contribution;
+        }
+        total
+    };
+
+    let inv_phi = (5.0_f64.sqrt() - 1.0) / 2.0;
+    let mut a = log_min;
+    let mut b = log_max;
+    let mut c = b - inv_phi * (b - a);
+    let mut d = a + inv_phi * (b - a);
+    let mut fc = weighted_loglik(c);
+    let mut fd = weighted_loglik(d);
+
+    for _ in 0..96 {
+        if (b - a).abs() <= 1.0e-8 {
+            break;
+        }
+        if fc < fd {
+            a = c;
+            c = d;
+            fc = fd;
+            d = a + inv_phi * (b - a);
+            fd = weighted_loglik(d);
+        } else {
+            b = d;
+            d = c;
+            fd = fc;
+            c = b - inv_phi * (b - a);
+            fc = weighted_loglik(c);
+        }
+    }
+
+    let mut candidates = vec![a, b, c, d];
+    let moment = negative_binomial_theta_moment_start(y, weights);
+    candidates.push(moment.ln());
+    candidates
+        .into_iter()
+        .filter(|value| value.is_finite())
+        .max_by(|left, right| weighted_loglik(*left).total_cmp(&weighted_loglik(*right)))
+        .map(|log_theta| clamp_negative_binomial_theta(log_theta.exp()))
+        .unwrap_or(moment)
+}
+
+fn relative_theta_change(old: f64, new: f64) -> f64 {
+    if !old.is_finite() || !new.is_finite() {
+        return f64::INFINITY;
+    }
+    (new - old).abs() / old.abs().max(1.0)
 }
 
 fn pirls_converged(obj: f64, accepted_obj: f64, tol: f64) -> bool {
@@ -4045,26 +4379,59 @@ fn validate_supported_glmm_family_link(family: Family, link: LinkFunction) -> Re
     }
 }
 
-fn validate_negative_binomial_theta(family: Family, theta: Option<f64>) -> Result<Option<f64>> {
-    match (family, theta) {
-        (Family::NegativeBinomial, Some(theta)) if theta.is_finite() && theta > 0.0 => {
-            Ok(Some(theta))
-        }
-        (Family::NegativeBinomial, Some(theta)) => Err(MixedModelError::InvalidArgument(format!(
-            "negative-binomial fixed theta must be positive and finite (got {theta})"
-        ))),
-        (Family::NegativeBinomial, None) => Err(MixedModelError::InvalidArgument(
-            "negative-binomial GLMM requires a positive fixed theta; use \
+fn validate_negative_binomial_theta_request(
+    family: Family,
+    theta: Option<f64>,
+    estimate_theta: bool,
+) -> Result<()> {
+    match (family, theta, estimate_theta) {
+        (Family::NegativeBinomial, Some(theta), _) if theta.is_finite() && theta > 0.0 => Ok(()),
+        (Family::NegativeBinomial, Some(theta), true) => Err(MixedModelError::InvalidArgument(
+            format!("negative-binomial theta start must be positive and finite (got {theta})"),
+        )),
+        (Family::NegativeBinomial, Some(theta), false) => Err(MixedModelError::InvalidArgument(
+            format!("negative-binomial fixed theta must be positive and finite (got {theta})"),
+        )),
+        (Family::NegativeBinomial, None, true) => Ok(()),
+        (Family::NegativeBinomial, None, false) => Err(MixedModelError::InvalidArgument(
+            "negative-binomial GLMM requires a positive fixed theta, or explicit theta \
+             estimation via GeneralizedLinearMixedModel::new_negative_binomial_estimated(...) \
+             / GeneralizedLinearMixedModelBuilder::estimate_negative_binomial_theta(...); use \
              GeneralizedLinearMixedModel::new_negative_binomial(...) or \
-             GeneralizedLinearMixedModelBuilder::negative_binomial_theta(...)"
+             GeneralizedLinearMixedModelBuilder::negative_binomial_theta(...) for fixed theta"
                 .to_string(),
         )),
-        (_, Some(_)) => Err(MixedModelError::InvalidArgument(
-            "negative-binomial theta can only be supplied with Family::NegativeBinomial"
+        (_, Some(_), _) | (_, None, true) => Err(MixedModelError::InvalidArgument(
+            "negative-binomial theta options can only be supplied with Family::NegativeBinomial"
                 .to_string(),
         )),
-        (_, None) => Ok(None),
+        (_, None, false) => Ok(()),
     }
+}
+
+fn initialize_negative_binomial_theta(
+    family: Family,
+    theta: Option<f64>,
+    estimate_theta: bool,
+    response: Option<&[f64]>,
+) -> Result<Option<f64>> {
+    if family != Family::NegativeBinomial {
+        return Ok(None);
+    }
+    if let Some(theta) = theta {
+        return Ok(Some(clamp_negative_binomial_theta(theta)));
+    }
+    if estimate_theta {
+        let y = response.ok_or_else(|| {
+            MixedModelError::InvalidArgument(
+                "negative-binomial theta estimation requires a numeric response".to_string(),
+            )
+        })?;
+        return Ok(Some(negative_binomial_theta_moment_start(y, None)));
+    }
+    Err(MixedModelError::InvalidArgument(
+        "negative-binomial GLMM requires a positive fixed theta".to_string(),
+    ))
 }
 
 fn validate_glmm_response_domain(family: Family, link: LinkFunction, y: &[f64]) -> Result<()> {
@@ -4188,7 +4555,11 @@ impl MixedModelFit for GeneralizedLinearMixedModel {
     fn dof(&self) -> usize {
         self.lmm.feterm.rank
             + self.lmm.parmap.len()
-            + if self.family.has_dispersion() { 1 } else { 0 }
+            + if self.family.has_dispersion() || self.negative_binomial_estimate_theta {
+                1
+            } else {
+                0
+            }
     }
 
     fn coef(&self) -> DVector<f64> {
@@ -4984,6 +5355,18 @@ mod tests {
             other => panic!("expected InvalidArgument error, got {other:?}"),
         }
 
+        let estimated = GeneralizedLinearMixedModel::new_negative_binomial_estimated(
+            formula.clone(),
+            &data,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(estimated.negative_binomial_theta_estimated());
+        assert!(estimated
+            .negative_binomial_theta()
+            .is_some_and(|theta| theta.is_finite() && theta > 0.0));
+
         let bad_link = GeneralizedLinearMixedModel::new_negative_binomial(
             formula,
             &data,
@@ -5035,6 +5418,13 @@ mod tests {
             Some(&2.0)
         );
         assert_eq!(
+            metadata
+                .family_parameter_sources
+                .get("negative_binomial_theta")
+                .map(String::as_str),
+            Some("fixed")
+        );
+        assert_eq!(
             model
                 .compiler_artifact()
                 .model_boundary
@@ -5046,6 +5436,13 @@ mod tests {
             payload.family_parameters.get("negative_binomial_theta"),
             Some(&2.5)
         );
+        assert_eq!(
+            payload
+                .family_parameter_sources
+                .get("negative_binomial_theta")
+                .map(String::as_str),
+            Some("fixed")
+        );
 
         let vc = model.varcorr();
         assert!(vc.residual_sd.is_none());
@@ -5055,6 +5452,87 @@ mod tests {
         assert!(y_sim
             .iter()
             .all(|value| is_nonnegative_integer_response(*value)));
+    }
+
+    #[test]
+    fn test_negative_binomial_estimated_theta_fit_records_metadata() {
+        let data = negative_binomial_fixture();
+        let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
+        let mut model = GeneralizedLinearMixedModel::new_negative_binomial_estimated(
+            formula, &data, None, None,
+        )
+        .unwrap();
+        let start_theta = model.negative_binomial_theta().unwrap();
+
+        let control = OptimizerControl::auto()
+            .with_optimizer(Optimizer::PatternSearch)
+            .with_max_feval(80);
+        model
+            .fit_with_glmm_options(GlmmFitOptions::fast_laplace().with_optimizer_control(control))
+            .unwrap();
+
+        let theta = model.negative_binomial_theta().unwrap();
+        assert!(model.negative_binomial_theta_estimated());
+        assert!(theta.is_finite() && theta > 0.0);
+        assert_eq!(model.dispersion(false), theta);
+        assert_eq!(model.dispersion(true), theta);
+        assert_eq!(
+            model.dof(),
+            model.lmm.feterm.rank + model.lmm.parmap.len() + 1
+        );
+        assert!(model.objective().is_finite());
+        assert!(model.loglikelihood().is_finite());
+
+        let metadata = model
+            .compiler_artifact()
+            .glmm_fit_metadata
+            .as_ref()
+            .expect("estimated NB GLMM should record fit metadata");
+        assert_eq!(
+            metadata.family_parameters.get("negative_binomial_theta"),
+            Some(&theta)
+        );
+        assert_eq!(
+            metadata
+                .family_parameters
+                .get("negative_binomial_theta_initial"),
+            Some(&start_theta)
+        );
+        assert!(metadata
+            .family_parameters
+            .get("negative_binomial_theta_outer_iterations")
+            .is_some_and(|value| *value >= 1.0));
+        assert_eq!(
+            metadata
+                .family_parameter_sources
+                .get("negative_binomial_theta")
+                .map(String::as_str),
+            Some("estimated")
+        );
+
+        let json = serde_json::to_string(model.compiler_artifact()).unwrap();
+        let artifact: crate::compiler::CompiledModelArtifact = serde_json::from_str(&json).unwrap();
+        let roundtrip_metadata = artifact.glmm_fit_metadata.unwrap();
+        assert_eq!(
+            roundtrip_metadata
+                .family_parameter_sources
+                .get("negative_binomial_theta")
+                .map(String::as_str),
+            Some("estimated")
+        );
+
+        let payload = crate::stats::FitSummaryPayload::from_generalized_model(&model);
+        assert_eq!(
+            payload.family_parameters.get("negative_binomial_theta"),
+            Some(&theta)
+        );
+        assert_eq!(
+            payload
+                .family_parameter_sources
+                .get("negative_binomial_theta")
+                .map(String::as_str),
+            Some("estimated")
+        );
     }
 
     #[test]

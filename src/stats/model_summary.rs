@@ -75,6 +75,9 @@ pub struct FitSummaryPayload {
     /// Fixed or estimated response-family parameters, when applicable.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub family_parameters: BTreeMap<String, f64>,
+    /// Provenance for response-family parameters, keyed like `family_parameters`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub family_parameter_sources: BTreeMap<String, String>,
     /// Number of objective evaluations.
     pub feval: i64,
     /// Fixed-effect coefficient table.
@@ -329,6 +332,7 @@ impl FitSummaryPayload {
         );
         if let Some(metadata) = model.compiler_artifact().glmm_fit_metadata.as_ref() {
             payload.family_parameters = metadata.family_parameters.clone();
+            payload.family_parameter_sources = metadata.family_parameter_sources.clone();
         } else if let Some(theta) = model.negative_binomial_theta() {
             payload
                 .family_parameters
@@ -336,6 +340,18 @@ impl FitSummaryPayload {
             payload
                 .family_parameters
                 .insert("negative_binomial_variance_power".to_string(), 2.0);
+            payload.family_parameter_sources.insert(
+                "negative_binomial_theta".to_string(),
+                if model.negative_binomial_theta_estimated() {
+                    "estimated".to_string()
+                } else {
+                    "fixed".to_string()
+                },
+            );
+            payload.family_parameter_sources.insert(
+                "negative_binomial_variance_power".to_string(),
+                "fixed".to_string(),
+            );
         }
         payload
     }
@@ -388,6 +404,10 @@ impl FitSummaryPayload {
             family_parameters: glmm_metadata
                 .as_ref()
                 .map(|metadata| metadata.family_parameters.clone())
+                .unwrap_or_default(),
+            family_parameter_sources: glmm_metadata
+                .as_ref()
+                .map(|metadata| metadata.family_parameter_sources.clone())
                 .unwrap_or_default(),
             feval: opt.feval,
             coefficients,
