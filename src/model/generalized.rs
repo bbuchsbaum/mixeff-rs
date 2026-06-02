@@ -2984,17 +2984,22 @@ impl GeneralizedLinearMixedModel {
 
         let mut lower_bounds = vec![f64::NEG_INFINITY; p];
         lower_bounds.extend(self.lmm.lower_bounds());
+        let mut active_indices = (0..p).collect::<Vec<_>>();
+        let mut omitted_boundary_theta_indices = Vec::new();
         for index in p..params.len() {
             let lower = lower_bounds[index];
             if lower.is_finite() && params[index] <= lower + glmm_hessian_step(params[index]) {
-                return Err(format!(
-                    "joint-laplace GLMM Wald inference is unavailable because covariance parameter {} is on or too near its lower bound",
-                    index - p + 1
-                ));
+                omitted_boundary_theta_indices.push(index - p + 1);
+            } else {
+                active_indices.push(index);
             }
         }
 
-        let hessian = self.finite_difference_joint_laplace_hessian(&params, &lower_bounds)?;
+        let hessian = self.finite_difference_joint_laplace_hessian_for_indices(
+            &params,
+            &lower_bounds,
+            &active_indices,
+        )?;
         let certification = certify_glmm_joint_hessian(&hessian)?;
         let beta_covariance = 2.0 * certification.inverse.view((0, 0), (p, p)).into_owned();
         if !matrix_is_finite_local(&beta_covariance) {
@@ -3013,7 +3018,10 @@ impl GeneralizedLinearMixedModel {
             &full_covariance,
             self.lmm.feterm.rank,
             &certification,
+            &omitted_boundary_theta_indices,
         )?;
+        let inference_notes =
+            glmm_joint_laplace_hessian_notes(&certification, &omitted_boundary_theta_indices);
 
         let normal = Normal::new(0.0, 1.0)
             .map_err(|err| format!("normal reference distribution unavailable: {err}"))?;
@@ -3065,16 +3073,7 @@ impl GeneralizedLinearMixedModel {
                     ),
                     reason: None,
                     details: None,
-                    notes: vec![
-                        "fixed-effect covariance derived from the beta block of the inverse finite-difference Hessian over joint-laplace beta+theta parameters"
-                            .to_string(),
-                        format!(
-                            "joint Hessian certificate: min eigenvalue {:.6e}, condition number {:.6e}, rank {}",
-                            certification.min_eigenvalue,
-                            certification.condition_number,
-                            certification.rank
-                        ),
-                    ],
+                    notes: inference_notes.clone(),
                 }
             })
             .collect();
@@ -3090,7 +3089,21 @@ impl GeneralizedLinearMixedModel {
         params: &[f64],
         lower_bounds: &[f64],
     ) -> std::result::Result<DMatrix<f64>, String> {
-        let n = params.len();
+        let active_indices = (0..params.len()).collect::<Vec<_>>();
+        self.finite_difference_joint_laplace_hessian_for_indices(
+            params,
+            lower_bounds,
+            &active_indices,
+        )
+    }
+
+    fn finite_difference_joint_laplace_hessian_for_indices(
+        &mut self,
+        params: &[f64],
+        lower_bounds: &[f64],
+        active_indices: &[usize],
+    ) -> std::result::Result<DMatrix<f64>, String> {
+        let n = active_indices.len();
         let p = self.beta.len();
         let n_agq = self.lmm.optsum.n_agq;
         let base = self.joint_glmm_deviance_at_params(params, p, n_agq);
@@ -3102,7 +3115,13 @@ impl GeneralizedLinearMixedModel {
         }
 
         let mut steps = Vec::with_capacity(n);
-        for (index, value) in params.iter().copied().enumerate() {
+        for &index in active_indices {
+            let value = *params.get(index).ok_or_else(|| {
+                format!(
+                    "joint-laplace GLMM Hessian active parameter index {} is out of range",
+                    index + 1
+                )
+            })?;
             let h = glmm_hessian_step(value);
             let lower = lower_bounds
                 .get(index)
@@ -3119,8 +3138,9 @@ impl GeneralizedLinearMixedModel {
         }
 
         let mut hessian = DMatrix::zeros(n, n);
-        for i in 0..n {
-            let hi = steps[i];
+        for active_i in 0..n {
+            let i = active_indices[active_i];
+            let hi = steps[active_i];
             let mut plus = params.to_vec();
             plus[i] += hi;
             let f_plus = self.joint_glmm_deviance_at_params(&plus, p, n_agq);
@@ -3134,10 +3154,11 @@ impl GeneralizedLinearMixedModel {
                     i + 1
                 ));
             }
-            hessian[(i, i)] = (f_plus - 2.0 * base + f_minus) / (hi * hi);
+            hessian[(active_i, active_i)] = (f_plus - 2.0 * base + f_minus) / (hi * hi);
 
-            for j in 0..i {
-                let hj = steps[j];
+            for active_j in 0..active_i {
+                let j = active_indices[active_j];
+                let hj = steps[active_j];
                 let mut pp = params.to_vec();
                 pp[i] += hi;
                 pp[j] += hj;
@@ -3170,8 +3191,8 @@ impl GeneralizedLinearMixedModel {
                     ));
                 }
                 let value = (f_pp - f_pm - f_mp + f_mm) / (4.0 * hi * hj);
-                hessian[(i, j)] = value;
-                hessian[(j, i)] = value;
+                hessian[(active_i, active_j)] = value;
+                hessian[(active_j, active_i)] = value;
             }
         }
         let _ = self.joint_glmm_deviance_at_params(params, p, n_agq);
@@ -5655,6 +5676,7 @@ fn glmm_joint_laplace_fixed_effect_covariance_matrix(
     covariance: &DMatrix<f64>,
     rank: usize,
     certification: &GlmmJointHessianCertification,
+    omitted_boundary_theta_indices: &[usize],
 ) -> std::result::Result<FixedEffectCovarianceMatrix, String> {
     let finite = matrix_is_finite_local(covariance);
     let symmetric = finite && matrix_max_asymmetry_local(covariance) <= 1.0e-8;
@@ -5683,17 +5705,35 @@ fn glmm_joint_laplace_fixed_effect_covariance_matrix(
         coef_names,
         matrix_rows_local(covariance),
         details,
-        vec![
-            "fixed-effect covariance derived from the beta block of the inverse finite-difference Hessian over joint-laplace beta+theta parameters"
-                .to_string(),
-            format!(
-                "joint Hessian certificate: min eigenvalue {:.6e}, condition number {:.6e}, rank {}",
-                certification.min_eigenvalue,
-                certification.condition_number,
-                certification.rank
-            ),
-        ],
+        glmm_joint_laplace_hessian_notes(certification, omitted_boundary_theta_indices),
     ))
+}
+
+fn glmm_joint_laplace_hessian_notes(
+    certification: &GlmmJointHessianCertification,
+    omitted_boundary_theta_indices: &[usize],
+) -> Vec<String> {
+    let mut notes = vec![
+        "fixed-effect covariance derived from the beta block of the inverse finite-difference Hessian over joint-laplace beta plus interior theta parameters"
+            .to_string(),
+        format!(
+            "joint Hessian certificate: min eigenvalue {:.6e}, condition number {:.6e}, rank {}",
+            certification.min_eigenvalue,
+            certification.condition_number,
+            certification.rank
+        ),
+    ];
+    if !omitted_boundary_theta_indices.is_empty() {
+        let labels = omitted_boundary_theta_indices
+            .iter()
+            .map(|index| index.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        notes.push(format!(
+            "boundary covariance parameters held fixed at their lower bounds and omitted from the active Hessian: theta {labels}"
+        ));
+    }
+    notes
 }
 
 fn glmm_inference_availability_for_table(
@@ -5733,8 +5773,8 @@ fn glmm_fixed_effect_inference_unsupported_reason(estimation_method: &str) -> St
     format!(
         "certified GLMM fixed-effect Wald inference is not implemented for {estimation_method}; \
          fast-PIRLS/profiled covariance geometry remains a working-Hessian payload, while only \
-         joint-laplace fits with a passing certified active-subspace Hessian over active beta+theta \
-         parameters can report Wald SE/z/p/confint"
+         joint-laplace fits with a passing certified active-subspace Hessian over active beta plus \
+         interior theta parameters can report Wald SE/z/p/confint"
     )
 }
 

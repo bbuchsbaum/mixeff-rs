@@ -99,6 +99,28 @@ fn bernoulli_separation_contract_data() -> DataFrame {
     data
 }
 
+fn poisson_boundary_random_intercept_contract_data() -> DataFrame {
+    let mut y = Vec::new();
+    let mut x = Vec::new();
+    let mut group = Vec::new();
+
+    for g in 0..5 {
+        for obs in 0..6 {
+            let xv = obs as f64 - 2.5;
+            let eta = 0.8 + 0.15 * xv;
+            y.push(eta.exp().round().max(0.0));
+            x.push(xv);
+            group.push(format!("g{}", g + 1));
+        }
+    }
+
+    let mut data = DataFrame::new();
+    data.add_numeric("y", y).unwrap();
+    data.add_numeric("x", x).unwrap();
+    data.add_categorical("group", group).unwrap();
+    data
+}
+
 #[test]
 fn native_glmm_artifact_records_support_contract_metadata() {
     let data = gamma_log_contract_data();
@@ -683,4 +705,75 @@ fn binomial_separation_keeps_glmm_wald_rows_unavailable_with_reason() {
         .wald_confint(0.95)
         .iter()
         .all(|row| row.lower.is_nan() && row.upper.is_nan()));
+}
+
+#[test]
+fn joint_laplace_glmm_boundary_theta_still_certifies_fixed_effect_rows() {
+    let data = poisson_boundary_random_intercept_contract_data();
+    let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
+    let mut model =
+        GeneralizedLinearMixedModel::new(formula, &data, Family::Poisson, Some(LinkFunction::Log))
+            .expect("boundary fixture should construct");
+
+    model
+        .fit_with_options(false, 1, false)
+        .expect("boundary fixture should fit without fabricating inference");
+
+    let theta = model.theta();
+    assert!(
+        theta.iter().any(|value| value.abs() <= 1.0e-4),
+        "boundary fixture should pin at least one covariance scale near zero, got {theta:?}"
+    );
+
+    let artifact = model.compiler_artifact();
+    assert!(matches!(
+        artifact.model_boundary.inference_availability,
+        InferenceAvailability::Available { ref method }
+            if method == "asymptotic_wald_z_joint_laplace_active_hessian"
+    ));
+
+    let covariance = artifact
+        .fixed_effect_covariance_matrix
+        .as_ref()
+        .expect("boundary joint-laplace GLMM should carry certified fixed covariance");
+    assert_eq!(
+        covariance.method,
+        FixedEffectCovarianceMethod::JointLaplaceActiveHessian
+    );
+    assert_eq!(covariance.status, FixedEffectCovarianceStatus::Available);
+    assert!(covariance
+        .notes
+        .iter()
+        .any(|note| note.contains("omitted from the active Hessian") && note.contains("theta 1")));
+
+    let inference = artifact
+        .fixed_effect_inference_table
+        .as_ref()
+        .expect("boundary joint-laplace GLMM should carry fixed-effect Wald rows");
+    assert_eq!(inference.rows.len(), 2);
+    for row in &inference.rows {
+        assert_eq!(row.method, FixedEffectInferenceMethod::AsymptoticWaldZ);
+        assert_eq!(row.status, FixedEffectInferenceStatus::Available);
+        assert_eq!(row.reliability, ReliabilityGrade::Moderate);
+        assert!(row
+            .std_error
+            .is_some_and(|value| value.is_finite() && value > 0.0));
+        assert!(row.statistic.is_some_and(f64::is_finite));
+        assert!(row.reason.is_none());
+        assert!(row.notes.iter().any(
+            |note| note.contains("omitted from the active Hessian") && note.contains("theta 1")
+        ));
+    }
+
+    assert!(model
+        .stderror()
+        .iter()
+        .all(|value| value.is_finite() && *value > 0.0));
+    let summary = FitSummaryPayload::from_generalized_model(&model);
+    assert_eq!(summary.coefficients.method, "wald-z");
+    assert!(summary
+        .coefficients
+        .std_errors
+        .iter()
+        .all(|value| value.is_finite() && *value > 0.0));
 }
