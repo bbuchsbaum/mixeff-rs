@@ -138,6 +138,110 @@ pub enum NewReLevels {
     Missing,
 }
 
+/// Availability status for one prediction-variance row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PredictionVarianceStatus {
+    /// Fixed-effect, random-effect, and combined variance components are available.
+    Available,
+    /// Variance components are computed but the method is approximate or not
+    /// certified for the requested model family.
+    Degraded,
+    /// At least one required variance component is unavailable; see `reason`.
+    Unavailable,
+}
+
+/// Engine method used to construct a prediction-variance payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum PredictionVarianceMethod {
+    /// LMM identity-link approximation using model-based fixed-effect
+    /// covariance plus conditional-mode random-effect covariance blocks.
+    LmmConditionalModeCovariance,
+    /// GLMM working-Hessian delta-method approximation. This is useful
+    /// geometry, but not the certified active-subspace Hessian requested for
+    /// full GLMM Wald/parity claims.
+    GlmmPirlsLaplaceWorkingDelta,
+    /// No certified prediction-variance method is available for this model.
+    Unavailable,
+}
+
+/// Row-level prediction variance for a new-data prediction.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct PredictionVarianceRow {
+    /// Zero-based row index in the supplied new data.
+    pub row: usize,
+    /// Point prediction on the model's prediction scale, when available.
+    pub prediction: Option<f64>,
+    /// Fixed-effect contribution `x V_beta x'`.
+    pub fixed_variance: Option<f64>,
+    /// Random-effect contribution `z V_b z'`.
+    pub random_variance: Option<f64>,
+    /// Covariance between the fixed-effect and random-effect prediction
+    /// contributions. `combined_variance` includes `2 * fixed_random_covariance`.
+    pub fixed_random_covariance: Option<f64>,
+    /// Combined fitted-mean variance.
+    pub combined_variance: Option<f64>,
+    /// Square root of `combined_variance`.
+    pub se_fit: Option<f64>,
+    /// Prediction variance for a future observation, `combined_variance + sigma^2`.
+    pub prediction_variance: Option<f64>,
+    /// Lower confidence bound for the fitted mean on the prediction scale.
+    pub confidence_lower: Option<f64>,
+    /// Upper confidence bound for the fitted mean on the prediction scale.
+    pub confidence_upper: Option<f64>,
+    /// Lower prediction bound for a future observation on the prediction scale.
+    pub prediction_lower: Option<f64>,
+    /// Upper prediction bound for a future observation on the prediction scale.
+    pub prediction_upper: Option<f64>,
+    /// Availability status for the combined variance.
+    pub status: PredictionVarianceStatus,
+    /// Stable human-readable reason when unavailable or degraded.
+    pub reason: Option<String>,
+}
+
+/// Engine prediction-variance payload with row-level provenance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct PredictionVariancePayload {
+    /// Versioned schema name for downstream JSON consumers.
+    pub schema_name: String,
+    /// Version of this payload schema.
+    pub schema_version: String,
+    /// Crate version that produced the payload.
+    pub crate_version: Option<String>,
+    /// Method used to compute the variance rows.
+    pub method: PredictionVarianceMethod,
+    /// Confidence level used for interval columns, if requested.
+    pub confidence_level: Option<f64>,
+    /// One row per prediction row.
+    pub rows: Vec<PredictionVarianceRow>,
+    /// Payload-level notes describing scope and assumptions.
+    pub notes: Vec<String>,
+}
+
+impl PredictionVariancePayload {
+    pub(crate) fn new(
+        method: PredictionVarianceMethod,
+        rows: Vec<PredictionVarianceRow>,
+        confidence_level: Option<f64>,
+        notes: Vec<String>,
+    ) -> Self {
+        Self {
+            schema_name: "mixedmodels.prediction_variance".to_string(),
+            schema_version: "3".to_string(),
+            crate_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            method,
+            confidence_level,
+            rows,
+            notes,
+        }
+    }
+}
+
 /// Profiled quantities for a batch of response columns sharing the same
 /// fixed-effects design, random-effects structure, and theta.
 #[doc(hidden)]
@@ -8621,6 +8725,14 @@ impl LinearMixedModel {
                     notes,
                 )
             }
+            FixedEffectCovarianceMethod::JointLaplaceActiveHessian => {
+                FixedEffectCovarianceMatrix::joint_laplace_active_hessian(
+                    coef_names,
+                    matrix_rows(&vcov),
+                    details,
+                    notes,
+                )
+            }
             FixedEffectCovarianceMethod::Unavailable => unreachable!(
                 "available covariance constructor should not be called with unavailable method"
             ),
@@ -8937,36 +9049,88 @@ impl LinearMixedModel {
         newdata: &DataFrame,
         new_re_levels: NewReLevels,
     ) -> Result<Vec<Option<f64>>> {
-        let n_new = newdata.nrow();
+        let beta = self.beta();
+        let b_list = self.ranef_b();
+        self.linear_predict_new_with_state(newdata, &beta, &b_list, new_re_levels)
+    }
 
+    pub(crate) fn predict_new_design(
+        &self,
+        newdata: &DataFrame,
+    ) -> Result<(
+        DataFrame,
+        DMatrix<f64>,
+        std::collections::HashMap<String, usize>,
+    )> {
         // Re-run the stateless transform evaluator on `newdata`. Correct by
         // construction: each transform is a pure pointwise recipe, so there
         // is no stored basis to diverge from — prediction simply re-evaluates
         // the same expression. See `docs/formula_transform_seam.md`.
         let materialized = self.formula.materialize(newdata)?;
-        let newdata = &materialized;
 
-        // --- Fixed-effects part ---
         // Realign categorical columns to the training factor encoding so that
         // newdata's own observation order cannot reorder/drop dummy columns.
-        let aligned = self.align_newdata_to_training(newdata)?;
+        let aligned = self.align_newdata_to_training(&materialized)?;
         let (raw_x, raw_names) = build_fixed_effects_matrix(&self.formula, &aligned)?;
 
-        // Map column name → index in the raw X
-        let name_to_col: std::collections::HashMap<&str, usize> = raw_names
-            .iter()
+        let name_to_col = raw_names
+            .into_iter()
             .enumerate()
-            .map(|(i, n)| (n.as_str(), i))
+            .map(|(i, n)| (n, i))
             .collect();
 
+        Ok((materialized, raw_x, name_to_col))
+    }
+
+    /// New-data linear predictor using caller-supplied fixed/random effects.
+    ///
+    /// GLMMs share the LMM formula lowering, training-anchored categorical
+    /// encoding, and random-effect level policy, but their fitted β and
+    /// conditional modes live on the GLMM wrapper rather than this inner LMM.
+    pub(crate) fn linear_predict_new_with_state(
+        &self,
+        newdata: &DataFrame,
+        beta: &DVector<f64>,
+        b_list: &[DMatrix<f64>],
+        new_re_levels: NewReLevels,
+    ) -> Result<Vec<Option<f64>>> {
+        let n_new = newdata.nrow();
+        if beta.len() != self.feterm.rank {
+            return Err(MixedModelError::DimensionMismatch(format!(
+                "prediction beta length {} does not match fixed-effect rank {}",
+                beta.len(),
+                self.feterm.rank
+            )));
+        }
+        if b_list.len() != self.reterms.len() {
+            return Err(MixedModelError::DimensionMismatch(format!(
+                "prediction random-effect term count {} does not match fitted term count {}",
+                b_list.len(),
+                self.reterms.len()
+            )));
+        }
+        for (term_idx, (rt, b)) in self.reterms.iter().zip(b_list.iter()).enumerate() {
+            if b.nrows() != rt.vsize || b.ncols() != rt.n_levels() {
+                return Err(MixedModelError::DimensionMismatch(format!(
+                    "prediction random-effect matrix for term {term_idx} has shape {}x{}, expected {}x{}",
+                    b.nrows(),
+                    b.ncols(),
+                    rt.vsize,
+                    rt.n_levels()
+                )));
+            }
+        }
+
+        let (materialized, raw_x, name_to_col) = self.predict_new_design(newdata)?;
+        let newdata = &materialized;
+
         let p = self.feterm.rank;
-        let beta = self.beta();
         let mut fe_pred = vec![0.0f64; n_new];
 
         for new_col in 0..p {
             // feterm.cnames[new_col] is the column name at pivot position new_col
             let name = &self.feterm.cnames[new_col];
-            if let Some(&raw_col) = name_to_col.get(name.as_str()) {
+            if let Some(&raw_col) = name_to_col.get(name) {
                 for obs in 0..n_new {
                     fe_pred[obs] += raw_x[(obs, raw_col)] * beta[new_col];
                 }
@@ -8975,8 +9139,6 @@ impl LinearMixedModel {
         }
 
         // --- Random-effects part ---
-        let b_list = self.ranef_b();
-
         // Build level-name → index maps for each RE term (training levels)
         let level_maps: Vec<std::collections::HashMap<&str, usize>> = self
             .reterms
@@ -9028,6 +9190,379 @@ impl LinearMixedModel {
         }
 
         Ok(result)
+    }
+
+    /// Prediction variance for new data, including fixed-effect and
+    /// conditional random-effect uncertainty on the LMM identity-link scale.
+    ///
+    /// Rows with unseen grouping levels under [`NewReLevels::Population`] or
+    /// [`NewReLevels::Missing`] return the point-prediction policy result but
+    /// mark the combined variance unavailable with a reason. This keeps the
+    /// no-fake-certainty contract: the engine does not substitute zero random
+    /// uncertainty for a level whose conditional covariance is unavailable.
+    pub fn predict_new_variance(
+        &self,
+        newdata: &DataFrame,
+        new_re_levels: NewReLevels,
+    ) -> Result<PredictionVariancePayload> {
+        self.predict_new_variance_with_level(newdata, new_re_levels, 0.95)
+    }
+
+    /// Prediction variance and intervals for new data at the requested
+    /// confidence level.
+    pub fn predict_new_variance_with_level(
+        &self,
+        newdata: &DataFrame,
+        new_re_levels: NewReLevels,
+        level: f64,
+    ) -> Result<PredictionVariancePayload> {
+        if self.optsum.feval <= 0 {
+            return Err(MixedModelError::NotFitted);
+        }
+        let z = prediction_interval_cutoff(level)?;
+
+        let predictions = self.predict_new(newdata, new_re_levels)?;
+        let n_new = newdata.nrow();
+        let (materialized, raw_x, name_to_col) = self.predict_new_design(newdata)?;
+        let newdata = &materialized;
+        let sigma_sq = self.sigma().powi(2);
+        let offsets = self.prediction_system_offsets();
+
+        let level_maps: Vec<std::collections::HashMap<&str, usize>> = self
+            .reterms
+            .iter()
+            .map(|rt| {
+                rt.levels
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| (s.as_str(), i))
+                    .collect()
+            })
+            .collect();
+        let level_names_by_term = self
+            .reterms
+            .iter()
+            .map(|rt| self.get_new_grouping_levels(rt, newdata))
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut rows = Vec::with_capacity(n_new);
+        for obs in 0..n_new {
+            let mut reason: Option<String> = None;
+
+            for (term_idx, rt) in self.reterms.iter().enumerate() {
+                let level_name = &level_names_by_term[term_idx][obs];
+                match level_maps[term_idx].get(level_name.as_str()) {
+                    Some(_) => {}
+                    None => match new_re_levels {
+                        NewReLevels::Error => {
+                            return Err(MixedModelError::InvalidArgument(format!(
+                                "New level '{}' in grouping factor '{}'. \
+                                 Use NewReLevels::Population or ::Missing to allow this.",
+                                level_name, rt.grouping_name
+                            )));
+                        }
+                        NewReLevels::Population | NewReLevels::Missing => {
+                            reason.get_or_insert_with(|| {
+                                format!(
+                                    "prediction variance unavailable for new level '{}' in grouping factor '{}'",
+                                    level_name, rt.grouping_name
+                                )
+                            });
+                        }
+                    },
+                }
+            }
+
+            let mut fixed_variance =
+                clean_prediction_variance_component(self.prediction_fixed_variance_for_obs(
+                    obs,
+                    &raw_x,
+                    &name_to_col,
+                    &offsets,
+                    sigma_sq,
+                )?);
+            if fixed_variance.is_none() && reason.is_none() {
+                reason.get_or_insert_with(|| {
+                    "fixed-effect prediction variance is non-finite or negative".to_string()
+                });
+            }
+            let mut random_variance = None;
+            let mut fixed_random_covariance = None;
+            let mut combined_variance = None;
+
+            if reason.is_none() {
+                let components = self.prediction_variance_components_for_obs(
+                    obs,
+                    newdata,
+                    &raw_x,
+                    &name_to_col,
+                    &level_maps,
+                    &level_names_by_term,
+                    &offsets,
+                    sigma_sq,
+                )?;
+
+                fixed_variance = clean_prediction_variance_component(components.fixed_variance);
+                if fixed_variance.is_none() {
+                    reason.get_or_insert_with(|| {
+                        "fixed-effect prediction variance is non-finite or negative".to_string()
+                    });
+                }
+
+                random_variance = clean_prediction_variance_component(components.random_variance);
+                if random_variance.is_none() {
+                    reason.get_or_insert_with(|| {
+                        "random-effect prediction variance is non-finite or negative".to_string()
+                    });
+                }
+
+                fixed_random_covariance =
+                    clean_prediction_covariance_component(components.fixed_random_covariance);
+                if fixed_random_covariance.is_none() {
+                    reason.get_or_insert_with(|| {
+                        "fixed/random prediction covariance is non-finite".to_string()
+                    });
+                }
+
+                combined_variance =
+                    clean_prediction_variance_component(components.combined_variance);
+                if combined_variance.is_none() {
+                    reason.get_or_insert_with(|| {
+                        "combined prediction variance is non-finite or negative".to_string()
+                    });
+                }
+            }
+            let se_fit = combined_variance.map(f64::sqrt);
+            let prediction_variance = if reason.is_none() {
+                combined_variance
+                    .and_then(|combined| clean_prediction_variance_component(combined + sigma_sq))
+            } else {
+                None
+            };
+            let (confidence_lower, confidence_upper, prediction_lower, prediction_upper) = match (
+                predictions[obs],
+                se_fit,
+                prediction_variance.map(f64::sqrt),
+                reason.is_none(),
+            ) {
+                (Some(prediction), Some(se_fit), Some(prediction_se), true) => (
+                    Some(prediction - z * se_fit),
+                    Some(prediction + z * se_fit),
+                    Some(prediction - z * prediction_se),
+                    Some(prediction + z * prediction_se),
+                ),
+                _ => (None, None, None, None),
+            };
+            let status = if reason.is_none() {
+                PredictionVarianceStatus::Available
+            } else {
+                PredictionVarianceStatus::Unavailable
+            };
+
+            rows.push(PredictionVarianceRow {
+                row: obs,
+                prediction: predictions[obs],
+                fixed_variance,
+                random_variance,
+                fixed_random_covariance,
+                combined_variance,
+                se_fit,
+                prediction_variance,
+                confidence_lower,
+                confidence_upper,
+                prediction_lower,
+                prediction_upper,
+                status,
+                reason,
+            });
+        }
+
+        Ok(PredictionVariancePayload::new(
+            PredictionVarianceMethod::LmmConditionalModeCovariance,
+            rows,
+            Some(level),
+            vec![
+                "fixed component is x V_beta x' on the fitted LMM identity-link scale".to_string(),
+                "random component is the random-effect-only row variance from the joint penalized Cholesky solve"
+                    .to_string(),
+                "combined fitted-mean variance includes the fixed/random cross covariance term"
+                    .to_string(),
+                "confidence intervals use the combined fitted-mean variance; prediction intervals additionally include residual variance"
+                    .to_string(),
+            ],
+        ))
+    }
+
+    pub(crate) fn fixed_prediction_design_for_obs(
+        &self,
+        obs: usize,
+        raw_x: &DMatrix<f64>,
+        name_to_col: &std::collections::HashMap<String, usize>,
+    ) -> DVector<f64> {
+        let p = self.feterm.rank;
+        let mut x = DVector::zeros(p);
+        for active_col in 0..p {
+            let name = &self.feterm.cnames[active_col];
+            if let Some(&raw_col) = name_to_col.get(name) {
+                x[active_col] = raw_x[(obs, raw_col)];
+            }
+        }
+        x
+    }
+
+    fn prediction_system_offsets(&self) -> Vec<usize> {
+        let k = self.reterms.len();
+        let mut offsets = vec![0usize; k + 1];
+        for j in 0..k {
+            offsets[j + 1] = offsets[j] + self.reterms[j].n_ranef();
+        }
+        offsets
+    }
+
+    fn prediction_variance_components_for_obs(
+        &self,
+        obs: usize,
+        newdata: &DataFrame,
+        raw_x: &DMatrix<f64>,
+        name_to_col: &std::collections::HashMap<String, usize>,
+        level_maps: &[std::collections::HashMap<&str, usize>],
+        level_names_by_term: &[Vec<String>],
+        offsets: &[usize],
+        sigma_sq: f64,
+    ) -> Result<PredictionVarianceComponents> {
+        let k = self.reterms.len();
+        let p = self.feterm.rank;
+        let pp1 = p + 1;
+        let nranef_total = offsets[k];
+        let len = nranef_total + pp1;
+        let mut fixed = vec![0.0; len];
+        let mut random = vec![0.0; len];
+
+        let x = self.fixed_prediction_design_for_obs(obs, raw_x, name_to_col);
+        for col in 0..p {
+            fixed[nranef_total + col] = x[col];
+        }
+
+        for (term_idx, rt) in self.reterms.iter().enumerate() {
+            let level_name = &level_names_by_term[term_idx][obs];
+            let Some(&level_idx) = level_maps[term_idx].get(level_name.as_str()) else {
+                continue;
+            };
+            let z_obs = self.get_z_for_obs(rt, newdata, obs)?;
+            let offset = offsets[term_idx] + level_idx * rt.vsize;
+            for col in 0..rt.vsize {
+                let mut value = 0.0;
+                for row in col..rt.vsize {
+                    value += rt.lambda[(row, col)] * z_obs[row];
+                }
+                random[offset + col] = value;
+            }
+        }
+
+        let mut combined = fixed.clone();
+        for (dst, src) in combined.iter_mut().zip(random.iter()) {
+            *dst += *src;
+        }
+
+        let h_fixed = self.prediction_design_norm_sq(&fixed, offsets)?;
+        let h_random = self.prediction_design_norm_sq(&random, offsets)?;
+        let h_combined = self.prediction_design_norm_sq(&combined, offsets)?;
+        let fixed_variance = sigma_sq * h_fixed;
+        let random_variance = sigma_sq * h_random;
+        let combined_variance = sigma_sq * h_combined;
+        let fixed_random_covariance = 0.5 * (combined_variance - fixed_variance - random_variance);
+
+        Ok(PredictionVarianceComponents {
+            fixed_variance,
+            random_variance,
+            fixed_random_covariance,
+            combined_variance,
+        })
+    }
+
+    fn prediction_fixed_variance_for_obs(
+        &self,
+        obs: usize,
+        raw_x: &DMatrix<f64>,
+        name_to_col: &std::collections::HashMap<String, usize>,
+        offsets: &[usize],
+        sigma_sq: f64,
+    ) -> Result<f64> {
+        let k = self.reterms.len();
+        let p = self.feterm.rank;
+        let pp1 = p + 1;
+        let nranef_total = offsets[k];
+        let mut fixed = vec![0.0; nranef_total + pp1];
+        let x = self.fixed_prediction_design_for_obs(obs, raw_x, name_to_col);
+        for col in 0..p {
+            fixed[nranef_total + col] = x[col];
+        }
+        Ok(sigma_sq * self.prediction_design_norm_sq(&fixed, offsets)?)
+    }
+
+    fn prediction_design_norm_sq(&self, v: &[f64], offsets: &[usize]) -> Result<f64> {
+        let k = self.reterms.len();
+        let p = self.feterm.rank;
+        let pp1 = p + 1;
+        let nranef_total = offsets[k];
+        let expected_len = nranef_total + pp1;
+        if v.len() != expected_len {
+            return Err(MixedModelError::DimensionMismatch(format!(
+                "prediction variance row has length {}, expected {}",
+                v.len(),
+                expected_len
+            )));
+        }
+
+        let mut w = vec![0.0f64; expected_len];
+
+        for j in 0..k {
+            let nranef_j = self.reterms[j].n_ranef();
+            let mut rhs = vec![0.0f64; nranef_j];
+            for idx in 0..nranef_j {
+                rhs[idx] = v[offsets[j] + idx];
+            }
+            for m in 0..j {
+                let l_jm = self.l_blocks[block_index(j, m)].as_dense();
+                let nranef_m = self.reterms[m].n_ranef();
+                for row in 0..nranef_j {
+                    let mut dot = 0.0;
+                    for col in 0..nranef_m {
+                        dot += l_jm[(row, col)] * w[offsets[m] + col];
+                    }
+                    rhs[row] -= dot;
+                }
+            }
+
+            solve_lower_block_against_rhs(&self.l_blocks[block_index(j, j)], &mut rhs);
+            for idx in 0..nranef_j {
+                w[offsets[j] + idx] = rhs[idx];
+            }
+        }
+
+        let mut rhs_k = vec![0.0f64; pp1];
+        rhs_k.copy_from_slice(&v[nranef_total..nranef_total + pp1]);
+        for j in 0..k {
+            let l_kj = self.l_blocks[block_index(k, j)].as_dense();
+            let nranef_j = self.reterms[j].n_ranef();
+            for row in 0..pp1 {
+                let mut dot = 0.0;
+                for col in 0..nranef_j {
+                    dot += l_kj[(row, col)] * w[offsets[j] + col];
+                }
+                rhs_k[row] -= dot;
+            }
+        }
+
+        let l_kk = self.l_blocks[block_index(k, k)].as_dense();
+        solve_lower_block_against_rhs(&MatrixBlock::Dense(l_kk), &mut rhs_k);
+
+        let sum_sq: f64 = w[..nranef_total]
+            .iter()
+            .map(|value| value * value)
+            .sum::<f64>()
+            + rhs_k[..p].iter().map(|value| value * value).sum::<f64>();
+        Ok(sum_sq)
     }
 
     /// Collect the grouping-factor level string for each observation in `newdata`.
@@ -9126,6 +9661,38 @@ fn random_term_grouping_name(rt: &crate::formula::RandomTerm) -> String {
         GroupingFactor::Single(name) => name.clone(),
         GroupingFactor::Interaction(names) | GroupingFactor::Cell(names) => names.join(" & "),
     }
+}
+
+struct PredictionVarianceComponents {
+    fixed_variance: f64,
+    random_variance: f64,
+    fixed_random_covariance: f64,
+    combined_variance: f64,
+}
+
+fn clean_prediction_variance_component(value: f64) -> Option<f64> {
+    if !value.is_finite() || value < -1.0e-10 {
+        None
+    } else {
+        Some(value.max(0.0))
+    }
+}
+
+fn clean_prediction_covariance_component(value: f64) -> Option<f64> {
+    value.is_finite().then_some(value)
+}
+
+pub(crate) fn prediction_interval_cutoff(level: f64) -> Result<f64> {
+    use statrs::distribution::{ContinuousCDF, Normal};
+
+    if !(level > 0.0 && level < 1.0) {
+        return Err(MixedModelError::InvalidArgument(format!(
+            "prediction interval level must be in (0,1); got {level}"
+        )));
+    }
+    Ok(Normal::new(0.0, 1.0)
+        .unwrap()
+        .inverse_cdf(1.0 - (1.0 - level) / 2.0))
 }
 
 fn random_term_z_for_obs(
@@ -22028,6 +22595,168 @@ mod tests {
                 i
             );
         }
+    }
+
+    #[test]
+    fn test_predict_new_variance_same_data_has_fixed_random_and_combined_components() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let payload = model
+            .predict_new_variance(&data, NewReLevels::Error)
+            .unwrap();
+        assert_eq!(
+            payload.method,
+            PredictionVarianceMethod::LmmConditionalModeCovariance
+        );
+        assert_eq!(payload.confidence_level, Some(0.95));
+        assert_eq!(payload.rows.len(), data.nrow());
+        let fitted = model.fitted();
+        let first = &payload.rows[0];
+        assert_eq!(first.status, PredictionVarianceStatus::Available);
+        assert_eq!(first.reason, None);
+        assert_relative_eq!(
+            first.prediction.expect("training row prediction"),
+            fitted[0],
+            epsilon = 1e-8,
+            max_relative = 1e-8
+        );
+        let fixed = first.fixed_variance.expect("fixed component");
+        let random = first.random_variance.expect("random component");
+        let cross = first
+            .fixed_random_covariance
+            .expect("fixed/random covariance component");
+        let combined = first.combined_variance.expect("combined component");
+        assert!(fixed > 0.0);
+        assert!(random > 0.0);
+        assert_relative_eq!(combined, fixed + random + 2.0 * cross, epsilon = 1e-8);
+        assert_relative_eq!(
+            first.se_fit.expect("se.fit").powi(2),
+            combined,
+            epsilon = 1e-8,
+            max_relative = 1e-8
+        );
+        let prediction_variance = first
+            .prediction_variance
+            .expect("future-observation prediction variance");
+        assert_relative_eq!(
+            prediction_variance,
+            combined + model.sigma().powi(2),
+            epsilon = 1e-8,
+            max_relative = 1e-8
+        );
+        let prediction = first.prediction.expect("prediction");
+        let confidence_lower = first.confidence_lower.expect("confidence lower");
+        let confidence_upper = first.confidence_upper.expect("confidence upper");
+        let prediction_lower = first.prediction_lower.expect("prediction lower");
+        let prediction_upper = first.prediction_upper.expect("prediction upper");
+        assert_relative_eq!(
+            prediction - confidence_lower,
+            confidence_upper - prediction,
+            epsilon = 1e-8,
+            max_relative = 1e-8
+        );
+        assert_relative_eq!(
+            prediction - prediction_lower,
+            prediction_upper - prediction,
+            epsilon = 1e-8,
+            max_relative = 1e-8
+        );
+        assert!(
+            prediction_lower < confidence_lower && prediction_upper > confidence_upper,
+            "prediction intervals should be wider than confidence intervals"
+        );
+
+        // lme4 2.0.1 reference:
+        // predict(lmer(Reaction ~ Days + (Days | Subject), sleepstudy, REML=FALSE),
+        //         newdata=sleepstudy[1:10,], re.form=NULL, se.fit=TRUE)$se.fit
+        let lme4_ml_conditional_se = [
+            12.0707575252371,
+            10.3984229256521,
+            9.00975482244658,
+            8.05286502387107,
+            7.69064748489919,
+            8.00424592909914,
+            8.92268555773584,
+            10.2851909434472,
+            11.940705943801,
+            13.7840572634364,
+        ];
+        for (row, expected) in payload
+            .rows
+            .iter()
+            .take(lme4_ml_conditional_se.len())
+            .zip(lme4_ml_conditional_se)
+        {
+            assert_relative_eq!(
+                row.se_fit.expect("training row conditional se.fit"),
+                expected,
+                epsilon = 2e-3,
+                max_relative = 2e-4
+            );
+        }
+    }
+
+    #[test]
+    fn test_predict_new_variance_rejects_invalid_interval_level() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let err = model
+            .predict_new_variance_with_level(&data, NewReLevels::Error, 1.0)
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_argument");
+        assert!(err.to_string().contains("level must be in (0,1)"));
+    }
+
+    #[test]
+    fn test_predict_new_variance_unseen_level_reports_structured_reason() {
+        let data = sleepstudy_fixture();
+        let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+
+        let mut newdata = DataFrame::new();
+        newdata.add_numeric("reaction", vec![0.0, 0.0]).unwrap();
+        newdata.add_numeric("days", vec![0.0, 1.0]).unwrap();
+        newdata
+            .add_categorical("subj", vec!["NEW".to_string(), "S309".to_string()])
+            .unwrap();
+
+        let payload = model
+            .predict_new_variance(&newdata, NewReLevels::Population)
+            .unwrap();
+        assert_eq!(payload.rows.len(), 2);
+
+        let unseen = &payload.rows[0];
+        assert!(unseen.prediction.is_some());
+        assert_eq!(unseen.status, PredictionVarianceStatus::Unavailable);
+        assert!(unseen.fixed_variance.is_some());
+        assert_eq!(unseen.random_variance, None);
+        assert_eq!(unseen.fixed_random_covariance, None);
+        assert_eq!(unseen.combined_variance, None);
+        assert_eq!(unseen.se_fit, None);
+        assert_eq!(unseen.prediction_variance, None);
+        assert_eq!(unseen.confidence_lower, None);
+        assert_eq!(unseen.confidence_upper, None);
+        assert_eq!(unseen.prediction_lower, None);
+        assert_eq!(unseen.prediction_upper, None);
+        assert!(unseen
+            .reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("new level 'NEW'"));
+
+        let known = &payload.rows[1];
+        assert_eq!(known.status, PredictionVarianceStatus::Available);
+        assert!(known.combined_variance.unwrap() > 0.0);
+        assert!(known.se_fit.unwrap() > 0.0);
+        assert!(known.confidence_lower.unwrap() < known.prediction.unwrap());
+        assert!(known.confidence_upper.unwrap() > known.prediction.unwrap());
     }
 
     // ── coeftable parity tests (pls.jl "coeftable" testset) ──────────────────

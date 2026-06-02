@@ -409,6 +409,22 @@ impl FixedEffectCovarianceMatrix {
         )
     }
 
+    pub fn joint_laplace_active_hessian(
+        coef_names: Vec<String>,
+        matrix: Vec<Vec<f64>>,
+        details: FixedEffectCovarianceDetails,
+        notes: Vec<String>,
+    ) -> Self {
+        Self::available_with_method(
+            coef_names,
+            matrix,
+            FixedEffectCovarianceMethod::JointLaplaceActiveHessian,
+            ReliabilityGrade::Moderate,
+            details,
+            notes,
+        )
+    }
+
     pub fn unavailable(
         coef_names: Vec<String>,
         reason: impl Into<String>,
@@ -436,6 +452,7 @@ impl FixedEffectCovarianceMatrix {
 pub enum FixedEffectCovarianceMethod {
     ModelBased,
     PirlsLaplaceWorkingHessian,
+    JointLaplaceActiveHessian,
     Unavailable,
 }
 

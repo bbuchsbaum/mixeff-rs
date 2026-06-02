@@ -8,7 +8,8 @@
 //! Uses Penalized Iteratively Reweighted Least Squares (PIRLS) for
 //! the conditional modes, with optional adaptive Gauss-Hermite quadrature.
 
-use nalgebra::{DMatrix, DVector};
+use nalgebra::{DMatrix, DVector, SymmetricEigen};
+use statrs::distribution::{ContinuousCDF, Normal};
 use statrs::function::gamma::ln_gamma;
 use std::cell::Cell;
 use std::cell::RefCell;
@@ -16,19 +17,28 @@ use std::rc::Rc;
 
 use crate::compiler::{
     CompiledModelArtifact, CompilerPolicy, Diagnostic, DiagnosticCode, DiagnosticSeverity,
-    DiagnosticStage, EvidenceMethod, EvidenceQuality, GlmmFitMetadata, ModelAuditReport,
+    DiagnosticStage, EstimabilityAssessment, EvidenceMethod, EvidenceQuality,
+    FixedContrastEstimability, FixedEffectCovarianceDetails, FixedEffectCovarianceMatrix,
+    FixedEffectCovarianceMethod, FixedEffectCovarianceStatus, FixedEffectInferenceMethod,
+    FixedEffectInferenceRow, FixedEffectInferenceRowKind, FixedEffectInferenceStatus,
+    FixedEffectInferenceTable, GlmmFitMetadata, InferenceAvailability, ModelAuditReport,
     ModelBoundary, ObjectiveApproximation, OptimizerCertificate, OptimizerDerivativeEvidence,
+    ReliabilityGrade,
 };
 use crate::error::{MixedModelError, Result};
 use crate::formula::Formula;
 use crate::model::data::DataFrame;
-use crate::model::linear::{CovarianceKktClassification, LinearMixedModel, OptimizerControl};
+use crate::model::linear::{
+    prediction_interval_cutoff, CovarianceKktClassification, LinearMixedModel, NewReLevels,
+    OptimizerControl, PredictionVarianceMethod, PredictionVariancePayload,
+    PredictionVarianceStatus,
+};
 use crate::model::traits::{Family, LinkFunction, MixedModelFit, RandomEffectTermInfo};
 use crate::optimizer::trust_bq::{
     minimize_with_progress as minimize_trust_bq_with_progress, TrustBqOptions, TrustBqProgress,
     TrustBqStopReason,
 };
-use crate::stats::{BlockDescription, ModelSummary, VarCorr};
+use crate::stats::{BlockDescription, MixedModelProfile, ModelSummary, VarCorr};
 use crate::types::{FitLogEntry, MatrixBlock, OptSummary, Optimizer, ReMat};
 use crate::unstable_internal_method;
 
@@ -108,6 +118,16 @@ pub struct GlmmFitOptions {
     pub verbose: bool,
     /// Optional audit-recorded optimizer controls.
     pub optimizer_control: OptimizerControl,
+}
+
+/// Scale for GLMM new-data predictions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum GlmmPredictionScale {
+    /// Return the linear predictor η = Xβ + Zb (+ offset when supplied).
+    Link,
+    /// Return the fitted conditional mean μ = g⁻¹(η).
+    Response,
 }
 
 impl Default for GlmmFitOptions {
@@ -317,6 +337,34 @@ impl<'a> GeneralizedLinearMixedModelBuilder<'a> {
 }
 
 impl GeneralizedLinearMixedModel {
+    fn fixed_effect_inference_standard_errors(&self) -> Option<DVector<f64>> {
+        let table = self
+            .lmm
+            .compiler_artifact
+            .fixed_effect_inference_table
+            .as_ref()?;
+        let names = self.coef_names();
+        let rows = table
+            .rows
+            .iter()
+            .filter(|row| row.kind == FixedEffectInferenceRowKind::Coefficient)
+            .collect::<Vec<_>>();
+        if rows.len() != names.len() {
+            return None;
+        }
+
+        let mut standard_errors = Vec::with_capacity(names.len());
+        for name in names {
+            let row = rows.iter().find(|row| row.label == name)?;
+            standard_errors.push(
+                row.std_error
+                    .filter(|value| value.is_finite() && *value > 0.0)
+                    .unwrap_or(f64::NAN),
+            );
+        }
+        Some(DVector::from_vec(standard_errors))
+    }
+
     unstable_internal_method! {
     /// Inner [`LinearMixedModel`] holding the local Laplace approximation
     /// (raw PIRLS solver state).
@@ -669,6 +717,266 @@ impl GeneralizedLinearMixedModel {
     /// Stable user-facing audit report derived from the compiler artifact.
     pub fn audit_report(&self) -> ModelAuditReport {
         self.lmm.audit_report()
+    }
+
+    /// Predictions for new data with configurable scale and unseen-level
+    /// handling.
+    ///
+    /// The fixed-effect design is rebuilt with the training-time categorical
+    /// encoding and the random-effects contribution uses the fitted GLMM
+    /// conditional modes. On [`GlmmPredictionScale::Response`], the fitted
+    /// inverse link is applied after the link-scale predictor is assembled.
+    pub fn predict_new(
+        &self,
+        newdata: &DataFrame,
+        scale: GlmmPredictionScale,
+        new_re_levels: NewReLevels,
+    ) -> Result<Vec<Option<f64>>> {
+        self.predict_new_with_offset(newdata, None, scale, new_re_levels)
+    }
+
+    /// Predictions for new data with an explicit new-data offset vector.
+    ///
+    /// Use this variant for offset GLMMs. The offset is added on link scale
+    /// before response-scale transformation. When `offset` is `None`, new rows
+    /// are predicted with zero offset.
+    pub fn predict_new_with_offset(
+        &self,
+        newdata: &DataFrame,
+        offset: Option<&[f64]>,
+        scale: GlmmPredictionScale,
+        new_re_levels: NewReLevels,
+    ) -> Result<Vec<Option<f64>>> {
+        if self.lmm.optsum.feval <= 0 {
+            return Err(MixedModelError::NotFitted);
+        }
+        if let Some(offset) = offset {
+            validate_offset(offset, newdata.nrow())?;
+        }
+
+        let mut eta =
+            self.lmm
+                .linear_predict_new_with_state(newdata, &self.beta, &self.b, new_re_levels)?;
+        if let Some(offset) = offset {
+            for (prediction, offset_i) in eta.iter_mut().zip(offset.iter()) {
+                if let Some(value) = prediction.as_mut() {
+                    *value += *offset_i;
+                }
+            }
+        }
+
+        match scale {
+            GlmmPredictionScale::Link => Ok(eta),
+            GlmmPredictionScale::Response => Ok(eta
+                .into_iter()
+                .map(|prediction| prediction.map(|value| self.link.linkinv(value)))
+                .collect()),
+        }
+    }
+
+    /// Prediction-variance payload for GLMM new-data predictions.
+    ///
+    /// This returns a PIRLS/Laplace working-Hessian delta-method payload. Rows
+    /// with known grouping levels carry fixed/random/combined components and
+    /// fitted-mean confidence intervals, but are marked
+    /// [`PredictionVarianceStatus::Degraded`] because the GLMM active-subspace
+    /// Hessian is not yet certified. New-level cases remain unavailable with
+    /// row-level reasons.
+    pub fn predict_new_variance(
+        &self,
+        newdata: &DataFrame,
+        scale: GlmmPredictionScale,
+        new_re_levels: NewReLevels,
+    ) -> Result<PredictionVariancePayload> {
+        self.predict_new_variance_with_level(newdata, scale, new_re_levels, 0.95)
+    }
+
+    /// Prediction-variance payload for GLMM new-data predictions at an
+    /// explicit confidence level.
+    pub fn predict_new_variance_with_level(
+        &self,
+        newdata: &DataFrame,
+        scale: GlmmPredictionScale,
+        new_re_levels: NewReLevels,
+        level: f64,
+    ) -> Result<PredictionVariancePayload> {
+        let z = prediction_interval_cutoff(level)?;
+        let link_predictions =
+            self.predict_new(newdata, GlmmPredictionScale::Link, new_re_levels)?;
+        let predictions = match scale {
+            GlmmPredictionScale::Link => link_predictions.clone(),
+            GlmmPredictionScale::Response => {
+                self.predict_new(newdata, GlmmPredictionScale::Response, new_re_levels)?
+            }
+        };
+        let mut payload =
+            self.lmm
+                .predict_new_variance_with_level(newdata, new_re_levels, level)?;
+        let certified_fixed_covariance = self.certified_joint_laplace_fixed_covariance();
+        let certified_fixed_design = if certified_fixed_covariance.is_some() {
+            let (_materialized, raw_x, name_to_col) = self.lmm.predict_new_design(newdata)?;
+            Some((raw_x, name_to_col))
+        } else {
+            None
+        };
+        let uses_certified_fixed_covariance = certified_fixed_covariance.is_some();
+
+        let degraded_reason = match scale {
+            GlmmPredictionScale::Link if uses_certified_fixed_covariance => {
+                "GLMM link-scale prediction variance uses certified joint-laplace fixed-effect covariance, but random-effect and fixed/random covariance components still use PIRLS/Laplace working geometry"
+                    .to_string()
+            }
+            GlmmPredictionScale::Response if uses_certified_fixed_covariance => {
+                "GLMM response-scale prediction variance uses delta-method link propagation from certified joint-laplace fixed-effect covariance, but random-effect and fixed/random covariance components still use PIRLS/Laplace working geometry"
+                    .to_string()
+            }
+            GlmmPredictionScale::Link => {
+                "GLMM link-scale prediction variance uses PIRLS/Laplace working-Hessian geometry; certified active-subspace Hessian variance is not implemented"
+                    .to_string()
+            }
+            GlmmPredictionScale::Response => {
+                "GLMM response-scale prediction variance uses delta-method link propagation from PIRLS/Laplace working-Hessian geometry; certified active-subspace Hessian variance is not implemented"
+                    .to_string()
+            }
+        };
+
+        for row in &mut payload.rows {
+            row.prediction = predictions[row.row];
+            if let (Some(covariance), Some((raw_x, name_to_col))) =
+                (&certified_fixed_covariance, &certified_fixed_design)
+            {
+                let x = self
+                    .lmm
+                    .fixed_prediction_design_for_obs(row.row, raw_x, name_to_col);
+                let fixed_variance = (x.transpose() * covariance * &x)[(0, 0)];
+                if let Some(clean_fixed) = clean_glmm_prediction_variance_component(fixed_variance)
+                {
+                    row.fixed_variance = Some(clean_fixed);
+                    row.combined_variance = match (row.random_variance, row.fixed_random_covariance)
+                    {
+                        (Some(random), Some(cross)) => clean_glmm_prediction_variance_component(
+                            clean_fixed + random + 2.0 * cross,
+                        ),
+                        _ => None,
+                    };
+                    row.se_fit = row.combined_variance.map(f64::sqrt);
+                }
+            }
+
+            let derivative = match (scale, link_predictions[row.row]) {
+                (GlmmPredictionScale::Link, Some(_)) => Some(1.0),
+                (GlmmPredictionScale::Response, Some(eta)) => {
+                    let value = self.link.mu_eta(eta);
+                    (value.is_finite()).then_some(value)
+                }
+                (_, None) => None,
+            };
+            let variance_multiplier = derivative.map(|value| value * value);
+
+            if let Some(multiplier) = variance_multiplier {
+                row.fixed_variance = row
+                    .fixed_variance
+                    .map(|value| (value * multiplier).max(0.0));
+                row.random_variance = row
+                    .random_variance
+                    .map(|value| (value * multiplier).max(0.0));
+                row.fixed_random_covariance =
+                    row.fixed_random_covariance.map(|value| value * multiplier);
+                row.combined_variance = row
+                    .combined_variance
+                    .map(|value| (value * multiplier).max(0.0));
+                row.se_fit = row.combined_variance.map(f64::sqrt);
+            } else {
+                row.random_variance = None;
+                row.fixed_random_covariance = None;
+                row.combined_variance = None;
+                row.se_fit = None;
+            }
+
+            if row.status == PredictionVarianceStatus::Available {
+                row.status = PredictionVarianceStatus::Degraded;
+                row.reason = Some(degraded_reason.clone());
+                row.prediction_variance = None;
+                if let (Some(prediction), Some(se_fit)) = (row.prediction, row.se_fit) {
+                    row.confidence_lower = Some(prediction - z * se_fit);
+                    row.confidence_upper = Some(prediction + z * se_fit);
+                } else {
+                    row.confidence_lower = None;
+                    row.confidence_upper = None;
+                }
+                row.prediction_lower = None;
+                row.prediction_upper = None;
+            } else {
+                row.prediction_variance = None;
+                row.confidence_lower = None;
+                row.confidence_upper = None;
+                row.prediction_lower = None;
+                row.prediction_upper = None;
+                let existing_reason = row.reason.clone().unwrap_or_else(|| {
+                    "GLMM prediction variance is unavailable for this row".to_string()
+                });
+                row.reason = Some(format!("{existing_reason}; {degraded_reason}"));
+            }
+        }
+
+        payload.method = PredictionVarianceMethod::GlmmPirlsLaplaceWorkingDelta;
+        payload.notes = vec![
+            degraded_reason,
+            if uses_certified_fixed_covariance {
+                "fixed components use the certified joint-laplace active-Hessian fixed-effect covariance from the fitted artifact; random and cross components are transformed from the inner PIRLS working LMM variance geometry"
+                    .to_string()
+            } else {
+                "fixed/random components are transformed from the inner PIRLS working LMM variance geometry"
+                    .to_string()
+            },
+            "future-observation prediction intervals are not reported for GLMMs because family-level response variance is not certified in this payload"
+                .to_string(),
+        ];
+        Ok(payload)
+    }
+
+    fn certified_joint_laplace_fixed_covariance(&self) -> Option<DMatrix<f64>> {
+        let covariance = self
+            .lmm
+            .compiler_artifact
+            .fixed_effect_covariance_matrix
+            .as_ref()?;
+        if covariance.status != FixedEffectCovarianceStatus::Available
+            || covariance.method != FixedEffectCovarianceMethod::JointLaplaceActiveHessian
+        {
+            return None;
+        }
+        let matrix = covariance.matrix.as_ref()?;
+        let p = self.lmm.feterm.rank;
+        if matrix.len() != p || matrix.iter().any(|row| row.len() != p) {
+            return None;
+        }
+        let values = matrix
+            .iter()
+            .flat_map(|row| row.iter().copied())
+            .collect::<Vec<_>>();
+        let dense = DMatrix::from_row_slice(p, p, &values);
+        matrix_is_finite_local(&dense).then_some(dense)
+    }
+
+    /// Explicit refusal for GLMM residual-scale profile likelihood.
+    ///
+    /// Profile likelihood is currently an LMM-only engine feature. This method
+    /// gives downstream bindings a stable runtime reason instead of requiring
+    /// them to infer support from the absence of a GLMM profile API.
+    pub fn profile_sigma(&mut self, _threshold: f64) -> Result<MixedModelProfile> {
+        Err(MixedModelError::Unsupported(
+            glmm_profile_likelihood_unsupported_reason("profile_sigma"),
+        ))
+    }
+
+    /// Explicit refusal for GLMM covariance-parameter profile likelihood.
+    ///
+    /// See [`Self::profile_sigma`] for the support boundary.
+    pub fn profile_theta(&mut self, _index: usize, _threshold: f64) -> Result<MixedModelProfile> {
+        Err(MixedModelError::Unsupported(
+            glmm_profile_likelihood_unsupported_reason("profile_theta"),
+        ))
     }
 
     /// Compact default print summary (PRD § 15).
@@ -2206,6 +2514,7 @@ impl GeneralizedLinearMixedModel {
         let ftol_abs = self.lmm.optsum.ftol_abs.max(1.0e-7);
         let ftol_rel = self.lmm.optsum.ftol_rel.max(1.0e-10);
         let initial_radius = joint_glmm_trust_bq_initial_radius(&initial, n_beta);
+        let compact_joint_space = (5..=8).contains(&n_params);
 
         let invalid_objective = profiled_start_objective.abs().max(1.0)
             + 1.0e6 * (1.0 + profiled_start_objective.abs());
@@ -2245,11 +2554,11 @@ impl GeneralizedLinearMixedModel {
                 max_evaluations: maxeval.max(1) as usize,
                 ftol_abs,
                 ftol_rel,
-                max_cross_terms: 0,
-                stall_iterations: 3,
-                stall_ftol_abs: 1.0e-6,
-                stall_ftol_rel: 1.0e-8,
-                stall_requires_stable_x: false,
+                max_cross_terms: if compact_joint_space { usize::MAX } else { 0 },
+                stall_iterations: if compact_joint_space { 4 } else { 3 },
+                stall_ftol_abs: if compact_joint_space { -1.0 } else { 1.0e-6 },
+                stall_ftol_rel: if compact_joint_space { -1.0 } else { 1.0e-8 },
+                stall_requires_stable_x: compact_joint_space,
                 reuse_samples: true,
                 ..TrustBqOptions::default()
             },
@@ -2287,7 +2596,8 @@ impl GeneralizedLinearMixedModel {
             &lower_bounds,
             Some(me.lmm.dims.n),
         );
-        if joint_certificate_requires_fallback(&certificate)
+        let optimizer_stop_requires_fallback = !certificate.evidence.optimizer_stop.acceptable_stop;
+        if optimizer_stop_requires_fallback
             && joint_candidate_materially_improves_profiled_start(&me.lmm.optsum)
         {
             let final_objective = me.joint_glmm_deviance_at_params(&params, n_beta, n_agq);
@@ -2307,7 +2617,7 @@ impl GeneralizedLinearMixedModel {
             me.refresh_near_unit_random_effect_correlation_diagnostics();
             return Ok(me);
         }
-        if fallback_fast_pirls.is_some() && joint_certificate_requires_fallback(&certificate) {
+        if fallback_fast_pirls.is_some() && optimizer_stop_requires_fallback {
             if let Some(fallback) =
                 uncertified_joint_fallback(&certificate, &me.lmm.optsum, fallback_fast_pirls.take())
             {
@@ -2315,6 +2625,14 @@ impl GeneralizedLinearMixedModel {
                 me.refresh_binomial_separation_diagnostics();
                 me.refresh_near_unit_random_effect_correlation_diagnostics();
                 return Ok(me);
+            }
+        }
+
+        if compact_joint_space {
+            if let Some(polished) =
+                me.polish_joint_laplace_stationarity(&params, &lower_bounds, 4, 2.0e-2)
+            {
+                params = polished;
             }
         }
 
@@ -2524,9 +2842,419 @@ impl GeneralizedLinearMixedModel {
             );
         }
         self.record_fast_pirls_parity_scope_diagnostic(&metadata);
+        let inference_artifacts = self.glmm_fixed_effect_inference_artifacts(&metadata);
+        let inference_availability =
+            glmm_inference_availability_for_table(&metadata, &inference_artifacts.table);
+        let covariance = inference_artifacts
+            .covariance
+            .unwrap_or_else(|| self.lmm.glmm_fixed_effect_covariance_matrix());
+        self.lmm
+            .compiler_artifact
+            .model_boundary
+            .inference_availability = inference_availability;
         self.lmm.compiler_artifact.glmm_fit_metadata = Some(metadata);
-        self.lmm.compiler_artifact.fixed_effect_covariance_matrix =
-            Some(self.lmm.glmm_fixed_effect_covariance_matrix());
+        self.lmm.compiler_artifact.fixed_effect_covariance_matrix = Some(covariance);
+        self.lmm.compiler_artifact.fixed_effect_inference_table = Some(inference_artifacts.table);
+    }
+
+    fn glmm_fixed_effect_inference_artifacts(
+        &mut self,
+        metadata: &GlmmFitMetadata,
+    ) -> GlmmFixedEffectInferenceArtifacts {
+        let separation_diagnostics = self.conservative_binomial_separation_diagnostics();
+        if !separation_diagnostics.is_empty() {
+            let affected_terms = separation_diagnostics
+                .iter()
+                .flat_map(|diagnostic| diagnostic.affected_terms.iter().cloned())
+                .collect::<Vec<_>>();
+            let reason = if affected_terms.is_empty() {
+                "GLMM Wald inference is unavailable because binomial separation diagnostics were detected"
+                    .to_string()
+            } else {
+                format!(
+                    "GLMM Wald inference is unavailable because binomial separation diagnostics were detected for {}",
+                    affected_terms.join(", ")
+                )
+            };
+            return GlmmFixedEffectInferenceArtifacts {
+                table: self.glmm_fixed_effect_inference_unavailable_table(
+                    reason,
+                    FixedEffectInferenceStatus::NotAssessed,
+                    vec![
+                        "near-separation/rare-outcome GLMMs keep Wald SE/z/p unavailable until a separation-robust inference backend is implemented"
+                            .to_string(),
+                    ],
+                ),
+                covariance: None,
+            };
+        }
+
+        if metadata.estimation_method == "joint_laplace" && self.lmm.optsum.n_agq <= 1 {
+            match self.glmm_joint_laplace_fixed_effect_inference_artifacts() {
+                Ok(artifacts) => return artifacts,
+                Err(reason) => {
+                    return GlmmFixedEffectInferenceArtifacts {
+                        table: self.glmm_fixed_effect_inference_unavailable_table(
+                            reason,
+                            FixedEffectInferenceStatus::NotAssessed,
+                            vec![
+                                "joint-laplace GLMM fixed-effect Hessian certificate did not pass quality gates"
+                                    .to_string(),
+                            ],
+                        ),
+                        covariance: None,
+                    };
+                }
+            }
+        }
+
+        GlmmFixedEffectInferenceArtifacts {
+            table: self.glmm_fixed_effect_inference_unavailable_table(
+                glmm_fixed_effect_inference_unsupported_reason(metadata.estimation_method.as_str()),
+                FixedEffectInferenceStatus::Unsupported,
+                vec![
+                    "GLMM fixed-effect covariance geometry is recorded separately and is not a certified Wald inference backend"
+                        .to_string(),
+                ],
+            ),
+            covariance: None,
+        }
+    }
+
+    fn glmm_fixed_effect_inference_unavailable_table(
+        &self,
+        reason: String,
+        status: FixedEffectInferenceStatus,
+        notes: Vec<String>,
+    ) -> FixedEffectInferenceTable {
+        let estimates = self.coef();
+        let rows = self
+            .coef_names()
+            .into_iter()
+            .enumerate()
+            .map(|(index, label)| FixedEffectInferenceRow {
+                label: label.clone(),
+                kind: FixedEffectInferenceRowKind::Coefficient,
+                estimate: estimates
+                    .get(index)
+                    .copied()
+                    .filter(|value| value.is_finite()),
+                std_error: None,
+                numerator_df: None,
+                denominator_df: None,
+                statistic: None,
+                statistic_name: None,
+                p_value: None,
+                method: FixedEffectInferenceMethod::NotComputed,
+                status,
+                reliability: ReliabilityGrade::NotAvailable,
+                estimability: EstimabilityAssessment::FixedContrast(
+                    FixedContrastEstimability::not_assessed(label),
+                ),
+                reason: Some(reason.clone()),
+                details: None,
+                notes: notes.clone(),
+            })
+            .collect();
+        FixedEffectInferenceTable::new(rows)
+    }
+
+    fn glmm_joint_laplace_fixed_effect_inference_artifacts(
+        &mut self,
+    ) -> std::result::Result<GlmmFixedEffectInferenceArtifacts, String> {
+        let p = self.beta.len();
+        let n_theta = self.theta.len();
+        let full_coef_names = self.coef_names();
+        if self.lmm.feterm.rank != full_coef_names.len() {
+            return Err(
+                "joint-laplace GLMM Wald inference is unavailable for rank-deficient fixed effects"
+                    .to_string(),
+            );
+        }
+
+        let params = self.lmm.optsum.final_params.clone();
+        if params.len() != p + n_theta {
+            return Err(format!(
+                "joint-laplace GLMM final parameter vector has length {}, expected {} fixed effects plus {} covariance parameters",
+                params.len(),
+                p,
+                n_theta
+            ));
+        }
+
+        let mut lower_bounds = vec![f64::NEG_INFINITY; p];
+        lower_bounds.extend(self.lmm.lower_bounds());
+        for index in p..params.len() {
+            let lower = lower_bounds[index];
+            if lower.is_finite() && params[index] <= lower + glmm_hessian_step(params[index]) {
+                return Err(format!(
+                    "joint-laplace GLMM Wald inference is unavailable because covariance parameter {} is on or too near its lower bound",
+                    index - p + 1
+                ));
+            }
+        }
+
+        let hessian = self.finite_difference_joint_laplace_hessian(&params, &lower_bounds)?;
+        let certification = certify_glmm_joint_hessian(&hessian)?;
+        let beta_covariance = 2.0 * certification.inverse.view((0, 0), (p, p)).into_owned();
+        if !matrix_is_finite_local(&beta_covariance) {
+            return Err(
+                "joint-laplace GLMM fixed-effect covariance contains non-finite entries"
+                    .to_string(),
+            );
+        }
+        let full_covariance = unpivot_glmm_fixed_effect_covariance(
+            &beta_covariance,
+            &self.lmm.feterm.piv,
+            full_coef_names.len(),
+        );
+        let covariance_payload = glmm_joint_laplace_fixed_effect_covariance_matrix(
+            full_coef_names.clone(),
+            &full_covariance,
+            self.lmm.feterm.rank,
+            &certification,
+        )?;
+
+        let normal = Normal::new(0.0, 1.0)
+            .map_err(|err| format!("normal reference distribution unavailable: {err}"))?;
+        let estimates = self.coef();
+        let mut std_errors = vec![f64::NAN; full_coef_names.len()];
+        for full_index in 0..full_coef_names.len() {
+            let variance = full_covariance[(full_index, full_index)];
+            if !variance.is_finite() || variance <= 0.0 {
+                return Err(format!(
+                    "joint-laplace GLMM fixed-effect covariance has invalid variance for coefficient {}",
+                    full_coef_names
+                        .get(full_index)
+                        .cloned()
+                        .unwrap_or_else(|| full_index.to_string())
+                ));
+            }
+            std_errors[full_index] = variance.sqrt();
+        }
+
+        let rows = full_coef_names
+            .into_iter()
+            .enumerate()
+            .map(|(index, label)| {
+                let estimate = estimates
+                    .get(index)
+                    .copied()
+                    .filter(|value| value.is_finite());
+                let std_error = std_errors
+                    .get(index)
+                    .copied()
+                    .filter(|value| value.is_finite() && *value > 0.0);
+                let statistic = estimate.zip(std_error).map(|(estimate, se)| estimate / se);
+                let p_value = statistic.map(|z| 2.0 * (1.0 - normal.cdf(z.abs())));
+                FixedEffectInferenceRow {
+                    label: label.clone(),
+                    kind: FixedEffectInferenceRowKind::Coefficient,
+                    estimate,
+                    std_error,
+                    numerator_df: None,
+                    denominator_df: None,
+                    statistic,
+                    statistic_name: Some(crate::compiler::FixedEffectStatisticName::Z),
+                    p_value,
+                    method: FixedEffectInferenceMethod::AsymptoticWaldZ,
+                    status: FixedEffectInferenceStatus::Available,
+                    reliability: ReliabilityGrade::Moderate,
+                    estimability: EstimabilityAssessment::FixedContrast(
+                        FixedContrastEstimability::estimable(label, 1, 1),
+                    ),
+                    reason: None,
+                    details: None,
+                    notes: vec![
+                        "fixed-effect covariance derived from the beta block of the inverse finite-difference Hessian over joint-laplace beta+theta parameters"
+                            .to_string(),
+                        format!(
+                            "joint Hessian certificate: min eigenvalue {:.6e}, condition number {:.6e}, rank {}",
+                            certification.min_eigenvalue,
+                            certification.condition_number,
+                            certification.rank
+                        ),
+                    ],
+                }
+            })
+            .collect();
+
+        Ok(GlmmFixedEffectInferenceArtifacts {
+            table: FixedEffectInferenceTable::new(rows),
+            covariance: Some(covariance_payload),
+        })
+    }
+
+    fn finite_difference_joint_laplace_hessian(
+        &mut self,
+        params: &[f64],
+        lower_bounds: &[f64],
+    ) -> std::result::Result<DMatrix<f64>, String> {
+        let n = params.len();
+        let p = self.beta.len();
+        let n_agq = self.lmm.optsum.n_agq;
+        let base = self.joint_glmm_deviance_at_params(params, p, n_agq);
+        if !base.is_finite() {
+            let _ = self.joint_glmm_deviance_at_params(params, p, n_agq);
+            return Err(
+                "joint-laplace GLMM Hessian certificate base objective is non-finite".to_string(),
+            );
+        }
+
+        let mut steps = Vec::with_capacity(n);
+        for (index, value) in params.iter().copied().enumerate() {
+            let h = glmm_hessian_step(value);
+            let lower = lower_bounds
+                .get(index)
+                .copied()
+                .unwrap_or(f64::NEG_INFINITY);
+            if lower.is_finite() && value - h <= lower {
+                let _ = self.joint_glmm_deviance_at_params(params, p, n_agq);
+                return Err(format!(
+                    "joint-laplace GLMM Hessian central difference step for parameter {} would cross its lower bound",
+                    index + 1
+                ));
+            }
+            steps.push(h);
+        }
+
+        let mut hessian = DMatrix::zeros(n, n);
+        for i in 0..n {
+            let hi = steps[i];
+            let mut plus = params.to_vec();
+            plus[i] += hi;
+            let f_plus = self.joint_glmm_deviance_at_params(&plus, p, n_agq);
+            let mut minus = params.to_vec();
+            minus[i] -= hi;
+            let f_minus = self.joint_glmm_deviance_at_params(&minus, p, n_agq);
+            if !f_plus.is_finite() || !f_minus.is_finite() {
+                let _ = self.joint_glmm_deviance_at_params(params, p, n_agq);
+                return Err(format!(
+                    "joint-laplace GLMM Hessian diagonal probe for parameter {} is non-finite",
+                    i + 1
+                ));
+            }
+            hessian[(i, i)] = (f_plus - 2.0 * base + f_minus) / (hi * hi);
+
+            for j in 0..i {
+                let hj = steps[j];
+                let mut pp = params.to_vec();
+                pp[i] += hi;
+                pp[j] += hj;
+                let f_pp = self.joint_glmm_deviance_at_params(&pp, p, n_agq);
+
+                let mut pm = params.to_vec();
+                pm[i] += hi;
+                pm[j] -= hj;
+                let f_pm = self.joint_glmm_deviance_at_params(&pm, p, n_agq);
+
+                let mut mp = params.to_vec();
+                mp[i] -= hi;
+                mp[j] += hj;
+                let f_mp = self.joint_glmm_deviance_at_params(&mp, p, n_agq);
+
+                let mut mm = params.to_vec();
+                mm[i] -= hi;
+                mm[j] -= hj;
+                let f_mm = self.joint_glmm_deviance_at_params(&mm, p, n_agq);
+
+                if ![f_pp, f_pm, f_mp, f_mm]
+                    .iter()
+                    .all(|value| value.is_finite())
+                {
+                    let _ = self.joint_glmm_deviance_at_params(params, p, n_agq);
+                    return Err(format!(
+                        "joint-laplace GLMM Hessian off-diagonal probe for parameters {} and {} is non-finite",
+                        i + 1,
+                        j + 1
+                    ));
+                }
+                let value = (f_pp - f_pm - f_mp + f_mm) / (4.0 * hi * hj);
+                hessian[(i, j)] = value;
+                hessian[(j, i)] = value;
+            }
+        }
+        let _ = self.joint_glmm_deviance_at_params(params, p, n_agq);
+
+        Ok(hessian)
+    }
+
+    fn polish_joint_laplace_stationarity(
+        &mut self,
+        params: &[f64],
+        lower_bounds: &[f64],
+        max_iterations: usize,
+        gradient_tolerance: f64,
+    ) -> Option<Vec<f64>> {
+        let p = self.beta.len();
+        let n_agq = self.lmm.optsum.n_agq;
+        let mut current = params.to_vec();
+        let mut current_objective = self.joint_glmm_deviance_at_params(&current, p, n_agq);
+        if !current_objective.is_finite() {
+            return None;
+        }
+
+        for _ in 0..max_iterations {
+            let gradient =
+                self.joint_laplace_finite_difference_gradient(&current, p, n_agq, lower_bounds);
+            let free_gradient_norm = gradient
+                .iter()
+                .map(|value| value.abs())
+                .fold(0.0_f64, f64::max);
+            if !free_gradient_norm.is_finite() || free_gradient_norm <= gradient_tolerance {
+                break;
+            }
+
+            let hessian = self
+                .finite_difference_joint_laplace_hessian(&current, lower_bounds)
+                .ok()?;
+            let step = hessian
+                .cholesky()
+                .map(|cholesky| cholesky.solve(&DVector::from_column_slice(&gradient)))?;
+            if !step.iter().all(|value| value.is_finite()) {
+                break;
+            }
+            let step_norm = step.iter().map(|value| value.abs()).fold(0.0_f64, f64::max);
+            if step_norm <= 1.0e-8 {
+                break;
+            }
+
+            let mut accepted = None;
+            for damping in [1.0, 0.5, 0.25, 0.125, 0.0625] {
+                let mut trial = current.clone();
+                for (index, value) in trial.iter_mut().enumerate() {
+                    *value -= damping * step[index];
+                    let lower = lower_bounds
+                        .get(index)
+                        .copied()
+                        .unwrap_or(f64::NEG_INFINITY);
+                    if lower.is_finite() && *value <= lower {
+                        *value = lower + 1.0e-8;
+                    }
+                }
+                if !trial.iter().all(|value| value.is_finite()) {
+                    continue;
+                }
+                let trial_objective = self.joint_glmm_deviance_at_params(&trial, p, n_agq);
+                if trial_objective.is_finite()
+                    && trial_objective
+                        < current_objective
+                            - (1.0e-9 * current_objective.abs().max(1.0)).max(1.0e-9)
+                {
+                    accepted = Some((trial, trial_objective));
+                    break;
+                }
+            }
+
+            let Some((trial, trial_objective)) = accepted else {
+                break;
+            };
+            current = trial;
+            current_objective = trial_objective;
+        }
+
+        let _ = self.joint_glmm_deviance_at_params(&current, p, n_agq);
+        Some(current)
     }
 
     fn record_negative_binomial_theta_estimation_metadata(
@@ -3890,6 +4618,16 @@ fn uncertified_joint_fallback(
         serde_json::json!(joint_return_code),
     );
     diagnostic.payload.insert(
+        "joint_fit_status".to_string(),
+        serde_json::json!(format!("{:?}", joint_certificate.status)),
+    );
+    if let Some(free_gradient_norm) = joint_certificate.free_gradient_norm {
+        diagnostic.payload.insert(
+            "joint_free_gradient_norm".to_string(),
+            serde_json::json!(free_gradient_norm),
+        );
+    }
+    diagnostic.payload.insert(
         "fast_pirls_return_code".to_string(),
         serde_json::json!(fast_return_code),
     );
@@ -4280,6 +5018,13 @@ fn glmm_variance(family: Family, mu: f64, negative_binomial_theta: Option<f64>) 
         }
         _ => family.variance(mu),
     }
+}
+
+fn clean_glmm_prediction_variance_component(value: f64) -> Option<f64> {
+    if !value.is_finite() || value < -1.0e-10 {
+        return None;
+    }
+    Some(value.max(0.0))
 }
 
 const NEGATIVE_BINOMIAL_THETA_MIN: f64 = 1.0e-8;
@@ -4686,7 +5431,8 @@ impl MixedModelFit for GeneralizedLinearMixedModel {
         self.lmm.vcov()
     }
     fn stderror(&self) -> DVector<f64> {
-        self.lmm.stderror()
+        self.fixed_effect_inference_standard_errors()
+            .unwrap_or_else(|| self.lmm.stderror())
     }
     fn fitted(&self) -> DVector<f64> {
         self.mu.clone()
@@ -4770,6 +5516,226 @@ impl MixedModelFit for GeneralizedLinearMixedModel {
     fn link_kind(&self) -> Option<crate::model::traits::LinkFunction> {
         Some(self.link)
     }
+}
+
+fn glmm_profile_likelihood_unsupported_reason(operation: &str) -> String {
+    format!(
+        "{operation}: GLMM profile likelihood is not implemented in this release; \
+         profile_sigma/profile_theta remain LMM-only, so GLMM callers must use \
+         certified Wald intervals when available or an explicit bootstrap/profile \
+         implementation rather than fabricated profile-likelihood intervals"
+    )
+}
+
+struct GlmmJointHessianCertification {
+    inverse: DMatrix<f64>,
+    min_eigenvalue: f64,
+    condition_number: f64,
+    rank: usize,
+}
+
+struct GlmmFixedEffectInferenceArtifacts {
+    table: FixedEffectInferenceTable,
+    covariance: Option<FixedEffectCovarianceMatrix>,
+}
+
+fn glmm_hessian_step(value: f64) -> f64 {
+    1.0e-4 * value.abs().max(1.0)
+}
+
+fn certify_glmm_joint_hessian(
+    hessian: &DMatrix<f64>,
+) -> std::result::Result<GlmmJointHessianCertification, String> {
+    const CONDITION_NUMBER_MAX: f64 = 1.0e10;
+
+    if hessian.nrows() == 0 || hessian.nrows() != hessian.ncols() {
+        return Err(format!(
+            "joint-laplace GLMM Hessian has shape {}x{}",
+            hessian.nrows(),
+            hessian.ncols()
+        ));
+    }
+    if !matrix_is_finite_local(hessian) {
+        return Err("joint-laplace GLMM Hessian contains non-finite entries".to_string());
+    }
+
+    let symmetric = 0.5 * (hessian + hessian.transpose());
+    let diagonal_scale = (0..symmetric.nrows())
+        .map(|index| symmetric[(index, index)].abs())
+        .fold(1.0_f64, f64::max);
+    let eigen_tolerance = 1.0e-7 * diagonal_scale;
+    let eigen = SymmetricEigen::new(symmetric.clone());
+    let mut min_eigenvalue = f64::INFINITY;
+    let mut max_eigenvalue = 0.0_f64;
+    let mut rank = 0usize;
+    for value in eigen.eigenvalues.iter().copied() {
+        min_eigenvalue = min_eigenvalue.min(value);
+        max_eigenvalue = max_eigenvalue.max(value);
+        if value > eigen_tolerance {
+            rank += 1;
+        }
+    }
+
+    if min_eigenvalue <= eigen_tolerance {
+        return Err(format!(
+            "joint-laplace GLMM Hessian is not positive definite on the active parameter space: min eigenvalue {min_eigenvalue:.6e} <= tolerance {eigen_tolerance:.6e}"
+        ));
+    }
+    if rank != symmetric.nrows() {
+        return Err(format!(
+            "joint-laplace GLMM Hessian rank {rank} is below expected rank {}",
+            symmetric.nrows()
+        ));
+    }
+
+    let condition_number = max_eigenvalue / min_eigenvalue;
+    if !condition_number.is_finite() || condition_number > CONDITION_NUMBER_MAX {
+        return Err(format!(
+            "joint-laplace GLMM Hessian condition number {condition_number:.6e} exceeds certification threshold {CONDITION_NUMBER_MAX:.6e}"
+        ));
+    }
+
+    let cholesky = symmetric
+        .cholesky()
+        .ok_or_else(|| "joint-laplace GLMM Hessian Cholesky factorization failed".to_string())?;
+    let inverse = cholesky.inverse();
+    if !matrix_is_finite_local(&inverse) {
+        return Err("joint-laplace GLMM Hessian inverse contains non-finite entries".to_string());
+    }
+
+    Ok(GlmmJointHessianCertification {
+        inverse,
+        min_eigenvalue,
+        condition_number,
+        rank,
+    })
+}
+
+fn matrix_is_finite_local(matrix: &DMatrix<f64>) -> bool {
+    matrix.iter().all(|value| value.is_finite())
+}
+
+fn matrix_rows_local(matrix: &DMatrix<f64>) -> Vec<Vec<f64>> {
+    (0..matrix.nrows())
+        .map(|row| (0..matrix.ncols()).map(|col| matrix[(row, col)]).collect())
+        .collect()
+}
+
+fn matrix_max_asymmetry_local(matrix: &DMatrix<f64>) -> f64 {
+    if matrix.nrows() != matrix.ncols() {
+        return f64::INFINITY;
+    }
+    let mut max_asymmetry = 0.0_f64;
+    for row in 0..matrix.nrows() {
+        for col in 0..row {
+            max_asymmetry = max_asymmetry.max((matrix[(row, col)] - matrix[(col, row)]).abs());
+        }
+    }
+    max_asymmetry
+}
+
+fn unpivot_glmm_fixed_effect_covariance(
+    active_covariance: &DMatrix<f64>,
+    pivot: &[usize],
+    full_p: usize,
+) -> DMatrix<f64> {
+    let mut result = DMatrix::zeros(full_p, full_p);
+    for active_row in 0..active_covariance.nrows() {
+        let full_row = pivot[active_row];
+        for active_col in 0..active_covariance.ncols() {
+            let full_col = pivot[active_col];
+            result[(full_row, full_col)] = active_covariance[(active_row, active_col)];
+        }
+    }
+    result
+}
+
+fn glmm_joint_laplace_fixed_effect_covariance_matrix(
+    coef_names: Vec<String>,
+    covariance: &DMatrix<f64>,
+    rank: usize,
+    certification: &GlmmJointHessianCertification,
+) -> std::result::Result<FixedEffectCovarianceMatrix, String> {
+    let finite = matrix_is_finite_local(covariance);
+    let symmetric = finite && matrix_max_asymmetry_local(covariance) <= 1.0e-8;
+    let details = FixedEffectCovarianceDetails {
+        rank: Some(rank),
+        expected_rank: Some(coef_names.len()),
+        aliased: Vec::new(),
+        matrix_rows: covariance.nrows(),
+        matrix_cols: covariance.ncols(),
+        finite: Some(finite),
+        symmetric: Some(symmetric),
+    };
+
+    if !finite {
+        return Err(
+            "joint-laplace GLMM active-Hessian covariance contains non-finite entries".to_string(),
+        );
+    }
+    if !symmetric {
+        return Err(
+            "joint-laplace GLMM active-Hessian covariance failed symmetry validation".to_string(),
+        );
+    }
+
+    Ok(FixedEffectCovarianceMatrix::joint_laplace_active_hessian(
+        coef_names,
+        matrix_rows_local(covariance),
+        details,
+        vec![
+            "fixed-effect covariance derived from the beta block of the inverse finite-difference Hessian over joint-laplace beta+theta parameters"
+                .to_string(),
+            format!(
+                "joint Hessian certificate: min eigenvalue {:.6e}, condition number {:.6e}, rank {}",
+                certification.min_eigenvalue,
+                certification.condition_number,
+                certification.rank
+            ),
+        ],
+    ))
+}
+
+fn glmm_inference_availability_for_table(
+    metadata: &GlmmFitMetadata,
+    table: &FixedEffectInferenceTable,
+) -> InferenceAvailability {
+    if !table.rows.is_empty()
+        && table
+            .rows
+            .iter()
+            .all(|row| row.status == FixedEffectInferenceStatus::Available)
+    {
+        return InferenceAvailability::Available {
+            method: "asymptotic_wald_z_joint_laplace_active_hessian".to_string(),
+        };
+    }
+
+    if metadata.estimation_method == "joint_laplace" {
+        return InferenceAvailability::NotAssessed {
+            reason: table
+                .rows
+                .first()
+                .and_then(|row| row.reason.clone())
+                .unwrap_or_else(|| {
+                    "joint-laplace GLMM fixed-effect Hessian certificate did not pass quality gates"
+                        .to_string()
+                }),
+        };
+    }
+
+    InferenceAvailability::Unsupported {
+        reason: glmm_fixed_effect_inference_unsupported_reason(&metadata.estimation_method),
+    }
+}
+
+fn glmm_fixed_effect_inference_unsupported_reason(estimation_method: &str) -> String {
+    format!(
+        "certified GLMM fixed-effect Wald inference is not implemented for {estimation_method}; \
+         fast-PIRLS/profiled covariance geometry remains a working-Hessian payload, while only \
+         joint-laplace fits with a passing certified active-subspace Hessian over active beta+theta \
+         parameters can report Wald SE/z/p/confint"
+    )
 }
 
 #[cfg(test)]
@@ -7241,6 +8207,314 @@ mod tests {
             .update_pirls_at_theta(&[f64::NAN], true)
             .expect_err("final theta update must propagate invalid-theta errors");
         assert!(matches!(err, MixedModelError::InvalidArgument(_)));
+    }
+
+    fn glmm_prediction_data() -> DataFrame {
+        let mut y = Vec::new();
+        let mut x = Vec::new();
+        let mut group = Vec::new();
+        let group_effects = [-0.45, 0.1, 0.35, -0.05, 0.25];
+        for (g, effect) in group_effects.iter().enumerate() {
+            for obs in 0..8 {
+                let xv = obs as f64 - 3.5;
+                let eta = 0.6 + 0.2 * xv + effect;
+                y.push(eta.exp().round().max(0.0));
+                x.push(xv);
+                group.push(format!("g{}", g + 1));
+            }
+        }
+
+        let mut data = DataFrame::new();
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_categorical("group", group).unwrap();
+        data
+    }
+
+    fn glmm_certified_prediction_data() -> DataFrame {
+        let mut y = Vec::new();
+        let mut x = Vec::new();
+        let mut group = Vec::new();
+        for g in 0..4 {
+            for obs in 0..5 {
+                let xv = obs as f64 - 2.0;
+                let eta = 0.5 + 0.2 * xv + (g as f64 - 1.5) * 0.08;
+                y.push(eta.exp() * (0.95 + 0.02 * ((g + obs) % 3) as f64));
+                x.push(xv);
+                group.push(format!("g{}", g + 1));
+            }
+        }
+
+        let mut data = DataFrame::new();
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_categorical("group", group).unwrap();
+        data
+    }
+
+    fn glmm_prediction_fixture() -> (GeneralizedLinearMixedModel, DataFrame) {
+        let data = glmm_prediction_data();
+        let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
+        let mut model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Poisson, None).unwrap();
+        model.fit().unwrap();
+        (model, data)
+    }
+
+    #[test]
+    fn test_glmm_predict_new_same_data_matches_fitted_on_response_and_link_scale() {
+        let (model, data) = glmm_prediction_fixture();
+
+        let response = model
+            .predict_new(&data, GlmmPredictionScale::Response, NewReLevels::Error)
+            .unwrap();
+        let fitted = model.fitted();
+        assert_eq!(response.len(), fitted.len());
+        for (idx, prediction) in response.iter().enumerate() {
+            assert_relative_eq!(
+                prediction.expect("training rows have known random-effect levels"),
+                fitted[idx],
+                epsilon = 1e-9,
+                max_relative = 1e-9
+            );
+        }
+
+        let link = model
+            .predict_new(&data, GlmmPredictionScale::Link, NewReLevels::Error)
+            .unwrap();
+        assert_eq!(link.len(), model.eta.len());
+        for (idx, prediction) in link.iter().enumerate() {
+            assert_relative_eq!(
+                prediction.expect("training rows have known random-effect levels"),
+                model.eta[idx],
+                epsilon = 1e-9,
+                max_relative = 1e-9
+            );
+        }
+    }
+
+    #[test]
+    fn test_glmm_predict_new_unseen_levels_follow_policy() {
+        let (model, _) = glmm_prediction_fixture();
+
+        let mut newdata = DataFrame::new();
+        newdata.add_numeric("y", vec![0.0, 0.0]).unwrap();
+        newdata.add_numeric("x", vec![0.0, 0.0]).unwrap();
+        newdata
+            .add_categorical("group", vec!["NEW".to_string(), "g1".to_string()])
+            .unwrap();
+
+        let err = model
+            .predict_new(&newdata, GlmmPredictionScale::Response, NewReLevels::Error)
+            .unwrap_err();
+        assert_eq!(err.code(), "invalid_argument");
+        assert!(err.to_string().contains("NEW"));
+        assert!(err.to_string().contains("group"));
+
+        let population = model
+            .predict_new(
+                &newdata,
+                GlmmPredictionScale::Response,
+                NewReLevels::Population,
+            )
+            .unwrap();
+        assert_eq!(population.len(), 2);
+        assert!(population[0].is_some());
+        assert!(population[1].is_some());
+
+        let missing = model
+            .predict_new(
+                &newdata,
+                GlmmPredictionScale::Response,
+                NewReLevels::Missing,
+            )
+            .unwrap();
+        assert_eq!(missing[0], None);
+        assert!(missing[1].is_some());
+    }
+
+    #[test]
+    fn test_glmm_predict_new_with_offset_applies_offset_on_link_scale() {
+        let (model, data) = glmm_prediction_fixture();
+
+        let base = model
+            .predict_new(&data, GlmmPredictionScale::Link, NewReLevels::Error)
+            .unwrap();
+        let offset = vec![0.25; data.nrow()];
+        let shifted = model
+            .predict_new_with_offset(
+                &data,
+                Some(&offset),
+                GlmmPredictionScale::Link,
+                NewReLevels::Error,
+            )
+            .unwrap();
+
+        for (base, shifted) in base.iter().zip(shifted.iter()) {
+            assert_relative_eq!(
+                shifted.expect("known level"),
+                base.expect("known level") + 0.25,
+                epsilon = 1e-12
+            );
+        }
+    }
+
+    #[test]
+    fn test_glmm_predict_new_variance_returns_degraded_working_delta_payload() {
+        let (model, data) = glmm_prediction_fixture();
+
+        let payload = model
+            .predict_new_variance(&data, GlmmPredictionScale::Response, NewReLevels::Error)
+            .unwrap();
+        assert_eq!(
+            payload.method,
+            PredictionVarianceMethod::GlmmPirlsLaplaceWorkingDelta
+        );
+        assert_eq!(payload.confidence_level, Some(0.95));
+        assert_eq!(payload.rows.len(), data.nrow());
+        let fitted = model.fitted();
+        let first = &payload.rows[0];
+        assert_eq!(first.status, PredictionVarianceStatus::Degraded);
+        assert_relative_eq!(
+            first.prediction.expect("GLMM point prediction"),
+            fitted[0],
+            epsilon = 1e-9,
+            max_relative = 1e-9
+        );
+        assert!(first.fixed_variance.unwrap() > 0.0);
+        assert!(first.random_variance.unwrap() >= 0.0);
+        assert!(first.fixed_random_covariance.unwrap().is_finite());
+        assert!(first.combined_variance.unwrap() > 0.0);
+        assert!(first.se_fit.unwrap() > 0.0);
+        assert_eq!(first.prediction_variance, None);
+        assert!(first.confidence_lower.unwrap() < first.prediction.unwrap());
+        assert!(first.confidence_upper.unwrap() > first.prediction.unwrap());
+        assert_eq!(first.prediction_lower, None);
+        assert_eq!(first.prediction_upper, None);
+        assert!(first
+            .reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("certified active-subspace Hessian variance is not implemented"));
+    }
+
+    #[test]
+    fn test_glmm_predict_new_variance_uses_certified_joint_fixed_covariance_when_available() {
+        let data = glmm_certified_prediction_data();
+        let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
+        let mut model = GeneralizedLinearMixedModel::new(
+            formula,
+            &data,
+            Family::Gamma,
+            Some(LinkFunction::Log),
+        )
+        .unwrap();
+        model.fit_with_options(false, 1, false).unwrap();
+
+        let artifact = model.compiler_artifact();
+        let covariance = artifact
+            .fixed_effect_covariance_matrix
+            .as_ref()
+            .expect("joint-laplace fit should expose fixed covariance");
+        assert_eq!(
+            covariance.method,
+            FixedEffectCovarianceMethod::JointLaplaceActiveHessian
+        );
+        let matrix = covariance
+            .matrix
+            .as_ref()
+            .expect("certified covariance should carry matrix values");
+
+        let payload = model
+            .predict_new_variance(&data, GlmmPredictionScale::Response, NewReLevels::Error)
+            .unwrap();
+        let first = &payload.rows[0];
+        assert_eq!(first.status, PredictionVarianceStatus::Degraded);
+        assert!(first
+            .reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("certified joint-laplace fixed-effect covariance"));
+        assert!(payload
+            .notes
+            .iter()
+            .any(|note| note.contains("fixed components use the certified joint-laplace")));
+
+        let x = -2.0;
+        let link_scale_fixed = matrix[0][0] + 2.0 * x * matrix[0][1] + x * x * matrix[1][1];
+        let derivative = first.prediction.expect("response-scale prediction");
+        assert_relative_eq!(
+            first.fixed_variance.expect("fixed component"),
+            link_scale_fixed * derivative * derivative,
+            epsilon = 1.0e-8,
+            max_relative = 1.0e-8
+        );
+        assert_relative_eq!(
+            first.combined_variance.expect("combined component"),
+            first.fixed_variance.unwrap()
+                + first.random_variance.unwrap()
+                + 2.0 * first.fixed_random_covariance.unwrap(),
+            epsilon = 1.0e-8,
+            max_relative = 1.0e-8
+        );
+        assert!(first.se_fit.unwrap() > 0.0);
+        assert_eq!(first.prediction_variance, None);
+    }
+
+    #[test]
+    fn test_glmm_predict_new_variance_unseen_level_keeps_unavailable_reason() {
+        let (model, _) = glmm_prediction_fixture();
+
+        let mut newdata = DataFrame::new();
+        newdata.add_numeric("y", vec![0.0, 0.0]).unwrap();
+        newdata.add_numeric("x", vec![0.0, 0.0]).unwrap();
+        newdata
+            .add_categorical("group", vec!["NEW".to_string(), "g1".to_string()])
+            .unwrap();
+
+        let payload = model
+            .predict_new_variance(
+                &newdata,
+                GlmmPredictionScale::Response,
+                NewReLevels::Population,
+            )
+            .unwrap();
+        let unseen = &payload.rows[0];
+        assert_eq!(unseen.status, PredictionVarianceStatus::Unavailable);
+        assert!(unseen.prediction.is_some());
+        assert!(unseen.fixed_variance.is_some());
+        assert_eq!(unseen.random_variance, None);
+        assert_eq!(unseen.fixed_random_covariance, None);
+        assert_eq!(unseen.combined_variance, None);
+        assert_eq!(unseen.se_fit, None);
+        assert!(unseen
+            .reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("new level 'NEW'"));
+
+        let known = &payload.rows[1];
+        assert_eq!(known.status, PredictionVarianceStatus::Degraded);
+        assert!(known.se_fit.unwrap() > 0.0);
+    }
+
+    #[test]
+    fn test_glmm_profile_likelihood_methods_refuse_with_explicit_reason() {
+        let (mut model, _) = glmm_prediction_fixture();
+
+        let sigma_err = model.profile_sigma(4.0).unwrap_err();
+        assert_eq!(sigma_err.code(), "unsupported");
+        let sigma_msg = sigma_err.to_string();
+        assert!(sigma_msg.contains("profile_sigma"));
+        assert!(sigma_msg.contains("GLMM profile likelihood is not implemented"));
+        assert!(sigma_msg.contains("LMM-only"));
+
+        let theta_err = model.profile_theta(0, 4.0).unwrap_err();
+        assert_eq!(theta_err.code(), "unsupported");
+        let theta_msg = theta_err.to_string();
+        assert!(theta_msg.contains("profile_theta"));
+        assert!(theta_msg.contains("GLMM profile likelihood is not implemented"));
+        assert!(theta_msg.contains("LMM-only"));
     }
 
     #[test]

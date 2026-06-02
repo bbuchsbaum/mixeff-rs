@@ -35,6 +35,7 @@ pub use data::{
 };
 pub use generalized::{
     GeneralizedLinearMixedModel, GeneralizedLinearMixedModelBuilder, GlmmFitOptions,
+    GlmmPredictionScale,
 };
 pub use linear::{
     parametricbootstrap, BootstrapFailedRefitPolicy, BootstrapInterval, BootstrapIntervalMethod,
@@ -43,7 +44,8 @@ pub use linear::{
     FitToleranceOverrides, FixedEffectBootstrapOptions, FixedEffectNullBootstrapTarget,
     FixedEffectNullCovariancePolicy, LinearMixedModel, LinearMixedModelBuilder,
     MixedModelBootstrap, ModelCriterion, NewReLevels, OptimizerChoice, OptimizerControl,
-    BOOTSTRAP_RUN_SCHEMA, BOOTSTRAP_RUN_SCHEMA_VERSION,
+    PredictionVarianceMethod, PredictionVariancePayload, PredictionVarianceRow,
+    PredictionVarianceStatus, BOOTSTRAP_RUN_SCHEMA, BOOTSTRAP_RUN_SCHEMA_VERSION,
 };
 pub use summary_estimates::{ResidualSource, SamplingVarianceScale, SummaryEstimateOptions};
 pub use traits::{Family, LinkFunction, MixedModelFit, RandomEffectTermInfo, WaldConfintRow};

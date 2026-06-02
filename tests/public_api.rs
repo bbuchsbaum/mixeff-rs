@@ -9,9 +9,10 @@ use mixeff_rs::model::{
     BootstrapRunPayload, BootstrapSeedRecord, BootstrapTarget, BootstrapTargetKind,
     CategoricalColumn, Column, DataFrame, Family, FitToleranceOverrides,
     FixedEffectNullBootstrapTarget, FixedEffectNullCovariancePolicy, GeneralizedLinearMixedModel,
-    GlmmFitOptions, LinearMixedModel, LinkFunction, MixedModelBootstrap, MixedModelFit,
-    NewReLevels, OptimizerChoice, OptimizerControl, RandomEffectTermInfo, BOOTSTRAP_RUN_SCHEMA,
-    BOOTSTRAP_RUN_SCHEMA_VERSION,
+    GlmmFitOptions, GlmmPredictionScale, LinearMixedModel, LinkFunction, MixedModelBootstrap,
+    MixedModelFit, NewReLevels, OptimizerChoice, OptimizerControl, PredictionVarianceMethod,
+    PredictionVariancePayload, PredictionVarianceRow, PredictionVarianceStatus,
+    RandomEffectTermInfo, BOOTSTRAP_RUN_SCHEMA, BOOTSTRAP_RUN_SCHEMA_VERSION,
 };
 use mixeff_rs::stats::{
     assess_model_comparison_sequence, coeftable_to_markdown, profile, profile_beta, profile_betas,
@@ -218,10 +219,15 @@ fn intended_model_barrel_exports_compile_for_downstream_users() {
     assert_type::<GeneralizedLinearMixedModel>();
     assert_type::<LinearMixedModel>();
     assert_type::<GlmmFitOptions>();
+    assert_type::<GlmmPredictionScale>();
     assert_type::<OptimizerChoice>();
     assert_type::<OptimizerControl>();
     assert_type::<FitToleranceOverrides>();
     assert_type::<NewReLevels>();
+    assert_type::<PredictionVarianceMethod>();
+    assert_type::<PredictionVariancePayload>();
+    assert_type::<PredictionVarianceRow>();
+    assert_type::<PredictionVarianceStatus>();
     assert_type::<BootstrapReplicate>();
     assert_type::<MixedModelBootstrap>();
     assert_type::<BootstrapIntervalMethod>();
@@ -243,6 +249,47 @@ fn intended_model_barrel_exports_compile_for_downstream_users() {
 
     let _ = LinearMixedModel::fixed_effect_fitted
         as fn(&LinearMixedModel) -> mixeff_rs::nalgebra::DVector<f64>;
+    let _ = GeneralizedLinearMixedModel::predict_new
+        as fn(
+            &GeneralizedLinearMixedModel,
+            &DataFrame,
+            GlmmPredictionScale,
+            NewReLevels,
+        ) -> mixeff_rs::error::Result<Vec<Option<f64>>>;
+    let _ = GeneralizedLinearMixedModel::profile_theta
+        as fn(
+            &mut GeneralizedLinearMixedModel,
+            usize,
+            f64,
+        ) -> mixeff_rs::error::Result<mixeff_rs::stats::MixedModelProfile>;
+    let _ = LinearMixedModel::predict_new_variance
+        as fn(
+            &LinearMixedModel,
+            &DataFrame,
+            NewReLevels,
+        ) -> mixeff_rs::error::Result<PredictionVariancePayload>;
+    let _ = LinearMixedModel::predict_new_variance_with_level
+        as fn(
+            &LinearMixedModel,
+            &DataFrame,
+            NewReLevels,
+            f64,
+        ) -> mixeff_rs::error::Result<PredictionVariancePayload>;
+    let _ = GeneralizedLinearMixedModel::predict_new_variance
+        as fn(
+            &GeneralizedLinearMixedModel,
+            &DataFrame,
+            GlmmPredictionScale,
+            NewReLevels,
+        ) -> mixeff_rs::error::Result<PredictionVariancePayload>;
+    let _ = GeneralizedLinearMixedModel::predict_new_variance_with_level
+        as fn(
+            &GeneralizedLinearMixedModel,
+            &DataFrame,
+            GlmmPredictionScale,
+            NewReLevels,
+            f64,
+        ) -> mixeff_rs::error::Result<PredictionVariancePayload>;
     let _ = BOOTSTRAP_RUN_SCHEMA;
     let _ = BOOTSTRAP_RUN_SCHEMA_VERSION;
     let _ = parametricbootstrap::<rand::rngs::StdRng>;

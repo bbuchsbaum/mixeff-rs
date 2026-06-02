@@ -5,6 +5,9 @@ use statrs::distribution::{ChiSquared, ContinuousCDF};
 use std::collections::BTreeMap;
 
 use crate::compiler::GlmmFitMetadata;
+use crate::compiler::{
+    FixedEffectInferenceMethod, FixedEffectInferenceRowKind, FixedEffectStatisticName,
+};
 use crate::model::traits::MixedModelFit;
 use crate::model::{GeneralizedLinearMixedModel, LinearMixedModel};
 use crate::stats::{CoefTable, VarCorr};
@@ -147,14 +150,8 @@ impl ModelSummary {
             None
         };
         let varcorr = VarCorr::from_reterms(&model.lmm.reterms, scale, None);
-        summary_from_parts(
-            &model.coef_names(),
-            model.coef().as_slice(),
-            model.stderror().as_slice(),
-            &varcorr,
-            residual_label,
-            residual_value,
-        )
+        let coeftable = generalized_coeftable(model);
+        summary_from_coeftable(&coeftable, &varcorr, residual_label, residual_value)
     }
 
     /// Render the summary as a markdown table.
@@ -322,11 +319,7 @@ impl FitSummaryPayload {
             model,
             model.family_kind().map(family_label),
             model.link_kind().map(link_label),
-            CoefTable::new(
-                model.coef_names(),
-                model.coef().as_slice().to_vec(),
-                model.stderror().as_slice().to_vec(),
-            ),
+            generalized_coeftable(model),
             model.varcorr(),
             ModelSummary::from_generalized_model(model),
         );
@@ -441,23 +434,170 @@ fn link_label(link: crate::model::traits::LinkFunction) -> &'static str {
     }
 }
 
-fn summary_from_parts(
-    coef_names: &[String],
-    coef: &[f64],
-    stderror: &[f64],
+fn generalized_coeftable(model: &GeneralizedLinearMixedModel) -> CoefTable {
+    if let Some(table) = model
+        .compiler_artifact()
+        .fixed_effect_inference_table
+        .as_ref()
+    {
+        let rows = table
+            .rows
+            .iter()
+            .filter(|row| row.kind == FixedEffectInferenceRowKind::Coefficient)
+            .collect::<Vec<_>>();
+        if !rows.is_empty() {
+            let names = rows.iter().map(|row| row.label.clone()).collect::<Vec<_>>();
+            let estimates = rows
+                .iter()
+                .map(|row| row.estimate.unwrap_or(f64::NAN))
+                .collect::<Vec<_>>();
+            let std_errors = rows
+                .iter()
+                .map(|row| row.std_error.unwrap_or(f64::NAN))
+                .collect::<Vec<_>>();
+            let statistics = rows
+                .iter()
+                .map(|row| row.statistic.unwrap_or(f64::NAN))
+                .collect::<Vec<_>>();
+            let p_values = rows
+                .iter()
+                .map(|row| row.p_value.unwrap_or(f64::NAN))
+                .collect::<Vec<_>>();
+            let p_value_reasons = rows
+                .iter()
+                .map(|row| {
+                    row.p_value.map(|_| None).unwrap_or_else(|| {
+                        row.reason.clone().or_else(|| {
+                            Some("fixed-effect inference is unavailable for this row".to_string())
+                        })
+                    })
+                })
+                .collect::<Vec<_>>();
+            let df = rows
+                .iter()
+                .map(|row| row.denominator_df)
+                .collect::<Vec<_>>();
+            let statistic_name = rows
+                .iter()
+                .find_map(|row| row.statistic_name)
+                .map(fixed_effect_statistic_name_label)
+                .unwrap_or("z");
+            let method = rows
+                .first()
+                .map(|row| fixed_effect_inference_method_label(row.method))
+                .unwrap_or("not-computed");
+            return CoefTable::from_df_inference(
+                names,
+                estimates,
+                std_errors,
+                statistics,
+                p_values,
+                p_value_reasons,
+                df,
+                statistic_name,
+                method,
+            );
+        }
+    }
+
+    CoefTable::new(
+        model.coef_names(),
+        model.coef().as_slice().to_vec(),
+        model.stderror().as_slice().to_vec(),
+    )
+}
+
+fn summary_from_coeftable(
+    coeftable: &CoefTable,
     varcorr: &VarCorr,
     residual_label: Option<&str>,
     residual_value: Option<f64>,
 ) -> ModelSummary {
-    summary_from_parts_with_pvalues(
-        coef_names,
-        coef,
-        stderror,
-        None,
-        varcorr,
-        residual_label,
-        residual_value,
-    )
+    let sigma_headers = varcorr
+        .components
+        .iter()
+        .map(|comp| format!("σ_{}", comp.group))
+        .collect::<Vec<_>>();
+    let sigma_maps = varcorr
+        .components
+        .iter()
+        .map(|comp| {
+            comp.names
+                .iter()
+                .cloned()
+                .zip(comp.std_dev.iter().copied())
+                .collect::<std::collections::HashMap<_, _>>()
+        })
+        .collect::<Vec<_>>();
+
+    let mut rows = Vec::new();
+    for index in 0..coeftable.names.len() {
+        let label = &coeftable.names[index];
+        rows.push(ModelSummaryRow {
+            label: label.clone(),
+            estimate: coeftable
+                .estimates
+                .get(index)
+                .copied()
+                .filter(|value| value.is_finite()),
+            std_error: coeftable
+                .std_errors
+                .get(index)
+                .copied()
+                .filter(|value| value.is_finite()),
+            z_stat: coeftable
+                .z_values
+                .get(index)
+                .copied()
+                .filter(|value| value.is_finite()),
+            pvalue: coeftable
+                .p_values
+                .get(index)
+                .copied()
+                .filter(|value| value.is_finite()),
+            sigma_values: sigma_maps
+                .iter()
+                .map(|map| map.get(label).copied())
+                .collect(),
+        });
+    }
+
+    let mut seen = coeftable.names.clone();
+    for comp in &varcorr.components {
+        for name in &comp.names {
+            if seen.contains(name) {
+                continue;
+            }
+            rows.push(ModelSummaryRow {
+                label: name.clone(),
+                estimate: None,
+                std_error: None,
+                z_stat: None,
+                pvalue: None,
+                sigma_values: sigma_maps
+                    .iter()
+                    .map(|map| map.get(name).copied())
+                    .collect(),
+            });
+            seen.push(name.clone());
+        }
+    }
+
+    if let (Some(label), Some(value)) = (residual_label, residual_value) {
+        rows.push(ModelSummaryRow {
+            label: label.to_string(),
+            estimate: Some(value),
+            std_error: None,
+            z_stat: None,
+            pvalue: None,
+            sigma_values: vec![None; sigma_headers.len()],
+        });
+    }
+
+    ModelSummary {
+        sigma_headers,
+        rows,
+    }
 }
 
 fn summary_from_parts_with_pvalues(
@@ -557,6 +697,25 @@ fn summary_from_parts_with_pvalues(
     ModelSummary {
         sigma_headers,
         rows,
+    }
+}
+
+fn fixed_effect_statistic_name_label(name: FixedEffectStatisticName) -> &'static str {
+    match name {
+        FixedEffectStatisticName::Z => "z",
+        FixedEffectStatisticName::T => "t",
+        FixedEffectStatisticName::F => "F",
+        FixedEffectStatisticName::ChiSquare => "chisq",
+    }
+}
+
+fn fixed_effect_inference_method_label(method: FixedEffectInferenceMethod) -> &'static str {
+    match method {
+        FixedEffectInferenceMethod::AsymptoticWaldZ => "wald-z",
+        FixedEffectInferenceMethod::Satterthwaite => "satterthwaite",
+        FixedEffectInferenceMethod::KenwardRoger => "kenward-roger",
+        FixedEffectInferenceMethod::Bootstrap => "bootstrap",
+        FixedEffectInferenceMethod::NotComputed => "not-computed",
     }
 }
 
