@@ -112,7 +112,10 @@ pub fn parametricbootstrap_glmm<R: rand::Rng>(
                 fits.push(BootstrapReplicate {
                     objective: work.objective(),
                     sigma: work.dispersion(false),
-                    se: work.stderror(),
+                    // Descriptive replicate SEs (finite for successful
+                    // refits), not the certified-Wald `stderror` surface,
+                    // which refuses with NaN for uncertified fits.
+                    se: work.bootstrap_replicate_standard_errors(),
                     beta,
                     theta: work.theta(),
                 });

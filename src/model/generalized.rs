@@ -365,6 +365,21 @@ impl GeneralizedLinearMixedModel {
         Some(DVector::from_vec(standard_errors))
     }
 
+    /// Standard errors recorded on a parametric-bootstrap replicate refit.
+    ///
+    /// Replicate SEs are descriptive resampling payloads, not certified Wald
+    /// inference: downstream summaries use their finiteness to separate
+    /// successful refits from failed ones. When the refit carries a fully
+    /// certified Wald table its SEs are recorded; otherwise (fast-PIRLS
+    /// fits, refused or partially refused tables) the working-covariance
+    /// standard errors are recorded instead of NaN refusals.
+    pub(crate) fn bootstrap_replicate_standard_errors(&self) -> DVector<f64> {
+        match self.fixed_effect_inference_standard_errors() {
+            Some(se) if se.iter().all(|value| value.is_finite()) => se,
+            _ => self.lmm.stderror(),
+        }
+    }
+
     unstable_internal_method! {
     /// Inner [`LinearMixedModel`] holding the local Laplace approximation
     /// (raw PIRLS solver state).
