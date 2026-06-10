@@ -1,0 +1,9 @@
+{
+  "fixture": "glmm_high_baseline_random_intercept.json",
+  "issue": "bd-01KT40T6FGVXQQ9N50G2HM0ZZE",
+  "purpose": "Regression guard for trust_bq premature ObjectiveStagnation on high-baseline random-intercept binomial GLMMs. Pre-fix the joint Laplace optimizer stalled at the fast-PIRLS profiled start (intercept biased toward 0 by ~0.03, dlogLik ~5e-3) yet reported ConvergedInterior.",
+  "reference_engine": "R lme4::glmer 1.1-x (R 4.5)",
+  "regenerate": "set.seed(101); nsub<-16; nitem<-6; reps<-3; g<-expand.grid(sub=factor(1:nsub), item=factor(1:nitem)); g<-g[rep(1:nrow(g),reps),]; x<-rnorm(nrow(g)); u_s<-rnorm(nsub,0,0.45)[as.integer(g$sub)]; u_i<-rnorm(nitem,0,0.68)[as.integer(g$item)]; g$y<-rbinom(nrow(g),1,plogis(1.4 + 0.10*x + u_s + u_i)); g$x<-x; fit<-lme4::glmer(y ~ x + (1|sub) + (1|item), data=g, family=binomial()); reference: logLik, fixef, getME(fit,'theta')",
+  "formula": "y ~ x + (1 | sub) + (1 | item)",
+  "family": "binomial(logit)"
+}

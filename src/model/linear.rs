@@ -2953,11 +2953,20 @@ impl LinearMixedModel {
         let restore_result = self.set_theta(&previous_theta);
         self.optsum = previous_optsum;
         restore_result?;
-        certified
+        // The certificate is purely an early-stop accelerator. On degenerate
+        // surfaces (e.g. a response constant within nested grouping levels)
+        // the finite-difference score probes can fail outright; that must
+        // read as "not certified, keep optimizing", not abort the fit.
+        Ok(certified.unwrap_or(false))
     }
 
     fn apply_kkt_guided_boundary_restart(&mut self, reml: bool) -> Result<bool> {
-        let Some(candidate) = self.kkt_boundary_restart_candidate()? else {
+        // The KKT-guided restart is a best-effort post-fit improvement probe.
+        // On degenerate surfaces (e.g. a response constant within nested
+        // grouping levels) the certificate's finite-difference score probes
+        // can fail to evaluate; that must skip the restart, not turn an
+        // otherwise completed fit into an error.
+        let Some(candidate) = self.kkt_boundary_restart_candidate().unwrap_or(None) else {
             return Ok(false);
         };
 
@@ -5436,6 +5445,19 @@ impl LinearMixedModel {
                     cholesky_zero_pad_tolerance,
                 )
                 .unwrap_or(invalid_objective)
+            };
+            // TrustBQ requires every objective value to be finite, unlike the
+            // NLopt/COBYLA backends which tolerate ±inf trial values. A
+            // degenerate theta (e.g. a response constant within nested
+            // grouping levels driving the profiled deviance to -inf/NaN) is
+            // mapped to the same finite penalty as a hard evaluation error so
+            // the trust region steps away from it instead of aborting the
+            // fit; it also keeps the best-theta tracker below from latching
+            // onto a non-finite "optimum".
+            let obj = if obj.is_finite() {
+                obj
+            } else {
+                invalid_objective
             };
 
             fit_log.borrow_mut().push(FitLogEntry {
@@ -11514,8 +11536,28 @@ fn trust_bq_model_family_policy(
     } else {
         TrustBqModelFamily::Moderate
     };
-    let ftol_abs = configured_ftol_abs.max(1e-8);
-    let ftol_rel = configured_ftol_rel.max(1e-10);
+    // Map the configured (NLopt-style) tolerances onto TrustBQ's
+    // accepted-step stop band. For the small family the default
+    // `ftol_rel = 1e-8` is far too loose as an accepted-step criterion: at
+    // |f| ~ 2e3 it stops on any accepted reduction below ~2e-5, which on the
+    // flat ridge of e.g. the sleepstudy full-covariance ML surface leaves
+    // theta ~1e-4 short of the optimum — a ~6e-4 sigma / ~3e-3 fitted-value
+    // error, outside the 5e-4 absolute band the cross-engine parity fixtures
+    // certify. Small problems re-probe cheaply (full cross-term model, few
+    // axes), so capping the relative band there buys parity-grade endpoints
+    // for a few dozen extra evaluations. Explicitly *tighter* configured
+    // values are still honored; moderate/crossed families keep the previous
+    // floors unchanged.
+    let (ftol_abs, ftol_rel) = match family {
+        TrustBqModelFamily::Small => (
+            configured_ftol_abs.max(1e-10),
+            configured_ftol_rel.clamp(1e-12, 1e-11),
+        ),
+        TrustBqModelFamily::Moderate | TrustBqModelFamily::CrossedLarge => (
+            configured_ftol_abs.max(1e-8),
+            configured_ftol_rel.max(1e-10),
+        ),
+    };
     let max_evaluations = maxeval_override.unwrap_or_else(|| {
         if configured_max_feval > 0 {
             configured_max_feval as usize
@@ -16567,8 +16609,11 @@ mod tests {
         assert_eq!(policy.stall_ftol_rel, -1.0);
         assert_eq!(policy.stall_ftol_abs, -1.0);
         assert!(policy.stall_requires_stable_x);
-        assert_eq!(policy.certificate_ftol_abs, 1e-8);
-        assert_eq!(policy.certificate_ftol_rel, 1e-8);
+        // The small family caps the relative accepted-step band at 1e-11 (the
+        // NLopt-style 1e-8 default is too loose for parity-grade endpoints)
+        // and floors the absolute band at 1e-10; the certificate inherits.
+        assert_eq!(policy.certificate_ftol_abs, 1e-10);
+        assert_eq!(policy.certificate_ftol_rel, 1e-11);
     }
 
     #[test]

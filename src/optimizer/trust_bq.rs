@@ -222,6 +222,10 @@ where
     let mut cache: SampleCache = SampleCache::new();
     let mut x = project_point(initial, lower_bounds, upper_bounds);
     let mut f = evaluate(&mut objective, &x, &mut fevals, &mut cache, reuse)?;
+    // Objective at the starting point. The stagnation early-stop is a
+    // *plateau-after-descent* detector, so it must not fire until the search
+    // has improved on this value at least once (see the gate below).
+    let initial_objective = f;
     let mut best_x = x.clone();
     let mut best_f = f;
     let mut radius = options.initial_radius.max(options.final_radius);
@@ -316,7 +320,18 @@ where
         } else {
             stalled += 1;
         }
-        if stalled >= options.stall_iterations && radius < options.initial_radius {
+        // Only treat a stall as convergence once the search has actually
+        // descended below the starting objective. Otherwise — as on the
+        // flat high-baseline random-intercept GLMM Laplace surface, where the
+        // first trial steps are all rejected because the initial trust radius
+        // (sized to repair far-off intercept starts) overshoots a small move —
+        // the counter would trip while the radius is still far larger than the
+        // move needed, reporting a premature interior convergence at the
+        // un-improved start. Withholding the stop lets the radius keep
+        // contracting until a step is finally accepted and the descent reaches
+        // the true optimum (after which a genuine plateau stalls as intended).
+        let has_descended = best_f < initial_objective;
+        if has_descended && stalled >= options.stall_iterations && radius < options.initial_radius {
             return Ok(TrustBqResult {
                 x: best_x,
                 fmin: best_f,

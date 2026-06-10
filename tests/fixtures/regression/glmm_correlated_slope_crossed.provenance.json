@@ -1,0 +1,7 @@
+{
+  "generator": "R glmer (lme4)",
+  "script": "seed 303; nsub=24 nitem=10 reps=4; y ~ x + (1+x|sub) + (1+x|item), binomial; see bd-01KTQ7T8DPAGA1GS93R71D6QKF",
+  "lme4_version": "2.0.1",
+  "r_version": "R version 4.5.1 (2025-06-13)",
+  "n": 960
+}

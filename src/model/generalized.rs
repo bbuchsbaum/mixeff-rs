@@ -404,6 +404,111 @@ impl GeneralizedLinearMixedModel {
     }
     }
 
+    unstable_internal_method! {
+    /// Profiled (beta-varying PIRLS) deviance with response constants at an
+    /// arbitrary `theta`, for optimizer diagnostics: lets probes evaluate the
+    /// fast-PIRLS objective at an externally supplied covariance candidate
+    /// (e.g. a reference fit's theta) without running an optimizer.
+    ///
+    /// Unstable internal surface: `pub` only with the `unstable-internals`
+    /// feature; otherwise `pub(crate)`. Not part of the stable 1.0 API.
+    #[allow(dead_code)]
+    unstable_vis fn profiled_deviance_at_theta(
+        &mut self,
+        theta: &[f64],
+        n_agq: usize,
+    ) -> Result<f64> {
+        self.update_pirls_at_theta(theta, true)?;
+        Ok(self.deviance_with_response_constants(n_agq))
+    }
+    }
+
+    unstable_internal_method! {
+    /// [`profiled_deviance_at_theta`](Self::profiled_deviance_at_theta) with
+    /// an explicit PIRLS iteration budget, for diagnosing objective
+    /// distortion from the default per-evaluation PIRLS cap.
+    ///
+    /// Unstable internal surface: `pub` only with the `unstable-internals`
+    /// feature; otherwise `pub(crate)`. Not part of the stable 1.0 API.
+    #[allow(dead_code)]
+    unstable_vis fn profiled_deviance_at_theta_with_pirls_budget(
+        &mut self,
+        theta: &[f64],
+        n_agq: usize,
+        max_iter: usize,
+    ) -> Result<f64> {
+        self.update_pirls_at_theta_with_options(theta, true, max_iter, true)?;
+        Ok(self.deviance_with_response_constants(n_agq))
+    }
+    }
+
+    unstable_internal_method! {
+    /// Joint-Laplace deviance at `theta` with the fast-PIRLS profiled beta:
+    /// first solves beta jointly inside PIRLS at `theta`, then re-evaluates
+    /// the u-only Laplace criterion at that (beta, theta) — the objective the
+    /// joint optimizer and glmer's nAGQ=1 deviance use. The beta-varying
+    /// PIRLS criterion folds the fixed-effects block into the log-determinant
+    /// and is NOT comparable to glmer's reported logLik.
+    ///
+    /// Unstable internal surface: `pub` only with the `unstable-internals`
+    /// feature; otherwise `pub(crate)`. Not part of the stable 1.0 API.
+    #[allow(dead_code)]
+    unstable_vis fn joint_deviance_at_theta_with_profiled_beta(
+        &mut self,
+        theta: &[f64],
+        n_agq: usize,
+    ) -> Result<f64> {
+        self.update_pirls_at_theta(theta, true)?;
+        let n_beta = self.beta.len();
+        let mut params = self.beta.as_slice().to_vec();
+        params.extend_from_slice(theta);
+        Ok(self.joint_glmm_deviance_at_params(&params, n_beta, n_agq))
+    }
+    }
+
+    unstable_internal_method! {
+    /// Joint-Laplace fit seeded at an arbitrary `start_theta` (beta seeded at
+    /// the fast-PIRLS profiled solution for that theta), bypassing the usual
+    /// profiled-fit start. Optimizer-diagnostics surface: lets probes test
+    /// whether a reference optimum is reachable when the search starts beside
+    /// it instead of at the profiled fit.
+    ///
+    /// Unstable internal surface: `pub` only with the `unstable-internals`
+    /// feature; otherwise `pub(crate)`. Not part of the stable 1.0 API.
+    #[allow(dead_code)]
+    unstable_vis fn fit_joint_glmm_from_custom_theta(
+        &mut self,
+        start_theta: &[f64],
+        n_agq: usize,
+    ) -> Result<&mut Self> {
+        if self.lmm.optsum.feval > 0 {
+            return Err(MixedModelError::AlreadyFitted);
+        }
+        self.validate_agq(n_agq)?;
+        self.update_pirls_at_theta(start_theta, true)?;
+        let start_beta = self.beta.as_slice().to_vec();
+        let n_beta = start_beta.len();
+        let mut params = start_beta.clone();
+        params.extend_from_slice(start_theta);
+        let start_objective = self.joint_glmm_deviance_at_params(&params, n_beta, n_agq);
+        let maxeval = joint_glmm_configured_maxeval_for(
+            &self.lmm.optsum,
+            params.len(),
+            Optimizer::TrustBq,
+        );
+        self.lmm.optsum.optimizer = Optimizer::TrustBq;
+        self.lmm.optsum.backend = Optimizer::TrustBq.canonical_backend();
+        self.fit_joint_glmm_from_start(
+            start_beta,
+            start_theta.to_vec(),
+            start_objective,
+            n_agq,
+            maxeval,
+            None,
+        )
+    }
+    }
+
     /// Construct a GLMM from formula, data, distribution, and link.
     pub fn new(
         formula: Formula,
@@ -926,6 +1031,7 @@ impl GeneralizedLinearMixedModel {
                 }
             }
 
+            let link_scale_se = row.combined_variance.map(f64::sqrt);
             let derivative = match (scale, link_predictions[row.row]) {
                 (GlmmPredictionScale::Link, Some(_)) => Some(1.0),
                 (GlmmPredictionScale::Response, Some(eta)) => {
@@ -958,9 +1064,30 @@ impl GeneralizedLinearMixedModel {
 
             if row.status == PredictionVarianceStatus::Available {
                 row.prediction_variance = None;
-                if let (Some(prediction), Some(se_fit)) = (row.prediction, row.se_fit) {
-                    row.confidence_lower = Some(prediction - z * se_fit);
-                    row.confidence_upper = Some(prediction + z * se_fit);
+                // Response-scale symmetric bounds can escape the family's
+                // valid range near the boundary; compute the interval on the
+                // link scale and map both ends through the inverse link
+                // (ordered, since some links are decreasing).
+                let bounds = match (scale, row.prediction, row.se_fit) {
+                    (GlmmPredictionScale::Link, Some(prediction), Some(se_fit)) => {
+                        Some((prediction - z * se_fit, prediction + z * se_fit))
+                    }
+                    (GlmmPredictionScale::Response, Some(_), Some(_)) => {
+                        match (link_predictions[row.row], link_scale_se) {
+                            (Some(eta), Some(link_se)) => {
+                                let one = self.link.linkinv(eta - z * link_se);
+                                let other = self.link.linkinv(eta + z * link_se);
+                                (one.is_finite() && other.is_finite())
+                                    .then(|| (one.min(other), one.max(other)))
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                if let Some((lower, upper)) = bounds {
+                    row.confidence_lower = Some(lower);
+                    row.confidence_upper = Some(upper);
                 } else {
                     row.confidence_lower = None;
                     row.confidence_upper = None;
@@ -1013,6 +1140,12 @@ impl GeneralizedLinearMixedModel {
                     .to_string(),
             ]
         };
+        if matches!(scale, GlmmPredictionScale::Response) {
+            payload.notes.push(
+                "response-scale confidence bounds are link-scale Wald bounds mapped through the inverse link so they respect the family's valid range; se_fit remains delta-method on the response scale"
+                    .to_string(),
+            );
+        }
         Ok(payload)
     }
 
@@ -2544,16 +2677,17 @@ impl GeneralizedLinearMixedModel {
             &lower_bounds,
             Some(me.lmm.dims.n),
         );
-        let gradient = me.joint_laplace_finite_difference_gradient(
+        let certification_gradient = me.joint_laplace_certification_gradient(
             &me.lmm.optsum.final_params.clone(),
             n_beta,
             n_agq,
             &lower_bounds,
+            2.0e-2,
         );
         certificate.apply_derivative_evidence(
             OptimizerDerivativeEvidence {
                 method: EvidenceMethod::FiniteDifference,
-                gradient: gradient.clone(),
+                gradient: certification_gradient.gradient.clone(),
                 hessian: None,
             },
             2.0e-2,
@@ -2564,7 +2698,7 @@ impl GeneralizedLinearMixedModel {
             &me.lmm.optsum.final_params,
             n_beta,
             &lower_bounds,
-            &gradient,
+            &certification_gradient,
             2.0e-2,
         );
         if joint_certificate_requires_fallback(&certificate)
@@ -2751,16 +2885,59 @@ impl GeneralizedLinearMixedModel {
             &lower_bounds,
             Some(me.lmm.dims.n),
         );
-        let gradient = me.joint_laplace_finite_difference_gradient(
+        let mut certification_gradient = me.joint_laplace_certification_gradient(
             &me.lmm.optsum.final_params.clone(),
             n_beta,
             n_agq,
             &lower_bounds,
+            2.0e-2,
         );
+        // trust_bq's derivative-free ftol stop can rest a steep, narrow
+        // valley's width (~1e-3 deviance) short of the stationary point, where
+        // the *assessed* gradient is genuinely above tolerance even though the
+        // fit is reference-equivalent to several decimals. That failure is
+        // polishable: take damped Newton steps to the stationary point and
+        // re-certify, instead of surfacing fit_status=not_optimized on a fit
+        // the polish can finish.
+        if certificate.evidence.optimizer_stop.acceptable_stop
+            && certification_gradient_assessed_free_failure(
+                &certification_gradient,
+                &me.lmm.optsum.final_params,
+                &lower_bounds,
+                2.0e-2,
+            )
+        {
+            if let Some(polished) = me.polish_joint_laplace_stationarity(
+                &me.lmm.optsum.final_params.clone(),
+                &lower_bounds,
+                4,
+                2.0e-2,
+            ) {
+                let polished_objective = me.joint_glmm_deviance_at_params(&polished, n_beta, n_agq);
+                if polished_objective.is_finite() && polished_objective <= me.lmm.optsum.fmin {
+                    me.refresh_dispersion();
+                    me.lmm.optsum.fmin = polished_objective;
+                    me.lmm.optsum.final_params = polished;
+                    certificate = OptimizerCertificate::from_opt_summary_with_context(
+                        &me.lmm.optsum,
+                        &me.lmm.optsum.final_params,
+                        &lower_bounds,
+                        Some(me.lmm.dims.n),
+                    );
+                    certification_gradient = me.joint_laplace_certification_gradient(
+                        &me.lmm.optsum.final_params.clone(),
+                        n_beta,
+                        n_agq,
+                        &lower_bounds,
+                        2.0e-2,
+                    );
+                }
+            }
+        }
         certificate.apply_derivative_evidence(
             OptimizerDerivativeEvidence {
                 method: EvidenceMethod::FiniteDifference,
-                gradient: gradient.clone(),
+                gradient: certification_gradient.gradient.clone(),
                 hessian: None,
             },
             2.0e-2,
@@ -2771,7 +2948,7 @@ impl GeneralizedLinearMixedModel {
             &me.lmm.optsum.final_params,
             n_beta,
             &lower_bounds,
-            &gradient,
+            &certification_gradient,
             2.0e-2,
         );
         if joint_certificate_requires_fallback(&certificate)
@@ -2863,28 +3040,112 @@ impl GeneralizedLinearMixedModel {
         n_agq: usize,
         lower_bounds: &[f64],
     ) -> Vec<f64> {
-        let base = self.joint_glmm_deviance_at_params(params, n_beta, n_agq);
-        let mut gradient = Vec::with_capacity(params.len());
-        for (index, &value) in params.iter().enumerate() {
-            let h = 1.0e-5 * value.abs().max(1.0);
-            let lower = lower_bounds
-                .get(index)
-                .copied()
-                .unwrap_or(f64::NEG_INFINITY);
-            let mut plus = params.to_vec();
-            plus[index] = value + h;
-            let fp = self.joint_glmm_deviance_at_params(&plus, n_beta, n_agq);
-            if value - h > lower {
-                let mut minus = params.to_vec();
-                minus[index] = value - h;
-                let fm = self.joint_glmm_deviance_at_params(&minus, n_beta, n_agq);
-                gradient.push((fp - fm) / (2.0 * h));
-            } else {
-                gradient.push((fp - base) / h);
-            }
-        }
+        let gradient = (0..params.len())
+            .map(|index| {
+                let h = JOINT_LAPLACE_FD_RELATIVE_STEP * params[index].abs().max(1.0);
+                self.joint_laplace_fd_gradient_component(
+                    params,
+                    index,
+                    h,
+                    n_beta,
+                    n_agq,
+                    lower_bounds,
+                )
+            })
+            .collect();
         let _ = self.joint_glmm_deviance_at_params(params, n_beta, n_agq);
         gradient
+    }
+
+    fn joint_laplace_fd_gradient_component(
+        &mut self,
+        params: &[f64],
+        index: usize,
+        h: f64,
+        n_beta: usize,
+        n_agq: usize,
+        lower_bounds: &[f64],
+    ) -> f64 {
+        let value = params[index];
+        let lower = lower_bounds
+            .get(index)
+            .copied()
+            .unwrap_or(f64::NEG_INFINITY);
+        let mut plus = params.to_vec();
+        plus[index] = value + h;
+        let fp = self.joint_glmm_deviance_at_params(&plus, n_beta, n_agq);
+        if value - h > lower {
+            let mut minus = params.to_vec();
+            minus[index] = value - h;
+            let fm = self.joint_glmm_deviance_at_params(&minus, n_beta, n_agq);
+            (fp - fm) / (2.0 * h)
+        } else {
+            let base = self.joint_glmm_deviance_at_params(params, n_beta, n_agq);
+            (fp - base) / h
+        }
+    }
+
+    /// Stationarity gradient for the joint-Laplace certificate, robust to the
+    /// inner-PIRLS deviance noise floor.
+    ///
+    /// The deviance returned by a PIRLS solve carries an O(1e-5) absolute
+    /// error from its own stopping rule, so a finite difference at the default
+    /// step `1e-5 * scale` amplifies that error to an O(0.1-1) gradient
+    /// reading in directions where the surface is nearly flat — exactly the
+    /// directions a converged fit produces. Components whose default-step
+    /// reading exceeds the tolerance are therefore re-probed at two larger
+    /// steps where the deviance signal dominates the PIRLS noise. If the two
+    /// large-step estimates agree, that estimate is the assessed gradient
+    /// (which may still fail the tolerance — a genuine non-stationarity). If
+    /// they disagree, the component cannot be assessed at any trusted step and
+    /// is reported as such rather than as a failure.
+    fn joint_laplace_certification_gradient(
+        &mut self,
+        params: &[f64],
+        n_beta: usize,
+        n_agq: usize,
+        lower_bounds: &[f64],
+        gradient_tolerance: f64,
+    ) -> JointLaplaceCertificationGradient {
+        let probe_gradient =
+            self.joint_laplace_finite_difference_gradient(params, n_beta, n_agq, lower_bounds);
+        let mut gradient = probe_gradient.clone();
+        let mut escalated_indices = Vec::new();
+        let mut unassessable_indices = Vec::new();
+        for (index, &value) in params.iter().enumerate() {
+            let raw = probe_gradient[index];
+            if raw.is_finite() && raw.abs() <= gradient_tolerance {
+                continue;
+            }
+            let scale = value.abs().max(1.0);
+            let estimates = JOINT_LAPLACE_CERT_FD_ESCALATED_RELATIVE_STEPS.map(|step| {
+                self.joint_laplace_fd_gradient_component(
+                    params,
+                    index,
+                    step * scale,
+                    n_beta,
+                    n_agq,
+                    lower_bounds,
+                )
+            });
+            let consistent = estimates.iter().all(|estimate| estimate.is_finite())
+                && (estimates[0] - estimates[1]).abs() <= gradient_tolerance;
+            if consistent {
+                gradient[index] = estimates[1];
+                escalated_indices.push(index);
+            } else {
+                unassessable_indices.push(index);
+            }
+        }
+        if !(escalated_indices.is_empty() && unassessable_indices.is_empty()) {
+            let _ = self.joint_glmm_deviance_at_params(params, n_beta, n_agq);
+        }
+        JointLaplaceCertificationGradient {
+            gradient,
+            probe_gradient,
+            escalated_indices,
+            unassessable_indices,
+        }
     }
 
     fn reset_for_refit(&mut self, new_y: Option<&[f64]>) -> Result<()> {
@@ -3396,8 +3657,21 @@ impl GeneralizedLinearMixedModel {
         }
 
         for _ in 0..max_iterations {
-            let gradient =
-                self.joint_laplace_finite_difference_gradient(&current, p, n_agq, lower_bounds);
+            let certification = self.joint_laplace_certification_gradient(
+                &current,
+                p,
+                n_agq,
+                lower_bounds,
+                gradient_tolerance,
+            );
+            // Polish only on assessed gradient signal: components the
+            // noise-aware probe could not assess carry no usable descent
+            // direction, and Newton steps on probe noise just burn a full
+            // finite-difference Hessian before the line search rejects them.
+            let mut gradient = certification.gradient;
+            for &index in &certification.unassessable_indices {
+                gradient[index] = 0.0;
+            }
             let free_gradient_norm = gradient
                 .iter()
                 .map(|value| value.abs())
@@ -4610,40 +4884,90 @@ fn annotate_glmm_covariance_status(
     params: &[f64],
     n_beta: usize,
     lower_bounds: &[f64],
-    gradient: &[f64],
+    certification: &JointLaplaceCertificationGradient,
     gradient_tolerance: f64,
 ) {
     if !certificate.evidence.optimizer_stop.acceptable_stop || params.len() <= n_beta {
         return;
     }
+    let boundary_tolerance = 1.0e-8;
+    let gradient = certification.gradient.as_slice();
 
     if let Some(free_gradient_norm) = certificate.free_gradient_norm {
         if !free_gradient_norm.is_finite() || free_gradient_norm > gradient_tolerance {
-            certificate.status = crate::compiler::FitStatus::NotOptimized;
-            if !certificate.diagnostics.iter().any(|diagnostic| {
-                diagnostic.code == DiagnosticCode::OptimizerNonconvergence
-                    && diagnostic
+            // The assembled gradient failed the free-component KKT check. A
+            // failure is only an *assessed* non-stationarity when some
+            // failing free component carries a trusted reading; if every
+            // failing component is one the noise-aware probe could not
+            // assess, the honest verdict is "not assessable", not "not
+            // optimized".
+            let assessed_failure = certification_gradient_assessed_free_failure(
+                certification,
+                params,
+                lower_bounds,
+                gradient_tolerance,
+            );
+            if assessed_failure {
+                certificate.status = crate::compiler::FitStatus::NotOptimized;
+                if !certificate.diagnostics.iter().any(|diagnostic| {
+                    diagnostic.code == DiagnosticCode::OptimizerNonconvergence
+                        && diagnostic
+                            .payload
+                            .get("stationarity_check")
+                            .and_then(serde_json::Value::as_str)
+                            == Some("free_gradient_kkt")
+                }) {
+                    let mut diagnostic = Diagnostic::new(
+                        DiagnosticCode::OptimizerNonconvergence,
+                        DiagnosticSeverity::Warning,
+                        DiagnosticStage::Certification,
+                        "GLMM joint optimizer stop failed finite-difference stationarity; convergence is not certified",
+                    )
+                    .with_suggested_actions(vec![
+                        "treat this joint GLMM result as not optimized until a tighter run or alternate optimizer certifies stationarity".to_string(),
+                        "fall back to the labelled fast-PIRLS GLMM result when available rather than reporting a silent interior convergence".to_string(),
+                    ]);
+                    diagnostic
                         .payload
-                        .get("stationarity_check")
-                        .and_then(serde_json::Value::as_str)
-                        == Some("free_gradient_kkt")
-            }) {
+                        .insert("fit_mode".to_string(), serde_json::json!("joint_glmm"));
+                    diagnostic.payload.insert(
+                        "stationarity_check".to_string(),
+                        serde_json::json!("free_gradient_kkt"),
+                    );
+                    diagnostic.payload.insert(
+                        "free_gradient_norm".to_string(),
+                        serde_json::json!(free_gradient_norm),
+                    );
+                    diagnostic.payload.insert(
+                        "gradient_tolerance".to_string(),
+                        serde_json::json!(gradient_tolerance),
+                    );
+                    insert_certification_gradient_payload(&mut diagnostic, certification);
+                    if let Some(return_code) = &certificate.evidence.optimizer_stop.return_code {
+                        diagnostic
+                            .payload
+                            .insert("return_code".to_string(), serde_json::json!(return_code));
+                    }
+                    certificate.diagnostics.push(diagnostic);
+                }
+            } else {
+                certificate.status = crate::compiler::FitStatus::NotAssessed;
                 let mut diagnostic = Diagnostic::new(
-                    DiagnosticCode::OptimizerNonconvergence,
+                    DiagnosticCode::OptimizerNotAssessed,
                     DiagnosticSeverity::Warning,
                     DiagnosticStage::Certification,
-                    "GLMM joint optimizer stop failed finite-difference stationarity; convergence is not certified",
+                    "GLMM joint stationarity could not be assessed: the finite-difference probe is noise-dominated on a flat deviance direction even at escalated steps",
                 )
                 .with_suggested_actions(vec![
-                    "treat this joint GLMM result as not optimized until a tighter run or alternate optimizer certifies stationarity".to_string(),
-                    "fall back to the labelled fast-PIRLS GLMM result when available rather than reporting a silent interior convergence".to_string(),
+                    "treat this fit as an acceptable optimizer stop whose stationarity is unverifiable, not as an assessed optimization failure".to_string(),
+                    "certify externally (reference fit or refit with a tighter inner PIRLS tolerance) before promoting this row to strict parity".to_string(),
                 ]);
                 diagnostic
                     .payload
                     .insert("fit_mode".to_string(), serde_json::json!("joint_glmm"));
                 diagnostic.payload.insert(
                     "stationarity_check".to_string(),
-                    serde_json::json!("free_gradient_kkt"),
+                    serde_json::json!("free_gradient_kkt_noise_dominated"),
                 );
                 diagnostic.payload.insert(
                     "free_gradient_norm".to_string(),
@@ -4653,6 +4977,7 @@ fn annotate_glmm_covariance_status(
                     "gradient_tolerance".to_string(),
                     serde_json::json!(gradient_tolerance),
                 );
+                insert_certification_gradient_payload(&mut diagnostic, certification);
                 if let Some(return_code) = &certificate.evidence.optimizer_stop.return_code {
                     diagnostic
                         .payload
@@ -4663,8 +4988,6 @@ fn annotate_glmm_covariance_status(
             return;
         }
     }
-
-    let boundary_tolerance = 1.0e-8;
     let theta_params = &params[n_beta..];
     let theta_lower = lower_bounds.get(n_beta..).unwrap_or(&[]);
     let theta_gradient = gradient.get(n_beta..).unwrap_or(&[]);
@@ -4683,13 +5006,19 @@ fn annotate_glmm_covariance_status(
 
     if boundary_indices.is_empty() {
         certificate.status = crate::compiler::FitStatus::ConvergedInterior;
+        record_certification_gradient_escalation(certificate, certification, gradient_tolerance);
         return;
     }
 
+    // A boundary KKT violation must be *proven* on an assessed reading; an
+    // unassessable component cannot demote a boundary stop.
     let invalid_boundary = boundary_indices.iter().any(|&index| {
-        theta_gradient
-            .get(index)
-            .is_some_and(|value| *value < -gradient_tolerance)
+        !certification
+            .unassessable_indices
+            .contains(&(index + n_beta))
+            && theta_gradient
+                .get(index)
+                .is_some_and(|value| *value < -gradient_tolerance)
     });
     let classification = if invalid_boundary {
         certificate.status = crate::compiler::FitStatus::NotOptimized;
@@ -4721,6 +5050,106 @@ fn annotate_glmm_covariance_status(
         "gradient_tolerance".to_string(),
         serde_json::json!(gradient_tolerance),
     );
+    insert_certification_gradient_payload(&mut diagnostic, certification);
+    certificate.diagnostics.push(diagnostic);
+    record_certification_gradient_escalation(certificate, certification, gradient_tolerance);
+}
+
+/// True when some free (non-boundary) component fails the stationarity
+/// tolerance on an *assessed* reading — i.e. the failure is a proven
+/// non-stationarity rather than a noise-dominated probe artifact.
+fn certification_gradient_assessed_free_failure(
+    certification: &JointLaplaceCertificationGradient,
+    params: &[f64],
+    lower_bounds: &[f64],
+    gradient_tolerance: f64,
+) -> bool {
+    let boundary_tolerance = 1.0e-8;
+    certification
+        .gradient
+        .iter()
+        .enumerate()
+        .any(|(index, value)| {
+            let at_bound = lower_bounds.get(index).copied().is_some_and(|lower| {
+                lower.is_finite()
+                    && params.get(index).copied().unwrap_or(f64::NAN) <= lower + boundary_tolerance
+            });
+            !at_bound
+                && (!value.is_finite() || value.abs() > gradient_tolerance)
+                && !certification.unassessable_indices.contains(&index)
+        })
+}
+
+/// Records the noise-aware probe context on a certification diagnostic so the
+/// evidence trail shows which components were assessed at escalated
+/// finite-difference steps (and which could not be assessed at all).
+fn insert_certification_gradient_payload(
+    diagnostic: &mut Diagnostic,
+    certification: &JointLaplaceCertificationGradient,
+) {
+    if !certification.was_escalated() {
+        return;
+    }
+    let max_abs = |values: &[f64]| {
+        values
+            .iter()
+            .map(|value| value.abs())
+            .fold(0.0_f64, f64::max)
+    };
+    diagnostic.payload.insert(
+        "probe_gradient_max_abs".to_string(),
+        serde_json::json!(max_abs(&certification.probe_gradient)),
+    );
+    diagnostic.payload.insert(
+        "assessed_gradient_max_abs".to_string(),
+        serde_json::json!(max_abs(&certification.gradient)),
+    );
+    diagnostic.payload.insert(
+        "escalated_indices".to_string(),
+        serde_json::json!(certification.escalated_indices),
+    );
+    diagnostic.payload.insert(
+        "unassessable_indices".to_string(),
+        serde_json::json!(certification.unassessable_indices),
+    );
+    diagnostic.payload.insert(
+        "escalated_relative_steps".to_string(),
+        serde_json::json!(JOINT_LAPLACE_CERT_FD_ESCALATED_RELATIVE_STEPS),
+    );
+}
+
+/// Leaves an Info-severity evidence trail on certificates whose stationarity
+/// verdict relied on escalated finite-difference steps, so a passing status
+/// never hides that the default-step probe was noise-dominated.
+fn record_certification_gradient_escalation(
+    certificate: &mut OptimizerCertificate,
+    certification: &JointLaplaceCertificationGradient,
+    gradient_tolerance: f64,
+) {
+    if !certification.was_escalated() {
+        return;
+    }
+    let mut diagnostic = Diagnostic::new(
+        DiagnosticCode::OptimizerRecovery,
+        DiagnosticSeverity::Info,
+        DiagnosticStage::Certification,
+        "GLMM joint stationarity was assessed with escalated finite-difference steps; the default-step probe was dominated by inner-PIRLS deviance noise",
+    )
+    .with_suggested_actions(vec![
+        "read the recorded probe and assessed gradient norms before applying strict external-engine tolerances".to_string(),
+    ]);
+    diagnostic
+        .payload
+        .insert("fit_mode".to_string(), serde_json::json!("joint_glmm"));
+    diagnostic.payload.insert(
+        "stationarity_check".to_string(),
+        serde_json::json!("free_gradient_kkt_escalated_step"),
+    );
+    diagnostic.payload.insert(
+        "gradient_tolerance".to_string(),
+        serde_json::json!(gradient_tolerance),
+    );
+    insert_certification_gradient_payload(&mut diagnostic, certification);
     certificate.diagnostics.push(diagnostic);
 }
 
@@ -5750,6 +6179,44 @@ struct GlmmFixedEffectInferenceArtifacts {
 const GLMM_PIRLS_MAX_ITER: usize = 10;
 const GLMM_HESSIAN_PIRLS_MAX_ITER: usize = 50;
 
+/// Default relative finite-difference step for joint-Laplace gradients.
+const JOINT_LAPLACE_FD_RELATIVE_STEP: f64 = 1.0e-5;
+
+/// Escalated relative steps for the stationarity certification gradient.
+///
+/// The inner PIRLS stopping rule leaves an O(1e-5) absolute error in the
+/// deviance, so a central difference at relative step `h` carries a noise
+/// term of roughly `1e-5 / h` in the gradient. Against the 2e-2 stationarity
+/// tolerance the default 1e-5 step is useless on flat directions (noise
+/// O(1)); these two steps put the noise term at roughly tolerance/2 and
+/// tolerance/8 while keeping the central-difference truncation error far
+/// below tolerance, and disagreement between them flags a component whose
+/// surface is too rough to assess at any trusted step.
+const JOINT_LAPLACE_CERT_FD_ESCALATED_RELATIVE_STEPS: [f64; 2] = [1.0e-3, 4.0e-3];
+
+/// Result of the noise-aware stationarity gradient probe used by the
+/// joint-Laplace optimizer certificate.
+struct JointLaplaceCertificationGradient {
+    /// Assessed gradient: default-step readings where those already pass the
+    /// tolerance, escalated-step readings where the default step was
+    /// noise-dominated but the larger steps agreed, and the raw default-step
+    /// readings for unassessable components.
+    gradient: Vec<f64>,
+    /// Raw default-step readings, kept for the certificate evidence trail.
+    probe_gradient: Vec<f64>,
+    /// Components certified (or honestly failed) via escalated steps.
+    escalated_indices: Vec<usize>,
+    /// Components whose escalated-step readings disagreed: the probe cannot
+    /// distinguish noise from signal, so stationarity is not assessable there.
+    unassessable_indices: Vec<usize>,
+}
+
+impl JointLaplaceCertificationGradient {
+    fn was_escalated(&self) -> bool {
+        !self.escalated_indices.is_empty() || !self.unassessable_indices.is_empty()
+    }
+}
+
 fn glmm_hessian_step(value: f64) -> f64 {
     1.0e-4 * value.abs().max(1.0)
 }
@@ -6104,12 +6571,18 @@ mod tests {
             1.0e-6,
         );
 
+        let certification = JointLaplaceCertificationGradient {
+            gradient: gradient.clone(),
+            probe_gradient: gradient.clone(),
+            escalated_indices: Vec::new(),
+            unassessable_indices: Vec::new(),
+        };
         annotate_glmm_covariance_status(
             &mut certificate,
             &params,
             2,
             &lower_bounds,
-            &gradient,
+            &certification,
             gradient_tolerance,
         );
 
@@ -6144,6 +6617,171 @@ mod tests {
         assert_eq!(
             diagnostic.payload.get("free_gradient_norm"),
             Some(&serde_json::json!(3.5e-2))
+        );
+    }
+
+    #[test]
+    fn joint_glmm_noise_dominated_stationarity_is_not_assessed() {
+        // Probe readings on the two theta components are pure inner-PIRLS
+        // noise (bd-01KTQFTH6J0ZFGR5RMV28HAX44 measured 0.703/0.365 at a
+        // glmer-equivalent optimum); the escalated steps disagreed, so the
+        // components are unassessable. The certificate must say NotAssessed,
+        // not NotOptimized, and must not trigger the fast-PIRLS fallback.
+        let params = vec![1.43958, 0.08172, 0.3861, 0.5219];
+        let lower_bounds = vec![f64::NEG_INFINITY, f64::NEG_INFINITY, 0.0, 0.0];
+        let probe_gradient = vec![-2.7e-5, 1.0e-3, 0.703, 0.365];
+        let gradient_tolerance = 2.0e-2;
+
+        let mut optsum = OptSummary::new(params.clone());
+        optsum.optimizer = Optimizer::TrustBq;
+        optsum.backend = Optimizer::TrustBq.canonical_backend();
+        optsum.return_value = "JOINT_LAPLACE:FTOL_REACHED".to_string();
+        optsum.finitial = 2851.2;
+        optsum.fmin = 2845.375;
+        optsum.feval = 55;
+        optsum.max_feval = 820;
+        optsum.final_params = params.clone();
+
+        let mut certificate = OptimizerCertificate::from_opt_summary_with_context(
+            &optsum,
+            &params,
+            &lower_bounds,
+            Some(2880),
+        );
+        let certification = JointLaplaceCertificationGradient {
+            gradient: probe_gradient.clone(),
+            probe_gradient: probe_gradient.clone(),
+            escalated_indices: Vec::new(),
+            unassessable_indices: vec![2, 3],
+        };
+        certificate.apply_derivative_evidence(
+            OptimizerDerivativeEvidence {
+                method: EvidenceMethod::FiniteDifference,
+                gradient: certification.gradient.clone(),
+                hessian: None,
+            },
+            gradient_tolerance,
+            1.0e-6,
+        );
+        annotate_glmm_covariance_status(
+            &mut certificate,
+            &params,
+            2,
+            &lower_bounds,
+            &certification,
+            gradient_tolerance,
+        );
+
+        assert_eq!(certificate.status, crate::compiler::FitStatus::NotAssessed);
+        assert!(
+            !joint_certificate_requires_fallback(&certificate),
+            "an unassessable stationarity probe must not discard the joint candidate"
+        );
+        let diagnostic = certificate
+            .diagnostics
+            .iter()
+            .find(|diagnostic| {
+                diagnostic.code == DiagnosticCode::OptimizerNotAssessed
+                    && diagnostic
+                        .payload
+                        .get("stationarity_check")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("free_gradient_kkt_noise_dominated")
+            })
+            .expect("noise-dominated stationarity should be reported as not assessed");
+        assert_eq!(
+            diagnostic.payload.get("unassessable_indices"),
+            Some(&serde_json::json!([2, 3]))
+        );
+        assert_eq!(
+            diagnostic.payload.get("return_code"),
+            Some(&serde_json::json!("JOINT_LAPLACE:FTOL_REACHED"))
+        );
+        assert!(
+            !certificate
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == DiagnosticCode::OptimizerNonconvergence),
+            "an unassessable probe must not be labelled optimizer nonconvergence"
+        );
+    }
+
+    #[test]
+    fn joint_glmm_escalated_stationarity_pass_certifies_with_evidence_trail() {
+        // The default-step probe was noise-dominated on theta but the
+        // escalated steps agreed on a near-zero gradient: the fit certifies
+        // as interior-converged with an Info trail recording the escalation.
+        let params = vec![1.43958, 0.08172, 0.3861, 0.5219];
+        let lower_bounds = vec![f64::NEG_INFINITY, f64::NEG_INFINITY, 0.0, 0.0];
+        let probe_gradient = vec![-2.7e-5, 1.0e-3, 0.703, 0.365];
+        let assessed_gradient = vec![-2.7e-5, 1.0e-3, 2.4e-3, -1.1e-3];
+        let gradient_tolerance = 2.0e-2;
+
+        let mut optsum = OptSummary::new(params.clone());
+        optsum.optimizer = Optimizer::TrustBq;
+        optsum.backend = Optimizer::TrustBq.canonical_backend();
+        optsum.return_value = "JOINT_LAPLACE:FTOL_REACHED".to_string();
+        optsum.finitial = 2851.2;
+        optsum.fmin = 2845.375;
+        optsum.feval = 55;
+        optsum.max_feval = 820;
+        optsum.final_params = params.clone();
+
+        let mut certificate = OptimizerCertificate::from_opt_summary_with_context(
+            &optsum,
+            &params,
+            &lower_bounds,
+            Some(2880),
+        );
+        let certification = JointLaplaceCertificationGradient {
+            gradient: assessed_gradient.clone(),
+            probe_gradient,
+            escalated_indices: vec![2, 3],
+            unassessable_indices: Vec::new(),
+        };
+        certificate.apply_derivative_evidence(
+            OptimizerDerivativeEvidence {
+                method: EvidenceMethod::FiniteDifference,
+                gradient: certification.gradient.clone(),
+                hessian: None,
+            },
+            gradient_tolerance,
+            1.0e-6,
+        );
+        annotate_glmm_covariance_status(
+            &mut certificate,
+            &params,
+            2,
+            &lower_bounds,
+            &certification,
+            gradient_tolerance,
+        );
+
+        assert_eq!(
+            certificate.status,
+            crate::compiler::FitStatus::ConvergedInterior
+        );
+        assert!(!joint_certificate_requires_fallback(&certificate));
+        let trail = certificate
+            .diagnostics
+            .iter()
+            .find(|diagnostic| {
+                diagnostic.code == DiagnosticCode::OptimizerRecovery
+                    && diagnostic
+                        .payload
+                        .get("stationarity_check")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("free_gradient_kkt_escalated_step")
+            })
+            .expect("escalated certification must leave an evidence trail");
+        assert_eq!(trail.severity, DiagnosticSeverity::Info);
+        assert_eq!(
+            trail.payload.get("escalated_indices"),
+            Some(&serde_json::json!([2, 3]))
+        );
+        assert_eq!(
+            trail.payload.get("probe_gradient_max_abs"),
+            Some(&serde_json::json!(0.703))
         );
     }
 
@@ -8626,6 +9264,92 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .contains("certified active-subspace Hessian variance is not implemented"));
+    }
+
+    #[test]
+    fn test_glmm_response_scale_confidence_bounds_stay_in_family_range() {
+        // Strong slope pushes fitted probabilities near 0 and 1 so symmetric
+        // response-scale bounds would escape (0, 1).
+        let mut y = Vec::new();
+        let mut x = Vec::new();
+        let mut group = Vec::new();
+        for g in 0..8usize {
+            for obs in 0..12usize {
+                let idx = g * 12 + obs;
+                let xv = (obs as f64 - 5.5) / 2.2;
+                let eta = -0.3 + 1.8 * xv + (g as f64 - 3.5) * 0.25;
+                let p = 1.0 / (1.0 + (-eta).exp());
+                let u = ((idx * 37 + 11) % 97) as f64 / 97.0;
+                y.push(if p > u { 1.0 } else { 0.0 });
+                x.push(xv);
+                group.push(format!("g{}", g + 1));
+            }
+        }
+        let mut data = DataFrame::new();
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_categorical("group", group).unwrap();
+
+        let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
+        let mut model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+        model.fit_with_options(false, 1, false).unwrap();
+
+        let response = model
+            .predict_new_variance(&data, GlmmPredictionScale::Response, NewReLevels::Error)
+            .unwrap();
+        let link = model
+            .predict_new_variance(&data, GlmmPredictionScale::Link, NewReLevels::Error)
+            .unwrap();
+        assert!(response
+            .notes
+            .iter()
+            .any(|note| note.contains("mapped through the inverse link")));
+
+        let z = 1.959963984540054;
+        let mut rows_with_bounds = 0;
+        let mut symmetric_would_escape = false;
+        for (row, link_row) in response.rows.iter().zip(link.rows.iter()) {
+            let (Some(fit), Some(se_fit), Some(lower), Some(upper)) = (
+                row.prediction,
+                row.se_fit,
+                row.confidence_lower,
+                row.confidence_upper,
+            ) else {
+                continue;
+            };
+            rows_with_bounds += 1;
+            assert!(
+                lower > 0.0 && upper < 1.0,
+                "row {}: response bounds ({lower}, {upper}) escape (0, 1)",
+                row.row
+            );
+            assert!(lower < fit && fit < upper);
+            if fit - z * se_fit < 0.0 || fit + z * se_fit > 1.0 {
+                symmetric_would_escape = true;
+            }
+            // The response bounds must be the link-scale bounds mapped
+            // through the inverse link.
+            let link_lower = link_row.confidence_lower.expect("link lower bound");
+            let link_upper = link_row.confidence_upper.expect("link upper bound");
+            assert_relative_eq!(
+                lower,
+                1.0 / (1.0 + (-link_lower).exp()),
+                epsilon = 1e-12,
+                max_relative = 1e-12
+            );
+            assert_relative_eq!(
+                upper,
+                1.0 / (1.0 + (-link_upper).exp()),
+                epsilon = 1e-12,
+                max_relative = 1e-12
+            );
+        }
+        assert!(rows_with_bounds > 0, "fixture should yield bounded rows");
+        assert!(
+            symmetric_would_escape,
+            "fixture should reproduce the symmetric-bounds escape this test guards against"
+        );
     }
 
     #[test]
