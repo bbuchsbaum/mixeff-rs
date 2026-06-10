@@ -341,6 +341,16 @@ pub fn audit_design(semantic_model: &SemanticModel, data: &DataFrame) -> DesignA
         diagnostics.push(diagnostic);
     }
 
+    for (term_id, diagnostic) in zerocorr_factor_decorrelation_diagnostics(semantic_model, data) {
+        if let Some(term_audit) = random_terms
+            .iter_mut()
+            .find(|term_audit| term_audit.term_id == term_id)
+        {
+            term_audit.diagnostics.push(diagnostic.clone());
+        }
+        diagnostics.push(diagnostic);
+    }
+
     diagnostics.extend(crossed_scalar_correlation_absence_diagnostics(
         semantic_model,
     ));
@@ -2216,6 +2226,82 @@ fn grouping_factor_label(group: &GroupingFactorIr) -> String {
     }
 }
 
+/// A factor inside a zero-correlation (`||`) random term is fully
+/// decorrelated here: its treatment-coded level contrasts each get an
+/// independent variance and no within-factor level covariances are estimated.
+/// That is a deliberate, strictly smaller covariance family than giving the
+/// factor its own correlated cell-means block, and zero-correlation
+/// expansions of factor terms are known to differ across mixed-model
+/// implementations — so say it out loud at design-audit time, where the data
+/// reveals which slope coefficients are factors.
+fn zerocorr_factor_decorrelation_diagnostics(
+    semantic_model: &SemanticModel,
+    data: &DataFrame,
+) -> Vec<(String, Diagnostic)> {
+    semantic_model
+        .random_terms
+        .iter()
+        .filter(|term| term.block_group.is_some())
+        .filter_map(|term| {
+            let basis = term.basis.first()?;
+            if basis.kind != RandomCoefficientKind::Slope {
+                return None;
+            }
+            let factor = data.categorical(&basis.name)?;
+            if factor.n_levels() < 2 {
+                return None;
+            }
+            let group = grouping_factor_label(&term.group);
+            let name = &basis.name;
+            let mut diagnostic = Diagnostic::new(
+                DiagnosticCode::CovarianceAssumption,
+                DiagnosticSeverity::Info,
+                DiagnosticStage::DesignAudit,
+                format!(
+                    "zero-correlation syntax fully decorrelates factor '{name}' within '{group}': \
+                     each treatment-coded level contrast of '{name}' receives an independent \
+                     variance and no within-factor level covariances are estimated"
+                ),
+            )
+            .with_affected_terms(vec![term.source_syntax.user_text().to_string()])
+            .with_suggested_actions(vec![
+                format!(
+                    "to estimate within-factor level covariances for '{name}', give it its own \
+                     correlated cell-means block `(0 + {name} | {group})` and keep the remaining \
+                     coefficients under zero-correlation terms"
+                ),
+                "zero-correlation expansions of factor terms differ across mixed-model \
+                 implementations; when matching an external fit, write the intended expansion \
+                 explicitly instead of relying on `||`"
+                    .to_string(),
+            ]);
+            diagnostic
+                .payload
+                .insert("group".to_string(), serde_json::json!(group));
+            diagnostic
+                .payload
+                .insert("factor".to_string(), serde_json::json!(name));
+            diagnostic.payload.insert(
+                "n_levels".to_string(),
+                serde_json::json!(factor.n_levels()),
+            );
+            diagnostic.payload.insert(
+                "reason".to_string(),
+                serde_json::json!("double_bar_factor_term"),
+            );
+            diagnostic.payload.insert(
+                "dropped".to_string(),
+                serde_json::json!("within_factor_level_covariances"),
+            );
+            diagnostic.payload.insert(
+                "correlated_block_equivalent".to_string(),
+                serde_json::json!(format!("(0 + {name} | {group})")),
+            );
+            Some((term.id.clone(), diagnostic))
+        })
+        .collect()
+}
+
 fn crossed_scalar_correlation_absence_diagnostics(
     semantic_model: &SemanticModel,
 ) -> Vec<Diagnostic> {
@@ -3087,6 +3173,70 @@ mod tests {
             .diagnostics
             .iter()
             .any(|d| d.code == DiagnosticCode::FixedEffectColumnMissing));
+    }
+
+    #[test]
+    fn design_audit_flags_zerocorr_factor_decorrelation() {
+        let formula = parse_formula("y ~ x + (1 + cond + x || subject)").unwrap();
+        let semantic = compile_formula_ir(&formula);
+        let audit = audit_design(&semantic, &categorical_subject_data(6));
+
+        let diagnostic = audit
+            .diagnostics
+            .iter()
+            .find(|d| {
+                d.code == DiagnosticCode::CovarianceAssumption
+                    && d.payload.get("reason")
+                        == Some(&serde_json::json!("double_bar_factor_term"))
+            })
+            .expect("factor inside || should get a decorrelation diagnostic");
+        assert_eq!(diagnostic.severity, DiagnosticSeverity::Info);
+        assert_eq!(diagnostic.stage, DiagnosticStage::DesignAudit);
+        assert_eq!(
+            diagnostic.payload.get("factor"),
+            Some(&serde_json::json!("cond"))
+        );
+        assert_eq!(
+            diagnostic.payload.get("n_levels"),
+            Some(&serde_json::json!(3))
+        );
+        assert_eq!(
+            diagnostic.payload.get("correlated_block_equivalent"),
+            Some(&serde_json::json!("(0 + cond | subject)"))
+        );
+        // Exactly one: the numeric slope `x` in the same || block must not trigger.
+        assert_eq!(
+            audit
+                .diagnostics
+                .iter()
+                .filter(|d| d.payload.get("reason")
+                    == Some(&serde_json::json!("double_bar_factor_term")))
+                .count(),
+            1
+        );
+        // Attached to the owning random-term audit as well.
+        assert!(audit.random_terms.iter().any(|term| term
+            .diagnostics
+            .iter()
+            .any(|d| d.payload.get("reason")
+                == Some(&serde_json::json!("double_bar_factor_term")))));
+    }
+
+    #[test]
+    fn design_audit_zerocorr_factor_decorrelation_is_silent_without_factor_or_zerocorr() {
+        // Numeric-only || block: nothing to say.
+        let formula = parse_formula("y ~ x + (1 + x || subject)").unwrap();
+        let semantic = compile_formula_ir(&formula);
+        let audit = audit_design(&semantic, &categorical_subject_data(6));
+        assert!(!audit.diagnostics.iter().any(|d| d.payload.get("reason")
+            == Some(&serde_json::json!("double_bar_factor_term"))));
+
+        // Correlated factor block: within-factor covariances are estimated.
+        let formula = parse_formula("y ~ x + (1 + cond | subject)").unwrap();
+        let semantic = compile_formula_ir(&formula);
+        let audit = audit_design(&semantic, &categorical_subject_data(6));
+        assert!(!audit.diagnostics.iter().any(|d| d.payload.get("reason")
+            == Some(&serde_json::json!("double_bar_factor_term"))));
     }
 
     #[test]

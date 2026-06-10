@@ -118,6 +118,34 @@ the two likely-intended alternatives (`(b|a)+(b|c)` for crossed mains;
 
 Reason: keeping `||` as a flag rather than rewriting to `(b1|g) + (0+b2|g)` preserves source syntax for diagnostics (R9) and keeps the term identifiable to ThetaMap as a single covariance block.
 
+**Factor terms inside `||` (resolved decision, bd-01KTRQRZKB).** `||` means
+*all* covariances in the block are fixed at zero, including within-factor
+ones. A factor basis inside `||` — e.g. `(1 + cond + x || g)` — contributes
+its treatment-coded level contrasts as independent scalar variance components:
+no within-factor level covariance is estimated, and no covariance with the
+intercept or other slopes. This is the deliberate reading of "zero
+correlation"; it is identifiable by construction (one θ per column, no
+redundant parameter directions). Users who want within-factor level
+covariances write the factor as its own correlated cell-means block:
+`(1|g) + (0 + cond|g) + (0 + x|g)`. Because this is a place where mixed-model
+implementations genuinely differ in how they expand `||` over factors, the
+design audit emits an Info-level `CovarianceAssumption` diagnostic
+(`reason = double_bar_factor_term`) whenever a factor lands inside `||`,
+stating what is and is not estimated and showing the correlated-block
+rewrite (`zerocorr_factor_decorrelation_diagnostics`, `src/compiler/audit.rs`).
+
+*Non-normative cross-engine note (parity testing only — external behavior is
+observed, not depended on):* lme4 expands `(1 + cond + x || g)` to
+`(1|g) + (0 + cond|g) + (0 + x|g)` and keeps the full within-factor covariance
+of the `(0 + cond|g)` block; that family is over-parameterized (the intercept
+variance and the factor block share an identifiable direction, producing a θ
+ridge). Reference fits made under that expansion are only comparable to native
+fits of the *explicit* expansion formula, never to native `||`. Empirical
+case: the aphantasia `combined` fixture, where the reference optimum needs the
+within-factor off-diagonal and the native-`||` optimum is ~1.9 logLik away by
+construction, while the `intact` subset degenerates into the native family and
+matches (see `examples/probe_aphantasia_combined.rs`, mote bd-01KTQJFZNF).
+
 Status: conforms.
 
 ### R3a — Structured covariance wrappers
