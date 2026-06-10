@@ -118,6 +118,14 @@ name = "profile_grouseticks_glmm"
 required-features = ["unstable-internals"]
 
 [[example]]
+name = "probe_high_baseline_glmm"
+required-features = ["unstable-internals"]
+
+[[example]]
+name = "probe_aphantasia_combined"
+required-features = ["unstable-internals"]
+
+[[example]]
 name = "probe_tungara_glmm"
 required-features = ["unstable-internals"]
 

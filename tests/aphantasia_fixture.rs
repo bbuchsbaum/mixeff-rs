@@ -243,6 +243,78 @@ fn intact_prepared_frame_builds_native_glmm_design_without_refitting() {
     assert_eq!(model.theta().len(), 4);
 }
 
+fn combined_glmm_data() -> DataFrame {
+    load_prepared_case(
+        "combined",
+        &["correct", "soa_s"],
+        &["participant", "item", "group", "mask", "block", "stimtype"],
+    )
+}
+
+/// Regression for bd-01KTQJFZNF5H034B5WKWKJQRDF.
+///
+/// The joint Laplace route on the COMBINED model used to declare FTOL after
+/// ~99 evaluations at the profiled start (the trust_bq stagnation guard
+/// tripped before any descent) and discard the joint candidate for the
+/// labelled fast-PIRLS fallback. With the descent-gated stagnation stop the
+/// optimizer must now actually descend from the profiled start and return a
+/// joint result.
+///
+/// Note the lme4 reference for this formula is NOT a parity target here:
+/// lme4's `||` keeps the within-factor correlation of `mask` (a full 2x2
+/// block, 6 theta), while the native `||` drops it (4 theta), and lme4's
+/// fitted combined optimum needs that off-diagonal. The native-family joint
+/// optimum sits ~1.9 logLik above lme4's; the explicit expansion
+/// `(1|p) + (0+mask|p) + (0+soa_s|p) + (1|item)` reproduces lme4's family
+/// and its optimum (see `probe_aphantasia_combined`).
+#[cfg(all(not(feature = "nlopt"), feature = "unstable-internals"))]
+#[test]
+#[ignore = "real aphantasia combined GLMM takes ~15 minutes; run intentionally for optimizer diagnostics"]
+fn combined_native_joint_descends_from_profiled_start_without_fallback() {
+    let reference = reference_json();
+    let combined_ref = reference_model(&reference, "combined");
+    let reference_loglik = combined_ref["logLik"].as_f64().unwrap();
+    let data = combined_glmm_data();
+    let formula = parse_formula(
+        "correct ~ group * mask * soa_s * stimtype + block + (1 + mask + soa_s || participant) + (1 | item)",
+    )
+    .unwrap();
+
+    let mut profiled =
+        GeneralizedLinearMixedModel::new(formula.clone(), &data, Family::Bernoulli, None).unwrap();
+    profiled.fit_with_options(true, 1, false).unwrap();
+    let profiled_loglik = profiled.loglikelihood();
+
+    let mut joint =
+        GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+    joint.fit_with_options(false, 1, false).unwrap();
+    let joint_loglik = joint.loglikelihood();
+    let return_value = &joint.lmm().optsum().return_value;
+
+    // Pre-fix: FTOL at ~99 evals, zero descent, fallback to fast-PIRLS.
+    assert!(
+        return_value.starts_with("JOINT_LAPLACE:"),
+        "combined joint fit fell back instead of returning a joint result: {return_value:?}"
+    );
+    assert!(
+        joint.lmm().optsum().feval > 300,
+        "joint optimizer stopped suspiciously early: feval={}",
+        joint.lmm().optsum().feval
+    );
+    assert!(
+        joint_loglik > profiled_loglik + 1.0,
+        "joint Laplace should materially improve the profiled start: joint={joint_loglik:.4} profiled={profiled_loglik:.4}"
+    );
+    // Native-family optimum (zero-correlation mask dummy) sits ~1.9 logLik
+    // above lme4's 6-theta optimum; allow headroom but catch regressions back
+    // toward the profiled start (~5.0 above).
+    let gap = (joint_loglik - reference_loglik).abs();
+    assert!(
+        gap < 2.5,
+        "combined joint logLik gap to lme4 should stay below 2.5 (native-family optimum ~1.9): {gap:.4}"
+    );
+}
+
 #[cfg(all(not(feature = "nlopt"), feature = "unstable-internals"))]
 #[test]
 #[ignore = "real aphantasia intact GLMM takes minutes; run intentionally for optimizer diagnostics"]
