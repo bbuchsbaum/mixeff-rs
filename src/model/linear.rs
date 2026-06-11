@@ -167,8 +167,15 @@ pub enum PredictionVarianceMethod {
     /// GLMM joint-Laplace fitted-mean delta-method approximation using the
     /// final PIRLS/Laplace conditional-mode covariance over fixed and random
     /// effects. The fitted-mean variance includes fixed, random, and cross
-    /// terms; future-observation family variance is not included.
+    /// terms; future-observation columns are plug-in predictive summaries on
+    /// the response scale.
     GlmmJointLaplaceConditionalDelta,
+    /// GLMM fast-PIRLS profiled fitted-mean delta-method approximation whose
+    /// conditional-mode covariance geometry is certified by a post-fit
+    /// stationarity-plus-curvature certificate of the profiled optimum. Same
+    /// component structure as [`Self::GlmmJointLaplaceConditionalDelta`], for
+    /// the profiled fast-PIRLS estimator's own objective.
+    GlmmPirlsProfiledCertifiedConditionalDelta,
     /// No certified prediction-variance method is available for this model.
     Unavailable,
 }
@@ -192,7 +199,9 @@ pub struct PredictionVarianceRow {
     pub combined_variance: Option<f64>,
     /// Square root of `combined_variance`.
     pub se_fit: Option<f64>,
-    /// Prediction variance for a future observation, `combined_variance + sigma^2`.
+    /// Prediction variance for a future observation. For LMMs this is
+    /// `combined_variance + sigma^2`; for GLMM response-scale rows it is the
+    /// law-of-total-variance moment of the plug-in predictive distribution.
     pub prediction_variance: Option<f64>,
     /// Lower confidence bound for the fitted mean on the prediction scale.
     pub confidence_lower: Option<f64>,

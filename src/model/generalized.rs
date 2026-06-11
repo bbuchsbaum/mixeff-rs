@@ -9,7 +9,10 @@
 //! the conditional modes, with optional adaptive Gauss-Hermite quadrature.
 
 use nalgebra::{DMatrix, DVector, SymmetricEigen};
-use statrs::distribution::{ContinuousCDF, Normal};
+use statrs::distribution::{
+    ContinuousCDF, DiscreteCDF, Gamma as GammaDist, NegativeBinomial as NegativeBinomialDist,
+    Normal, Poisson as PoissonDist,
+};
 use statrs::function::gamma::ln_gamma;
 use std::cell::Cell;
 use std::cell::RefCell;
@@ -39,7 +42,7 @@ use crate::optimizer::trust_bq::{
     TrustBqStopReason,
 };
 use crate::stats::{BlockDescription, MixedModelProfile, ModelSummary, VarCorr};
-use crate::types::{FitLogEntry, MatrixBlock, OptSummary, Optimizer, ReMat};
+use crate::types::{gh_norm, FitLogEntry, MatrixBlock, OptSummary, Optimizer, ReMat};
 use crate::unstable_internal_method;
 
 /// A generalized linear mixed-effects model.
@@ -103,6 +106,13 @@ pub struct GeneralizedLinearMixedModel {
     sd: Vec<f64>,
     /// Multipliers for AGQ.
     mult: Vec<f64>,
+
+    /// Post-fit certificate that the fast-PIRLS profiled optimum passed
+    /// stationarity and curvature quality gates, or the reason it did not.
+    /// `None` until a profiled fast-PIRLS fit records its metadata; joint
+    /// fits leave this `None` and certify through the joint Hessian instead.
+    pirls_profiled_optimum_certificate:
+        Option<std::result::Result<PirlsProfiledOptimumCertificate, String>>,
 }
 
 /// Options controlling how a GLMM is fit.
@@ -765,6 +775,7 @@ impl GeneralizedLinearMixedModel {
             devc0: vec![0.0; agq_len],
             sd: vec![0.0; agq_len],
             mult: vec![0.0; agq_len],
+            pirls_profiled_optimum_certificate: None,
         };
         model.initialize_beta_from_response();
         Ok(model)
@@ -896,12 +907,18 @@ impl GeneralizedLinearMixedModel {
 
     /// Prediction-variance payload for GLMM new-data predictions.
     ///
-    /// Fast-PIRLS fits return a working-Hessian delta-method payload and mark
-    /// rows as [`PredictionVarianceStatus::Degraded`]. Joint-Laplace fits with
-    /// an available fixed-effect inference artifact return fitted-mean
-    /// fixed/random/cross components from the final Laplace conditional-mode
-    /// covariance and mark rows available. New-level cases remain unavailable
-    /// with row-level reasons.
+    /// Rows are marked [`PredictionVarianceStatus::Available`] when the fit
+    /// carries certified optimum evidence: joint-Laplace fits with an
+    /// available fixed-effect inference artifact, or profiled fast-PIRLS fits
+    /// whose post-fit profiled-optimum certificate passed its stationarity
+    /// and curvature gates. Uncertified fits return the same working-Hessian
+    /// delta-method numbers and mark rows
+    /// [`PredictionVarianceStatus::Degraded`] with the certificate failure in
+    /// the row reason. Response-scale rows additionally carry plug-in
+    /// future-observation `prediction_variance` and predictive-quantile
+    /// `prediction_lower`/`prediction_upper` columns for families that
+    /// support them. New-level cases remain unavailable with row-level
+    /// reasons.
     pub fn predict_new_variance(
         &self,
         newdata: &DataFrame,
@@ -951,47 +968,69 @@ impl GeneralizedLinearMixedModel {
         let glmm_scale_multiplier = (glmm_covariance_scale / inner_lmm_scale).powi(2);
         let joint_laplace_conditional_variance =
             self.certified_joint_laplace_fixed_covariance().is_some();
-        let certified_fixed_covariance = if joint_laplace_conditional_variance {
-            None
-        } else {
-            self.certified_joint_laplace_fixed_covariance()
+        let pirls_certified_conditional_variance = !joint_laplace_conditional_variance
+            && matches!(self.pirls_profiled_optimum_certificate, Some(Ok(_)));
+        let certified_conditional_variance =
+            joint_laplace_conditional_variance || pirls_certified_conditional_variance;
+        let pirls_certificate_failure = match &self.pirls_profiled_optimum_certificate {
+            Some(Err(reason)) if !joint_laplace_conditional_variance => Some(reason.clone()),
+            _ => None,
         };
-        let certified_fixed_design = if certified_fixed_covariance.is_some() {
-            let (_materialized, raw_x, name_to_col) = self.lmm.predict_new_design(newdata)?;
-            Some((raw_x, name_to_col))
-        } else {
-            None
-        };
-        let uses_certified_fixed_covariance = certified_fixed_covariance.is_some();
 
+        let certified_geometry_label = if joint_laplace_conditional_variance {
+            "final joint-laplace PIRLS/Laplace conditional-mode covariance"
+        } else {
+            "final fast-PIRLS profiled conditional-mode covariance at the certified profiled optimum"
+        };
         let available_note = match scale {
             GlmmPredictionScale::Link => {
-                "GLMM link-scale fitted-mean prediction variance uses the final joint-laplace PIRLS/Laplace conditional-mode covariance over fixed and random effects, rescaled to the GLMM covariance scale; theta uncertainty and future-observation family variance are not included"
-                    .to_string()
+                format!(
+                    "GLMM link-scale fitted-mean prediction variance uses the {certified_geometry_label} over fixed and random effects, rescaled to the GLMM covariance scale; theta uncertainty is not included"
+                )
             }
             GlmmPredictionScale::Response => {
-                "GLMM response-scale fitted-mean prediction variance uses delta-method link propagation from the final joint-laplace PIRLS/Laplace conditional-mode covariance over fixed and random effects, rescaled to the GLMM covariance scale; theta uncertainty and future-observation family variance are not included"
+                format!(
+                    "GLMM response-scale fitted-mean prediction variance uses delta-method link propagation from the {certified_geometry_label} over fixed and random effects, rescaled to the GLMM covariance scale; theta uncertainty is not included"
+                )
+            }
+        };
+        let fit_is_joint = self
+            .lmm
+            .compiler_artifact
+            .glmm_fit_metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.estimation_method.starts_with("joint"));
+        let uncertified_clause = match &pirls_certificate_failure {
+            Some(failure) => format!(
+                "the fast-PIRLS profiled optimum certificate was not issued ({failure}); refit with GlmmFitOptions::joint_laplace() for certified conditional prediction variance"
+            ),
+            None if fit_is_joint => {
+                "the joint GLMM Hessian certificate did not pass quality gates, so conditional prediction variance is not certified for this fit"
                     .to_string()
             }
+            None => "no certified optimum evidence is available for this fit; refit with GlmmFitOptions::joint_laplace() for certified conditional prediction variance"
+                .to_string(),
         };
         let degraded_reason = match scale {
-            GlmmPredictionScale::Link if uses_certified_fixed_covariance => {
-                "GLMM link-scale prediction variance uses certified joint-laplace fixed-effect covariance, but random-effect and fixed/random covariance components still use PIRLS/Laplace working geometry"
-                    .to_string()
-            }
-            GlmmPredictionScale::Response if uses_certified_fixed_covariance => {
-                "GLMM response-scale prediction variance uses delta-method link propagation from certified joint-laplace fixed-effect covariance, but random-effect and fixed/random covariance components still use PIRLS/Laplace working geometry"
-                    .to_string()
-            }
             GlmmPredictionScale::Link => {
-                "GLMM link-scale prediction variance uses PIRLS/Laplace working-Hessian geometry; certified active-subspace Hessian variance is not implemented"
-                    .to_string()
+                format!(
+                    "GLMM link-scale prediction variance uses PIRLS/Laplace working-Hessian geometry; {uncertified_clause}"
+                )
             }
             GlmmPredictionScale::Response => {
-                "GLMM response-scale prediction variance uses delta-method link propagation from PIRLS/Laplace working-Hessian geometry; certified active-subspace Hessian variance is not implemented"
-                    .to_string()
+                format!(
+                    "GLMM response-scale prediction variance uses delta-method link propagation from PIRLS/Laplace working-Hessian geometry; {uncertified_clause}"
+                )
             }
         };
+        let future_observation_support: std::result::Result<(), String> = match scale {
+            GlmmPredictionScale::Link => Err(
+                "future-observation prediction intervals are response-scale objects; request GlmmPredictionScale::Response for prediction_variance and prediction bounds"
+                    .to_string(),
+            ),
+            GlmmPredictionScale::Response => self.glmm_future_observation_family_support(),
+        };
+        let mut future_observation_row_failures = std::collections::BTreeSet::new();
 
         for row in &mut payload.rows {
             row.prediction = predictions[row.row];
@@ -1009,27 +1048,6 @@ impl GeneralizedLinearMixedModel {
                 clean_glmm_prediction_variance_component(value * glmm_scale_multiplier)
             });
             row.se_fit = row.combined_variance.map(f64::sqrt);
-
-            if let (Some(covariance), Some((raw_x, name_to_col))) =
-                (&certified_fixed_covariance, &certified_fixed_design)
-            {
-                let x = self
-                    .lmm
-                    .fixed_prediction_design_for_obs(row.row, raw_x, name_to_col);
-                let fixed_variance = (x.transpose() * covariance * &x)[(0, 0)];
-                if let Some(clean_fixed) = clean_glmm_prediction_variance_component(fixed_variance)
-                {
-                    row.fixed_variance = Some(clean_fixed);
-                    row.combined_variance = match (row.random_variance, row.fixed_random_covariance)
-                    {
-                        (Some(random), Some(cross)) => clean_glmm_prediction_variance_component(
-                            clean_fixed + random + 2.0 * cross,
-                        ),
-                        _ => None,
-                    };
-                    row.se_fit = row.combined_variance.map(f64::sqrt);
-                }
-            }
 
             let link_scale_se = row.combined_variance.map(f64::sqrt);
             let derivative = match (scale, link_predictions[row.row]) {
@@ -1063,7 +1081,6 @@ impl GeneralizedLinearMixedModel {
             }
 
             if row.status == PredictionVarianceStatus::Available {
-                row.prediction_variance = None;
                 // Response-scale symmetric bounds can escape the family's
                 // valid range near the boundary; compute the interval on the
                 // link scale and map both ends through the inverse link
@@ -1092,9 +1109,27 @@ impl GeneralizedLinearMixedModel {
                     row.confidence_lower = None;
                     row.confidence_upper = None;
                 }
+                row.prediction_variance = None;
                 row.prediction_lower = None;
                 row.prediction_upper = None;
-                if joint_laplace_conditional_variance {
+                if future_observation_support.is_ok() {
+                    if let (Some(eta), Some(link_se)) =
+                        (link_predictions[row.row], link_scale_se)
+                    {
+                        match self.glmm_future_observation(eta, link_se, level) {
+                            Ok(future) => {
+                                row.prediction_variance =
+                                    clean_glmm_prediction_variance_component(future.variance);
+                                row.prediction_lower = Some(future.lower);
+                                row.prediction_upper = Some(future.upper);
+                            }
+                            Err(reason) => {
+                                future_observation_row_failures.insert(reason);
+                            }
+                        }
+                    }
+                }
+                if certified_conditional_variance {
                     row.reason = None;
                 } else {
                     row.status = PredictionVarianceStatus::Degraded;
@@ -1115,31 +1150,42 @@ impl GeneralizedLinearMixedModel {
 
         payload.method = if joint_laplace_conditional_variance {
             PredictionVarianceMethod::GlmmJointLaplaceConditionalDelta
+        } else if pirls_certified_conditional_variance {
+            PredictionVarianceMethod::GlmmPirlsProfiledCertifiedConditionalDelta
         } else {
             PredictionVarianceMethod::GlmmPirlsLaplaceWorkingDelta
         };
-        payload.notes = if joint_laplace_conditional_variance {
+        payload.notes = if certified_conditional_variance {
             vec![
                 available_note,
-                "fixed, random, and fixed/random covariance components are transformed together from the final joint-laplace conditional-mode covariance geometry"
-                    .to_string(),
-                "future-observation prediction intervals are not reported for GLMMs because family-level response variance is not certified in this payload"
-                    .to_string(),
+                format!(
+                    "fixed, random, and fixed/random covariance components are transformed together from the {certified_geometry_label} geometry"
+                ),
             ]
         } else {
             vec![
                 degraded_reason,
-                if uses_certified_fixed_covariance {
-                    "fixed components use the certified joint-laplace active-Hessian fixed-effect covariance from the fitted artifact; random and cross components are transformed from the inner PIRLS working LMM variance geometry"
-                        .to_string()
-                } else {
-                    "fixed/random components are transformed from the inner PIRLS working LMM variance geometry"
-                        .to_string()
-                },
-                "future-observation prediction intervals are not reported for GLMMs because family-level response variance is not certified in this payload"
+                "fixed/random components are transformed from the inner PIRLS working LMM variance geometry"
                     .to_string(),
             ]
         };
+        match &future_observation_support {
+            Ok(()) => {
+                payload.notes.push(format!(
+                    "future-observation prediction_variance and prediction bounds are plug-in predictive summaries: the family conditional distribution (dispersion/size parameters treated as known at their estimates, future case weight 1) is mixed over link-scale fitted-mean uncertainty with {GLMM_PREDICTIVE_QUADRATURE_POINTS}-point Gauss-Hermite quadrature; bounds are predictive-distribution quantiles and prediction_variance is the law-of-total-variance moment; theta uncertainty is not included"
+                ));
+            }
+            Err(reason) => {
+                payload.notes.push(format!(
+                    "future-observation prediction intervals are not reported: {reason}"
+                ));
+            }
+        }
+        for failure in future_observation_row_failures {
+            payload.notes.push(format!(
+                "future-observation prediction columns are unavailable for some rows: {failure}"
+            ));
+        }
         if matches!(scale, GlmmPredictionScale::Response) {
             payload.notes.push(
                 "response-scale confidence bounds are link-scale Wald bounds mapped through the inverse link so they respect the family's valid range; se_fit remains delta-method on the response scale"
@@ -1159,6 +1205,234 @@ impl GeneralizedLinearMixedModel {
         }
         let denom = self.y.len().max(1) as f64;
         Some((pwrss / denom).max(f64::MIN_POSITIVE).sqrt())
+    }
+
+    /// Whether this model's family supports closed-form plug-in
+    /// future-observation summaries for new rows.
+    fn glmm_future_observation_family_support(&self) -> std::result::Result<(), String> {
+        match self.family {
+            Family::Binomial => Err(
+                "future-observation prediction intervals for a grouped binomial response require the future observation's trial count, which newdata does not carry; model unit-trial rows with Family::Bernoulli for future-observation intervals"
+                    .to_string(),
+            ),
+            _ => Ok(()),
+        }
+    }
+
+    /// Plug-in predictive summary for one future observation.
+    ///
+    /// The family conditional distribution (dispersion / NB size treated as
+    /// known at their estimates, future case weight 1) is mixed over the
+    /// link-scale Gaussian fitted-mean uncertainty with normalized
+    /// Gauss-Hermite quadrature. `variance` is the law-of-total-variance
+    /// moment; `lower`/`upper` are predictive-distribution quantiles, so for
+    /// discrete families they are integers and the interval is conservative
+    /// (coverage at least `level`).
+    fn glmm_future_observation(
+        &self,
+        eta: f64,
+        link_se: f64,
+        level: f64,
+    ) -> std::result::Result<GlmmFutureObservation, String> {
+        if !eta.is_finite() || !link_se.is_finite() || link_se < 0.0 {
+            return Err(
+                "link-scale prediction or its standard error is not finite and non-negative"
+                    .to_string(),
+            );
+        }
+        let lower_p = (1.0 - level) / 2.0;
+        let upper_p = 1.0 - lower_p;
+        let quadrature = gh_norm(GLMM_PREDICTIVE_QUADRATURE_POINTS);
+        let mut nodes = Vec::with_capacity(quadrature.len());
+        for (&z_node, &weight) in quadrature.z.iter().zip(quadrature.w.iter()) {
+            let mu = self.link.linkinv(eta + link_se * z_node);
+            if !mu.is_finite() {
+                return Err(
+                    "predictive quadrature produced a non-finite conditional mean".to_string(),
+                );
+            }
+            nodes.push((mu, weight));
+        }
+
+        let mean: f64 = nodes.iter().map(|(mu, w)| w * mu).sum();
+        let second_moment: f64 = nodes.iter().map(|(mu, w)| w * mu * mu).sum();
+        let mean_variance = (second_moment - mean * mean).max(0.0);
+        let dispersion = if self.family.has_dispersion() {
+            self.dispersion(true)
+        } else {
+            1.0
+        };
+        if !dispersion.is_finite() || dispersion <= 0.0 {
+            return Err(format!(
+                "family dispersion estimate {dispersion} is not usable for predictive variance"
+            ));
+        }
+        let family_variance: f64 = nodes
+            .iter()
+            .map(|(mu, w)| w * dispersion * self.variance(*mu))
+            .sum();
+        if !family_variance.is_finite() || family_variance < 0.0 {
+            return Err(
+                "family conditional variance is not finite over the predictive quadrature"
+                    .to_string(),
+            );
+        }
+        let variance = mean_variance + family_variance;
+        let spread = variance.sqrt();
+
+        let (lower, upper) = match self.family {
+            Family::Bernoulli => {
+                let prob_zero: f64 = nodes.iter().map(|(mu, w)| w * (1.0 - mu)).sum();
+                let quantile = |p: f64| if prob_zero >= p { 0.0 } else { 1.0 };
+                (quantile(lower_p), quantile(upper_p))
+            }
+            Family::Poisson => {
+                let components = nodes
+                    .iter()
+                    .map(|(mu, w)| {
+                        PoissonDist::new(mu.max(GLMM_PREDICTIVE_MEAN_FLOOR))
+                            .map(|distribution| (distribution, *w))
+                            .map_err(|err| format!("poisson predictive component: {err}"))
+                    })
+                    .collect::<std::result::Result<Vec<_>, String>>()?;
+                let cdf = |t: u64| {
+                    components
+                        .iter()
+                        .map(|(distribution, w)| w * distribution.cdf(t))
+                        .sum::<f64>()
+                };
+                let quantile = |p: f64| {
+                    discrete_mixture_quantile(&cdf, p, mean).ok_or_else(|| {
+                        "poisson predictive quantile search did not converge".to_string()
+                    })
+                };
+                (quantile(lower_p)?, quantile(upper_p)?)
+            }
+            Family::NegativeBinomial => {
+                let size = self
+                    .negative_binomial_theta
+                    .filter(|theta| theta.is_finite() && *theta > 0.0)
+                    .ok_or_else(|| {
+                        "negative-binomial predictive quantiles require a positive finite size parameter"
+                            .to_string()
+                    })?;
+                let components = nodes
+                    .iter()
+                    .map(|(mu, w)| {
+                        let mu = mu.max(GLMM_PREDICTIVE_MEAN_FLOOR);
+                        NegativeBinomialDist::new(size, size / (size + mu))
+                            .map(|distribution| (distribution, *w))
+                            .map_err(|err| {
+                                format!("negative-binomial predictive component: {err}")
+                            })
+                    })
+                    .collect::<std::result::Result<Vec<_>, String>>()?;
+                let cdf = |t: u64| {
+                    components
+                        .iter()
+                        .map(|(distribution, w)| w * distribution.cdf(t))
+                        .sum::<f64>()
+                };
+                let quantile = |p: f64| {
+                    discrete_mixture_quantile(&cdf, p, mean).ok_or_else(|| {
+                        "negative-binomial predictive quantile search did not converge".to_string()
+                    })
+                };
+                (quantile(lower_p)?, quantile(upper_p)?)
+            }
+            Family::Gamma => {
+                let shape = 1.0 / dispersion;
+                let components = nodes
+                    .iter()
+                    .map(|(mu, w)| {
+                        if !(*mu > 0.0) {
+                            return Err(
+                                "predictive quadrature produced conditional means outside the gamma family domain"
+                                    .to_string(),
+                            );
+                        }
+                        GammaDist::new(shape, shape / mu)
+                            .map(|distribution| (distribution, *w))
+                            .map_err(|err| format!("gamma predictive component: {err}"))
+                    })
+                    .collect::<std::result::Result<Vec<_>, String>>()?;
+                let cdf = |t: f64| {
+                    components
+                        .iter()
+                        .map(|(distribution, w)| w * distribution.cdf(t))
+                        .sum::<f64>()
+                };
+                let quantile = |p: f64| {
+                    continuous_mixture_quantile(&cdf, p, Some(0.0), mean, spread).ok_or_else(
+                        || "gamma predictive quantile search did not converge".to_string(),
+                    )
+                };
+                (quantile(lower_p)?, quantile(upper_p)?)
+            }
+            Family::InverseGaussian => {
+                let lambda = 1.0 / dispersion;
+                for (mu, _) in &nodes {
+                    if !(*mu > 0.0) {
+                        return Err(
+                            "predictive quadrature produced conditional means outside the inverse-Gaussian family domain"
+                                .to_string(),
+                        );
+                    }
+                }
+                let cdf = |t: f64| {
+                    nodes
+                        .iter()
+                        .map(|(mu, w)| w * inverse_gaussian_cdf(t, *mu, lambda))
+                        .sum::<f64>()
+                };
+                let quantile = |p: f64| {
+                    continuous_mixture_quantile(&cdf, p, Some(0.0), mean, spread).ok_or_else(
+                        || {
+                            "inverse-Gaussian predictive quantile search did not converge"
+                                .to_string()
+                        },
+                    )
+                };
+                (quantile(lower_p)?, quantile(upper_p)?)
+            }
+            Family::Normal => {
+                let sigma = dispersion.sqrt();
+                let components = nodes
+                    .iter()
+                    .map(|(mu, w)| {
+                        Normal::new(*mu, sigma)
+                            .map(|distribution| (distribution, *w))
+                            .map_err(|err| format!("gaussian predictive component: {err}"))
+                    })
+                    .collect::<std::result::Result<Vec<_>, String>>()?;
+                let cdf = |t: f64| {
+                    components
+                        .iter()
+                        .map(|(distribution, w)| w * distribution.cdf(t))
+                        .sum::<f64>()
+                };
+                let quantile = |p: f64| {
+                    continuous_mixture_quantile(&cdf, p, None, mean, spread).ok_or_else(|| {
+                        "gaussian predictive quantile search did not converge".to_string()
+                    })
+                };
+                (quantile(lower_p)?, quantile(upper_p)?)
+            }
+            other => {
+                return Err(format!(
+                    "future-observation predictive quantiles are not implemented for {other:?}"
+                ));
+            }
+        };
+        if !(lower.is_finite() && upper.is_finite() && lower <= upper) {
+            return Err("predictive quantiles are not finite and ordered".to_string());
+        }
+
+        Ok(GlmmFutureObservation {
+            variance,
+            lower,
+            upper,
+        })
     }
 
     fn certified_joint_laplace_fixed_covariance(&self) -> Option<DMatrix<f64>> {
@@ -3148,6 +3422,316 @@ impl GeneralizedLinearMixedModel {
         }
     }
 
+    fn pirls_profiled_fd_gradient_component(
+        &mut self,
+        theta: &[f64],
+        index: usize,
+        h: f64,
+        n_agq: usize,
+        lower_bounds: &[f64],
+    ) -> f64 {
+        let value = theta[index];
+        let lower = lower_bounds
+            .get(index)
+            .copied()
+            .unwrap_or(f64::NEG_INFINITY);
+        let mut plus = theta.to_vec();
+        plus[index] = value + h;
+        let fp = self.penalized_pirls_deviance_at_theta(&plus, n_agq);
+        if value - h > lower {
+            let mut minus = theta.to_vec();
+            minus[index] = value - h;
+            let fm = self.penalized_pirls_deviance_at_theta(&minus, n_agq);
+            (fp - fm) / (2.0 * h)
+        } else {
+            let base = self.penalized_pirls_deviance_at_theta(theta, n_agq);
+            (fp - base) / h
+        }
+    }
+
+    /// Stationarity gradient of the profiled fast-PIRLS objective over theta,
+    /// with the same PIRLS-noise-aware step escalation as the joint-Laplace
+    /// certificate (see [`Self::joint_laplace_certification_gradient`]).
+    fn pirls_profiled_certification_gradient(
+        &mut self,
+        theta: &[f64],
+        n_agq: usize,
+        lower_bounds: &[f64],
+        gradient_tolerance: f64,
+    ) -> JointLaplaceCertificationGradient {
+        let probe_gradient = (0..theta.len())
+            .map(|index| {
+                let h = JOINT_LAPLACE_FD_RELATIVE_STEP * theta[index].abs().max(1.0);
+                self.pirls_profiled_fd_gradient_component(theta, index, h, n_agq, lower_bounds)
+            })
+            .collect::<Vec<_>>();
+        let mut gradient = probe_gradient.clone();
+        let mut escalated_indices = Vec::new();
+        let mut unassessable_indices = Vec::new();
+        for (index, &value) in theta.iter().enumerate() {
+            let raw = probe_gradient[index];
+            if raw.is_finite() && raw.abs() <= gradient_tolerance {
+                continue;
+            }
+            let scale = value.abs().max(1.0);
+            let estimates = JOINT_LAPLACE_CERT_FD_ESCALATED_RELATIVE_STEPS.map(|step| {
+                self.pirls_profiled_fd_gradient_component(
+                    theta,
+                    index,
+                    step * scale,
+                    n_agq,
+                    lower_bounds,
+                )
+            });
+            let consistent = estimates.iter().all(|estimate| estimate.is_finite())
+                && (estimates[0] - estimates[1]).abs() <= gradient_tolerance;
+            if consistent {
+                gradient[index] = estimates[1];
+                escalated_indices.push(index);
+            } else {
+                unassessable_indices.push(index);
+            }
+        }
+        JointLaplaceCertificationGradient {
+            gradient,
+            probe_gradient,
+            escalated_indices,
+            unassessable_indices,
+        }
+    }
+
+    /// Central-difference Hessian of the profiled fast-PIRLS objective over
+    /// the interior (non-boundary) theta coordinates.
+    fn finite_difference_pirls_profiled_hessian(
+        &mut self,
+        theta: &[f64],
+        active_indices: &[usize],
+        n_agq: usize,
+    ) -> std::result::Result<DMatrix<f64>, String> {
+        let n = active_indices.len();
+
+        macro_rules! eval_profiled_probe {
+            ($probe:expr, $context:expr) => {{
+                let value = self.penalized_pirls_deviance_at_theta($probe, n_agq);
+                if value.is_finite() {
+                    value
+                } else {
+                    return Err(format!("{} is non-finite", $context));
+                }
+            }};
+        }
+
+        let base = eval_profiled_probe!(theta, "profiled fast-PIRLS Hessian base objective");
+        let steps = active_indices
+            .iter()
+            .map(|&index| glmm_hessian_step(theta[index]))
+            .collect::<Vec<_>>();
+
+        let mut hessian = DMatrix::zeros(n, n);
+        for active_i in 0..n {
+            let i = active_indices[active_i];
+            let hi = steps[active_i];
+            let mut plus = theta.to_vec();
+            plus[i] += hi;
+            let f_plus = eval_profiled_probe!(
+                &plus,
+                format!(
+                    "profiled fast-PIRLS Hessian diagonal plus probe for covariance parameter {}",
+                    i + 1
+                )
+            );
+            let mut minus = theta.to_vec();
+            minus[i] -= hi;
+            let f_minus = eval_profiled_probe!(
+                &minus,
+                format!(
+                    "profiled fast-PIRLS Hessian diagonal minus probe for covariance parameter {}",
+                    i + 1
+                )
+            );
+            hessian[(active_i, active_i)] = (f_plus - 2.0 * base + f_minus) / (hi * hi);
+
+            for active_j in 0..active_i {
+                let j = active_indices[active_j];
+                let hj = steps[active_j];
+                let mut pp = theta.to_vec();
+                pp[i] += hi;
+                pp[j] += hj;
+                let f_pp = eval_profiled_probe!(
+                    &pp,
+                    format!(
+                        "profiled fast-PIRLS Hessian off-diagonal ++ probe for covariance parameters {} and {}",
+                        i + 1,
+                        j + 1
+                    )
+                );
+                let mut pm = theta.to_vec();
+                pm[i] += hi;
+                pm[j] -= hj;
+                let f_pm = eval_profiled_probe!(
+                    &pm,
+                    format!(
+                        "profiled fast-PIRLS Hessian off-diagonal +- probe for covariance parameters {} and {}",
+                        i + 1,
+                        j + 1
+                    )
+                );
+                let mut mp = theta.to_vec();
+                mp[i] -= hi;
+                mp[j] += hj;
+                let f_mp = eval_profiled_probe!(
+                    &mp,
+                    format!(
+                        "profiled fast-PIRLS Hessian off-diagonal -+ probe for covariance parameters {} and {}",
+                        i + 1,
+                        j + 1
+                    )
+                );
+                let mut mm = theta.to_vec();
+                mm[i] -= hi;
+                mm[j] -= hj;
+                let f_mm = eval_profiled_probe!(
+                    &mm,
+                    format!(
+                        "profiled fast-PIRLS Hessian off-diagonal -- probe for covariance parameters {} and {}",
+                        i + 1,
+                        j + 1
+                    )
+                );
+                let value = (f_pp - f_pm - f_mp + f_mm) / (4.0 * hi * hj);
+                hessian[(active_i, active_j)] = value;
+                hessian[(active_j, active_i)] = value;
+            }
+        }
+        Ok(hessian)
+    }
+
+    /// Certify the fast-PIRLS profiled optimum after a profiled fit.
+    ///
+    /// The profiled objective minimizes the Laplace (or AGQ) deviance over
+    /// theta with beta solved exactly by the penalized least-squares step at
+    /// every theta, so a stationarity-plus-curvature certificate over theta
+    /// is a complete optimum certificate for this estimator's own objective:
+    /// the beta directions are exactly minimized by construction. The
+    /// certificate gates are the joint-Laplace ones — noise-aware gradient
+    /// tolerance for interior coordinates, a one-sided gradient condition for
+    /// boundary coordinates, and positive-definiteness/conditioning of the
+    /// interior-theta Hessian.
+    fn certify_pirls_profiled_optimum(
+        &mut self,
+    ) -> std::result::Result<PirlsProfiledOptimumCertificate, String> {
+        let theta = self.lmm.optsum.final_params.clone();
+        if theta.len() != self.theta.len() {
+            return Err(format!(
+                "profiled fast-PIRLS final parameter vector has length {}, expected {} covariance parameters",
+                theta.len(),
+                self.theta.len()
+            ));
+        }
+        if theta.len() > PIRLS_PROFILED_CERTIFICATE_MAX_THETA {
+            return Err(format!(
+                "profiled-optimum certificate skipped: {} covariance parameters exceed the certification budget of {PIRLS_PROFILED_CERTIFICATE_MAX_THETA}",
+                theta.len()
+            ));
+        }
+        let n_agq = self.lmm.optsum.n_agq.max(1);
+        let lower_bounds = self.lmm.lower_bounds();
+        let outcome = self.certify_pirls_profiled_optimum_probes(&theta, n_agq, &lower_bounds);
+        // Probes left PIRLS state at an off-optimum theta; restore the fitted
+        // state exactly the way finalize_theta_after_optimizer leaves it.
+        let _ = self.penalized_pirls_deviance_at_theta(&theta, n_agq);
+        self.beta = self.lmm.beta();
+        self.refresh_dispersion();
+        outcome
+    }
+
+    fn certify_pirls_profiled_optimum_probes(
+        &mut self,
+        theta: &[f64],
+        n_agq: usize,
+        lower_bounds: &[f64],
+    ) -> std::result::Result<PirlsProfiledOptimumCertificate, String> {
+        let mut boundary_theta_indices = Vec::new();
+        let mut interior_indices = Vec::new();
+        for (index, &value) in theta.iter().enumerate() {
+            let lower = lower_bounds
+                .get(index)
+                .copied()
+                .unwrap_or(f64::NEG_INFINITY);
+            if lower.is_finite() && value <= lower + glmm_hessian_step(value) {
+                boundary_theta_indices.push(index + 1);
+            } else {
+                interior_indices.push(index);
+            }
+        }
+
+        let certification = self.pirls_profiled_certification_gradient(
+            theta,
+            n_agq,
+            lower_bounds,
+            PIRLS_PROFILED_CERTIFICATE_GRADIENT_TOLERANCE,
+        );
+        if !certification.unassessable_indices.is_empty() {
+            let labels = certification
+                .unassessable_indices
+                .iter()
+                .map(|index| (index + 1).to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "profiled fast-PIRLS stationarity is not assessable for covariance parameter(s) {labels}: escalated finite-difference readings disagreed"
+            ));
+        }
+        let mut gradient_max_abs = 0.0_f64;
+        for (index, &value) in certification.gradient.iter().enumerate() {
+            if !value.is_finite() {
+                return Err(format!(
+                    "profiled fast-PIRLS stationarity gradient is non-finite for covariance parameter {}",
+                    index + 1
+                ));
+            }
+            let boundary = boundary_theta_indices.contains(&(index + 1));
+            let fails = if boundary {
+                // At a lower bound the objective must not decrease moving
+                // into the interior; the forward-difference gradient there
+                // must be non-negative up to tolerance.
+                value < -PIRLS_PROFILED_CERTIFICATE_GRADIENT_TOLERANCE
+            } else {
+                value.abs() > PIRLS_PROFILED_CERTIFICATE_GRADIENT_TOLERANCE
+            };
+            if fails {
+                return Err(format!(
+                    "profiled fast-PIRLS stationarity gradient {value:.6e} for covariance parameter {} exceeds tolerance {PIRLS_PROFILED_CERTIFICATE_GRADIENT_TOLERANCE:.1e}",
+                    index + 1
+                ));
+            }
+            gradient_max_abs = gradient_max_abs.max(value.abs());
+        }
+
+        if interior_indices.is_empty() {
+            return Err(
+                "all covariance parameters sit at their lower bounds; the profiled curvature certificate is not assessable for a fully boundary optimum"
+                    .to_string(),
+            );
+        }
+        let hessian =
+            self.finite_difference_pirls_profiled_hessian(theta, &interior_indices, n_agq)?;
+        let curvature =
+            certify_glmm_joint_hessian(&hessian, "profiled fast-PIRLS theta Hessian")?;
+
+        Ok(PirlsProfiledOptimumCertificate {
+            gradient_max_abs,
+            min_eigenvalue: curvature.min_eigenvalue,
+            condition_number: curvature.condition_number,
+            escalated_theta_indices: certification
+                .escalated_indices
+                .iter()
+                .map(|index| index + 1)
+                .collect(),
+            boundary_theta_indices,
+        })
+    }
+
     fn reset_for_refit(&mut self, new_y: Option<&[f64]>) -> Result<()> {
         if let Some(new_y) = new_y {
             if new_y.len() != self.y.len() {
@@ -3213,6 +3797,7 @@ impl GeneralizedLinearMixedModel {
         self.lmm.compiler_artifact.glmm_fit_metadata = None;
         self.lmm.compiler_artifact.fixed_effect_covariance_matrix = None;
         self.lmm.compiler_artifact.effective_covariance.clear();
+        self.pirls_profiled_optimum_certificate = None;
         Ok(())
     }
 
@@ -3239,6 +3824,7 @@ impl GeneralizedLinearMixedModel {
             );
         }
         self.record_fast_pirls_parity_scope_diagnostic(&metadata);
+        self.record_pirls_profiled_optimum_certificate(&metadata);
         let inference_artifacts = self.glmm_fixed_effect_inference_artifacts(&metadata);
         let inference_availability =
             glmm_inference_availability_for_table(&metadata, &inference_artifacts.table);
@@ -3252,6 +3838,83 @@ impl GeneralizedLinearMixedModel {
         self.lmm.compiler_artifact.glmm_fit_metadata = Some(metadata);
         self.lmm.compiler_artifact.fixed_effect_covariance_matrix = Some(covariance);
         self.lmm.compiler_artifact.fixed_effect_inference_table = Some(inference_artifacts.table);
+    }
+
+    /// Run the post-fit profiled-optimum certificate for profiled fast-PIRLS
+    /// fits, store the outcome for prediction-variance gating, and record a
+    /// provenance diagnostic either way.
+    fn record_pirls_profiled_optimum_certificate(&mut self, metadata: &GlmmFitMetadata) {
+        if !matches!(
+            metadata.estimation_method.as_str(),
+            "fast_pirls_profiled" | "fallback_fast_pirls"
+        ) {
+            self.pirls_profiled_optimum_certificate = None;
+            return;
+        }
+        // Fit drivers can record metadata more than once for the same final
+        // fit (e.g. a joint fallback re-labelling a profiled fit); the
+        // certificate and its diagnostic are per-fit, not per-recording.
+        if self.pirls_profiled_optimum_certificate.is_some() {
+            return;
+        }
+        let outcome = self.certify_pirls_profiled_optimum();
+
+        let mut diagnostic = Diagnostic::new(
+            DiagnosticCode::SupportNote,
+            DiagnosticSeverity::Info,
+            DiagnosticStage::Certification,
+            match &outcome {
+                Ok(_) => "Fast-PIRLS profiled optimum certificate issued",
+                Err(_) => "Fast-PIRLS profiled optimum certificate not issued",
+            },
+        );
+        diagnostic.payload.insert(
+            "glmm_pirls_profiled_optimum_certificate".to_string(),
+            serde_json::json!(if outcome.is_ok() {
+                "issued"
+            } else {
+                "not_issued"
+            }),
+        );
+        diagnostic.payload.insert(
+            "estimation_method".to_string(),
+            serde_json::json!(metadata.estimation_method.as_str()),
+        );
+        match &outcome {
+            Ok(certificate) => {
+                diagnostic.payload.insert(
+                    "gradient_max_abs".to_string(),
+                    serde_json::json!(certificate.gradient_max_abs),
+                );
+                diagnostic.payload.insert(
+                    "min_eigenvalue".to_string(),
+                    serde_json::json!(certificate.min_eigenvalue),
+                );
+                diagnostic.payload.insert(
+                    "condition_number".to_string(),
+                    serde_json::json!(certificate.condition_number),
+                );
+                if !certificate.escalated_theta_indices.is_empty() {
+                    diagnostic.payload.insert(
+                        "escalated_theta_indices".to_string(),
+                        serde_json::json!(certificate.escalated_theta_indices),
+                    );
+                }
+                if !certificate.boundary_theta_indices.is_empty() {
+                    diagnostic.payload.insert(
+                        "boundary_theta_indices".to_string(),
+                        serde_json::json!(certificate.boundary_theta_indices),
+                    );
+                }
+            }
+            Err(reason) => {
+                diagnostic
+                    .payload
+                    .insert("reason".to_string(), serde_json::json!(reason));
+            }
+        }
+        self.lmm.compiler_artifact.diagnostics.push(diagnostic);
+        self.pirls_profiled_optimum_certificate = Some(outcome);
     }
 
     fn glmm_fixed_effect_inference_artifacts(
@@ -3398,7 +4061,7 @@ impl GeneralizedLinearMixedModel {
             &active_indices,
             true,
         )?;
-        let certification = certify_glmm_joint_hessian(&hessian)?;
+        let certification = certify_glmm_joint_hessian(&hessian, "joint-laplace GLMM Hessian")?;
         let beta_covariance = 2.0 * certification.inverse.view((0, 0), (p, p)).into_owned();
         if !matrix_is_finite_local(&beta_covariance) {
             return Err(
@@ -5664,6 +6327,132 @@ fn clean_glmm_prediction_variance_component(value: f64) -> Option<f64> {
     Some(value.max(0.0))
 }
 
+/// Plug-in predictive summary for one future observation on the response
+/// scale: law-of-total-variance moment plus predictive-distribution quantile
+/// bounds.
+struct GlmmFutureObservation {
+    variance: f64,
+    lower: f64,
+    upper: f64,
+}
+
+/// Gauss-Hermite node count for predictive (future-observation) mixtures.
+const GLMM_PREDICTIVE_QUADRATURE_POINTS: usize = 21;
+/// Floor applied to conditional means before constructing count-family
+/// predictive components, since the statrs distributions require a strictly
+/// positive rate/mean.
+const GLMM_PREDICTIVE_MEAN_FLOOR: f64 = 1.0e-12;
+
+/// Smallest `t` (as f64) with `cdf(t) >= p` for a discrete mixture supported
+/// on the non-negative integers. Doubles an upper bracket from `mean_hint`,
+/// then binary-searches. `None` if the bracket never reaches `p`.
+fn discrete_mixture_quantile(cdf: &dyn Fn(u64) -> f64, p: f64, mean_hint: f64) -> Option<f64> {
+    let mut hi: u64 = if mean_hint.is_finite() && mean_hint > 1.0 {
+        mean_hint.ceil() as u64
+    } else {
+        1
+    };
+    let mut expansions = 0;
+    while cdf(hi) < p {
+        if expansions >= 96 {
+            return None;
+        }
+        hi = hi.saturating_mul(2).saturating_add(1);
+        expansions += 1;
+    }
+    let mut lo: u64 = 0;
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2;
+        if cdf(mid) >= p {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    Some(lo as f64)
+}
+
+/// Quantile of a continuous mixture CDF by bracket expansion and bisection.
+/// `domain_floor` clamps the lower bracket for positive-support families.
+fn continuous_mixture_quantile(
+    cdf: &dyn Fn(f64) -> f64,
+    p: f64,
+    domain_floor: Option<f64>,
+    center: f64,
+    spread: f64,
+) -> Option<f64> {
+    if !center.is_finite() || !spread.is_finite() {
+        return None;
+    }
+    let step = spread.max(center.abs() * 1.0e-6).max(1.0e-12);
+    let mut lo = center - 10.0 * step;
+    let mut hi = center + 10.0 * step;
+    if let Some(floor) = domain_floor {
+        lo = lo.max(floor);
+        hi = hi.max(floor + step);
+    }
+    let mut expansions = 0;
+    while cdf(hi) < p {
+        if expansions >= 256 || !hi.is_finite() {
+            return None;
+        }
+        hi += (hi - lo).max(step);
+        expansions += 1;
+    }
+    expansions = 0;
+    while cdf(lo) > p {
+        if expansions >= 256 || !lo.is_finite() {
+            return None;
+        }
+        lo -= (hi - lo).max(step);
+        if let Some(floor) = domain_floor {
+            if lo <= floor {
+                lo = floor;
+                break;
+            }
+        }
+        expansions += 1;
+    }
+    for _ in 0..200 {
+        let mid = 0.5 * (lo + hi);
+        if !(mid > lo && mid < hi) {
+            break;
+        }
+        if cdf(mid) >= p {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    Some(hi)
+}
+
+/// `ln Phi(x)` with an asymptotic tail for arguments where the direct CDF
+/// underflows (needed by the inverse-Gaussian CDF's exponentially weighted
+/// second term).
+fn standard_normal_ln_cdf(x: f64) -> f64 {
+    if x < -37.0 {
+        // Mills-ratio asymptotic: Phi(x) ~ phi(x) / |x| for x -> -inf.
+        -0.5 * x * x - (-x).ln() - 0.5 * (2.0 * std::f64::consts::PI).ln()
+    } else {
+        Normal::new(0.0, 1.0).unwrap().cdf(x).max(f64::MIN_POSITIVE).ln()
+    }
+}
+
+/// CDF of the inverse-Gaussian distribution with mean `mu` and shape
+/// `lambda`, evaluated in log space so the `exp(2 lambda / mu)` factor cannot
+/// overflow against the matching normal tail.
+fn inverse_gaussian_cdf(t: f64, mu: f64, lambda: f64) -> f64 {
+    if t <= 0.0 {
+        return 0.0;
+    }
+    let standard_normal = Normal::new(0.0, 1.0).unwrap();
+    let sqrt_term = (lambda / t).sqrt();
+    let first = standard_normal.cdf(sqrt_term * (t / mu - 1.0));
+    let second = (2.0 * lambda / mu + standard_normal_ln_cdf(-sqrt_term * (t / mu + 1.0))).exp();
+    (first + second).clamp(0.0, 1.0)
+}
+
 const NEGATIVE_BINOMIAL_THETA_MIN: f64 = 1.0e-8;
 const NEGATIVE_BINOMIAL_THETA_MAX: f64 = 1.0e8;
 const NEGATIVE_BINOMIAL_THETA_MAX_ITERS: usize = 8;
@@ -6194,6 +6983,14 @@ const JOINT_LAPLACE_FD_RELATIVE_STEP: f64 = 1.0e-5;
 /// surface is too rough to assess at any trusted step.
 const JOINT_LAPLACE_CERT_FD_ESCALATED_RELATIVE_STEPS: [f64; 2] = [1.0e-3, 4.0e-3];
 
+/// Stationarity tolerance for the post-fit profiled fast-PIRLS optimum
+/// certificate; matches the joint-Laplace fit-time certification tolerance.
+const PIRLS_PROFILED_CERTIFICATE_GRADIENT_TOLERANCE: f64 = 2.0e-2;
+/// Theta-dimension budget for the post-fit profiled-optimum certificate. The
+/// curvature probe costs ~2k^2 PIRLS solves; beyond this the certificate is
+/// skipped with an explicit reason rather than silently slowing every fit.
+const PIRLS_PROFILED_CERTIFICATE_MAX_THETA: usize = 12;
+
 /// Result of the noise-aware stationarity gradient probe used by the
 /// joint-Laplace optimizer certificate.
 struct JointLaplaceCertificationGradient {
@@ -6217,24 +7014,45 @@ impl JointLaplaceCertificationGradient {
     }
 }
 
+/// Evidence that a profiled fast-PIRLS fit sits at a certified optimum of its
+/// own objective: assessed stationarity over theta plus positive-definite,
+/// well-conditioned curvature over the interior theta coordinates. Beta is
+/// exactly minimized by the penalized least-squares step at every probed
+/// theta, so no separate beta-direction evidence is required.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PirlsProfiledOptimumCertificate {
+    /// Largest assessed absolute gradient component over theta.
+    gradient_max_abs: f64,
+    /// Smallest eigenvalue of the interior-theta profiled Hessian.
+    min_eigenvalue: f64,
+    /// Condition number of the interior-theta profiled Hessian.
+    condition_number: f64,
+    /// One-based theta indices whose gradient needed escalated FD steps.
+    escalated_theta_indices: Vec<usize>,
+    /// One-based theta indices held at their lower bounds (one-sided
+    /// stationarity check; omitted from the curvature probe).
+    boundary_theta_indices: Vec<usize>,
+}
+
 fn glmm_hessian_step(value: f64) -> f64 {
     1.0e-4 * value.abs().max(1.0)
 }
 
 fn certify_glmm_joint_hessian(
     hessian: &DMatrix<f64>,
+    context: &str,
 ) -> std::result::Result<GlmmJointHessianCertification, String> {
     const CONDITION_NUMBER_MAX: f64 = 1.0e10;
 
     if hessian.nrows() == 0 || hessian.nrows() != hessian.ncols() {
         return Err(format!(
-            "joint-laplace GLMM Hessian has shape {}x{}",
+            "{context} has shape {}x{}",
             hessian.nrows(),
             hessian.ncols()
         ));
     }
     if !matrix_is_finite_local(hessian) {
-        return Err("joint-laplace GLMM Hessian contains non-finite entries".to_string());
+        return Err(format!("{context} contains non-finite entries"));
     }
 
     let symmetric = 0.5 * (hessian + hessian.transpose());
@@ -6256,12 +7074,12 @@ fn certify_glmm_joint_hessian(
 
     if min_eigenvalue <= eigen_tolerance {
         return Err(format!(
-            "joint-laplace GLMM Hessian is not positive definite on the active parameter space: min eigenvalue {min_eigenvalue:.6e} <= tolerance {eigen_tolerance:.6e}"
+            "{context} is not positive definite on the active parameter space: min eigenvalue {min_eigenvalue:.6e} <= tolerance {eigen_tolerance:.6e}"
         ));
     }
     if rank != symmetric.nrows() {
         return Err(format!(
-            "joint-laplace GLMM Hessian rank {rank} is below expected rank {}",
+            "{context} rank {rank} is below expected rank {}",
             symmetric.nrows()
         ));
     }
@@ -6269,16 +7087,16 @@ fn certify_glmm_joint_hessian(
     let condition_number = max_eigenvalue / min_eigenvalue;
     if !condition_number.is_finite() || condition_number > CONDITION_NUMBER_MAX {
         return Err(format!(
-            "joint-laplace GLMM Hessian condition number {condition_number:.6e} exceeds certification threshold {CONDITION_NUMBER_MAX:.6e}"
+            "{context} condition number {condition_number:.6e} exceeds certification threshold {CONDITION_NUMBER_MAX:.6e}"
         ));
     }
 
     let cholesky = symmetric
         .cholesky()
-        .ok_or_else(|| "joint-laplace GLMM Hessian Cholesky factorization failed".to_string())?;
+        .ok_or_else(|| format!("{context} Cholesky factorization failed"))?;
     let inverse = cholesky.inverse();
     if !matrix_is_finite_local(&inverse) {
-        return Err("joint-laplace GLMM Hessian inverse contains non-finite entries".to_string());
+        return Err(format!("{context} inverse contains non-finite entries"));
     }
 
     Ok(GlmmJointHessianCertification {
@@ -9254,16 +10072,277 @@ mod tests {
         assert!(first.fixed_random_covariance.unwrap().is_finite());
         assert!(first.combined_variance.unwrap() > 0.0);
         assert!(first.se_fit.unwrap() > 0.0);
-        assert_eq!(first.prediction_variance, None);
+        assert!(first.prediction_variance.unwrap() > 0.0);
         assert!(first.confidence_lower.unwrap() < first.prediction.unwrap());
         assert!(first.confidence_upper.unwrap() > first.prediction.unwrap());
+        let prediction_lower = first.prediction_lower.unwrap();
+        let prediction_upper = first.prediction_upper.unwrap();
+        assert!(prediction_lower >= 0.0);
+        assert!(prediction_lower <= prediction_upper);
+        assert_eq!(prediction_lower.fract(), 0.0, "poisson bounds are counts");
+        assert_eq!(prediction_upper.fract(), 0.0, "poisson bounds are counts");
+        assert!(first.prediction_variance.unwrap() > first.combined_variance.unwrap());
+        let reason = first.reason.as_deref().unwrap_or("");
+        assert!(reason.contains("the fast-PIRLS profiled optimum certificate was not issued"));
+        assert!(reason.contains("GlmmFitOptions::joint_laplace()"));
+    }
+
+    fn glmm_certified_pirls_poisson_fixture() -> (GeneralizedLinearMixedModel, DataFrame) {
+        let mut y = Vec::new();
+        let mut x = Vec::new();
+        let mut group = Vec::new();
+        let group_effects = [-0.9_f64, -0.3, 0.2, 0.7, 1.1, -0.5];
+        for (g, effect) in group_effects.iter().enumerate() {
+            for obs in 0..10 {
+                let xv = (obs as f64 - 4.5) / 3.0;
+                let eta = 1.0 + 0.3 * xv + effect;
+                let noise = 0.85 + 0.3 * (((g * 13 + obs * 7) % 11) as f64 / 10.0);
+                y.push((eta.exp() * noise).round().max(0.0));
+                x.push(xv);
+                group.push(format!("g{}", g + 1));
+            }
+        }
+        let mut data = DataFrame::new();
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_categorical("group", group).unwrap();
+        let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
+        let mut model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Poisson, None).unwrap();
+        model.fit().unwrap();
+        (model, data)
+    }
+
+    #[test]
+    fn test_glmm_pirls_certified_prediction_variance_rows_available() {
+        let (model, data) = glmm_certified_pirls_poisson_fixture();
+        assert!(
+            matches!(model.pirls_profiled_optimum_certificate, Some(Ok(_))),
+            "fixture should certify: {:?}",
+            model.pirls_profiled_optimum_certificate
+        );
+
+        let payload = model
+            .predict_new_variance(&data, GlmmPredictionScale::Response, NewReLevels::Error)
+            .unwrap();
+        assert_eq!(
+            payload.method,
+            PredictionVarianceMethod::GlmmPirlsProfiledCertifiedConditionalDelta
+        );
+        assert!(payload
+            .notes
+            .iter()
+            .any(|note| note.contains("certified profiled optimum")));
+        for row in &payload.rows {
+            assert_eq!(row.status, PredictionVarianceStatus::Available);
+            assert_eq!(row.reason, None);
+            let prediction = row.prediction.expect("point prediction");
+            assert!(row.se_fit.unwrap() > 0.0);
+            // The Poisson future-observation variance is dominated by the
+            // family term E[mu], so it must exceed the fitted-mean variance.
+            assert!(row.prediction_variance.unwrap() > row.combined_variance.unwrap());
+            let lower = row.prediction_lower.unwrap();
+            let upper = row.prediction_upper.unwrap();
+            assert_eq!(lower.fract(), 0.0);
+            assert_eq!(upper.fract(), 0.0);
+            assert!(lower >= 0.0);
+            assert!(lower <= prediction.ceil());
+            assert!(upper >= prediction.floor());
+            assert!(upper > lower);
+        }
+
+        assert!(model
+            .compiler_artifact()
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic
+                .payload
+                .get("glmm_pirls_profiled_optimum_certificate")
+                .and_then(serde_json::Value::as_str)
+                == Some("issued")));
+    }
+
+    #[test]
+    fn test_glmm_pirls_uncertified_fit_keeps_degraded_with_refit_guidance() {
+        let (mut model, data) = glmm_certified_pirls_poisson_fixture();
+        model.pirls_profiled_optimum_certificate =
+            Some(Err("forced certificate failure for test".to_string()));
+
+        let payload = model
+            .predict_new_variance(&data, GlmmPredictionScale::Response, NewReLevels::Error)
+            .unwrap();
+        assert_eq!(
+            payload.method,
+            PredictionVarianceMethod::GlmmPirlsLaplaceWorkingDelta
+        );
+        let first = &payload.rows[0];
+        assert_eq!(first.status, PredictionVarianceStatus::Degraded);
+        let reason = first.reason.as_deref().unwrap();
+        assert!(reason.contains("forced certificate failure for test"));
+        assert!(reason.contains("GlmmFitOptions::joint_laplace()"));
+        // Degraded rows still carry the (uncertified) predictive columns so
+        // downstream layers can surface them together with the reason.
+        assert!(first.prediction_variance.unwrap() > 0.0);
+    }
+
+    #[test]
+    fn test_glmm_link_scale_rows_do_not_carry_future_observation_columns() {
+        let (model, data) = glmm_certified_pirls_poisson_fixture();
+        let payload = model
+            .predict_new_variance(&data, GlmmPredictionScale::Link, NewReLevels::Error)
+            .unwrap();
+        let first = &payload.rows[0];
+        assert_eq!(first.status, PredictionVarianceStatus::Available);
+        assert_eq!(first.prediction_variance, None);
         assert_eq!(first.prediction_lower, None);
         assert_eq!(first.prediction_upper, None);
-        assert!(first
-            .reason
-            .as_deref()
-            .unwrap_or("")
-            .contains("certified active-subspace Hessian variance is not implemented"));
+        assert!(payload
+            .notes
+            .iter()
+            .any(|note| note.contains("response-scale objects")));
+    }
+
+    #[test]
+    fn test_glmm_bernoulli_future_observation_bounds_are_support_points() {
+        let mut y = Vec::new();
+        let mut x = Vec::new();
+        let mut group = Vec::new();
+        for g in 0..8usize {
+            for obs in 0..12usize {
+                let idx = g * 12 + obs;
+                let xv = (obs as f64 - 5.5) / 2.2;
+                let eta = -0.3 + 1.8 * xv + (g as f64 - 3.5) * 0.25;
+                let p = 1.0 / (1.0 + (-eta).exp());
+                let u = ((idx * 37 + 11) % 97) as f64 / 97.0;
+                y.push(if p > u { 1.0 } else { 0.0 });
+                x.push(xv);
+                group.push(format!("g{}", g + 1));
+            }
+        }
+        let mut data = DataFrame::new();
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_categorical("group", group).unwrap();
+
+        let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
+        let mut model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+        model.fit_with_options(false, 1, false).unwrap();
+
+        let payload = model
+            .predict_new_variance(&data, GlmmPredictionScale::Response, NewReLevels::Error)
+            .unwrap();
+        let mut saw_zero_lower = false;
+        let mut saw_unit_upper = false;
+        for row in &payload.rows {
+            let lower = row.prediction_lower.unwrap();
+            let upper = row.prediction_upper.unwrap();
+            assert!(lower == 0.0 || lower == 1.0);
+            assert!(upper == 0.0 || upper == 1.0);
+            assert!(lower <= upper);
+            let variance = row.prediction_variance.unwrap();
+            // Law of total variance for a Bernoulli future observation:
+            // bounded by the maximal Bernoulli variance.
+            assert!(variance > 0.0 && variance <= 0.25 + 1.0e-9);
+            saw_zero_lower |= lower == 0.0;
+            saw_unit_upper |= upper == 1.0;
+        }
+        assert!(saw_zero_lower && saw_unit_upper);
+    }
+
+    #[test]
+    fn test_glmm_binomial_future_observation_refused_with_trial_count_reason() {
+        let (data, _) = crate::datasets::load("cbpp").unwrap();
+        let incidence = data.numeric("incidence").unwrap();
+        let size = data.numeric("size").unwrap();
+        let proportion: Vec<f64> = incidence
+            .iter()
+            .zip(size.iter())
+            .map(|(&y, &n)| y / n)
+            .collect();
+        let weights: Vec<f64> = size.to_vec();
+        let mut data_with_proportion = data.clone();
+        data_with_proportion
+            .add_numeric("proportion", proportion)
+            .unwrap();
+        let formula = parse_formula("proportion ~ 1 + period + (1 | herd)").unwrap();
+        let mut model = GeneralizedLinearMixedModel::new_with_weights(
+            formula,
+            &data_with_proportion,
+            Family::Binomial,
+            None,
+            weights,
+        )
+        .unwrap();
+        model.fit().unwrap();
+
+        let payload = model
+            .predict_new_variance(
+                &data_with_proportion,
+                GlmmPredictionScale::Response,
+                NewReLevels::Error,
+            )
+            .unwrap();
+        let first = &payload.rows[0];
+        assert_eq!(first.prediction_variance, None);
+        assert_eq!(first.prediction_lower, None);
+        assert_eq!(first.prediction_upper, None);
+        assert!(first.confidence_lower.is_some());
+        assert!(payload
+            .notes
+            .iter()
+            .any(|note| note.contains("trial count")));
+    }
+
+    #[test]
+    fn test_discrete_mixture_quantile_matches_single_poisson_reference() {
+        let poisson = PoissonDist::new(4.2).unwrap();
+        let cdf = |t: u64| poisson.cdf(t);
+        // scipy.stats.poisson.ppf reference values for lambda = 4.2.
+        assert_eq!(discrete_mixture_quantile(&cdf, 0.025, 4.2), Some(1.0));
+        assert_eq!(discrete_mixture_quantile(&cdf, 0.975, 4.2), Some(9.0));
+        assert_eq!(discrete_mixture_quantile(&cdf, 0.005, 4.2), Some(0.0));
+        assert_eq!(discrete_mixture_quantile(&cdf, 0.995, 4.2), Some(10.0));
+    }
+
+    #[test]
+    fn test_inverse_gaussian_cdf_matches_scipy_reference() {
+        // scipy.stats.invgauss(mu=1, scale=1).cdf(1) and
+        // scipy.stats.invgauss(mu=4, scale=0.5).cdf(3) (mean 2, shape 0.5).
+        // statrs's erfc-based normal CDF carries ~1e-11 absolute error, so
+        // the comparison tolerance reflects that, not the IG formula.
+        assert_relative_eq!(
+            inverse_gaussian_cdf(1.0, 1.0, 1.0),
+            0.6681020012231706,
+            epsilon = 1.0e-9
+        );
+        assert_relative_eq!(
+            inverse_gaussian_cdf(3.0, 2.0, 0.5),
+            0.8343083811593116,
+            epsilon = 1.0e-9
+        );
+        assert_eq!(inverse_gaussian_cdf(0.0, 1.0, 1.0), 0.0);
+        assert_eq!(inverse_gaussian_cdf(-1.0, 1.0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn test_standard_normal_ln_cdf_tail_is_continuous_and_consistent() {
+        let direct = Normal::new(0.0, 1.0).unwrap().cdf(-5.0).ln();
+        assert_relative_eq!(standard_normal_ln_cdf(-5.0), direct, epsilon = 1.0e-12);
+        let just_above = standard_normal_ln_cdf(-36.9);
+        let just_below = standard_normal_ln_cdf(-37.1);
+        assert!(just_below < just_above);
+        assert!((just_below - just_above).abs() < 8.0);
+    }
+
+    #[test]
+    fn test_continuous_mixture_quantile_matches_single_normal_reference() {
+        let normal = Normal::new(2.0, 3.0).unwrap();
+        let cdf = |t: f64| normal.cdf(t);
+        let q = continuous_mixture_quantile(&cdf, 0.975, None, 2.0, 3.0).unwrap();
+        assert_relative_eq!(q, 2.0 + 1.959963984540054 * 3.0, epsilon = 1.0e-6);
+        let q_low = continuous_mixture_quantile(&cdf, 0.025, None, 2.0, 3.0).unwrap();
+        assert_relative_eq!(q_low, 2.0 - 1.959963984540054 * 3.0, epsilon = 1.0e-6);
     }
 
     #[test]
@@ -9410,11 +10489,16 @@ mod tests {
             max_relative = 1.0e-8
         );
         assert!(first.se_fit.unwrap() > 0.0);
-        assert_eq!(first.prediction_variance, None);
+        assert!(first.prediction_variance.unwrap() > 0.0);
         assert!(first.confidence_lower.unwrap() < first.prediction.unwrap());
         assert!(first.confidence_upper.unwrap() > first.prediction.unwrap());
-        assert_eq!(first.prediction_lower, None);
-        assert_eq!(first.prediction_upper, None);
+        let prediction_lower = first.prediction_lower.unwrap();
+        let prediction_upper = first.prediction_upper.unwrap();
+        assert!(prediction_lower > 0.0, "gamma future bounds stay positive");
+        assert!(prediction_lower < first.prediction.unwrap());
+        assert!(prediction_upper > first.prediction.unwrap());
+        assert!(prediction_lower <= first.confidence_lower.unwrap() + 1.0e-9);
+        assert!(prediction_upper >= first.confidence_upper.unwrap() - 1.0e-9);
 
         let link_payload = model
             .predict_new_variance(&data, GlmmPredictionScale::Link, NewReLevels::Error)
