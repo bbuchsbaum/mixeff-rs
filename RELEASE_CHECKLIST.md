@@ -10,6 +10,14 @@ See `VERSIONING.md` for what bump a change requires.
 - [ ] `CARGO_REGISTRY_TOKEN` secret set in GitHub Actions (publish is CI-driven).
 - [ ] Julia available locally with `MixedModels`, `DataFrames`, `JSON3`
       (for the local parity gate; CI also runs it on the tag).
+- [ ] PRIMA C library available if running the PRIMA feature gate locally:
+      `PRIMA_DIR` points to the install prefix containing `lib/libprimac`.
+      If the local machine lacks PRIMA, use the Linux CI `prima` leg as the
+      release evidence; `.github/workflows/ci.yml` installs PRIMA before
+      running the same Cargo command.
+- [ ] Supply-chain tools available: `cargo-deny` and `cargo-audit` installed
+      as Cargo subcommands, or available on `PATH` as `cargo-deny` and
+      `cargo-audit`.
 
 ## 1. Branch
 - [ ] `git switch -c release-prep-v<VER>`
@@ -22,7 +30,7 @@ See `VERSIONING.md` for what bump a change requires.
 - [ ] `cargo test --features nlopt`
 - [ ] `cargo test --no-default-features`
 - [ ] `cargo test --features unstable-internals`
-- [ ] `cargo test --no-default-features --features prima`
+- [ ] `cargo test --no-default-features --features prima`  # requires `libprimac`
 - [ ] `cargo test --release`
 - [ ] `cargo +1.85 test --no-default-features`   # MSRV must RUN, not just check
 - [ ] `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`
@@ -48,7 +56,8 @@ See `VERSIONING.md` for what bump a change requires.
 ## 4. Package verification
 - [ ] `cargo publish --dry-run`
 - [ ] `cargo package --list | sort`  -> confirm NO `MixedModels.jl/`,
-      `docs/`, `scripts/`, `tests/fixtures/`, `.github/`.
+      top-level `docs/*.md`, `scripts/`, `tests/`, `.github/`, `audit/`,
+      `=`, or `halving_bound`; confirm `docs/guide/` is included.
 - [ ] `.crate` size sanity (KBs–low MB, not the Julia tree).
 
 ## 5. Commit, PR, merge

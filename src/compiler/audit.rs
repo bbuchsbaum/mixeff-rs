@@ -2281,10 +2281,9 @@ fn zerocorr_factor_decorrelation_diagnostics(
             diagnostic
                 .payload
                 .insert("factor".to_string(), serde_json::json!(name));
-            diagnostic.payload.insert(
-                "n_levels".to_string(),
-                serde_json::json!(factor.n_levels()),
-            );
+            diagnostic
+                .payload
+                .insert("n_levels".to_string(), serde_json::json!(factor.n_levels()));
             diagnostic.payload.insert(
                 "reason".to_string(),
                 serde_json::json!("double_bar_factor_term"),
@@ -3186,8 +3185,7 @@ mod tests {
             .iter()
             .find(|d| {
                 d.code == DiagnosticCode::CovarianceAssumption
-                    && d.payload.get("reason")
-                        == Some(&serde_json::json!("double_bar_factor_term"))
+                    && d.payload.get("reason") == Some(&serde_json::json!("double_bar_factor_term"))
             })
             .expect("factor inside || should get a decorrelation diagnostic");
         assert_eq!(diagnostic.severity, DiagnosticSeverity::Info);
@@ -3218,8 +3216,9 @@ mod tests {
         assert!(audit.random_terms.iter().any(|term| term
             .diagnostics
             .iter()
-            .any(|d| d.payload.get("reason")
-                == Some(&serde_json::json!("double_bar_factor_term")))));
+            .any(
+                |d| d.payload.get("reason") == Some(&serde_json::json!("double_bar_factor_term"))
+            )));
     }
 
     #[test]
@@ -3228,15 +3227,25 @@ mod tests {
         let formula = parse_formula("y ~ x + (1 + x || subject)").unwrap();
         let semantic = compile_formula_ir(&formula);
         let audit = audit_design(&semantic, &categorical_subject_data(6));
-        assert!(!audit.diagnostics.iter().any(|d| d.payload.get("reason")
-            == Some(&serde_json::json!("double_bar_factor_term"))));
+        assert!(
+            !audit
+                .diagnostics
+                .iter()
+                .any(|d| d.payload.get("reason")
+                    == Some(&serde_json::json!("double_bar_factor_term")))
+        );
 
         // Correlated factor block: within-factor covariances are estimated.
         let formula = parse_formula("y ~ x + (1 + cond | subject)").unwrap();
         let semantic = compile_formula_ir(&formula);
         let audit = audit_design(&semantic, &categorical_subject_data(6));
-        assert!(!audit.diagnostics.iter().any(|d| d.payload.get("reason")
-            == Some(&serde_json::json!("double_bar_factor_term"))));
+        assert!(
+            !audit
+                .diagnostics
+                .iter()
+                .any(|d| d.payload.get("reason")
+                    == Some(&serde_json::json!("double_bar_factor_term")))
+        );
     }
 
     #[test]

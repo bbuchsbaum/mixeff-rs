@@ -1086,12 +1086,20 @@ fn cbpp_glmm_audit_report_matches_wire_fixture() {
         "binomial/logit"
     );
     assert_eq!(
+        json_section_by_title(&value, "Optimizer")["lines"][0]["status"],
+        "info"
+    );
+    assert_eq!(
         json_section_by_title(&value, "Optimizer")["lines"][0]["detail"],
-        "model has not been fitted"
+        "not applicable before fitting; model has not been fitted"
+    );
+    assert_eq!(
+        json_section_by_title(&value, "Inference")["lines"][0]["status"],
+        "info"
     );
     assert_eq!(
         json_section_by_title(&value, "Inference")["lines"][0]["detail"],
-        "LMM finite-sample methods such as Satterthwaite/KR are unsupported for GLMMs in compiler v0"
+        "not applicable before fitting; LMM finite-sample methods such as Satterthwaite/KR are unsupported for GLMMs in compiler v0"
     );
     assert_wire_fixture(
         "tests/fixtures/compiler_contract/cbpp_glmm_model_audit_report_v1.json",

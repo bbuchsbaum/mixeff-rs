@@ -90,57 +90,90 @@ impl ModelAuditReport {
     pub fn to_text(&self) -> String {
         self.to_string()
     }
+
+    /// Compact, upstream-authored report suitable for default wrapper prints.
+    ///
+    /// This preserves the same Audit Summary wording as the full Display impl,
+    /// then adds the Requested Model section without requiring downstream
+    /// wrappers to slice rendered text.
+    pub fn render_summary(&self) -> String {
+        let mut out = String::new();
+        write_report_summary(self, &mut out).expect("writing audit summary to String cannot fail");
+        if let Some(section) = self
+            .sections
+            .iter()
+            .find(|section| section.title == "Requested Model")
+        {
+            out.push('\n');
+            write_report_section(section, &mut out)
+                .expect("writing audit summary to String cannot fail");
+        }
+        out
+    }
 }
 
 impl fmt::Display for ModelAuditReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let attention = attention_lines(&self.sections);
-        let overview_status = overview_status(&attention);
+        write_report_summary(self, f)?;
 
-        writeln!(f, "Audit Summary:")?;
-        writeln!(
-            f,
-            "  overall [{}]: {}",
-            status_label(overview_status),
-            overview_detail(&attention)
-        )?;
-        if attention.is_empty() {
-            writeln!(
-                f,
-                "  attention [{}]: no warnings or unchecked inference-critical items",
-                status_label(AuditReportStatus::Ok)
-            )?;
-        } else {
-            for item in &attention {
-                writeln!(
-                    f,
-                    "  attention [{}]: {} / {}: {}",
-                    status_label(item.status),
-                    item.section,
-                    item.label,
-                    item.detail
-                )?;
-            }
-        }
-        writeln!(f)?;
-
-        for (section_index, section) in self.sections.iter().enumerate() {
-            if section_index > 0 {
-                writeln!(f)?;
-            }
-            writeln!(f, "{}:", section.title)?;
-            for line in &section.lines {
-                writeln!(
-                    f,
-                    "  {} [{}]: {}",
-                    line.label,
-                    status_label(line.status),
-                    line.detail
-                )?;
-            }
+        for section in &self.sections {
+            writeln!(f)?;
+            write_report_section(section, f)?;
         }
         Ok(())
     }
+}
+
+fn write_report_summary<W: fmt::Write + ?Sized>(
+    report: &ModelAuditReport,
+    f: &mut W,
+) -> fmt::Result {
+    let attention = attention_lines(&report.sections);
+    let overview_status = overview_status(&attention);
+
+    writeln!(f, "Audit Summary:")?;
+    writeln!(
+        f,
+        "  overall [{}]: {}",
+        status_label(overview_status),
+        overview_detail(&attention)
+    )?;
+    if attention.is_empty() {
+        writeln!(
+            f,
+            "  attention [{}]: no warnings or unchecked inference-critical items",
+            status_label(AuditReportStatus::Ok)
+        )?;
+    } else {
+        for item in &attention {
+            writeln!(
+                f,
+                "  attention [{}]: {} / {}: {}",
+                status_label(item.status),
+                item.section,
+                item.label,
+                item.detail
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn write_report_section<W: fmt::Write + ?Sized>(
+    section: &AuditReportSection,
+    f: &mut W,
+) -> fmt::Result {
+    writeln!(f, "{}:", section.title)?;
+    for line in &section.lines {
+        writeln!(
+            f,
+            "  {} [{}]: {}",
+            line.label,
+            status_label(line.status),
+            line.detail
+        )?;
+    }
+    Ok(())
 }
 
 struct AttentionLine {
@@ -152,13 +185,15 @@ struct AttentionLine {
 
 fn attention_lines(sections: &[AuditReportSection]) -> Vec<AttentionLine> {
     let mut lines = Vec::new();
+    let prefit = report_is_prefit(sections);
     for section in sections {
         for line in &section.lines {
             let high_priority = matches!(
                 line.status,
                 AuditReportStatus::Warning | AuditReportStatus::Error
             );
-            let unchecked_inference_critical = line.status == AuditReportStatus::NotAssessed
+            let unchecked_inference_critical = !prefit
+                && line.status == AuditReportStatus::NotAssessed
                 && matches!(
                     section.title.as_str(),
                     "Effective Covariance" | "Optimizer" | "Inference"
@@ -177,6 +212,17 @@ fn attention_lines(sections: &[AuditReportSection]) -> Vec<AttentionLine> {
     lines
 }
 
+fn report_is_prefit(sections: &[AuditReportSection]) -> bool {
+    sections
+        .iter()
+        .find(|section| section.title == "Model State")
+        .and_then(|section| section.lines.iter().find(|line| line.label == "fitted"))
+        .is_some_and(|line| {
+            line.status == AuditReportStatus::NotAssessed
+                && line.detail.contains("model has not been fitted")
+        })
+}
+
 fn overview_status(attention: &[AttentionLine]) -> AuditReportStatus {
     attention
         .iter()
@@ -187,7 +233,7 @@ fn overview_status(attention: &[AttentionLine]) -> AuditReportStatus {
 
 fn overview_detail(attention: &[AttentionLine]) -> String {
     if attention.is_empty() {
-        return "ready: no warnings or unchecked inference-critical items".to_string();
+        return "clean: no warnings or attention items".to_string();
     }
 
     let errors = attention
@@ -331,11 +377,11 @@ fn model_changes_status(changes: &[super::artifact::ModelStateChange]) -> AuditR
         AuditReportStatus::Ok
     } else if changes
         .iter()
-        .any(|change| change.status == super::artifact::ModelChangeStatus::Applied)
+        .any(|change| change.status == super::artifact::ModelChangeStatus::Recommended)
     {
-        AuditReportStatus::Info
-    } else {
         AuditReportStatus::Warning
+    } else {
+        AuditReportStatus::Info
     }
 }
 
@@ -1131,12 +1177,17 @@ fn dependence_path_kind_label(path: super::audit::DependencePathKind) -> &'stati
 
 fn effective_covariance_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
     if artifact.effective_covariance.is_empty() {
+        let line = if artifact.optimizer_certificate.is_none() {
+            not_applicable_before_fit_line(
+                "effective covariance rank",
+                "effective covariance rank is recorded after fitting",
+            )
+        } else {
+            not_assessed_line("effective covariance rank", "not assessed")
+        };
         return AuditReportSection {
             title: "Effective Covariance".to_string(),
-            lines: vec![not_assessed_line(
-                "effective covariance rank",
-                "not assessed",
-            )],
+            lines: vec![line],
         };
     }
 
@@ -1305,7 +1356,7 @@ fn optimizer_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
     let Some(certificate) = &artifact.optimizer_certificate else {
         return AuditReportSection {
             title: "Optimizer".to_string(),
-            lines: vec![not_assessed_line(
+            lines: vec![not_applicable_before_fit_line(
                 "certificate",
                 "model has not been fitted",
             )],
@@ -3099,17 +3150,24 @@ fn certification_quality_status(
 }
 
 fn inference_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
+    let prefit = artifact.optimizer_certificate.is_none();
     let mut lines = vec![match &artifact.model_boundary.inference_availability {
         InferenceAvailability::Available { method } => AuditReportLine {
             label: "finite-sample inference".to_string(),
             status: AuditReportStatus::Ok,
             detail: format!("available via {method}"),
         },
+        InferenceAvailability::Unsupported { reason } if prefit => {
+            not_applicable_before_fit_line("finite-sample inference", reason)
+        }
         InferenceAvailability::Unsupported { reason } => AuditReportLine {
             label: "finite-sample inference".to_string(),
             status: AuditReportStatus::NotAssessed,
             detail: reason.clone(),
         },
+        InferenceAvailability::NotAssessed { reason } if prefit => {
+            not_applicable_before_fit_line("finite-sample inference", reason)
+        }
         InferenceAvailability::NotAssessed { reason } => {
             not_assessed_line("finite-sample inference", reason)
         }
@@ -3121,11 +3179,17 @@ fn inference_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
             status: AuditReportStatus::Ok,
             detail: "available".to_string(),
         },
+        DerivativeAvailability::NotAvailable { reason } if prefit => {
+            not_applicable_before_fit_line("covariance derivatives", reason)
+        }
         DerivativeAvailability::NotAvailable { reason } => AuditReportLine {
             label: "covariance derivatives".to_string(),
             status: AuditReportStatus::NotAssessed,
             detail: reason.clone(),
         },
+        DerivativeAvailability::NotAssessed { reason } if prefit => {
+            not_applicable_before_fit_line("covariance derivatives", reason)
+        }
         DerivativeAvailability::NotAssessed { reason } => {
             not_assessed_line("covariance derivatives", reason)
         }
@@ -3311,6 +3375,14 @@ fn not_assessed_line(label: &str, detail: &str) -> AuditReportLine {
         label: label.to_string(),
         status: AuditReportStatus::NotAssessed,
         detail: detail.to_string(),
+    }
+}
+
+fn not_applicable_before_fit_line(label: &str, detail: &str) -> AuditReportLine {
+    AuditReportLine {
+        label: label.to_string(),
+        status: AuditReportStatus::Info,
+        detail: format!("not applicable before fitting; {detail}"),
     }
 }
 
@@ -3521,6 +3593,26 @@ mod tests {
         data
     }
 
+    fn sleepstudy_like_data() -> DataFrame {
+        let mut data = DataFrame::new();
+        let mut reaction = Vec::new();
+        let mut days = Vec::new();
+        let mut subjects = Vec::new();
+
+        for subject in 0..18 {
+            for day in 0..10 {
+                reaction.push(250.0 + subject as f64 + 10.0 * day as f64);
+                days.push(day as f64);
+                subjects.push(format!("S{subject:02}"));
+            }
+        }
+
+        data.add_numeric("Reaction", reaction).unwrap();
+        data.add_numeric("Days", days).unwrap();
+        data.add_categorical("Subject", subjects).unwrap();
+        data
+    }
+
     fn repeated_unmodeled_data() -> DataFrame {
         let mut data = DataFrame::new();
         data.add_numeric("y", vec![1.0, 2.0, 2.5, 3.5]).unwrap();
@@ -3611,6 +3703,54 @@ mod tests {
         assert!(text.contains("Policy Recommendations"));
         assert!(text.contains("Optimizer"));
         assert!(text.contains("model has not been fitted"));
+    }
+
+    #[test]
+    fn prefit_canonical_formula_summary_does_not_read_as_instability() {
+        let formula = parse_formula("Reaction ~ Days + (Days | Subject)").unwrap();
+        let semantic = compile_formula_ir(&formula);
+        let mut artifact = CompiledModelArtifact::new(formula.to_string(), semantic);
+        artifact.attach_design_audit(&sleepstudy_like_data());
+
+        let report = ModelAuditReport::from_artifact(&artifact);
+        let model_state = report
+            .sections
+            .iter()
+            .find(|section| section.title == "Model State")
+            .expect("Model State section");
+        let changes = model_state
+            .lines
+            .iter()
+            .find(|line| line.label == "changes")
+            .expect("changes line");
+        assert_eq!(changes.status, AuditReportStatus::Info);
+        assert!(changes.detail.contains("Diagnostic:NotAReduction"));
+
+        let text = report.to_text();
+        assert!(text.contains("overall [OK]: clean: no warnings or attention items"));
+        assert!(text.contains("changes [INFO]: Diagnostic:NotAReduction:(Days | Subject)"));
+        assert!(text.contains(
+            "effective covariance rank [INFO]: not applicable before fitting; effective covariance rank is recorded after fitting"
+        ));
+        assert!(text.contains(
+            "certificate [INFO]: not applicable before fitting; model has not been fitted"
+        ));
+        assert!(text.contains(
+            "finite-sample inference [INFO]: not applicable before fitting; finite-sample inference is not implemented in compiler v0"
+        ));
+        assert!(!text.contains("not checked item(s)"));
+        assert!(!text.contains("review attention lines before treating inference as routine"));
+        assert!(!text.contains("attention [NOT CHECKED]"));
+
+        let summary = report.render_summary();
+        assert!(summary.starts_with("Audit Summary:\n"));
+        assert!(summary.contains("Requested Model:\n"));
+        assert!(
+            summary.contains("attention [OK]: no warnings or unchecked inference-critical items")
+        );
+        assert!(!summary.contains("\nModel State:"));
+        assert!(!summary.contains("\nOptimizer:"));
+        assert!(!summary.contains("review attention lines before treating inference as routine"));
     }
 
     #[test]

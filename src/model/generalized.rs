@@ -1113,9 +1113,7 @@ impl GeneralizedLinearMixedModel {
                 row.prediction_lower = None;
                 row.prediction_upper = None;
                 if future_observation_support.is_ok() {
-                    if let (Some(eta), Some(link_se)) =
-                        (link_predictions[row.row], link_scale_se)
-                    {
+                    if let (Some(eta), Some(link_se)) = (link_predictions[row.row], link_scale_se) {
                         match self.glmm_future_observation(eta, link_se, level) {
                             Ok(future) => {
                                 row.prediction_variance =
@@ -1322,9 +1320,7 @@ impl GeneralizedLinearMixedModel {
                         let mu = mu.max(GLMM_PREDICTIVE_MEAN_FLOOR);
                         NegativeBinomialDist::new(size, size / (size + mu))
                             .map(|distribution| (distribution, *w))
-                            .map_err(|err| {
-                                format!("negative-binomial predictive component: {err}")
-                            })
+                            .map_err(|err| format!("negative-binomial predictive component: {err}"))
                     })
                     .collect::<std::result::Result<Vec<_>, String>>()?;
                 let cdf = |t: u64| {
@@ -1363,9 +1359,9 @@ impl GeneralizedLinearMixedModel {
                         .sum::<f64>()
                 };
                 let quantile = |p: f64| {
-                    continuous_mixture_quantile(&cdf, p, Some(0.0), mean, spread).ok_or_else(
-                        || "gamma predictive quantile search did not converge".to_string(),
-                    )
+                    continuous_mixture_quantile(&cdf, p, Some(0.0), mean, spread).ok_or_else(|| {
+                        "gamma predictive quantile search did not converge".to_string()
+                    })
                 };
                 (quantile(lower_p)?, quantile(upper_p)?)
             }
@@ -1386,12 +1382,9 @@ impl GeneralizedLinearMixedModel {
                         .sum::<f64>()
                 };
                 let quantile = |p: f64| {
-                    continuous_mixture_quantile(&cdf, p, Some(0.0), mean, spread).ok_or_else(
-                        || {
-                            "inverse-Gaussian predictive quantile search did not converge"
-                                .to_string()
-                        },
-                    )
+                    continuous_mixture_quantile(&cdf, p, Some(0.0), mean, spread).ok_or_else(|| {
+                        "inverse-Gaussian predictive quantile search did not converge".to_string()
+                    })
                 };
                 (quantile(lower_p)?, quantile(upper_p)?)
             }
@@ -3716,8 +3709,7 @@ impl GeneralizedLinearMixedModel {
         }
         let hessian =
             self.finite_difference_pirls_profiled_hessian(theta, &interior_indices, n_agq)?;
-        let curvature =
-            certify_glmm_joint_hessian(&hessian, "profiled fast-PIRLS theta Hessian")?;
+        let curvature = certify_glmm_joint_hessian(&hessian, "profiled fast-PIRLS theta Hessian")?;
 
         Ok(PirlsProfiledOptimumCertificate {
             gradient_max_abs,
@@ -6435,7 +6427,11 @@ fn standard_normal_ln_cdf(x: f64) -> f64 {
         // Mills-ratio asymptotic: Phi(x) ~ phi(x) / |x| for x -> -inf.
         -0.5 * x * x - (-x).ln() - 0.5 * (2.0 * std::f64::consts::PI).ln()
     } else {
-        Normal::new(0.0, 1.0).unwrap().cdf(x).max(f64::MIN_POSITIVE).ln()
+        Normal::new(0.0, 1.0)
+            .unwrap()
+            .cdf(x)
+            .max(f64::MIN_POSITIVE)
+            .ln()
     }
 }
 
@@ -10114,6 +10110,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "nlopt")]
     fn test_glmm_pirls_certified_prediction_variance_rows_available() {
         let (model, data) = glmm_certified_pirls_poisson_fixture();
         assert!(
@@ -10163,6 +10160,33 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(feature = "nlopt"))]
+    fn test_glmm_pirls_native_prediction_variance_rows_degrade_without_certificate() {
+        let (model, data) = glmm_certified_pirls_poisson_fixture();
+        assert!(
+            matches!(model.pirls_profiled_optimum_certificate, Some(Err(_))),
+            "native fixture should keep uncertified geometry explicit: {:?}",
+            model.pirls_profiled_optimum_certificate
+        );
+
+        let payload = model
+            .predict_new_variance(&data, GlmmPredictionScale::Response, NewReLevels::Error)
+            .unwrap();
+        assert_eq!(
+            payload.method,
+            PredictionVarianceMethod::GlmmPirlsLaplaceWorkingDelta
+        );
+        for row in &payload.rows {
+            assert_eq!(row.status, PredictionVarianceStatus::Degraded);
+            let reason = row.reason.as_deref().unwrap_or("");
+            assert!(reason.contains("the fast-PIRLS profiled optimum certificate was not issued"));
+            assert!(reason.contains("GlmmFitOptions::joint_laplace()"));
+            assert!(row.se_fit.unwrap() > 0.0);
+            assert!(row.prediction_variance.unwrap() > row.combined_variance.unwrap());
+        }
+    }
+
+    #[test]
     fn test_glmm_pirls_uncertified_fit_keeps_degraded_with_refit_guidance() {
         let (mut model, data) = glmm_certified_pirls_poisson_fixture();
         model.pirls_profiled_optimum_certificate =
@@ -10192,7 +10216,11 @@ mod tests {
             .predict_new_variance(&data, GlmmPredictionScale::Link, NewReLevels::Error)
             .unwrap();
         let first = &payload.rows[0];
-        assert_eq!(first.status, PredictionVarianceStatus::Available);
+        if matches!(model.pirls_profiled_optimum_certificate, Some(Ok(_))) {
+            assert_eq!(first.status, PredictionVarianceStatus::Available);
+        } else {
+            assert_eq!(first.status, PredictionVarianceStatus::Degraded);
+        }
         assert_eq!(first.prediction_variance, None);
         assert_eq!(first.prediction_lower, None);
         assert_eq!(first.prediction_upper, None);

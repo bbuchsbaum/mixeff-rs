@@ -78,7 +78,9 @@ fn load_combined() -> Result<DataFrame, Box<dyn std::error::Error>> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let max_feval = std::env::args().nth(1).map(|raw| raw.parse::<i64>().unwrap());
+    let max_feval = std::env::args()
+        .nth(1)
+        .map(|raw| raw.parse::<i64>().unwrap());
     let reference: Value =
         serde_json::from_str(&std::fs::read_to_string(fixture_path("reference.json"))?)?;
     let reference_loglik = reference["models"]["combined"]["logLik"].as_f64().unwrap();
@@ -161,7 +163,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for (index, entry) in optsum.fit_log.iter().enumerate() {
             if entry.objective < best {
                 best = entry.objective;
-                println!("  eval {:>4}: objective={:.6} (new best)", index + 1, entry.objective);
+                println!(
+                    "  eval {:>4}: objective={:.6} (new best)",
+                    index + 1,
+                    entry.objective
+                );
             }
         }
         return Ok(());
@@ -310,7 +316,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             lme4_part_int,
             lme4_part_soa,
         ];
-        for (label, theta) in [("unmasked-first", lme4_theta), ("masked-first", lme4_theta_alt)] {
+        for (label, theta) in [
+            ("unmasked-first", lme4_theta),
+            ("masked-first", lme4_theta_alt),
+        ] {
             let mut walker = GeneralizedLinearMixedModel::new(
                 lme4_formula.clone(),
                 &data,
@@ -341,10 +350,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("profiled theta: {:?}", profiled.theta());
     let candidates: [(&str, Vec<f64>); 7] = [
-        (
-            "sanity: profiled fit theta",
-            profiled.theta().to_vec(),
-        ),
+        ("sanity: profiled fit theta", profiled.theta().to_vec()),
         (
             "item,part(int,mask,soa)",
             vec![lme4_item_int, lme4_part_int, lme4_part_mask, lme4_part_soa],
@@ -521,7 +527,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (index, entry) in log.iter().enumerate() {
         if entry.objective < best {
             best = entry.objective;
-            println!("  eval {:>4}: objective={:.6} (new best)", index + 1, entry.objective);
+            println!(
+                "  eval {:>4}: objective={:.6} (new best)",
+                index + 1,
+                entry.objective
+            );
         }
     }
 

@@ -35,9 +35,12 @@ fn csv_row_count(relative: &str) -> usize {
         .has_headers(true)
         .from_path(&path)
         .unwrap_or_else(|error| panic!("open {path:?}: {error}"));
-    rdr.records()
-        .map(|record| record.unwrap_or_else(|error| panic!("read {path:?}: {error}")))
-        .count()
+    let mut count = 0usize;
+    for record in rdr.records() {
+        record.unwrap_or_else(|error| panic!("read {path:?}: {error}"));
+        count += 1;
+    }
+    count
 }
 
 fn load_prepared_case(
@@ -113,6 +116,7 @@ fn intact_glmm_data() -> DataFrame {
     )
 }
 
+#[cfg(all(not(feature = "nlopt"), feature = "unstable-internals"))]
 fn aphantasia_budget_grid() -> Vec<i64> {
     match std::env::var("MIXEFF_APHANTASIA_BUDGETS") {
         Ok(raw) => raw
@@ -129,6 +133,7 @@ fn aphantasia_budget_grid() -> Vec<i64> {
     }
 }
 
+#[cfg(all(not(feature = "nlopt"), feature = "unstable-internals"))]
 fn max_abs_fixef_drift(model: &GeneralizedLinearMixedModel, reference: &Value) -> f64 {
     let expected = reference["fixef"]
         .as_object()
@@ -187,8 +192,10 @@ fn aphantasia_fixture_snapshot_has_expected_reference_contract() {
     let cargo_toml =
         fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
             .expect("read Cargo.toml");
+    let fixtures_excluded =
+        cargo_toml.contains("\"tests/fixtures/\"") || cargo_toml.contains("\"tests/\"");
     assert!(
-        cargo_toml.contains("\"tests/fixtures/\""),
+        fixtures_excluded,
         "aphantasia fixture must remain under the crate exclude path"
     );
 
@@ -243,6 +250,7 @@ fn intact_prepared_frame_builds_native_glmm_design_without_refitting() {
     assert_eq!(model.theta().len(), 4);
 }
 
+#[cfg(all(not(feature = "nlopt"), feature = "unstable-internals"))]
 fn combined_glmm_data() -> DataFrame {
     load_prepared_case(
         "combined",

@@ -193,8 +193,8 @@
       "lines": [
         {
           "label": "effective covariance rank",
-          "status": "not_assessed",
-          "detail": "not assessed"
+          "status": "info",
+          "detail": "not applicable before fitting; effective covariance rank is recorded after fitting"
         }
       ]
     },
@@ -213,8 +213,8 @@
       "lines": [
         {
           "label": "certificate",
-          "status": "not_assessed",
-          "detail": "model has not been fitted"
+          "status": "info",
+          "detail": "not applicable before fitting; model has not been fitted"
         }
       ]
     },
@@ -223,13 +223,13 @@
       "lines": [
         {
           "label": "finite-sample inference",
-          "status": "not_assessed",
-          "detail": "finite-sample inference is not implemented in compiler v0"
+          "status": "info",
+          "detail": "not applicable before fitting; finite-sample inference is not implemented in compiler v0"
         },
         {
           "label": "covariance derivatives",
-          "status": "not_assessed",
-          "detail": "compiler v0 does not expose covariance derivative certificates"
+          "status": "info",
+          "detail": "not applicable before fitting; compiler v0 does not expose covariance derivative certificates"
         }
       ]
     },

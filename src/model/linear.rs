@@ -7193,9 +7193,9 @@ impl LinearMixedModel {
                         statistics.clone(),
                         estimability.clone(),
                     );
-                    if satterthwaite.status == InferenceStatus::Available {
-                        satterthwaite
-                    } else if satterthwaite.hypothesis.n_contrasts() != 1 {
+                    if satterthwaite.status == InferenceStatus::Available
+                        || satterthwaite.hypothesis.n_contrasts() != 1
+                    {
                         satterthwaite
                     } else {
                         let mut wald = fixed_effect_test_asymptotic_wald_z(
@@ -16069,9 +16069,7 @@ mod tests {
         let errors = artifact
             .diagnostics
             .iter()
-            .filter(|diag| {
-                diag.severity == crate::compiler::diagnostics::DiagnosticSeverity::Error
-            })
+            .filter(|diag| diag.severity == crate::compiler::diagnostics::DiagnosticSeverity::Error)
             .map(|diag| diag.message.clone())
             .collect::<Vec<_>>();
         assert!(
