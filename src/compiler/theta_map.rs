@@ -127,20 +127,31 @@ impl ThetaMap {
         }
     }
 
-    pub fn from_split_scalar_random_term_with_optimizer_basis(
+    /// Theta map for one split (`||`) random term that materialized into the
+    /// contiguous `lambda_indices` columns of the shared optimizer block. A
+    /// numeric coefficient occupies one column (Scalar); a factor coefficient
+    /// expands to one column per level contrast, each with an independent
+    /// variance (Diagonal).
+    pub fn from_split_random_term_with_optimizer_basis(
         term_index: usize,
         term: &RandomTermIr,
         global_start: usize,
         optimizer_basis: Vec<String>,
-        lambda_index: usize,
+        lambda_indices: std::ops::Range<usize>,
     ) -> Self {
-        ThetaMap::Scalar(ThetaMapBlock::from_split_scalar_random_term(
+        let scalar = lambda_indices.len() == 1;
+        let block = ThetaMapBlock::from_split_random_term(
             term_index,
             term,
             global_start,
             optimizer_basis,
-            lambda_index,
-        ))
+            lambda_indices,
+        );
+        if scalar {
+            ThetaMap::Scalar(block)
+        } else {
+            ThetaMap::Diagonal(block)
+        }
     }
 
     pub fn block(&self) -> &ThetaMapBlock {
@@ -201,25 +212,38 @@ impl ThetaMapBlock {
         }
     }
 
-    fn from_split_scalar_random_term(
+    fn from_split_random_term(
         term_index: usize,
         term: &RandomTermIr,
         global_start: usize,
         optimizer_basis: Vec<String>,
-        lambda_index: usize,
+        lambda_indices: std::ops::Range<usize>,
     ) -> Self {
         let user_basis: Vec<String> = term.basis.iter().map(|b| b.name.clone()).collect();
-        let theta_slots = vec![make_slot_with_lambda(
-            term_index,
-            0,
-            lambda_index,
-            lambda_index,
-            lambda_index,
-            lambda_index,
-            global_start,
-            &optimizer_basis,
-        )];
-        let source_parmap = vec![(term_index, lambda_index, lambda_index)];
+        let covariance_family = if lambda_indices.len() == 1 {
+            CovarianceFamily::Scalar
+        } else {
+            CovarianceFamily::Diagonal
+        };
+        let theta_slots = lambda_indices
+            .clone()
+            .enumerate()
+            .map(|(local, lambda_index)| {
+                make_slot_with_lambda(
+                    term_index,
+                    local,
+                    lambda_index,
+                    lambda_index,
+                    lambda_index,
+                    lambda_index,
+                    global_start + local,
+                    &optimizer_basis,
+                )
+            })
+            .collect();
+        let source_parmap = lambda_indices
+            .map(|lambda_index| (term_index, lambda_index, lambda_index))
+            .collect();
 
         Self {
             schema_name: THETA_MAP_SCHEMA.to_string(),
@@ -227,8 +251,8 @@ impl ThetaMapBlock {
             term_id: term.id.clone(),
             term_index,
             group: term.group.label(),
-            covariance_family: CovarianceFamily::Scalar,
-            support_status: CovarianceSupportStatus::Supported,
+            support_status: covariance_family.support_status(),
+            covariance_family,
             user_basis,
             optimizer_basis,
             theta_slots,

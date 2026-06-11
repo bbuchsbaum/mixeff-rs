@@ -1186,6 +1186,7 @@ impl CompiledModelArtifact {
                 ));
                 return;
             };
+            let mut split_lambda_cursor = 0;
             for &semantic_index in source_group {
                 let Some(term) = self
                     .active_semantic_model()
@@ -1201,9 +1202,12 @@ impl CompiledModelArtifact {
                     return;
                 };
                 let map = if source_group.len() > 1 {
-                    let lambda_index =
-                        split_term_optimizer_basis_index(term, &optimizer_basis[optimizer_index]);
-                    let Some(lambda_index) = lambda_index else {
+                    let lambda_indices = split_term_optimizer_basis_range(
+                        term,
+                        &optimizer_basis[optimizer_index],
+                        split_lambda_cursor,
+                    );
+                    let Some(lambda_indices) = lambda_indices else {
                         self.diagnostics.push(Diagnostic::new(
                             super::diagnostics::DiagnosticCode::Unsupported,
                             super::diagnostics::DiagnosticSeverity::Error,
@@ -1215,12 +1219,13 @@ impl CompiledModelArtifact {
                         ));
                         return;
                     };
-                    ThetaMap::from_split_scalar_random_term_with_optimizer_basis(
+                    split_lambda_cursor = lambda_indices.end;
+                    ThetaMap::from_split_random_term_with_optimizer_basis(
                         optimizer_index,
                         term,
                         global_start,
                         optimizer_basis[optimizer_index].clone(),
-                        lambda_index,
+                        lambda_indices,
                     )
                 } else {
                     ThetaMap::from_random_term_with_optimizer_basis(
@@ -1232,6 +1237,20 @@ impl CompiledModelArtifact {
                 };
                 global_start += map.n_free();
                 theta_maps.push(map);
+            }
+            if source_group.len() > 1
+                && split_lambda_cursor != optimizer_basis[optimizer_index].len()
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    super::diagnostics::DiagnosticCode::Unsupported,
+                    super::diagnostics::DiagnosticSeverity::Error,
+                    super::diagnostics::DiagnosticStage::Parameterization,
+                    format!(
+                        "split random-terms cover {split_lambda_cursor} of {} optimizer-basis columns",
+                        optimizer_basis[optimizer_index].len()
+                    ),
+                ));
+                return;
             }
         }
 
@@ -1318,12 +1337,66 @@ fn optimizer_source_groups(semantic_model: &SemanticModel) -> Vec<Vec<usize>> {
     groups
 }
 
-fn split_term_optimizer_basis_index(
+/// The contiguous run of materialized optimizer-basis columns belonging to one
+/// split (`||`) random term, starting at `cursor`. Materialization preserves
+/// semantic coefficient order, so split terms claim consecutive runs: a
+/// numeric coefficient claims its verbatim column, a factor coefficient claims
+/// one level-coded column per contrast.
+fn split_term_optimizer_basis_range(
     term: &super::ir::RandomTermIr,
     optimizer_basis: &[String],
-) -> Option<usize> {
+    cursor: usize,
+) -> Option<std::ops::Range<usize>> {
     let basis = term.basis.first()?;
-    optimizer_basis.iter().position(|name| name == &basis.name)
+    let mut end = cursor;
+    while end < optimizer_basis.len()
+        && optimizer_basis_column_materializes(&optimizer_basis[end], &basis.name)
+    {
+        end += 1;
+    }
+    (end > cursor).then_some(cursor..end)
+}
+
+/// Whether a materialized optimizer-basis column name is an expansion of a
+/// semantic basis coefficient. Numeric coefficients materialize verbatim
+/// ("x"), factor coefficients expand to level-coded columns ("f: b"), and
+/// interaction coefficients ("x:f") expand each factor component in place
+/// ("x:f: b", "f: a:x").
+fn optimizer_basis_column_materializes(column: &str, coefficient: &str) -> bool {
+    let components: Vec<&str> = coefficient.split(':').collect();
+    column_matches_coefficient_components(column, &components)
+}
+
+fn column_matches_coefficient_components(column: &str, components: &[&str]) -> bool {
+    let Some((component, rest_components)) = components.split_first() else {
+        return column.is_empty();
+    };
+    let Some(rest) = column.strip_prefix(component) else {
+        return false;
+    };
+    if rest_components.is_empty() {
+        // Final component: a verbatim numeric column or a level-coded factor
+        // expansion ("f: b").
+        return rest.is_empty() || rest.starts_with(": ");
+    }
+    // Numeric component followed by the ":" interaction separator.
+    if let Some(next) = rest.strip_prefix(':') {
+        if column_matches_coefficient_components(next, rest_components) {
+            return true;
+        }
+    }
+    // Factor component expanded to ": <level>" before the interaction
+    // separator; the level itself may contain ':' so try every cut point.
+    if let Some(level_rest) = rest.strip_prefix(": ") {
+        let mut search = level_rest;
+        while let Some(position) = search.find(':') {
+            if column_matches_coefficient_components(&search[position + 1..], rest_components) {
+                return true;
+            }
+            search = &search[position + 1..];
+        }
+    }
+    false
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1881,6 +1954,79 @@ mod tests {
         assert_eq!(block.user_basis, vec!["cond".to_string()]);
         assert_eq!(block.optimizer_basis, optimizer_basis[0].clone());
         assert_eq!(artifact.theta_maps[0].n_free(), 6);
+    }
+
+    #[test]
+    fn split_zerocorr_factor_terms_map_to_expanded_optimizer_basis() {
+        let formula = parse_formula("y ~ x + f + (1 + f + x || g)").unwrap();
+        let semantic = compile_formula_ir(&formula);
+        let mut artifact = CompiledModelArtifact::new(formula.to_string(), semantic);
+        // A three-level factor f expands to two level-contrast columns in the
+        // shared diagonal optimizer block.
+        let optimizer_basis = vec![vec![
+            "intercept".to_string(),
+            "f: b".to_string(),
+            "f: c".to_string(),
+            "x".to_string(),
+        ]];
+
+        artifact.rebuild_theta_maps_for_optimizer_order_with_basis(&[0], &optimizer_basis);
+
+        let errors = artifact
+            .diagnostics
+            .iter()
+            .filter(|diag| {
+                diag.severity == crate::compiler::diagnostics::DiagnosticSeverity::Error
+            })
+            .map(|diag| diag.message.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            errors.is_empty(),
+            "split factor rebuild should not record error diagnostics: {errors:?}"
+        );
+
+        assert_eq!(artifact.theta_maps.len(), 3);
+        let intercept_map = &artifact.theta_maps[0];
+        assert_eq!(intercept_map.n_free(), 1);
+        assert!(matches!(intercept_map, ThetaMap::Scalar(_)));
+        assert_eq!(intercept_map.block().theta_slots[0].lambda_row, 0);
+
+        let factor_map = &artifact.theta_maps[1];
+        assert_eq!(factor_map.block().user_basis, vec!["f".to_string()]);
+        assert_eq!(factor_map.n_free(), 2);
+        assert!(matches!(factor_map, ThetaMap::Diagonal(_)));
+        let factor_slots = &factor_map.block().theta_slots;
+        assert_eq!(
+            factor_slots
+                .iter()
+                .map(|slot| (slot.lambda_row, slot.lambda_col, slot.global_index))
+                .collect::<Vec<_>>(),
+            vec![(1, 1, Some(1)), (2, 2, Some(2))]
+        );
+        assert_eq!(factor_map.block().optimizer_basis, optimizer_basis[0]);
+
+        let slope_map = &artifact.theta_maps[2];
+        assert_eq!(slope_map.n_free(), 1);
+        assert_eq!(slope_map.block().theta_slots[0].lambda_row, 3);
+        assert_eq!(slope_map.block().theta_slots[0].global_index, Some(3));
+
+        assert_eq!(artifact.covariance_parameter_traces.len(), 4);
+    }
+
+    #[test]
+    fn optimizer_basis_column_materialization_handles_factor_expansions() {
+        assert!(optimizer_basis_column_materializes("x", "x"));
+        assert!(optimizer_basis_column_materializes("intercept", "intercept"));
+        assert!(optimizer_basis_column_materializes("f: b", "f"));
+        assert!(optimizer_basis_column_materializes("x:f: b", "x:f"));
+        assert!(optimizer_basis_column_materializes("f: a:x", "f:x"));
+        assert!(optimizer_basis_column_materializes("f: a:g: b", "f:g"));
+
+        assert!(!optimizer_basis_column_materializes("x2", "x"));
+        assert!(!optimizer_basis_column_materializes("g: a", "f"));
+        assert!(!optimizer_basis_column_materializes("x", "f"));
+        assert!(!optimizer_basis_column_materializes("f", "f:x"));
+        assert!(!optimizer_basis_column_materializes("f: a", "f:x"));
     }
 
     #[test]

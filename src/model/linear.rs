@@ -16038,6 +16038,68 @@ mod tests {
     }
 
     #[test]
+    fn test_zerocorr_factor_split_terms_record_no_error_diagnostics() {
+        let n = 60;
+        let mut data = DataFrame::new();
+        let x: Vec<f64> = (0..n).map(|i| (i as f64 * 0.37).sin()).collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| {
+                let group_effect = ((i / 6) as f64 * 1.3).sin();
+                let f_effect = if i % 2 == 0 { 0.0 } else { 0.4 };
+                0.5 * x[i] + f_effect + group_effect + (i as f64 * 2.1).sin() * 0.3
+            })
+            .collect();
+        data.add_numeric("y", y).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_categorical(
+            "f",
+            (0..n)
+                .map(|i| if i % 2 == 0 { "a" } else { "b" }.to_string())
+                .collect(),
+        )
+        .unwrap();
+        data.add_categorical("g", (0..n).map(|i| format!("g{}", i / 6)).collect())
+            .unwrap();
+
+        let formula = parse_formula("y ~ x + f + (1 + f + x || g)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+
+        assert_eq!(model.reterms[0].cnames, vec!["(Intercept)", "f: b", "x"]);
+        let artifact = model.compiler_artifact();
+        let errors = artifact
+            .diagnostics
+            .iter()
+            .filter(|diag| {
+                diag.severity == crate::compiler::diagnostics::DiagnosticSeverity::Error
+            })
+            .map(|diag| diag.message.clone())
+            .collect::<Vec<_>>();
+        assert!(
+            errors.is_empty(),
+            "||-with-factor construction should not record error diagnostics: {errors:?}"
+        );
+        assert_eq!(artifact.theta_maps.len(), 3);
+        let factor_map = &artifact.theta_maps[1];
+        assert_eq!(factor_map.block().user_basis, vec!["f".to_string()]);
+        assert_eq!(factor_map.block().theta_slots[0].lambda_row, 1);
+        let total_free: usize = artifact.theta_maps.iter().map(|map| map.n_free()).sum();
+        assert_eq!(total_free, model.theta().len());
+
+        model.fit(false).unwrap();
+        assert!(model.theta().iter().all(|value| value.is_finite()));
+        let post_fit_basis_errors = model
+            .compiler_artifact()
+            .diagnostics
+            .iter()
+            .filter(|diag| {
+                diag.severity == crate::compiler::diagnostics::DiagnosticSeverity::Error
+                    && diag.message.contains("optimizer basis")
+            })
+            .count();
+        assert_eq!(post_fit_basis_errors, 0);
+    }
+
+    #[test]
     fn test_singular_fixture_maximal_model_has_too_rich_information_budget() {
         let (data, _) = crate::datasets::load("singular").unwrap();
         let formula = parse_formula("y ~ 1 + A * B * C + (A * B * C | group)").unwrap();
