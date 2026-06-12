@@ -39,6 +39,7 @@
         "method": "asymptotic_wald_z",
         "status": "available",
         "reliability": "low",
+        "reliability_reason": "asymptotic_wald_z_fallback",
         "estimability": {
           "estimand": "fixed_contrast",
           "assessment": {
@@ -67,6 +68,7 @@
         "method": "asymptotic_wald_z",
         "status": "available",
         "reliability": "low",
+        "reliability_reason": "asymptotic_wald_z_fallback",
         "estimability": {
           "estimand": "fixed_contrast",
           "assessment": {

@@ -20,16 +20,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::compiler::{
-    compile_formula_ir, BasisLoading, BootstrapInferenceDetails, CompiledModelArtifact,
-    CompilerPolicy, ContrastFamilyDetails, ConvergenceVerification, ConvergenceVerificationRun,
-    ConvergenceVerificationStatus, CovarianceFamily, CovarianceFamilyTransition, DesignAudit,
-    Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticStage, DominantLoading,
-    EffectiveCovarianceSummary, EffectiveRankStatus, EstimabilityAssessment, EstimabilityStatus,
-    EvidenceMethod, FixedContrastEstimability, FixedEffectCovarianceDetails,
-    FixedEffectCovarianceMatrix, FixedEffectCovarianceMethod, FixedEffectHypothesis,
-    FixedEffectInferenceDetails, FixedEffectInferenceMethod, FixedEffectInferenceRow,
-    FixedEffectInferenceRowKind, FixedEffectInferenceStatus, FixedEffectInferenceTable,
-    FixedEffectNullTargetSummary, FixedEffectStatisticName, FixedEffectTermTestType,
+    compile_formula_ir, BasisLoading, BootstrapInferenceDetails, CertificateCheck,
+    CompiledModelArtifact, CompilerPolicy, ContrastFamilyDetails, ConvergenceVerification,
+    ConvergenceVerificationRun, ConvergenceVerificationStatus, CovarianceFamily,
+    CovarianceFamilyTransition, DesignAudit, Diagnostic, DiagnosticCode, DiagnosticSeverity,
+    DiagnosticStage, DominantLoading, EffectiveCovarianceSummary, EffectiveRankStatus,
+    EstimabilityAssessment, EstimabilityStatus, EvidenceMethod, FitStatus,
+    FixedContrastEstimability, FixedEffectCovarianceDetails, FixedEffectCovarianceMatrix,
+    FixedEffectCovarianceMethod, FixedEffectHypothesis, FixedEffectInferenceDetails,
+    FixedEffectInferenceMethod, FixedEffectInferenceRow, FixedEffectInferenceRowKind,
+    FixedEffectInferenceStatus, FixedEffectInferenceTable, FixedEffectNullTargetSummary,
+    FixedEffectReliabilityReason, FixedEffectStatisticName, FixedEffectTermTestType,
     FixedEffectTest, FixedEffectTestMethod, InferenceMethod, InferenceStatus,
     InterpretableSubmodel, KenwardRogerInferenceDetails, ModelAuditReport, ModelStateChange,
     ModelStateSummary, OptimizerCertificate, OptimizerDerivativeEvidence, PolicyAction,
@@ -7791,6 +7792,52 @@ impl LinearMixedModel {
         FixedEffectInferenceTable::new(rows)
     }
 
+    fn satterthwaite_fixed_effect_reliability(&self, denominator_df: f64) -> ReliabilityGrade {
+        if !denominator_df.is_finite() || denominator_df <= 2.0 {
+            return ReliabilityGrade::Low;
+        }
+
+        let Some(certificate) = &self.compiler_artifact.optimizer_certificate else {
+            return ReliabilityGrade::Low;
+        };
+
+        let clean_interior = certificate.status == FitStatus::ConvergedInterior
+            && certificate.evidence.optimizer_stop.acceptable_stop
+            && certificate.evidence.parameter_space.n_boundary == 0
+            && !self.theta_at_lower_bound()
+            && !self.has_reduced_effective_covariance();
+        let finite_difference_diagnostics = matches!(
+            certificate.evidence.gradient.method,
+            EvidenceMethod::Exact | EvidenceMethod::FiniteDifference
+        ) && matches!(
+            certificate.evidence.hessian.method,
+            EvidenceMethod::Exact | EvidenceMethod::FiniteDifference
+        );
+        let hessian_positive_on_active_space = certificate
+            .evidence
+            .hessian
+            .min_eigenvalue
+            .is_some_and(|value| value.is_finite() && value > 0.0)
+            && certificate.evidence.hessian.rank
+                == Some(certificate.evidence.parameter_space.n_free);
+        let no_failed_checks = certificate.checks.iter().all(|check| {
+            !matches!(
+                check,
+                CertificateCheck::DerivativeMismatch { .. } | CertificateCheck::Failed { .. }
+            )
+        });
+
+        if clean_interior
+            && finite_difference_diagnostics
+            && hessian_positive_on_active_space
+            && no_failed_checks
+        {
+            ReliabilityGrade::Moderate
+        } else {
+            ReliabilityGrade::Low
+        }
+    }
+
     fn satterthwaite_fixed_effect_test(
         &self,
         hypothesis: FixedEffectHypothesis,
@@ -8016,7 +8063,7 @@ impl LinearMixedModel {
                 denominator_df: Some(denominator_df),
                 p_values: vec![p_value],
                 method,
-                reliability: ReliabilityGrade::Low,
+                reliability: self.satterthwaite_fixed_effect_reliability(denominator_df),
                 status: InferenceStatus::Available,
                 estimability,
                 notes,
@@ -8126,7 +8173,7 @@ impl LinearMixedModel {
             denominator_df: Some(denominator_df),
             p_values: vec![p_value],
             method,
-            reliability: ReliabilityGrade::Low,
+            reliability: self.satterthwaite_fixed_effect_reliability(denominator_df),
             status: InferenceStatus::Available,
             estimability,
             notes,
@@ -11103,6 +11150,7 @@ fn fixed_effect_test_to_inference_row(
 ) -> FixedEffectInferenceRow {
     let statistic_name = fixed_effect_statistic_name(&test);
     let reason = fixed_effect_inference_reason(&test);
+    let reliability_reason = fixed_effect_reliability_reason(&test);
     let details = fixed_effect_details_for_test(kind, &test, statistic_name);
     FixedEffectInferenceRow {
         label: test.hypothesis.label.clone(),
@@ -11117,6 +11165,7 @@ fn fixed_effect_test_to_inference_row(
         method: fixed_effect_inference_method(&test.method),
         status: fixed_effect_inference_status(&test.status),
         reliability: test.reliability,
+        reliability_reason,
         estimability: EstimabilityAssessment::FixedContrast(test.estimability),
         reason,
         details,
@@ -11263,6 +11312,27 @@ fn fixed_effect_inference_status(status: &InferenceStatus) -> FixedEffectInferen
         InferenceStatus::NotEstimable { .. } => FixedEffectInferenceStatus::NotEstimable,
         InferenceStatus::NotAssessed { .. } => FixedEffectInferenceStatus::NotAssessed,
         InferenceStatus::Unsupported { .. } => FixedEffectInferenceStatus::Unsupported,
+    }
+}
+
+fn fixed_effect_reliability_reason(test: &FixedEffectTest) -> Option<FixedEffectReliabilityReason> {
+    if test.reliability == ReliabilityGrade::NotAvailable {
+        return None;
+    }
+    match test.method {
+        InferenceMethod::AsymptoticWaldZ => {
+            Some(FixedEffectReliabilityReason::AsymptoticWaldZFallback)
+        }
+        InferenceMethod::Satterthwaite => {
+            Some(FixedEffectReliabilityReason::SatterthwaiteFiniteDifferenceApproximation)
+        }
+        InferenceMethod::KenwardRoger => {
+            Some(FixedEffectReliabilityReason::KenwardRogerApproximation)
+        }
+        InferenceMethod::ParametricBootstrap => {
+            Some(FixedEffectReliabilityReason::ParametricBootstrapMonteCarlo)
+        }
+        InferenceMethod::NotComputed { .. } => None,
     }
 }
 
@@ -23093,7 +23163,7 @@ mod tests {
 
         assert_eq!(test.method, InferenceMethod::Satterthwaite);
         assert_eq!(test.status, InferenceStatus::Available);
-        assert_eq!(test.reliability, ReliabilityGrade::Low);
+        assert_eq!(test.reliability, ReliabilityGrade::Moderate);
         assert!(test.denominator_df.unwrap().is_finite());
         assert!(test.denominator_df.unwrap() > 0.0);
         assert!(test.p_values[0].unwrap().is_finite());
@@ -23131,6 +23201,10 @@ mod tests {
         let row = fixed_effect_test_to_inference_row(FixedEffectInferenceRowKind::Term, test);
         assert_eq!(row.statistic_name, Some(FixedEffectStatisticName::F));
         assert_eq!(row.numerator_df, Some(2.0));
+        assert_eq!(
+            row.reliability_reason,
+            Some(FixedEffectReliabilityReason::SatterthwaiteFiniteDifferenceApproximation)
+        );
         let family = row
             .details
             .as_ref()
@@ -23276,7 +23350,12 @@ mod tests {
 
             assert_eq!(test.method, InferenceMethod::Satterthwaite, "{}", case.name);
             assert_eq!(test.status, InferenceStatus::Available, "{}", case.name);
-            assert_eq!(test.reliability, ReliabilityGrade::Low, "{}", case.name);
+            let expected_reliability = if case.name == "sleepstudy_unbalanced_random_slope_days" {
+                ReliabilityGrade::Low
+            } else {
+                ReliabilityGrade::Moderate
+            };
+            assert_eq!(test.reliability, expected_reliability, "{}", case.name);
             assert!(
                 (test.estimates[0] - case.estimate).abs() <= 1e-5 + 1e-6 * case.estimate.abs(),
                 "{}: β drift",
@@ -23603,7 +23682,11 @@ mod tests {
             assert_eq!(row.kind, FixedEffectInferenceRowKind::Coefficient);
             assert_eq!(row.method, FixedEffectInferenceMethod::Satterthwaite);
             assert_eq!(row.status, FixedEffectInferenceStatus::Available);
-            assert_eq!(row.reliability, ReliabilityGrade::Low);
+            assert_eq!(row.reliability, ReliabilityGrade::Moderate);
+            assert_eq!(
+                row.reliability_reason,
+                Some(FixedEffectReliabilityReason::SatterthwaiteFiniteDifferenceApproximation)
+            );
             assert_eq!(row.statistic_name, Some(FixedEffectStatisticName::T));
             assert!(row.estimate.is_some());
             assert!(row.std_error.is_some());
@@ -23630,6 +23713,10 @@ mod tests {
         for row in &artifact_table.rows {
             assert_eq!(row.kind, FixedEffectInferenceRowKind::Coefficient);
             assert_eq!(row.method, FixedEffectInferenceMethod::AsymptoticWaldZ);
+            assert_eq!(
+                row.reliability_reason,
+                Some(FixedEffectReliabilityReason::AsymptoticWaldZFallback)
+            );
             assert_eq!(row.statistic_name, Some(FixedEffectStatisticName::Z));
             assert!(row.denominator_df.is_none());
         }
@@ -24454,6 +24541,10 @@ mod tests {
         assert_eq!(row.method, FixedEffectInferenceMethod::Bootstrap);
         assert_eq!(row.status, FixedEffectInferenceStatus::Available);
         assert_eq!(row.statistic_name, Some(FixedEffectStatisticName::T));
+        assert_eq!(
+            row.reliability_reason,
+            Some(FixedEffectReliabilityReason::ParametricBootstrapMonteCarlo)
+        );
         assert_relative_eq!(row.p_value.unwrap(), 1.0 / 41.0, epsilon = 1e-12);
         let bootstrap = row
             .details
@@ -24645,6 +24736,10 @@ mod tests {
         assert_eq!(row.status, FixedEffectInferenceStatus::Available);
         assert_eq!(row.statistic_name, Some(FixedEffectStatisticName::T));
         assert_eq!(row.reliability, ReliabilityGrade::Low);
+        assert_eq!(
+            row.reliability_reason,
+            Some(FixedEffectReliabilityReason::ParametricBootstrapMonteCarlo)
+        );
         assert!(row.p_value.unwrap().is_finite());
         assert!((1.0 / 31.0..=1.0).contains(&row.p_value.unwrap()));
         assert!(row

@@ -4,7 +4,8 @@
 use mixeff_rs::compiler::{
     CompiledModelArtifact, DiagnosticCode, FixedEffectCovarianceMethod,
     FixedEffectCovarianceStatus, FixedEffectInferenceMethod, FixedEffectInferenceStatus,
-    InferenceAvailability, ModelKind, ObjectiveApproximation, ReliabilityGrade,
+    FixedEffectReliabilityReason, InferenceAvailability, ModelKind, ObjectiveApproximation,
+    ReliabilityGrade,
 };
 use mixeff_rs::formula::parse_formula;
 use mixeff_rs::model::{
@@ -469,6 +470,10 @@ fn joint_laplace_glmm_artifact_reports_certified_wald_rows_when_hessian_passes()
         assert_eq!(row.method, FixedEffectInferenceMethod::AsymptoticWaldZ);
         assert_eq!(row.status, FixedEffectInferenceStatus::Available);
         assert_eq!(row.reliability, ReliabilityGrade::Moderate);
+        assert_eq!(
+            row.reliability_reason,
+            Some(FixedEffectReliabilityReason::GlmmJointLaplaceActiveHessianWald)
+        );
         assert!(row.estimate.unwrap().is_finite());
         assert!(row.std_error.unwrap() > 0.0);
         assert!(row.statistic.unwrap().is_finite());
@@ -641,6 +646,10 @@ fn joint_laplace_glmm_wald_rows_match_glmer_on_correlated_random_slopes() {
         assert_eq!(row.method, FixedEffectInferenceMethod::AsymptoticWaldZ);
         assert_eq!(row.status, FixedEffectInferenceStatus::Available);
         assert_eq!(row.reliability, ReliabilityGrade::Moderate);
+        assert_eq!(
+            row.reliability_reason,
+            Some(FixedEffectReliabilityReason::GlmmJointLaplaceActiveHessianWald)
+        );
 
         let (_, expected_estimate, expected_se, expected_z) = lme4_reference
             .iter()
@@ -767,6 +776,10 @@ fn joint_laplace_glmm_wald_rows_match_glmer_on_osf_study1b_correlated_slopes() {
         assert_eq!(row.method, FixedEffectInferenceMethod::AsymptoticWaldZ);
         assert_eq!(row.status, FixedEffectInferenceStatus::Available);
         assert_eq!(row.reliability, ReliabilityGrade::Moderate);
+        assert_eq!(
+            row.reliability_reason,
+            Some(FixedEffectReliabilityReason::GlmmJointLaplaceActiveHessianWald)
+        );
 
         let (_, expected_estimate, expected_se, expected_z) = lme4_reference
             .iter()
@@ -925,6 +938,10 @@ fn joint_laplace_glmm_boundary_theta_still_certifies_fixed_effect_rows() {
         assert_eq!(row.method, FixedEffectInferenceMethod::AsymptoticWaldZ);
         assert_eq!(row.status, FixedEffectInferenceStatus::Available);
         assert_eq!(row.reliability, ReliabilityGrade::Moderate);
+        assert_eq!(
+            row.reliability_reason,
+            Some(FixedEffectReliabilityReason::GlmmJointLaplaceActiveHessianWald)
+        );
         assert!(row
             .std_error
             .is_some_and(|value| value.is_finite() && value > 0.0));

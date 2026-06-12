@@ -12,8 +12,8 @@ use mixeff_rs::compiler::{
     compile_formula_ir, CompiledModelArtifact, CompilerPolicy, EstimabilityAssessment,
     FixedContrastEstimability, FixedEffectInferenceMethod, FixedEffectInferenceRow,
     FixedEffectInferenceRowKind, FixedEffectInferenceStatus, FixedEffectInferenceTable,
-    FixedEffectStatisticName, ModelAuditReport, ReductionRecord, ReductionTrigger,
-    ReliabilityGrade,
+    FixedEffectReliabilityReason, FixedEffectStatisticName, ModelAuditReport, ReductionRecord,
+    ReductionTrigger, ReliabilityGrade,
 };
 use mixeff_rs::datasets;
 use mixeff_rs::formula::parse_formula;
@@ -186,6 +186,7 @@ fn unavailable_se_fixed_effect_inference_table() -> FixedEffectInferenceTable {
         method: FixedEffectInferenceMethod::AsymptoticWaldZ,
         status: FixedEffectInferenceStatus::PValueUnavailable,
         reliability: ReliabilityGrade::Low,
+        reliability_reason: Some(FixedEffectReliabilityReason::AsymptoticWaldZFallback),
         estimability: EstimabilityAssessment::FixedContrast(FixedContrastEstimability::estimable(
             "x", 1, 1,
         )),
@@ -551,6 +552,7 @@ fn fixed_effect_inference_tables_match_wire_fixture() {
         row.kind == FixedEffectInferenceRowKind::Coefficient
             && row.method == FixedEffectInferenceMethod::AsymptoticWaldZ
             && row.reliability == ReliabilityGrade::Low
+            && row.reliability_reason == Some(FixedEffectReliabilityReason::AsymptoticWaldZFallback)
             && row.statistic_name == Some(FixedEffectStatisticName::Z)
             && row.numerator_df.is_none()
             && row.denominator_df.is_none()
@@ -567,6 +569,7 @@ fn fixed_effect_inference_tables_match_wire_fixture() {
     assert_all_rows_have_status(&penicillin, FixedEffectInferenceStatus::Available);
     assert!(penicillin.rows.iter().all(|row| {
         row.method == FixedEffectInferenceMethod::AsymptoticWaldZ
+            && row.reliability_reason == Some(FixedEffectReliabilityReason::AsymptoticWaldZFallback)
             && row.statistic_name == Some(FixedEffectStatisticName::Z)
             && row.denominator_df.is_none()
             && row.p_value.is_some()
@@ -581,7 +584,9 @@ fn fixed_effect_inference_tables_match_wire_fixture() {
     assert!(reduced_rank
         .rows
         .iter()
-        .all(|row| row.reliability == ReliabilityGrade::Low));
+        .all(|row| row.reliability == ReliabilityGrade::Low
+            && row.reliability_reason
+                == Some(FixedEffectReliabilityReason::AsymptoticWaldZFallback)));
 
     let boundary = boundary_fixed_effect_inference_table();
     assert_fixed_effect_table_round_trips(&boundary);
@@ -594,6 +599,7 @@ fn fixed_effect_inference_tables_match_wire_fixture() {
     assert!(rank_deficient.rows.iter().any(|row| {
         row.status == FixedEffectInferenceStatus::NotEstimable
             && row.method == FixedEffectInferenceMethod::NotComputed
+            && row.reliability_reason.is_none()
             && row.p_value.is_none()
             && row.reason.as_deref().unwrap_or("").contains("aliased")
     }));
@@ -604,6 +610,7 @@ fn fixed_effect_inference_tables_match_wire_fixture() {
     assert_all_rows_have_status(&regularized, FixedEffectInferenceStatus::PValueUnavailable);
     assert!(regularized.rows.iter().all(|row| {
         row.method == FixedEffectInferenceMethod::NotComputed
+            && row.reliability_reason.is_none()
             && row.p_value.is_none()
             && row
                 .reason
@@ -621,6 +628,7 @@ fn fixed_effect_inference_tables_match_wire_fixture() {
     );
     assert!(selection_time.rows.iter().all(|row| {
         row.method == FixedEffectInferenceMethod::NotComputed
+            && row.reliability_reason.is_none()
             && row.p_value.is_none()
             && row
                 .reason
@@ -638,6 +646,7 @@ fn fixed_effect_inference_tables_match_wire_fixture() {
     );
     assert!(unavailable_se.rows.iter().all(|row| {
         row.std_error.is_none()
+            && row.reliability_reason == Some(FixedEffectReliabilityReason::AsymptoticWaldZFallback)
             && row.p_value.is_none()
             && row
                 .reason

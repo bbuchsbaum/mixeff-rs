@@ -488,11 +488,23 @@ pub struct FixedEffectInferenceRow {
     pub method: FixedEffectInferenceMethod,
     pub status: FixedEffectInferenceStatus,
     pub reliability: ReliabilityGrade,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reliability_reason: Option<FixedEffectReliabilityReason>,
     pub estimability: EstimabilityAssessment,
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<FixedEffectInferenceDetails>,
     pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FixedEffectReliabilityReason {
+    AsymptoticWaldZFallback,
+    SatterthwaiteFiniteDifferenceApproximation,
+    KenwardRogerApproximation,
+    ParametricBootstrapMonteCarlo,
+    GlmmJointLaplaceActiveHessianWald,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2144,6 +2156,7 @@ mod tests {
                 method: FixedEffectInferenceMethod::AsymptoticWaldZ,
                 status: FixedEffectInferenceStatus::Available,
                 reliability: ReliabilityGrade::Low,
+                reliability_reason: Some(FixedEffectReliabilityReason::AsymptoticWaldZFallback),
                 estimability: EstimabilityAssessment::FixedContrast(
                     super::super::estimability::FixedContrastEstimability::estimable("x", 1, 1),
                 ),

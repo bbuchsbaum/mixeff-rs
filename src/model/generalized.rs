@@ -24,9 +24,9 @@ use crate::compiler::{
     FixedContrastEstimability, FixedEffectCovarianceDetails, FixedEffectCovarianceMatrix,
     FixedEffectCovarianceMethod, FixedEffectCovarianceStatus, FixedEffectInferenceMethod,
     FixedEffectInferenceRow, FixedEffectInferenceRowKind, FixedEffectInferenceStatus,
-    FixedEffectInferenceTable, GlmmFitMetadata, InferenceAvailability, ModelAuditReport,
-    ModelBoundary, ObjectiveApproximation, OptimizerCertificate, OptimizerDerivativeEvidence,
-    ReliabilityGrade,
+    FixedEffectInferenceTable, FixedEffectReliabilityReason, GlmmFitMetadata,
+    InferenceAvailability, ModelAuditReport, ModelBoundary, ObjectiveApproximation,
+    OptimizerCertificate, OptimizerDerivativeEvidence, ReliabilityGrade,
 };
 use crate::error::{MixedModelError, Result};
 use crate::formula::Formula;
@@ -4000,6 +4000,7 @@ impl GeneralizedLinearMixedModel {
                 method: FixedEffectInferenceMethod::NotComputed,
                 status,
                 reliability: ReliabilityGrade::NotAvailable,
+                reliability_reason: None,
                 estimability: EstimabilityAssessment::FixedContrast(
                     FixedContrastEstimability::not_assessed(label),
                 ),
@@ -4121,6 +4122,9 @@ impl GeneralizedLinearMixedModel {
                     method: FixedEffectInferenceMethod::AsymptoticWaldZ,
                     status: FixedEffectInferenceStatus::Available,
                     reliability: ReliabilityGrade::Moderate,
+                    reliability_reason: Some(
+                        FixedEffectReliabilityReason::GlmmJointLaplaceActiveHessianWald,
+                    ),
                     estimability: EstimabilityAssessment::FixedContrast(
                         FixedContrastEstimability::estimable(label, 1, 1),
                     ),
