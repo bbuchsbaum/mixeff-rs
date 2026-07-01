@@ -4,9 +4,13 @@ on:
   push:
   pull_request:
   schedule:
-    # Weekly Julia-parity gate: checked-in fixtures rot silently as
-    # MixedModels.jl evolves, so re-check them on a schedule.
+    # Weekly external-parity refresh: checked-in fixtures and comparison
+    # artifacts rot silently as MixedModels.jl / lme4 evolve, so re-check
+    # them on a schedule.
     - cron: "0 6 * * 1"
+  # Manual trigger for the external-parity jobs (e.g. after an upstream
+  # MixedModels.jl or lme4 release) without waiting for the weekly cron.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -120,9 +124,9 @@ jobs:
 
   julia-parity:
     name: Julia parity fixtures (scheduled)
-    # Only on the weekly schedule: the parity gate needs a Julia toolchain
-    # plus MixedModels.jl and is too slow for every push/PR.
-    if: github.event_name == 'schedule'
+    # Only on the weekly schedule or a manual dispatch: the parity gate needs
+    # a Julia toolchain plus MixedModels.jl and is too slow for every push/PR.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -134,3 +138,49 @@ jobs:
         run: julia -e 'using Pkg; Pkg.add(["MixedModels", "DataFrames", "JSON3"])'
       - name: Check Julia parity fixtures
         run: bash scripts/check_julia_parity_fixtures.sh
+      - name: Record engine provenance
+        if: always()
+        run: julia -e 'using Pkg; Pkg.status(["MixedModels", "DataFrames", "JSON3"])'
+
+  lme4-parity:
+    name: lme4 comparison refresh (scheduled)
+    # Only on the weekly schedule or a manual dispatch: regenerates the
+    # comparison artifacts against a live R/lme4 and re-runs the parity
+    # scorecard gate, which catches unreviewed classification drift.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install NLopt build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y cmake g++
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      - name: Install R comparison dependencies
+        run: Rscript -e 'install.packages(c("lme4", "jsonlite"))'
+      # The same sequence as scripts/check_release_lme4_parity.sh, but
+      # without its restore-on-exit behavior so the regenerated artifacts
+      # stay in the tree for the drift diff and upload below.
+      - name: Regenerate Rust comparison results
+        run: cargo run --release --features unstable-internals --example compare_rust
+      - name: Regenerate lme4 comparison results
+        run: Rscript scripts/compare_lme4.R
+      - name: Regenerate comparison report
+        run: cargo run --release --features unstable-internals --example compare_report
+      - name: Parity scorecard gate (catches unreviewed classification drift)
+        run: cargo test --features unstable-internals --test parity_scorecard
+      - name: Show comparison drift against checked-in artifacts
+        if: always()
+        run: git --no-pager diff --stat comparison/ || true
+      - name: Upload regenerated comparison artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lme4-comparison-refresh
+          path: |
+            comparison/manifest.json
+            comparison/rust_results.json
+            comparison/lme4_results.json
+            comparison/REPORT.md
+          if-no-files-found: warn
