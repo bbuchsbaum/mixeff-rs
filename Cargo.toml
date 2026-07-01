@@ -118,6 +118,10 @@ name = "parity_dump"
 required-features = ["unstable-internals"]
 
 [[example]]
+name = "perf_gate"
+required-features = ["unstable-internals"]
+
+[[example]]
 name = "profile_pls_kernel"
 required-features = ["unstable-internals"]
 

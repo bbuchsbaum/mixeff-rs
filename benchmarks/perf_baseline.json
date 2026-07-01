@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "profile": "rust_default_nlopt",
+  "scenarios": [
+    {
+      "name": "scalar_1000",
+      "fit_objective": 9861.36262539995,
+      "fit_feval": 23,
+      "optimizer": "pattern_search",
+      "backend": "native",
+      "allocs_per_eval": 1,
+      "bytes_per_eval": 72,
+      "eval_median_us": 1.3470825
+    },
+    {
+      "name": "vector_1000",
+      "fit_objective": 9688.227799025564,
+      "fit_feval": 67,
+      "optimizer": "bobyqa",
+      "backend": "nlopt",
+      "allocs_per_eval": 1,
+      "bytes_per_eval": 72,
+      "eval_median_us": 2.9047924999999997
+    },
+    {
+      "name": "vector_10000",
+      "fit_objective": 97060.63267971567,
+      "fit_feval": 39,
+      "optimizer": "bobyqa",
+      "backend": "nlopt",
+      "allocs_per_eval": 1,
+      "bytes_per_eval": 72,
+      "eval_median_us": 27.945727499999997
+    },
+    {
+      "name": "crossed_small",
+      "fit_objective": 6177.391784718841,
+      "fit_feval": 268,
+      "optimizer": "newuoa",
+      "backend": "nlopt",
+      "allocs_per_eval": 8,
+      "bytes_per_eval": 49224,
+      "eval_median_us": 12.5185425
+    },
+    {
+      "name": "crossed_medium",
+      "fit_objective": 24348.710146216894,
+      "fit_feval": 412,
+      "optimizer": "newuoa",
+      "backend": "nlopt",
+      "allocs_per_eval": 8,
+      "bytes_per_eval": 161864,
+      "eval_median_us": 49.211355
+    }
+  ],
+  "batch_scenarios": [
+    {
+      "name": "batch_profile_at_theta",
+      "q": 16,
+      "success_count": 16,
+      "objective_sum": 156444.4065384913,
+      "allocs_per_column": 17,
+      "bytes_per_column": 20561,
+      "total_median_ms": 0.081792
+    },
+    {
+      "name": "batch_optimize_per_column",
+      "q": 16,
+      "success_count": 16,
+      "objective_sum": 156431.11871913617,
+      "allocs_per_column": 7385,
+      "bytes_per_column": 12161055,
+      "total_median_ms": 59.812542
+    }
+  ]
+}
