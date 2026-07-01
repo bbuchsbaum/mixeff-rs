@@ -6263,25 +6263,12 @@ impl LinearMixedModel {
             )));
         }
 
-        let x = self.feterm.full_rank_x().into_owned();
-        let (a_blocks, mut l_blocks) = create_structural_al(&self.reterms, &x)?;
-        update_l_from_parts(
-            &a_blocks,
-            &mut l_blocks,
-            &self.reterms,
-            self.compiler_policy()
-                .thresholds
-                .cholesky_zero_pad_tolerance,
-        )?;
-        profile_response_matrix_with_l_blocks(
-            &self.reterms,
-            &x,
-            responses,
-            &l_blocks,
-            reml,
-            self.dims.n,
-            self.dims.p,
-        )
+        let kernel = crate::model::kernel::LmmObjectiveKernel::from_model(self)?;
+        let mut workspace = kernel.workspace();
+        // The workspace reterms carry this model's current λ; only the
+        // factorization needs to be brought up to date before profiling.
+        workspace.update_l()?;
+        workspace.profile(responses, reml)
     }
 
     /// Log-determinant of the RE Cholesky blocks.

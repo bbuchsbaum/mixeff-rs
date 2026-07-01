@@ -44,6 +44,7 @@ num-traits = "0.2"
 indexmap = "2"
 log = "0.4"
 nlopt = { version = "0.8.1", optional = true }
+rayon = { version = "1.10", optional = true }
 csv = "1"
 toml = { version = "0.8", default-features = false, features = ["parse"] }
 minilp = "0.2"
@@ -65,6 +66,10 @@ prima = []
 # compiler/IR is still in flux and dataset provenance churns. Off by default
 # so IR refinements are not SemVer-major breaks. See docs/semver_policy.md.
 unstable-internals = []
+# Enables opt-in deterministic parallel execution for response-matrix batch
+# fitting (`BatchParallelism::Rayon`). Off by default; the serial path stays
+# the default at runtime even when the feature is compiled in.
+rayon = ["dep:rayon"]
 
 [dev-dependencies]
 approx = "0.5"

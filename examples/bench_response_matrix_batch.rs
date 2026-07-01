@@ -11,6 +11,9 @@
 //! ```text
 //! MIXEDMODELS_RESPONSE_BATCH_QS=1,4,16,64 cargo run --example bench_response_matrix_batch
 //! ```
+//!
+//! Set `MIXEDMODELS_RESPONSE_BATCH_PARALLEL=1` (with `--features rayon`) to
+//! benchmark deterministic parallel chunk/column execution.
 
 use std::time::{Duration, Instant};
 
@@ -69,7 +72,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &template,
             BatchOptions {
                 chunk_columns: chunk_columns(),
-                max_failures: None,
+                parallelism: parallelism(),
+                ..BatchOptions::default()
             },
         )?;
 
@@ -104,7 +108,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 initial_step: Some(vec![0.25; theta.len()]),
                 options: BatchOptions {
                     chunk_columns: chunk_columns(),
-                    max_failures: None,
+                    parallelism: parallelism(),
+                    ..BatchOptions::default()
                 },
             };
             let shared = time_it(|| {
@@ -144,6 +149,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "optimize_per_column",
                     per_column.elapsed,
                     per_column.value.success_count(),
+                    theta.len(),
+                );
+            }
+
+            if run_adaptive() {
+                use mixeff_rs::model::batch::AdaptiveGroupingControl;
+                let adaptive = time_it(|| {
+                    batch.fit_responses(
+                        &responses,
+                        ResponseBatchMode::OptimizeAdaptive {
+                            reml: true,
+                            control: control.clone(),
+                            adaptive: AdaptiveGroupingControl::default(),
+                        },
+                    )
+                })?;
+                print_row(
+                    case,
+                    data.nrow(),
+                    q,
+                    "optimize_adaptive",
+                    adaptive.elapsed,
+                    adaptive.value.success_count(),
                     theta.len(),
                 );
             }
@@ -204,10 +232,22 @@ fn response_matrix(response: &[f64], q: usize) -> DMatrix<f64> {
         / response.len() as f64)
         .sqrt()
         .max(1.0);
+    let clusters = response_clusters();
     DMatrix::from_fn(response.len(), q, |row, col| {
         let scale = 0.75 + 0.5 * ((col % 17) as f64 / 16.0);
         let offset = ((col % 5) as f64 - 2.0) * 0.05 * sd;
-        scale * response[row] + offset
+        // With MIXEDMODELS_RESPONSE_BATCH_CLUSTERS > 1, columns fall into
+        // theta clusters: deterministic row noise inflates the residual
+        // variance by a cluster-specific amount, moving theta away from the
+        // template fit (the regime adaptive grouping targets).
+        let cluster = col % clusters;
+        let noise = if cluster == 0 {
+            0.0
+        } else {
+            let raw = ((row * 37 + cluster * 101) % 17) as f64 - 8.0;
+            raw * 0.08 * sd * cluster as f64
+        };
+        scale * (response[row] + noise) + offset
     })
 }
 
@@ -239,6 +279,27 @@ fn max_evaluations() -> i64 {
         .and_then(|value| value.parse::<i64>().ok())
         .filter(|value| *value > 0)
         .unwrap_or(80)
+}
+
+fn parallelism() -> mixeff_rs::model::batch::BatchParallelism {
+    use mixeff_rs::model::batch::BatchParallelism;
+    if env_flag("MIXEDMODELS_RESPONSE_BATCH_PARALLEL", false) {
+        BatchParallelism::Rayon
+    } else {
+        BatchParallelism::Serial
+    }
+}
+
+fn run_adaptive() -> bool {
+    env_flag("MIXEDMODELS_RESPONSE_BATCH_ADAPTIVE", false)
+}
+
+fn response_clusters() -> usize {
+    std::env::var("MIXEDMODELS_RESPONSE_BATCH_CLUSTERS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|&clusters| clusters >= 1)
+        .unwrap_or(1)
 }
 
 fn run_per_column() -> bool {

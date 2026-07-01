@@ -82,6 +82,45 @@ fn test_linalg_and_types_do_not_import_upstream_layers() {
     );
 }
 
+/// The LMM objective kernel (`model::kernel`) is numerical-core machinery:
+/// it may use error/types and the block-Cholesky entry points in
+/// `model::linear`, but must not depend on the stats/compiler/report layers.
+#[test]
+fn test_lmm_kernel_does_not_import_upper_layers() {
+    const KERNEL_FORBIDDEN_MODULES: &[&str] =
+        &["stats", "compiler", "pathology", "guide", "datasets"];
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let rel_path = "src/model/kernel.rs";
+    let source = fs::read_to_string(root.join(rel_path)).unwrap_or_else(|err| {
+        panic!("failed to read {rel_path}: {err}");
+    });
+
+    let mut violations = Vec::new();
+    let mut crate_group_depth = 0usize;
+    for (line_idx, line) in source.lines().enumerate() {
+        let line_no = line_idx + 1;
+        let code = line_without_comment(line);
+        let compact = compact_code(code);
+
+        for module in KERNEL_FORBIDDEN_MODULES {
+            if contains_crate_module(&compact, module)
+                || contains_forbidden_in_crate_group(&compact, module, crate_group_depth)
+            {
+                violations.push(format!("{rel_path}:{line_no}: {line}"));
+            }
+        }
+
+        crate_group_depth = update_crate_group_depth(crate_group_depth, &compact);
+    }
+
+    assert!(
+        violations.is_empty(),
+        "model/kernel.rs must not import stats/compiler/pathology/guide/datasets:\n{}",
+        violations.join("\n")
+    );
+}
+
 fn rust_files_under(dir: &Path) -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
     collect_rust_files(dir, &mut files);

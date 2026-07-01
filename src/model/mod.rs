@@ -25,6 +25,7 @@ pub mod data;
 #[doc(hidden)]
 pub mod fixed_design;
 pub mod generalized;
+pub(crate) mod kernel;
 pub mod linear;
 pub mod summary_estimates;
 pub mod traits;
