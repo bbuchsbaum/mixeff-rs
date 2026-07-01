@@ -234,6 +234,15 @@ impl LmmWorkspace<'_> {
         parallel: bool,
     ) -> Result<ResponseMatrixProfile> {
         debug_assert!(chunk_columns > 0, "chunk_columns must be positive");
+        // Identity selection in one chunk (the per-column optimizer's shape
+        // on every objective evaluation): the packed result is exactly the
+        // chunk profile, so skip the column gather and repack entirely.
+        if columns.len() <= chunk_columns
+            && columns.len() == responses.ncols()
+            && columns.iter().enumerate().all(|(i, &c)| i == c)
+        {
+            return self.profile(responses, reml);
+        }
         // Fan-out per objective evaluation only pays for itself once there
         // are enough independent chunks carrying enough total work; below
         // these thresholds the rayon dispatch overhead measurably regresses

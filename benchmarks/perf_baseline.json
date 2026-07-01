@@ -10,7 +10,7 @@
       "backend": "native",
       "allocs_per_eval": 1,
       "bytes_per_eval": 72,
-      "eval_median_us": 1.3470825
+      "eval_median_us": 1.3644775000000002
     },
     {
       "name": "vector_1000",
@@ -20,7 +20,7 @@
       "backend": "nlopt",
       "allocs_per_eval": 1,
       "bytes_per_eval": 72,
-      "eval_median_us": 2.9047924999999997
+      "eval_median_us": 2.935625
     },
     {
       "name": "vector_10000",
@@ -30,7 +30,7 @@
       "backend": "nlopt",
       "allocs_per_eval": 1,
       "bytes_per_eval": 72,
-      "eval_median_us": 27.945727499999997
+      "eval_median_us": 28.1079175
     },
     {
       "name": "crossed_small",
@@ -40,7 +40,7 @@
       "backend": "nlopt",
       "allocs_per_eval": 8,
       "bytes_per_eval": 49224,
-      "eval_median_us": 12.5185425
+      "eval_median_us": 12.5246875
     },
     {
       "name": "crossed_medium",
@@ -50,7 +50,7 @@
       "backend": "nlopt",
       "allocs_per_eval": 8,
       "bytes_per_eval": 161864,
-      "eval_median_us": 49.211355
+      "eval_median_us": 48.7315625
     }
   ],
   "batch_scenarios": [
@@ -58,19 +58,19 @@
       "name": "batch_profile_at_theta",
       "q": 16,
       "success_count": 16,
-      "objective_sum": 156444.4065384913,
-      "allocs_per_column": 17,
-      "bytes_per_column": 20561,
-      "total_median_ms": 0.081792
+      "objective_sum": 156444.40653849352,
+      "allocs_per_column": 15,
+      "bytes_per_column": 8365,
+      "total_median_ms": 0.056083
     },
     {
       "name": "batch_optimize_per_column",
       "q": 16,
       "success_count": 16,
-      "objective_sum": 156431.11871913617,
-      "allocs_per_column": 7385,
-      "bytes_per_column": 12161055,
-      "total_median_ms": 59.812542
+      "objective_sum": 156431.11871913844,
+      "allocs_per_column": 4170,
+      "bytes_per_column": 1497720,
+      "total_median_ms": 40.708375
     }
   ]
 }

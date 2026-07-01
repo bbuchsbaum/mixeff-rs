@@ -12704,7 +12704,7 @@ fn build_response_rhs_blocks(
         apply_lambda_transpose_to_rhs(&mut block, re);
         rhs_blocks.push(block);
     }
-    rhs_blocks.push(x.transpose() * y);
+    rhs_blocks.push(x.tr_mul(y));
     rhs_blocks
 }
 
@@ -12868,8 +12868,11 @@ fn solve_upper_block_from_lower_transpose_against_rhs(l: &MatrixBlock, rhs: &mut
 fn solve_lower_block_rhs(rhs: &mut DMatrix<f64>, l: &MatrixBlock) {
     debug_assert_eq!(rhs.nrows(), l.nrows());
 
+    let mut column_rhs = vec![0.0; rhs.nrows()];
     for col in 0..rhs.ncols() {
-        let mut column_rhs: Vec<f64> = (0..rhs.nrows()).map(|row| rhs[(row, col)]).collect();
+        for row in 0..rhs.nrows() {
+            column_rhs[row] = rhs[(row, col)];
+        }
         solve_lower_block_against_rhs(l, &mut column_rhs);
         for row in 0..rhs.nrows() {
             rhs[(row, col)] = column_rhs[row];
@@ -12880,15 +12883,13 @@ fn solve_lower_block_rhs(rhs: &mut DMatrix<f64>, l: &MatrixBlock) {
 fn solve_lower_block_rhs_system(l_blocks: &[MatrixBlock], rhs_blocks: &mut [DMatrix<f64>]) {
     let total = rhs_blocks.len();
     for row_block in 0..total {
-        for prev in 0..row_block {
+        let (solved, current_and_after) = rhs_blocks.split_at_mut(row_block);
+        let current = &mut current_and_after[0];
+        for (prev, solved_prev) in solved.iter().enumerate() {
             let lower = &l_blocks[block_index(row_block, prev)];
-            let solved_prev = rhs_blocks[prev].clone();
-            subtract_left_block_product(&mut rhs_blocks[row_block], lower, &solved_prev);
+            subtract_left_block_product(current, lower, solved_prev);
         }
-        solve_lower_block_rhs(
-            &mut rhs_blocks[row_block],
-            &l_blocks[block_index(row_block, row_block)],
-        );
+        solve_lower_block_rhs(current, &l_blocks[block_index(row_block, row_block)]);
     }
 }
 
