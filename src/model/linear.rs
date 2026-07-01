@@ -13468,6 +13468,36 @@ fn copy_and_rmul_lambda(l: &mut MatrixBlock, a: &MatrixBlock, re_j: &ReMat) {
     });
 }
 
+/// Zero-copy transposed view of a dense column-major matrix, so gemm
+/// operands of the form `A * Bᵀ` need not materialize `Bᵀ` on every
+/// objective evaluation.
+fn transposed_view(m: &DMatrix<f64>) -> nalgebra::DMatrixView<'_, f64, nalgebra::Dyn> {
+    let (nrows, ncols) = m.shape();
+    nalgebra::DMatrixView::from_slice_with_strides_generic(
+        m.as_slice(),
+        nalgebra::Dyn(ncols),
+        nalgebra::Dyn(nrows),
+        nalgebra::Dyn(nrows),
+        nalgebra::Dyn(1),
+    )
+}
+
+/// Zero-copy transpose of `m.rows(row_offset, block_rows)`.
+fn transposed_rows_view(
+    m: &DMatrix<f64>,
+    row_offset: usize,
+    block_rows: usize,
+) -> nalgebra::DMatrixView<'_, f64, nalgebra::Dyn> {
+    debug_assert!(row_offset + block_rows <= m.nrows());
+    nalgebra::DMatrixView::from_slice_with_strides_generic(
+        &m.as_slice()[row_offset..],
+        nalgebra::Dyn(m.ncols()),
+        nalgebra::Dyn(block_rows),
+        nalgebra::Dyn(m.nrows()),
+        nalgebra::Dyn(1),
+    )
+}
+
 /// Rank-k downdate: C -= A * A' (modifies diagonal block)
 fn rank_k_downdate(c: &mut MatrixBlock, a: &DMatrix<f64>) {
     match c {
@@ -13488,7 +13518,7 @@ fn rank_k_downdate(c: &mut MatrixBlock, a: &DMatrix<f64>) {
                     }
                 }
             } else {
-                c_mat.gemm(-1.0, a, &a.transpose(), 1.0);
+                c_mat.gemm(-1.0, a, &transposed_view(a), 1.0);
             }
         }
         MatrixBlock::Diagonal(c_diag) => {
@@ -13517,13 +13547,13 @@ fn rank_k_downdate(c: &mut MatrixBlock, a: &DMatrix<f64>) {
             for blk in blocks.iter_mut() {
                 let s = blk.nrows();
                 let a_block = a.rows(row_offset, s);
-                blk.gemm(-1.0, &a_block, &a_block.transpose(), 1.0);
+                blk.gemm(-1.0, &a_block, &transposed_rows_view(a, row_offset, s), 1.0);
                 row_offset += s;
             }
         }
         MatrixBlock::Sparse(_) => {
             let mut dense = c.as_dense();
-            dense.gemm(-1.0, a, &a.transpose(), 1.0);
+            dense.gemm(-1.0, a, &transposed_view(a), 1.0);
             *c = MatrixBlock::Dense(dense);
         }
     }
@@ -13576,22 +13606,22 @@ fn rank_k_downdate_sparse(c: &mut MatrixBlock, a: &CscMatrix<f64>) {
 fn subtract_product(c: &mut MatrixBlock, a: &DMatrix<f64>, b: &DMatrix<f64>) {
     match c {
         MatrixBlock::Dense(c_mat) => {
-            c_mat.gemm(-1.0, a, &b.transpose(), 1.0);
+            c_mat.gemm(-1.0, a, &transposed_view(b), 1.0);
         }
         MatrixBlock::BlockDiagonal(_) => {
             // Promote to dense — off-diagonal updates destroy block-diagonal structure
             let mut c_dense = c.as_dense();
-            c_dense.gemm(-1.0, a, &b.transpose(), 1.0);
+            c_dense.gemm(-1.0, a, &transposed_view(b), 1.0);
             *c = MatrixBlock::Dense(c_dense);
         }
         MatrixBlock::Sparse(_) => {
             let mut c_dense = c.as_dense();
-            c_dense.gemm(-1.0, a, &b.transpose(), 1.0);
+            c_dense.gemm(-1.0, a, &transposed_view(b), 1.0);
             *c = MatrixBlock::Dense(c_dense);
         }
         _ => {
             let mut c_dense = c.as_dense();
-            c_dense.gemm(-1.0, a, &b.transpose(), 1.0);
+            c_dense.gemm(-1.0, a, &transposed_view(b), 1.0);
             *c = MatrixBlock::Dense(c_dense);
         }
     }
