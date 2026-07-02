@@ -3008,7 +3008,7 @@ impl LinearMixedModel {
                 &weighted_response,
                 &self.reterms[j],
             )?;
-            self.a_blocks[idx] = block;
+            self.a_blocks[idx] = finalize_fixed_re_block(block, k);
             idx += 1;
         }
 

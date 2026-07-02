@@ -2944,6 +2944,120 @@ fn test_streamed_fixed_effect_lmm_fit_matches_dense_backend() {
     assert_lmm_fit_close(&dense, &streamed);
 }
 
+/// High-cardinality fixture: enough fixed columns x RE levels that the
+/// streamed backend's `X'Z` cross-product crosses the sparse-emission
+/// threshold (dense cells >= 64k).
+fn high_cardinality_streamed_fixture(n_levels: usize, obs_per_level: usize) -> DataFrame {
+    let n_obs = n_levels * obs_per_level;
+    let n_groups = 600;
+    let mut y = Vec::with_capacity(n_obs);
+    let mut x = Vec::with_capacity(n_obs);
+    let mut sku = Vec::with_capacity(n_obs);
+    let mut group = Vec::with_capacity(n_obs);
+
+    for level in 0..n_levels {
+        for rep in 0..obs_per_level {
+            let obs = level * obs_per_level + rep;
+            let x_value = rep as f64 - 0.5 + ((level % 5) as f64) * 0.1;
+            let sku_effect = ((level % 11) as f64 - 5.0) * 0.07;
+            let group_id = (obs * 7) % n_groups;
+            let group_effect = ((group_id % 23) as f64 - 11.0) * 0.03;
+            let noise = ((obs % 7) as f64 - 3.0) * 0.01;
+            x.push(x_value);
+            y.push(2.0 + 0.8 * x_value + sku_effect + group_effect + noise);
+            sku.push(format!("sku{:03}", level));
+            group.push(format!("g{:03}", group_id));
+        }
+    }
+
+    let mut data = DataFrame::new();
+    data.add_numeric("y", y).unwrap();
+    data.add_numeric("x", x).unwrap();
+    data.add_categorical("sku", sku).unwrap();
+    data.add_categorical("group", group).unwrap();
+    data
+}
+
+#[test]
+fn test_high_cardinality_streamed_fit_uses_sparse_fixed_re_block_and_matches_dense() {
+    let data = high_cardinality_streamed_fixture(120, 6);
+    let formula = parse_formula("y ~ 1 + x + sku + (1 | group)").unwrap();
+
+    let mut dense = LinearMixedModel::new_with_fixed_design_policy(
+        formula.clone(),
+        &data,
+        None,
+        FixedDesignBuildPolicy::dense(),
+    )
+    .unwrap();
+    let mut streamed = LinearMixedModel::new_with_fixed_design_policy(
+        formula,
+        &data,
+        None,
+        FixedDesignBuildPolicy::streamed(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        streamed.fixed_design.storage(),
+        crate::model::fixed_design::FixedDesignStorage::Streamed
+    );
+    // k == 1: a_blocks = [Z'Z, [X|y]'Z, [X|y]'[X|y]]; the FE x RE
+    // cross-product must have stayed sparse for this shape.
+    assert!(
+        matches!(streamed.a_blocks[1], MatrixBlock::Sparse(_)),
+        "high-cardinality streamed [X|y]'Z block should be Sparse, got {:?}",
+        match &streamed.a_blocks[1] {
+            MatrixBlock::Dense(m) => format!("Dense{:?}", m.shape()),
+            other => format!("{other:?}").chars().take(30).collect::<String>(),
+        }
+    );
+    assert!(
+        matches!(dense.a_blocks[1], MatrixBlock::Dense(_)),
+        "dense backend keeps the dense [X|y]'Z block"
+    );
+
+    dense.fit(false).unwrap();
+    streamed.fit(false).unwrap();
+
+    assert_lmm_fit_close(&dense, &streamed);
+}
+
+#[test]
+fn test_copy_and_rmul_lambda_sparse_matches_dense() {
+    let mut coo = CooMatrix::new(3, 4);
+    coo.push(0, 0, 2.0);
+    coo.push(2, 1, -1.5);
+    coo.push(1, 3, 0.75);
+    let sparse = CscMatrix::from(&coo);
+    let a_sparse = MatrixBlock::Sparse(sparse);
+    let a_dense = MatrixBlock::Dense(a_sparse.as_dense());
+
+    let mut re = ReMat::new(
+        "g".to_string(),
+        vec![0, 1],
+        vec!["a".to_string(), "b".to_string()],
+        vec!["(Intercept)".to_string()],
+        DMatrix::from_row_slice(1, 2, &[1.0, 1.0]),
+    );
+    re.set_theta(&[0.6]).unwrap();
+
+    let mut l_from_sparse = MatrixBlock::Sparse(CscMatrix::from(&CooMatrix::new(3, 4)));
+    copy_and_rmul_lambda(&mut l_from_sparse, &a_sparse, &re);
+    let mut l_from_dense = MatrixBlock::Dense(DMatrix::zeros(3, 4));
+    copy_and_rmul_lambda(&mut l_from_dense, &a_dense, &re);
+
+    assert!(matches!(l_from_sparse, MatrixBlock::Sparse(_)));
+    assert_eq!(l_from_sparse.as_dense(), l_from_dense.as_dense());
+
+    // Second application reuses the sparse buffer and stays correct after a
+    // theta change.
+    re.set_theta(&[1.25]).unwrap();
+    copy_and_rmul_lambda(&mut l_from_sparse, &a_sparse, &re);
+    copy_and_rmul_lambda(&mut l_from_dense, &a_dense, &re);
+    assert_eq!(l_from_sparse.as_dense(), l_from_dense.as_dense());
+}
+
 #[test]
 fn test_weighted_streamed_fixed_effect_lmm_fit_matches_dense_backend() {
     let data = streamed_fixed_effect_parity_fixture(48, 5);

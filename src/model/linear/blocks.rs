@@ -408,6 +408,7 @@ pub(super) fn create_al_from_fixed_design(
     for re in reterms {
         let block =
             compute_fixed_response_re_cross_product(&weighted_fixed_design, &weighted_y, re)?;
+        let block = finalize_fixed_re_block(block, k);
         a.push(block.clone());
         l.push(block);
     }
@@ -422,6 +423,18 @@ pub(super) fn create_al_from_fixed_design(
     promote_crossed_fill_in_blocks(&mut l, reterms);
 
     Ok((a, l))
+}
+
+/// Sparse `[X|y]'Z` blocks are only kept with a single random-effect term:
+/// with multiple terms the blocked factorization's off-diagonal updates
+/// (`subtract_product`) would re-materialize them on every θ evaluation, so
+/// promote them to dense once at construction instead.
+pub(super) fn finalize_fixed_re_block(block: MatrixBlock, n_reterms: usize) -> MatrixBlock {
+    if n_reterms > 1 && matches!(block, MatrixBlock::Sparse(_)) {
+        MatrixBlock::Dense(block.as_dense())
+    } else {
+        block
+    }
 }
 
 pub(super) fn weighted_fixed_design_for_solver(
@@ -755,16 +768,36 @@ pub(super) fn compute_fixed_response_re_cross_product(
         )));
     }
 
-    let fixed_re = fixed_design.xt_reterm(re)?.as_dense();
-    let mut result = DMatrix::zeros(fixed_design.n_cols() + 1, re.n_ranef());
+    let fixed_re = fixed_design.xt_reterm(re)?;
+    let response_re =
+        compute_response_re_cross_product(&DMatrix::from_columns(std::slice::from_ref(y)), re);
+    let pp1 = fixed_design.n_cols() + 1;
+
+    // A sparse X'Z (streamed high-cardinality designs) stays sparse in the
+    // combined [X|y]'Z block; the y'Z row appended below is structurally
+    // dense but adds only n_ranef nonzeros.
+    if let MatrixBlock::Sparse(xt_sparse) = &fixed_re {
+        let mut coo = CooMatrix::new(pp1, re.n_ranef());
+        for (row, col, value) in xt_sparse.triplet_iter() {
+            coo.push(row, col, *value);
+        }
+        for col in 0..response_re.nrows() {
+            let value = response_re[(col, 0)];
+            if value != 0.0 {
+                coo.push(pp1 - 1, col, value);
+            }
+        }
+        return Ok(MatrixBlock::Sparse(CscMatrix::from(&coo)));
+    }
+
+    let fixed_re = fixed_re.as_dense();
+    let mut result = DMatrix::zeros(pp1, re.n_ranef());
     for row in 0..fixed_re.nrows() {
         for col in 0..fixed_re.ncols() {
             result[(row, col)] = fixed_re[(row, col)];
         }
     }
 
-    let response_re =
-        compute_response_re_cross_product(&DMatrix::from_columns(std::slice::from_ref(y)), re);
     for col in 0..response_re.nrows() {
         result[(fixed_design.n_cols(), col)] = response_re[(col, 0)];
     }
@@ -1603,6 +1636,32 @@ pub(super) fn copy_and_rmul_lambda(l: &mut MatrixBlock, a: &MatrixBlock, re_j: &
                     for j in 0..ncols {
                         result[(i, j)] = a_dense[(i, j)] * lam;
                     }
+                }
+                return;
+            }
+            MatrixBlock::Sparse(a_sparse) => {
+                // Scalar λ scale of a sparse [X|y]'Z block: keep the sparse
+                // structure and reuse the L buffer when it already matches.
+                let result = match l {
+                    MatrixBlock::Sparse(result)
+                        if result.nrows() == a_sparse.nrows()
+                            && result.ncols() == a_sparse.ncols()
+                            && result.nnz() == a_sparse.nnz()
+                            && result.col_offsets() == a_sparse.col_offsets()
+                            && result.row_indices() == a_sparse.row_indices() =>
+                    {
+                        result
+                    }
+                    _ => {
+                        *l = MatrixBlock::Sparse(a_sparse.clone());
+                        match l {
+                            MatrixBlock::Sparse(result) => result,
+                            _ => unreachable!(),
+                        }
+                    }
+                };
+                for (dst, src) in result.values_mut().iter_mut().zip(a_sparse.values()) {
+                    *dst = src * lam;
                 }
                 return;
             }

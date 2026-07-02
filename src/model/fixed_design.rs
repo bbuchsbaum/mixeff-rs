@@ -7,6 +7,7 @@
 //! high-cardinality fixed-effect backends.
 
 use nalgebra::{DMatrix, DVector};
+use nalgebra_sparse::{coo::CooMatrix, csc::CscMatrix};
 
 use crate::error::{MixedModelError, Result};
 use crate::formula::{FixedTerm, Formula};
@@ -1053,6 +1054,40 @@ impl FixedDesignBackend for StreamedFixedDesign {
     fn xt_reterm(&self, re: &ReMat) -> Result<MatrixBlock> {
         self.validate_response_len(re.n_obs(), &format!("random term '{}'", re.grouping_name))?;
 
+        if re.vsize == 1 && xt_reterm_sparse_worthwhile(self.n_cols(), re.n_ranef()) {
+            // Accumulate the structural nonzeros only. Per-cell addition
+            // order matches the dense loop (observation-major), so the
+            // resulting values are bit-identical to the dense path.
+            let mut entries = std::collections::BTreeMap::<(usize, usize), f64>::new();
+            let mut structural_nnz = 0usize;
+            for (obs, row) in self.rows.iter().enumerate() {
+                let level = re.refs[obs] as usize;
+                let wtz = re.wtz[(0, obs)];
+                for &(fixed_col, fixed_value) in row {
+                    entries
+                        .entry((fixed_col, level))
+                        .and_modify(|value| *value += fixed_value * wtz)
+                        .or_insert_with(|| {
+                            structural_nnz += 1;
+                            fixed_value * wtz
+                        });
+                }
+            }
+            let density =
+                structural_nnz as f64 / ((self.n_cols() as f64) * (re.n_ranef() as f64)).max(1.0);
+            if density <= XT_RETERM_SPARSE_MAX_DENSITY {
+                let mut coo = CooMatrix::new(self.n_cols(), re.n_ranef());
+                for ((row, col), value) in entries {
+                    if value != 0.0 {
+                        coo.push(row, col, value);
+                    }
+                }
+                return Ok(MatrixBlock::Sparse(CscMatrix::from(&coo)));
+            }
+            // Fall through to the dense accumulation so the emitted block is
+            // built exactly the way the dense backend builds it.
+        }
+
         let mut result = DMatrix::zeros(self.n_cols(), re.n_ranef());
         for (obs, row) in self.rows.iter().enumerate() {
             let level = re.refs[obs] as usize;
@@ -1092,6 +1127,18 @@ fn dense_bytes(n_rows: usize, n_cols: usize) -> u128 {
     (n_rows as u128)
         .saturating_mul(n_cols as u128)
         .saturating_mul(std::mem::size_of::<f64>() as u128)
+}
+
+/// A sparse `X'Z` cross-product only pays off once the dense block is large
+/// enough to matter; below this size the dense block is cheap and avoids
+/// sparse overhead in the blocked factorization. Density above the cap means
+/// the block is effectively dense and the sparse representation would only
+/// add indirection.
+const XT_RETERM_SPARSE_MIN_DENSE_BYTES: u128 = 512 * 1024;
+const XT_RETERM_SPARSE_MAX_DENSITY: f64 = 0.25;
+
+fn xt_reterm_sparse_worthwhile(n_cols: usize, n_ranef: usize) -> bool {
+    dense_bytes(n_cols, n_ranef) >= XT_RETERM_SPARSE_MIN_DENSE_BYTES
 }
 
 fn validate_sqrt_weights(sqrt_weights: &DVector<f64>, n_obs: usize) -> Result<()> {
