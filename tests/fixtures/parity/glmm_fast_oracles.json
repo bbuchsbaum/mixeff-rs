@@ -2,7 +2,7 @@
   "schema_version": "1.0.0",
   "reference_engine": "MixedModels.jl 5.3.0",
   "fit_mode": "fast=true",
-  "generated_at": "2026-05-09",
+  "generated_at": "2026-07-01",
   "source": "Local MixedModels.jl project oracle run for large GLMM rows where Rust intentionally uses the fast PIRLS comparison path.",
   "rows": [
     {
@@ -15,11 +15,11 @@
       "objective_abs_tol": 0.001,
       "optimizer_fevals": 20,
       "coef_names": ["(Intercept)", "age", "livch: 1", "livch: 2", "livch: 3+", "urban: Y"],
-      "mixedmodels_jl_beta": [-1.6599151961489025, -0.02614195791447797, 1.0917838472085355, 1.3541475127449418, 1.323517647688961, 0.7196879725537388],
-      "mixedmodels_jl_theta": [0.4604141624542791],
+      "mixedmodels_jl_beta": [-1.6599151961489025, -0.026141957914477969, 1.0917838472085355, 1.3541475127449418, 1.323517647688961, 0.71968797255373884],
+      "mixedmodels_jl_theta": [0.46041416245427907],
       "rust_comparable_beta": null,
       "beta_abs_tol": null,
-      "rust_comparable_theta_abs": [0.4604141624542791],
+      "rust_comparable_theta_abs": [0.46041416245427907],
       "theta_abs_tol": 0.001,
       "classification": "fast-PIRLS oracle: Rust and MixedModels.jl fast=true agree on the profiled objective; beta is not directly compared because the local fixture uses different factor coding than the lme4 comparison artifact."
     },
@@ -33,8 +33,8 @@
       "objective_abs_tol": 0.001,
       "optimizer_fevals": 55,
       "coef_names": ["(Intercept)", "age", "livch: 1", "livch: 2", "livch: 3+", "urban: Y"],
-      "mixedmodels_jl_beta": [-1.6653550320110782, -0.0258344611804531, 1.0980445648729915, 1.3338215645585139, 1.3214795899569383, 0.7906965835835688],
-      "mixedmodels_jl_theta": [0.6168291215277705, -0.6387258066090262, 0.48169659308919244],
+      "mixedmodels_jl_beta": [-1.6653550320110782, -0.0258344611804531, 1.0980445648729915, 1.3338215645585139, 1.3214795899569383, 0.79069658358356876],
+      "mixedmodels_jl_theta": [0.61682912152777047, -0.63872580660902623, 0.48169659308919244],
       "rust_comparable_beta": null,
       "beta_abs_tol": null,
       "rust_comparable_theta_abs": null,
@@ -47,15 +47,15 @@
       "family": "Poisson",
       "link": "Log",
       "estimator": "Laplace",
-      "objective": 851.4046370786074,
+      "objective": 851.40463707860738,
       "objective_abs_tol": 0.001,
       "optimizer_fevals": 69,
       "coef_names": ["(Intercept)", "year: 1996", "year: 1997", "ch"],
-      "mixedmodels_jl_beta": [0.5293132307464635, 1.107297375422252, -0.9184126698895163, -0.022191955068623922],
-      "mixedmodels_jl_theta": [0.5369701510299283, 0.7362810985100142, -0.557282622553529],
-      "rust_comparable_beta": [0.5293132307464635, 1.107297375422252, -0.9184126698895163, -0.022191955068623922],
-      "beta_abs_tol": 0.0005,
-      "rust_comparable_theta_abs": [0.5369701510299283, 0.7362810985100142, 0.557282622553529],
+      "mixedmodels_jl_beta": [0.52931323074646353, 1.1072973754222519, -0.91841266988951631, -0.022191955068623922],
+      "mixedmodels_jl_theta": [0.53697015102992829, 0.73628109851001422, -0.55728262255352901],
+      "rust_comparable_beta": [0.52931323074646353, 1.1072973754222519, -0.91841266988951631, -0.022191955068623922],
+      "beta_abs_tol": 0.00050000000000000001,
+      "rust_comparable_theta_abs": [0.53697015102992829, 0.73628109851001422, 0.55728262255352901],
       "theta_abs_tol": 0.002,
       "classification": "fast-PIRLS oracle: Rust and MixedModels.jl fast=true agree on the profiled objective, fixed effects, and random-intercept scales; lme4 reports a different joint optimum."
     },
@@ -65,11 +65,11 @@
       "family": "Binomial",
       "link": "Logit",
       "estimator": "Laplace",
-      "objective": 8136.170871705988,
+      "objective": 8136.1708717059882,
       "objective_abs_tol": 0.001,
       "optimizer_fevals": 33,
       "coef_names": ["(Intercept)", "anger", "gender: M", "btype: scold", "btype: shout", "situ: self", "mode: want"],
-      "mixedmodels_jl_beta": [-0.1305593768250796, 0.054380198672327865, 0.3042435374222461, -1.017489581794865, -2.02067212240139, -1.0125459797987204, 0.6791019055495526],
+      "mixedmodels_jl_beta": [-0.13055937682507959, 0.054380198672327865, 0.30424353742224608, -1.017489581794865, -2.0206721224013902, -1.0125459797987204, 0.67910190554955263],
       "mixedmodels_jl_theta": [1.3389174861610893, 0.3446095318071673],
       "rust_comparable_beta": null,
       "beta_abs_tol": null,
@@ -78,8 +78,5 @@
       "classification": "fast-PIRLS oracle: Rust and MixedModels.jl fast=true agree on the profiled objective and random-intercept scales; beta is not directly compared because the local fixture uses different factor coding than the lme4 comparison artifact."
     }
   ],
-  "notes": [
-    "This fixture does not promote fast=true semantics as the final GLMM target; it prevents the current large-row allowlist from being unexplained.",
-    "Rows that can use the joint beta+theta path in routine time are still gated directly against lme4 in comparison/rust_results.json."
-  ]
+  "notes": ["This fixture does not promote fast=true semantics as the final GLMM target; it prevents the current large-row allowlist from being unexplained.", "Rows that can use the joint beta+theta path in routine time are still gated directly against lme4 in comparison/rust_results.json."]
 }

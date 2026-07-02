@@ -5,6 +5,7 @@ using DataFrames
 using Dates
 using MixedModels
 using Printf
+using Statistics
 
 struct JObj
     fields::Vector{Pair{String, Any}}
@@ -396,6 +397,156 @@ function gamma_glmm_engines_fixture()
     ])
 end
 
+# Regenerate tests/fixtures/parity/glmm_fast_oracles.json: MixedModels.jl
+# fast=true oracle rows for large GLMMs where Rust intentionally uses the
+# fast-PIRLS comparison path (see comparison/parity_scorecard.toml). Oracle
+# numerics (objective, beta, theta, feval counts) are refreshed from live
+# fits; tolerances, comparability policy, and classification strings are
+# versioned here because they encode Rust-side gating decisions, not Julia
+# outputs.
+function glmm_fast_oracles_fixture()
+    rows = Any[]
+
+    contra = DataFrame(MixedModels.dataset(:contra))
+    contra.usenum = Float64.(contra.use .== "Y")
+    contra_ri = fit(
+        MixedModel,
+        @formula(usenum ~ 1 + age + livch + urban + (1 | dist)),
+        contra,
+        Bernoulli();
+        fast=true,
+        progress=false,
+    )
+    push!(rows, fast_oracle_row(
+        contra_ri;
+        dataset="contraception",
+        formula="use ~ 1 + age + livch + urban + (1 | dist)",
+        family="Binomial",
+        link="Logit",
+        compare_beta=false,
+        beta_abs_tol=nothing,
+        compare_theta=true,
+        theta_abs_tol=0.001,
+        classification="fast-PIRLS oracle: Rust and MixedModels.jl fast=true agree on the profiled objective; beta is not directly compared because the local fixture uses different factor coding than the lme4 comparison artifact.",
+    ))
+
+    contra_rs = fit(
+        MixedModel,
+        @formula(usenum ~ 1 + age + livch + urban + (1 + urban | dist)),
+        contra,
+        Bernoulli();
+        fast=true,
+        progress=false,
+    )
+    push!(rows, fast_oracle_row(
+        contra_rs;
+        dataset="contraception",
+        formula="use ~ 1 + age + livch + urban + (1 + urban | dist)",
+        family="Binomial",
+        link="Logit",
+        compare_beta=false,
+        beta_abs_tol=nothing,
+        compare_theta=false,
+        theta_abs_tol=nothing,
+        classification="fast-PIRLS oracle: Rust and MixedModels.jl fast=true agree on the profiled objective; beta and Cholesky parameters are not directly compared because factor coding changes the random-slope basis.",
+    ))
+
+    grouseticks = DataFrame(MixedModels.dataset(:grouseticks))
+    # The centered-height covariate is named `ch` so the emitted coefficient
+    # name matches the original oracle run.
+    grouseticks.ch = Float64.(grouseticks.height) .- mean(Float64.(grouseticks.height))
+    grouseticks_fit = fit(
+        MixedModel,
+        @formula(ticks ~ 1 + year + ch + (1 | brood) + (1 | index) + (1 | location)),
+        grouseticks,
+        Poisson();
+        fast=true,
+        progress=false,
+    )
+    push!(rows, fast_oracle_row(
+        grouseticks_fit;
+        dataset="grouseticks",
+        formula="TICKS ~ 1 + YEAR + cHEIGHT + (1 | BROOD) + (1 | INDEX) + (1 | LOCATION)",
+        family="Poisson",
+        link="Log",
+        compare_beta=true,
+        beta_abs_tol=0.0005,
+        compare_theta=true,
+        theta_abs_tol=0.002,
+        classification="fast-PIRLS oracle: Rust and MixedModels.jl fast=true agree on the profiled objective, fixed effects, and random-intercept scales; lme4 reports a different joint optimum.",
+    ))
+
+    verbagg = DataFrame(MixedModels.dataset(:verbagg))
+    verbagg.r2num = Float64.(verbagg.r2 .== "Y")
+    verbagg_fit = fit(
+        MixedModel,
+        @formula(r2num ~ 1 + anger + gender + btype + situ + mode + (1 | subj) + (1 | item)),
+        verbagg,
+        Bernoulli();
+        fast=true,
+        progress=false,
+    )
+    push!(rows, fast_oracle_row(
+        verbagg_fit;
+        dataset="verbagg",
+        formula="r2 ~ 1 + Anger + Gender + btype + situ + mode + (1 | id) + (1 | item)",
+        family="Binomial",
+        link="Logit",
+        compare_beta=false,
+        beta_abs_tol=nothing,
+        compare_theta=true,
+        theta_abs_tol=0.001,
+        classification="fast-PIRLS oracle: Rust and MixedModels.jl fast=true agree on the profiled objective and random-intercept scales; beta is not directly compared because the local fixture uses different factor coding than the lme4 comparison artifact.",
+    ))
+
+    return JObj([
+        "schema_version" => "1.0.0",
+        "reference_engine" => source_version(),
+        "fit_mode" => "fast=true",
+        "generated_at" => Dates.format(Dates.today(), "yyyy-mm-dd"),
+        "source" => "Local MixedModels.jl project oracle run for large GLMM rows where Rust intentionally uses the fast PIRLS comparison path.",
+        "rows" => rows,
+        "notes" => [
+            "This fixture does not promote fast=true semantics as the final GLMM target; it prevents the current large-row allowlist from being unexplained.",
+            "Rows that can use the joint beta+theta path in routine time are still gated directly against lme4 in comparison/rust_results.json.",
+        ],
+    ])
+end
+
+function fast_oracle_row(
+    model;
+    dataset,
+    formula,
+    family,
+    link,
+    compare_beta,
+    beta_abs_tol,
+    compare_theta,
+    theta_abs_tol,
+    classification,
+)
+    beta = collect(coef(model))
+    theta = collect(getproperty(model, :theta))
+    return JObj([
+        "dataset" => dataset,
+        "formula" => formula,
+        "family" => family,
+        "link" => link,
+        "estimator" => "Laplace",
+        "objective" => objective(model),
+        "objective_abs_tol" => 0.001,
+        "optimizer_fevals" => model.optsum.feval,
+        "coef_names" => collect(String.(coefnames(model))),
+        "mixedmodels_jl_beta" => beta,
+        "mixedmodels_jl_theta" => theta,
+        "rust_comparable_beta" => compare_beta ? beta : nothing,
+        "beta_abs_tol" => beta_abs_tol,
+        "rust_comparable_theta_abs" => compare_theta ? abs.(theta) : nothing,
+        "theta_abs_tol" => theta_abs_tol,
+        "classification" => classification,
+    ])
+end
+
 function main()
     if "--help" in ARGS || "-h" in ARGS
         println("usage: regenerate_julia_parity_fixtures.jl --out-dir=<dir>")
@@ -408,6 +559,7 @@ function main()
     write_json(out_dir, "tests/fixtures/parity/parmap_vsize3.json", parmap_vsize3_fixture())
     write_json(out_dir, "tests/fixtures/parity/rank_deficient_metrics.json", rank_deficient_metrics_fixture())
     write_json(out_dir, "tests/fixtures/parity/gamma_glmm_engines.json", gamma_glmm_engines_fixture())
+    write_json(out_dir, "tests/fixtures/parity/glmm_fast_oracles.json", glmm_fast_oracles_fixture())
 end
 
 main()

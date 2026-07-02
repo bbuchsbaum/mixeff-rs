@@ -70,6 +70,7 @@ fixtures=(
   tests/fixtures/parity/parmap_vsize3.json
   tests/fixtures/parity/rank_deficient_metrics.json
   tests/fixtures/parity/gamma_glmm_engines.json
+  tests/fixtures/parity/glmm_fast_oracles.json
   tests/fixtures/pathology_corpus/easy_full_rank/parity/mmjl.json
   tests/fixtures/pathology_corpus/reduced_rank_unit_correlation/parity/mmjl.json
 )
@@ -86,6 +87,17 @@ for fixture in "${fixtures[@]}"; do
   echo "checking $fixture"
   if [[ "$fixture" == tests/fixtures/pathology_corpus/* ]]; then
     python scripts/compare_json_tolerant.py --abs-tol=1e-7 --rel-tol=1e-8 --ignore=/runtime_ms "$fixture" "$tmp_dir/$fixture"
+  elif [[ "$fixture" == tests/fixtures/parity/glmm_fast_oracles.json ]]; then
+    # generated_at is the regeneration date; optimizer feval counts are
+    # informational and can shift across platforms/BLAS without any
+    # numerical drift in the oracle values themselves.
+    python scripts/compare_json_tolerant.py --abs-tol=1e-7 --rel-tol=1e-8 \
+      --ignore=/generated_at \
+      --ignore=/rows/0/optimizer_fevals \
+      --ignore=/rows/1/optimizer_fevals \
+      --ignore=/rows/2/optimizer_fevals \
+      --ignore=/rows/3/optimizer_fevals \
+      "$fixture" "$tmp_dir/$fixture"
   else
     python scripts/compare_json_tolerant.py --abs-tol=1e-7 --rel-tol=1e-8 "$fixture" "$tmp_dir/$fixture"
   fi
