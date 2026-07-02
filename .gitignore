@@ -1,4 +1,5 @@
 /target
+benchmarks/local_report/
 .omc/
 progress.txt
 .DS_Store
