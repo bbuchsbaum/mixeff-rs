@@ -1742,6 +1742,7 @@ pub(super) fn copy_and_rmul_lambda(l: &mut MatrixBlock, a: &MatrixBlock, re_j: &
 /// Zero-copy transposed view of a dense column-major matrix, so gemm
 /// operands of the form `A * Bᵀ` need not materialize `Bᵀ` on every
 /// objective evaluation.
+#[cfg(not(feature = "faer-backend"))]
 pub(super) fn transposed_view(m: &DMatrix<f64>) -> nalgebra::DMatrixView<'_, f64, nalgebra::Dyn> {
     let (nrows, ncols) = m.shape();
     nalgebra::DMatrixView::from_slice_with_strides_generic(
@@ -1754,6 +1755,7 @@ pub(super) fn transposed_view(m: &DMatrix<f64>) -> nalgebra::DMatrixView<'_, f64
 }
 
 /// Zero-copy transpose of `m.rows(row_offset, block_rows)`.
+#[cfg(not(feature = "faer-backend"))]
 pub(super) fn transposed_rows_view(
     m: &DMatrix<f64>,
     row_offset: usize,
@@ -1767,6 +1769,83 @@ pub(super) fn transposed_rows_view(
         nalgebra::Dyn(m.nrows()),
         nalgebra::Dyn(1),
     )
+}
+
+/// `C -= A * Bᵀ`, dispatched to the compiled gemm backend. The default
+/// backend is nalgebra (matrixmultiply); the experimental `faer-backend`
+/// feature routes the product through faer's matmul instead.
+#[cfg(not(feature = "faer-backend"))]
+pub(super) fn gemm_sub_abt(c: &mut DMatrix<f64>, a: &DMatrix<f64>, b: &DMatrix<f64>) {
+    c.gemm(-1.0, a, &transposed_view(b), 1.0);
+}
+
+/// `C -= A * Bᵀ` through faer's sequential matmul over zero-copy views of
+/// the nalgebra column-major storage.
+#[cfg(feature = "faer-backend")]
+pub(super) fn gemm_sub_abt(c: &mut DMatrix<f64>, a: &DMatrix<f64>, b: &DMatrix<f64>) {
+    let (m, k) = a.shape();
+    let n = b.nrows();
+    debug_assert_eq!(b.ncols(), k);
+    debug_assert_eq!(c.shape(), (m, n));
+    let a_ref = faer::MatRef::from_column_major_slice(a.as_slice(), m, k);
+    let b_ref = faer::MatRef::from_column_major_slice(b.as_slice(), n, k);
+    let c_mut = faer::MatMut::from_column_major_slice_mut(c.as_mut_slice(), m, n);
+    faer::linalg::matmul::matmul(
+        c_mut,
+        faer::Accum::Add,
+        a_ref,
+        b_ref.transpose(),
+        -1.0,
+        faer::Par::Seq,
+    );
+}
+
+/// `C -= A[rows] * A[rows]ᵀ` over `block_rows` rows starting at `row_offset`.
+#[cfg(not(feature = "faer-backend"))]
+pub(super) fn gemm_sub_rows_aat(
+    c: &mut DMatrix<f64>,
+    a: &DMatrix<f64>,
+    row_offset: usize,
+    block_rows: usize,
+) {
+    let a_block = a.rows(row_offset, block_rows);
+    c.gemm(
+        -1.0,
+        &a_block,
+        &transposed_rows_view(a, row_offset, block_rows),
+        1.0,
+    );
+}
+
+#[cfg(feature = "faer-backend")]
+pub(super) fn gemm_sub_rows_aat(
+    c: &mut DMatrix<f64>,
+    a: &DMatrix<f64>,
+    row_offset: usize,
+    block_rows: usize,
+) {
+    debug_assert!(row_offset + block_rows <= a.nrows());
+    if a.ncols() == 0 {
+        // Zero-column downdate is a no-op; the offset slice below would
+        // panic on an empty backing slice where nalgebra's gemm no-ops.
+        return;
+    }
+    let a_ref = faer::MatRef::from_column_major_slice_with_stride(
+        &a.as_slice()[row_offset..],
+        block_rows,
+        a.ncols(),
+        a.nrows(),
+    );
+    let (m, n) = (c.nrows(), c.ncols());
+    let c_mut = faer::MatMut::from_column_major_slice_mut(c.as_mut_slice(), m, n);
+    faer::linalg::matmul::matmul(
+        c_mut,
+        faer::Accum::Add,
+        a_ref,
+        a_ref.transpose(),
+        -1.0,
+        faer::Par::Seq,
+    );
 }
 
 /// Rank-k downdate: C -= A * A' (modifies diagonal block)
@@ -1789,7 +1868,7 @@ pub(super) fn rank_k_downdate(c: &mut MatrixBlock, a: &DMatrix<f64>) {
                     }
                 }
             } else {
-                c_mat.gemm(-1.0, a, &transposed_view(a), 1.0);
+                gemm_sub_abt(c_mat, a, a);
             }
         }
         MatrixBlock::Diagonal(c_diag) => {
@@ -1817,14 +1896,13 @@ pub(super) fn rank_k_downdate(c: &mut MatrixBlock, a: &DMatrix<f64>) {
             let mut row_offset = 0;
             for blk in blocks.iter_mut() {
                 let s = blk.nrows();
-                let a_block = a.rows(row_offset, s);
-                blk.gemm(-1.0, &a_block, &transposed_rows_view(a, row_offset, s), 1.0);
+                gemm_sub_rows_aat(blk, a, row_offset, s);
                 row_offset += s;
             }
         }
         MatrixBlock::Sparse(_) => {
             let mut dense = c.as_dense();
-            dense.gemm(-1.0, a, &transposed_view(a), 1.0);
+            gemm_sub_abt(&mut dense, a, a);
             *c = MatrixBlock::Dense(dense);
         }
     }
@@ -1877,22 +1955,22 @@ pub(super) fn rank_k_downdate_sparse(c: &mut MatrixBlock, a: &CscMatrix<f64>) {
 pub(super) fn subtract_product(c: &mut MatrixBlock, a: &DMatrix<f64>, b: &DMatrix<f64>) {
     match c {
         MatrixBlock::Dense(c_mat) => {
-            c_mat.gemm(-1.0, a, &transposed_view(b), 1.0);
+            gemm_sub_abt(c_mat, a, b);
         }
         MatrixBlock::BlockDiagonal(_) => {
             // Promote to dense — off-diagonal updates destroy block-diagonal structure
             let mut c_dense = c.as_dense();
-            c_dense.gemm(-1.0, a, &transposed_view(b), 1.0);
+            gemm_sub_abt(&mut c_dense, a, b);
             *c = MatrixBlock::Dense(c_dense);
         }
         MatrixBlock::Sparse(_) => {
             let mut c_dense = c.as_dense();
-            c_dense.gemm(-1.0, a, &transposed_view(b), 1.0);
+            gemm_sub_abt(&mut c_dense, a, b);
             *c = MatrixBlock::Dense(c_dense);
         }
         _ => {
             let mut c_dense = c.as_dense();
-            c_dense.gemm(-1.0, a, &transposed_view(b), 1.0);
+            gemm_sub_abt(&mut c_dense, a, b);
             *c = MatrixBlock::Dense(c_dense);
         }
     }

@@ -44,6 +44,7 @@ num-traits = "0.2"
 indexmap = "2"
 log = "0.4"
 nlopt = { version = "0.8.1", optional = true }
+faer = { version = "0.24", optional = true, default-features = false, features = ["std", "linalg"] }
 rayon = { version = "1.10", optional = true }
 csv = "1"
 toml = { version = "0.8", default-features = false, features = ["parse"] }
@@ -70,6 +71,11 @@ unstable-internals = []
 # fitting (`BatchParallelism::Rayon`). Off by default; the serial path stays
 # the default at runtime even when the feature is compiled in.
 rayon = ["dep:rayon"]
+# EXPERIMENTAL: routes the hot blocked-Cholesky gemm downdates through faer's
+# matmul instead of nalgebra/matrixmultiply. Benchmark-gated (see mote
+# bd-01KWG71ZHZAS...); off by default. Objectives may drift at rounding level
+# versus the pinned perf_gate baselines, so do not enable in parity runs.
+faer-backend = ["dep:faer"]
 
 [dev-dependencies]
 approx = "0.5"

@@ -120,6 +120,12 @@ The lower-level form (`LinearMixedModel::new(formula, &df, None)?` then
 - `unstable-internals`: exposes the in-flux internal surface (`compiler`,
   `datasets`, `pathology`) as public modules. **Not** covered by the SemVer
   guarantee — opt in only if you need it; it may change in any release.
+- `faer-backend` (experimental): routes the hot blocked-Cholesky gemm
+  downdates through [faer](https://crates.io/crates/faer) instead of
+  nalgebra/matrixmultiply. Measured ~15–24% faster profiled-objective
+  evaluations on crossed-design models, but objectives drift at rounding
+  level versus the certified default backend, so parity fixtures and the
+  performance gate are pinned to the default. Benchmark before adopting.
 
 ## Status
 

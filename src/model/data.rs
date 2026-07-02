@@ -771,6 +771,31 @@ mod tests {
     }
 
     #[test]
+    fn polynomial_contrast_matches_r_contr_poly_4() {
+        // R's contr.poly(4) in closed form:
+        //   .L = c(-3, -1, 1, 3) / sqrt(20)
+        //   .Q = c(1, -1, -1, 1) / 2
+        //   .C = c(-1, 3, -3, 1) / sqrt(20)
+        let c = CategoricalContrast::polynomial(levels(4)).unwrap();
+        let s20 = 20.0_f64.sqrt();
+        let expected = [
+            [-3.0 / s20, 0.5, -1.0 / s20],
+            [-1.0 / s20, -0.5, 3.0 / s20],
+            [1.0 / s20, -0.5, -3.0 / s20],
+            [3.0 / s20, 0.5, 1.0 / s20],
+        ];
+        for (i, row) in expected.iter().enumerate() {
+            for (j, want) in row.iter().enumerate() {
+                assert!(
+                    (c.matrix[(i, j)] - want).abs() < 1e-12,
+                    "({i},{j}): got {}, want {want}",
+                    c.matrix[(i, j)]
+                );
+            }
+        }
+    }
+
+    #[test]
     fn add_numeric_rejects_non_finite() {
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             let mut df = DataFrame::new();
