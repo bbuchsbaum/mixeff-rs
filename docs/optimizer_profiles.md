@@ -66,26 +66,95 @@ invalid-boundary and weak-identification classifications.
 
 ### Start Ladder Policy
 
-TrustBQ currently keeps the default start simple: it optimizes from the fitted
-model's existing initial theta and relies on the centralized policy above for
-budget, stall, reuse, cross-term, and certificate-stop behavior. A
-simple-to-complex start ladder is documented but not enabled by default because
-the hard-case benchmark evidence so far points to stopping/budget policy as
-the reliable speed win, while unvalidated restarts risk changing objectives or
-masking boundary diagnostics.
+TrustBQ keeps the default start simple: it optimizes from the fitted model's
+existing initial theta and relies on the centralized policy above for budget,
+stall, reuse, cross-term, and certificate-stop behavior.
 
-The candidate ladder for future opt-in experiments is:
+One ladder is now implemented as an **opt-in** control
+(`OptimizerControl::with_trust_bq_start_ladder(TrustBqStartLadder::DiagonalFirst)`,
+default `Off`): the diagonal-first / zero-correlation warm start. Stage one
+optimizes the covariance with all off-diagonal theta pinned at exactly zero,
+on a deliberately coarse budget (`family budget / 8`, clamped to 20–60
+evaluations, accepted-step band `ftol_abs 1e-4` / `ftol_rel 1e-6`). Stage two
+is the ordinary full-covariance TrustBQ run from the expanded stage-one
+optimum with the full family budget, a contracted initial trust radius
+(`policy radius / 8`; it re-expands on successful steps), and the unchanged
+certificate-stop and boundary-diagnostic behavior. Both stages' evaluations
+are counted in `feval` and the fit log, and an opted-in fit is audit-visible
+via a `START_LADDER(diagonal_first:<n> evals): <status>` return value.
+
+Benchmark evidence (2026-07-01, `optimizer_bench_harness`, native profile,
+`MIXEFF_BENCH_TRUST_BQ_START_LADDER=diagonal_first`):
+
+| Scenario | median ms (single-start → ladder) | status change |
+| --- | --- | --- |
+| vector_1000 | 1.07 → 0.92 | — |
+| vector_10000 | 8.87 → 6.33 | — |
+| vector_deep_200x50 | 3.32 → 2.41 | — |
+| crossed_small | 6.81 → 6.46 | MAXEVAL_REACHED → FTOL_REACHED |
+| crossed_medium | 31.4 → 27.0 | — (total fevals 437 → 516, wall still lower) |
+| crossed_large | 110.5 → 76.1 | — |
+
+All rows kept `objective_pass=true`; on a small 24-subject fixture the ladder
+also repaired a ~0.52 single-start under-convergence to the NLopt reference
+objective (see `test_trust_bq_diagonal_first_ladder_matches_single_start_objective`).
+The ladder stays off by default: crossed_medium trades evaluations for wall
+time, and default promotion should wait for external-parity refresh evidence
+across both compile profiles.
+
+The remaining candidate ladders are documented but not implemented:
 
 | Target family | Candidate warm start | Default status | Promotion requirement |
 | --- | --- | --- | --- |
-| Crossed scalar intercepts | fit the largest single grouping term, then add remaining scalar terms | off | lower `time_to_certified_fit` on crossed sparse rows with unchanged objective tolerance |
-| Random intercept/slope blocks | diagonal/zero-correlation block before the full block | off | fewer fevals on vector-RE rows without losing valid rank-deficient certificates |
-| Over-specified random slopes | certified lower-rank face from the covariance KKT certificate | off | active-face benchmark improves fevals or diagnostic stability and records active rank |
-| Badly scaled predictors | internally scaled theta step/radius, not data mutation | off | no ordinary-case slowdown and no coefficient/objective drift |
+| Crossed scalar intercepts | fit the largest single grouping term, then add remaining scalar terms | not implemented | lower `time_to_certified_fit` on crossed sparse rows with unchanged objective tolerance |
+| Badly scaled predictors | internally scaled theta step/radius, not data mutation | not implemented | no ordinary-case slowdown and no coefficient/objective drift |
 
-Until one of those ladders has benchmark-backed evidence, downstream users
-should treat the current TrustBQ profile as single-start, certificate-aware,
-and policy-tuned rather than restart-driven.
+By default downstream users should continue to treat the TrustBQ profile as
+single-start, certificate-aware, and policy-tuned; the diagonal-first ladder
+is available for callers who opt in.
+
+### Active-Face Refit (experimental, opt-in)
+
+The "over-specified random slopes" candidate is now implemented as a
+post-fit continuation rather than a warm-start ladder:
+`OptimizerControl::with_active_face_refit(ActiveFaceRefit::Experimental)`
+(default `Off`). After the primary optimizer stops, every fully
+parameterized vector term's fitted relative covariance `ΛΛ'` is
+eigendecomposed; eigenvalues under the compiler's
+`effective_rank_tolerance` (the same cut the effective-covariance summaries
+use) mark a lower-rank face. The refit holds the active eigenbasis `U`
+(k×r) fixed and re-optimizes only the face factor `C` of `G = U (C Cᵀ) Uᵀ`
+— `r(r+1)/2` coordinates instead of `k(k+1)/2` — with native TrustBQ under
+the ordinary family policy, expanding each trial to theta through an exact
+LQ re-triangularization of `W = U C` (never forming `G`). Detection and
+refit iterate while the detected rank keeps shrinking (at most three
+rounds), and a round is kept only when it strictly improves the objective.
+At the final point every dropped eigendirection is probed by a forward
+difference; the audit-visible return value records the outcome:
+`ACTIVE_FACE(rank5of8:909 evals:uncertified): FTOL_REACHED` means a
+rank-5-of-8 face, 909 face/probe evaluations (all counted in `feval` and
+the fit log), and a probe that still found material descent off the face
+(`certified` means it did not).
+
+Benchmark evidence (2026-07-02, `active_face_bench`, release, default NLopt
+primary path, `singular` fixture row `y ~ 1 + A * B * C + (A * B * C |
+group)` REML; lme4 reference objective 766.554 at 4027 evals / 434 ms):
+
+| Method | Objective | fevals | min wall ms | Status |
+| --- | --- | --- | --- | --- |
+| default | 822.357 | 10000 | 598 | MAXEVAL_REACHED |
+| + active face | **764.675** | 10909 | 629 | ACTIVE_FACE(rank5of8:909 evals:uncertified): FTOL_REACHED |
+| + active face, `with_max_feval(2000)` primary | 770.935 | 3428 | 156 | ACTIVE_FACE(rank5of8:1428 evals:uncertified): MAXEVAL_REACHED |
+
+The refit turns the crate's worst documented-divergence LMM row from a
+budget-exhausted stop 55.8 above the lme4 objective into a converged stop
+1.88 *below* it for ~5% wall overhead, and detection is a no-op on
+full-rank fits (`test_active_face_refit_noop_on_full_rank_fit` pins
+byte-identical results). It stays off by default: the face basis is frozen
+at a budget-bound iterate, the `uncertified` probe outcome above is real
+(descent off the rank-5 face remains), and promotion should wait for
+external-parity refresh evidence plus a policy for re-polishing in the full
+space from the face optimum.
 
 TrustBQ stop reasons are also mapped to a stable trace classification inside
 `src/optimizer/trust_bq.rs`:

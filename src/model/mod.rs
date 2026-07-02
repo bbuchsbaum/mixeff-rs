@@ -39,14 +39,15 @@ pub use generalized::{
     GlmmPredictionScale,
 };
 pub use linear::{
-    parametricbootstrap, BootstrapFailedRefitPolicy, BootstrapInterval, BootstrapIntervalMethod,
-    BootstrapQuantile, BootstrapRefitOptions, BootstrapReplicate, BootstrapRunMetadata,
-    BootstrapRunPayload, BootstrapSeedRecord, BootstrapTarget, BootstrapTargetKind, FitOptions,
-    FitToleranceOverrides, FixedEffectBootstrapOptions, FixedEffectNullBootstrapTarget,
-    FixedEffectNullCovariancePolicy, LinearMixedModel, LinearMixedModelBuilder,
-    MixedModelBootstrap, ModelCriterion, NewReLevels, OptimizerChoice, OptimizerControl,
-    PredictionVarianceMethod, PredictionVariancePayload, PredictionVarianceRow,
-    PredictionVarianceStatus, BOOTSTRAP_RUN_SCHEMA, BOOTSTRAP_RUN_SCHEMA_VERSION,
+    parametricbootstrap, ActiveFaceRefit, BootstrapFailedRefitPolicy, BootstrapInterval,
+    BootstrapIntervalMethod, BootstrapQuantile, BootstrapRefitOptions, BootstrapReplicate,
+    BootstrapRunMetadata, BootstrapRunPayload, BootstrapSeedRecord, BootstrapTarget,
+    BootstrapTargetKind, FitOptions, FitToleranceOverrides, FixedEffectBootstrapOptions,
+    FixedEffectNullBootstrapTarget, FixedEffectNullCovariancePolicy, LinearMixedModel,
+    LinearMixedModelBuilder, MixedModelBootstrap, ModelCriterion, NewReLevels, OptimizerChoice,
+    OptimizerControl, PredictionVarianceMethod, PredictionVariancePayload, PredictionVarianceRow,
+    PredictionVarianceStatus, TrustBqStartLadder, BOOTSTRAP_RUN_SCHEMA,
+    BOOTSTRAP_RUN_SCHEMA_VERSION,
 };
 pub use summary_estimates::{ResidualSource, SamplingVarianceScale, SummaryEstimateOptions};
 pub use traits::{Family, LinkFunction, MixedModelFit, RandomEffectTermInfo, WaldConfintRow};

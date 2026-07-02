@@ -1774,6 +1774,232 @@ fn test_trust_bq_model_family_policy_records_crossed_large_theta_contract() {
     assert_eq!(policy.certificate_ftol_rel, 1e-6);
 }
 
+#[test]
+fn test_trust_bq_start_ladder_defaults_off() {
+    assert_eq!(
+        OptimizerControl::default().trust_bq_start_ladder,
+        TrustBqStartLadder::Off
+    );
+
+    let data = simulate_sleepstudy_like(24, 10, 42);
+    let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+    let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+    model
+        .fit_with_options(FitOptions::reml().with_optimizer(Optimizer::TrustBq))
+        .unwrap();
+    assert!(
+        !model.optsum.return_value.contains("START_LADDER"),
+        "single-start TrustBQ must not report a ladder: {}",
+        model.optsum.return_value
+    );
+}
+
+#[test]
+fn test_trust_bq_diagonal_first_ladder_matches_single_start_objective() {
+    let data = simulate_sleepstudy_like(24, 10, 42);
+    let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+
+    let mut single = LinearMixedModel::new(formula.clone(), &data, None).unwrap();
+    single
+        .fit_with_options(FitOptions::reml().with_optimizer(Optimizer::TrustBq))
+        .unwrap();
+
+    let mut laddered = LinearMixedModel::new(formula, &data, None).unwrap();
+    laddered
+        .fit_with_options(
+            FitOptions::reml().with_optimizer_control(
+                OptimizerControl::auto()
+                    .with_optimizer(Optimizer::TrustBq)
+                    .with_trust_bq_start_ladder(TrustBqStartLadder::DiagonalFirst),
+            ),
+        )
+        .unwrap();
+
+    assert!(
+        laddered
+            .optsum
+            .return_value
+            .starts_with("START_LADDER(diagonal_first"),
+        "opted-in ladder must be audit-visible: {}",
+        laddered.optsum.return_value
+    );
+    // The warm start must never degrade the fit. It may legitimately land
+    // lower: on this fixture single-start TrustBQ under-converges by ~0.52
+    // while the ladder reaches the NLopt BOBYQA reference objective
+    // (2298.705488) to 1e-6.
+    let tolerance = 1e-6 * (1.0 + single.objective().abs());
+    assert!(
+        laddered.objective() <= single.objective() + tolerance,
+        "ladder objective {} is worse than single-start objective {}",
+        laddered.objective(),
+        single.objective()
+    );
+    // Both stages' evaluations are counted and logged.
+    assert_eq!(
+        laddered.optsum.feval as usize,
+        laddered.optsum.fit_log.len(),
+        "feval must count ladder-stage evaluations"
+    );
+    // The certificate must classify by the inner stop code, not the
+    // START_LADDER wrapper (a converged ladder fit is not NotOptimized).
+    if laddered.optsum.converged() {
+        assert_ne!(
+            laddered.optimizer_certificate().unwrap().status,
+            FitStatus::NotOptimized,
+            "converged ladder fit must not be certified NotOptimized"
+        );
+    }
+}
+
+#[test]
+fn test_trust_bq_ladder_is_noop_without_off_diagonal_theta() {
+    // A scalar random-intercept model has no off-diagonal theta, so the
+    // diagonal-first ladder must fall back to plain single-start TrustBQ.
+    let data = simulate_sleepstudy_like(24, 10, 42);
+    let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+    let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+    model
+        .fit_with_options(
+            FitOptions::reml().with_optimizer_control(
+                OptimizerControl::auto()
+                    .with_optimizer(Optimizer::TrustBq)
+                    .with_trust_bq_start_ladder(TrustBqStartLadder::DiagonalFirst),
+            ),
+        )
+        .unwrap();
+    assert!(
+        !model.optsum.return_value.contains("START_LADDER"),
+        "ladder must be a no-op without off-diagonal theta: {}",
+        model.optsum.return_value
+    );
+}
+
+#[test]
+fn test_active_face_refit_defaults_off() {
+    assert_eq!(
+        OptimizerControl::default().active_face_refit,
+        ActiveFaceRefit::Off
+    );
+
+    let data = simulate_sleepstudy_like(24, 10, 42);
+    let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+    let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+    model.fit_with_options(FitOptions::reml()).unwrap();
+    assert!(
+        !model.optsum.return_value.contains("ACTIVE_FACE"),
+        "default fits must not run the active-face refit: {}",
+        model.optsum.return_value
+    );
+}
+
+#[test]
+fn test_active_face_refit_noop_on_full_rank_fit() {
+    // A well-identified vector model detects no lower-rank face, so the
+    // opted-in refit must leave the fit byte-identical to the default path.
+    let data = simulate_sleepstudy_like(24, 10, 42);
+    let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+
+    let mut plain = LinearMixedModel::new(formula.clone(), &data, None).unwrap();
+    plain.fit_with_options(FitOptions::reml()).unwrap();
+
+    let mut faced = LinearMixedModel::new(formula, &data, None).unwrap();
+    faced
+        .fit_with_options(FitOptions::reml().with_optimizer_control(
+            OptimizerControl::auto().with_active_face_refit(ActiveFaceRefit::Experimental),
+        ))
+        .unwrap();
+
+    assert!(
+        !faced.optsum.return_value.contains("ACTIVE_FACE"),
+        "full-rank fit must not trigger the active-face refit: {}",
+        faced.optsum.return_value
+    );
+    assert_eq!(plain.objective(), faced.objective());
+    assert_eq!(plain.optsum.feval, faced.optsum.feval);
+    assert_eq!(plain.theta(), faced.theta());
+}
+
+// The maximal over-specified singular row (36 theta for a ~rank-4 block) is
+// where the primary optimizer exhausts its budget far from the lme4
+// optimum; the assertions pin the recovery contract on the default (NLopt)
+// release path.
+#[cfg(feature = "nlopt")]
+#[test]
+fn test_active_face_refit_improves_maximal_singular_fit() {
+    let (data, _) = crate::datasets::load("singular").unwrap();
+    let formula = parse_formula("y ~ 1 + A * B * C + (A * B * C | group)").unwrap();
+
+    let mut baseline = LinearMixedModel::new(formula.clone(), &data, None).unwrap();
+    baseline.fit_with_options(FitOptions::reml()).unwrap();
+
+    let mut faced = LinearMixedModel::new(formula, &data, None).unwrap();
+    faced
+        .fit_with_options(FitOptions::reml().with_optimizer_control(
+            OptimizerControl::auto().with_active_face_refit(ActiveFaceRefit::Experimental),
+        ))
+        .unwrap();
+
+    println!(
+        "baseline: objective {} feval {} status {}",
+        baseline.objective(),
+        baseline.optsum.feval,
+        baseline.optsum.return_value
+    );
+    println!(
+        "active-face: objective {} feval {} status {}",
+        faced.objective(),
+        faced.optsum.feval,
+        faced.optsum.return_value
+    );
+
+    assert!(
+        faced.optsum.return_value.starts_with("ACTIVE_FACE("),
+        "opted-in refit must be audit-visible: {}",
+        faced.optsum.return_value
+    );
+    assert!(
+        faced.objective() < baseline.objective() - 10.0,
+        "active-face refit must materially improve the budget-bound objective: {} vs {}",
+        faced.objective(),
+        baseline.objective()
+    );
+    // lme4 converges this row to 766.554 (comparison/lme4_results.json); the
+    // face refit must land in that neighborhood, not merely improve.
+    assert!(
+        (faced.objective() - 766.554).abs() < 5.0,
+        "active-face objective {} is far from the lme4 reference 766.554",
+        faced.objective()
+    );
+    // The refit's evaluations are accounted for.
+    assert!(faced.optsum.feval > baseline.optsum.feval);
+    // The reduced active rank is recorded in the audit label even when the
+    // face stage stops on budget (effective-covariance summaries only
+    // populate for certificate-converged statuses).
+    assert!(
+        faced.optsum.return_value.contains("rank") && faced.optsum.return_value.contains("of8"),
+        "active-face label must record the active rank: {}",
+        faced.optsum.return_value
+    );
+    // When the face stage genuinely converges, the certificate must accept
+    // the wrapped stop code and the summaries must expose the reduced rank.
+    if faced.optsum.converged() {
+        assert_ne!(
+            faced.optimizer_certificate().unwrap().status,
+            FitStatus::NotOptimized,
+            "converged active-face fit must not be certified NotOptimized"
+        );
+        let summary = &faced.compiler_artifact().effective_covariance[0];
+        assert_eq!(summary.requested_rank, 8);
+        assert!(
+            summary.supported_rank < summary.requested_rank,
+            "converged active-face optimum must expose its reduced rank"
+        );
+    }
+    // The face optimum sits on the boundary: dropped directions expand to
+    // exact zero theta columns.
+    assert!(faced.is_singular());
+}
+
 fn force_bad_boundary_fit_state(
     model: &mut LinearMixedModel,
     theta: &[f64],

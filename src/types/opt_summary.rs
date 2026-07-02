@@ -331,15 +331,25 @@ impl OptSummary {
         if raw.is_empty() {
             return ConvergenceStatus::NotRun;
         }
-        // Unwrap `KKT_BOUNDARY_RESTART(<n>): <inner status>` to the inner
-        // outcome that actually determined the final iterate.
-        let status = if let Some(rest) = raw.strip_prefix("KKT_BOUNDARY_RESTART") {
-            rest.split_once(": ")
-                .map(|(_, inner)| inner.trim())
-                .unwrap_or(raw)
-        } else {
-            raw
-        };
+        // Unwrap post-fit wrapper prefixes (`KKT_BOUNDARY_RESTART(<n>):
+        // <inner>`, `START_LADDER(<label>): <inner>`, `ACTIVE_FACE(<label>):
+        // <inner>`) to the inner status that actually determined the final
+        // iterate. Wrappers can stack, so strip repeatedly.
+        let mut status = raw;
+        loop {
+            let stripped = ["KKT_BOUNDARY_RESTART", "START_LADDER", "ACTIVE_FACE"]
+                .iter()
+                .find_map(|prefix| {
+                    status
+                        .strip_prefix(prefix)
+                        .and_then(|rest| rest.split_once(": "))
+                        .map(|(_, inner)| inner.trim())
+                });
+            match stripped {
+                Some(inner) => status = inner,
+                None => break,
+            }
+        }
         let status = status
             .strip_prefix("JOINT_LAPLACE:")
             .or_else(|| status.strip_prefix("JOINT_AGQ:"))
@@ -866,6 +876,34 @@ mod tests {
         assert_eq!(
             status_of(10, "KKT_BOUNDARY_RESTART(1): MAXEVAL_REACHED"),
             ConvergenceStatus::BudgetExhausted
+        );
+    }
+
+    #[test]
+    fn convergence_status_unwraps_start_ladder_and_active_face() {
+        // The TrustBQ start-ladder and active-face wrappers must classify by
+        // the inner outcome, including when wrappers stack.
+        assert_eq!(
+            status_of(10, "START_LADDER(diagonal_first:45 evals): FTOL_REACHED"),
+            ConvergenceStatus::Converged
+        );
+        assert_eq!(
+            status_of(10, "START_LADDER(diagonal_first:45 evals): MAXEVAL_REACHED"),
+            ConvergenceStatus::BudgetExhausted
+        );
+        assert_eq!(
+            status_of(
+                10,
+                "ACTIVE_FACE(rank4of8:312 evals:certified): FTOL_REACHED"
+            ),
+            ConvergenceStatus::Converged
+        );
+        assert_eq!(
+            status_of(
+                10,
+                "ACTIVE_FACE(rank4of8:312 evals:uncertified): KKT_BOUNDARY_RESTART(1): FTOL_REACHED"
+            ),
+            ConvergenceStatus::Converged
         );
     }
 

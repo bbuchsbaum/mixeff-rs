@@ -60,6 +60,8 @@ use crate::types::opt_summary::OptimizerBackend;
 use crate::types::{FeMat, FeTerm, FitLogEntry, OptSummary, Optimizer, OptimizerSource, ReMat};
 use crate::unstable_internal_method;
 
+mod active_face;
+
 mod blocks;
 pub(crate) use blocks::*;
 
@@ -118,6 +120,17 @@ pub struct LinearMixedModel {
     /// order or a missing level in newdata cannot silently reorder or drop
     /// dummy columns.
     pub(crate) training_categorical: std::collections::HashMap<String, TrainingCategoricalLevels>,
+    /// Skip the optimizer certificate's finite-difference derivative checks
+    /// after fitting. Set only on internal bootstrap-replicate refits, where
+    /// per-fit derivative diagnostics are never read; the certificate then
+    /// records the checks explicitly as not assessed.
+    pub(crate) suppress_derivative_diagnostics: bool,
+    /// Opt-in TrustBQ warm-start ladder, carried from
+    /// [`OptimizerControl::trust_bq_start_ladder`]. Defaults to `Off`.
+    pub(crate) trust_bq_start_ladder: TrustBqStartLadder,
+    /// Opt-in post-fit active-face refit for singular vector blocks, carried
+    /// from [`OptimizerControl::active_face_refit`]. Defaults to `Off`.
+    pub(crate) active_face_refit: ActiveFaceRefit,
 }
 
 /// Snapshot of a training categorical column's encoding contract: the
@@ -602,6 +615,49 @@ impl FitToleranceOverrides {
     }
 }
 
+/// Opt-in TrustBQ warm-start ladder strategy.
+///
+/// Experimental and benchmark-gated: the default is
+/// [`TrustBqStartLadder::Off`], which keeps the single-start TrustBQ
+/// behavior documented in `docs/optimizer_profiles.md`. Ladders only apply
+/// to the native TrustBQ LMM path; other optimizers ignore this control.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TrustBqStartLadder {
+    /// Single-start TrustBQ (the default).
+    #[default]
+    Off,
+    /// Optimize the zero-correlation (diagonal-only) covariance first, then
+    /// use that optimum as the warm start for the full-covariance
+    /// optimization. The two stages share one evaluation budget and both
+    /// stages' evaluations are counted in `feval`.
+    DiagonalFirst,
+}
+
+/// Opt-in post-fit active-face refit for singular vector random-effect
+/// blocks.
+///
+/// Experimental and benchmark-gated: the default is [`ActiveFaceRefit::Off`],
+/// which leaves fits untouched. When enabled, a fitted vector block whose
+/// covariance eigendecomposition shows a lower-rank face (by the same
+/// `effective_rank_tolerance` the effective-covariance summaries use) is
+/// re-optimized on that face — `r(r+1)/2` face coordinates instead of the
+/// term's `k(k+1)/2` theta coordinates — and the refit is kept only when the
+/// objective strictly improves. The refit is audit-visible through an
+/// `ACTIVE_FACE(<rank>:<evals>:<certified|uncertified>): <status>` return
+/// value; `certified` means a finite-difference probe of every dropped
+/// direction found no material descent off the face.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ActiveFaceRefit {
+    /// No active-face continuation (the default).
+    #[default]
+    Off,
+    /// Detect lower-rank faces after the primary optimizer stops and
+    /// re-optimize on them (best-effort, improvement-gated).
+    Experimental,
+}
+
 /// Narrow, audit-recorded caller control over optimizer setup.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[non_exhaustive]
@@ -614,6 +670,12 @@ pub struct OptimizerControl {
     pub start_theta: Option<Vec<f64>>,
     /// Optional maximum number of optimizer function evaluations.
     pub max_feval: Option<usize>,
+    /// Opt-in TrustBQ warm-start ladder. Defaults to
+    /// [`TrustBqStartLadder::Off`].
+    pub trust_bq_start_ladder: TrustBqStartLadder,
+    /// Opt-in post-fit active-face refit for singular vector blocks.
+    /// Defaults to [`ActiveFaceRefit::Off`].
+    pub active_face_refit: ActiveFaceRefit,
 }
 
 impl OptimizerControl {
@@ -646,6 +708,18 @@ impl OptimizerControl {
         self
     }
 
+    /// Opt into a TrustBQ warm-start ladder.
+    pub fn with_trust_bq_start_ladder(mut self, ladder: TrustBqStartLadder) -> Self {
+        self.trust_bq_start_ladder = ladder;
+        self
+    }
+
+    /// Opt into the experimental post-fit active-face refit.
+    pub fn with_active_face_refit(mut self, refit: ActiveFaceRefit) -> Self {
+        self.active_face_refit = refit;
+        self
+    }
+
     fn caller_set_fields(&self) -> Vec<String> {
         let mut fields = Vec::new();
         if self.optimizer.named().is_some() {
@@ -671,6 +745,12 @@ impl OptimizerControl {
         }
         if self.max_feval.is_some() {
             fields.push("max_feval".to_string());
+        }
+        if self.trust_bq_start_ladder != TrustBqStartLadder::Off {
+            fields.push("trust_bq_start_ladder".to_string());
+        }
+        if self.active_face_refit != ActiveFaceRefit::Off {
+            fields.push("active_face_refit".to_string());
         }
         fields
     }
@@ -1024,6 +1104,9 @@ impl LinearMixedModel {
             compiler_artifact,
             residual_source: crate::model::summary_estimates::ResidualSource::EstimatedSigma,
             training_categorical,
+            suppress_derivative_diagnostics: false,
+            trust_bq_start_ladder: TrustBqStartLadder::default(),
+            active_face_refit: ActiveFaceRefit::default(),
         };
         debug_assert_eq!(
             model.dims.p, model.feterm.rank,
@@ -1541,6 +1624,7 @@ impl LinearMixedModel {
             }
         }
         self.apply_kkt_guided_boundary_restart(reml)?;
+        self.apply_active_face_refit()?;
         self.refresh_optimizer_certificate();
         self.refresh_effective_covariance_summaries();
         self.refresh_covariance_parameter_traces();
@@ -1670,6 +1754,13 @@ impl LinearMixedModel {
         &self,
         certificate: &OptimizerCertificate,
     ) -> Option<String> {
+        if self.suppress_derivative_diagnostics {
+            return Some(
+                "finite-difference derivative diagnostics are skipped for internal bootstrap-replicate refits"
+                    .to_string(),
+            );
+        }
+
         let n_theta = certificate.evidence.parameter_space.n_theta;
         if n_theta == 0 {
             return Some(
@@ -2189,6 +2280,9 @@ impl LinearMixedModel {
     pub(crate) fn apply_optimizer_control(&mut self, control: &OptimizerControl) -> Result<()> {
         let n_theta = self.n_theta();
 
+        self.trust_bq_start_ladder = control.trust_bq_start_ladder;
+        self.active_face_refit = control.active_face_refit;
+
         if let Some(value) = control.tolerances.ftol_rel {
             validate_positive_control_value("ftol_rel", value)?;
             self.optsum.ftol_rel = value;
@@ -2323,8 +2417,9 @@ impl LinearMixedModel {
         }
 
         let theta = self.theta();
-        let objective = self.objective_at_theta_for_certificate(&theta)?;
-        let variance_tolerance = 1e-8;
+        let mut evaluator = self.clone();
+        let objective = evaluator.objective_at(&theta)?;
+        let variance_tolerance = SCALAR_KKT_VARIANCE_TOLERANCE;
         let score_tolerance = (1e-5 * (1.0 + objective.abs())).max(1e-6);
         let mut blocks = Vec::with_capacity(self.reterms.len());
 
@@ -2332,7 +2427,8 @@ impl LinearMixedModel {
             let theta_index = term_index;
             let theta_value = theta[theta_index].max(0.0);
             let variance = theta_value * theta_value;
-            let score = self.scalar_covariance_score(theta_index, &theta, objective)?;
+            let score =
+                Self::scalar_covariance_score(&mut evaluator, theta_index, &theta, objective)?;
             let complementarity = (variance * score).abs() / (1.0 + variance.abs() * score.abs());
             let classification = classify_scalar_covariance_kkt(
                 variance,
@@ -2378,13 +2474,19 @@ impl LinearMixedModel {
         })
     }
 
+    /// Evaluate the profiled objective at `theta` without mutating `self`.
+    ///
+    /// Clones a fresh evaluator per call, so it is a convenience for one-off
+    /// probes (primarily tests); repeated-probe paths such as the KKT
+    /// certificates share a single cloned evaluator instead.
+    #[cfg(test)]
     fn objective_at_theta_for_certificate(&self, theta: &[f64]) -> Result<f64> {
         let mut evaluator = self.clone();
         evaluator.objective_at(theta)
     }
 
     fn scalar_covariance_score(
-        &self,
+        evaluator: &mut LinearMixedModel,
         theta_index: usize,
         theta: &[f64],
         objective: f64,
@@ -2393,12 +2495,18 @@ impl LinearMixedModel {
         let mut step = scalar_covariance_variance_step(variance);
 
         for _ in 0..8 {
-            let plus = self.objective_at_scalar_variance(theta, theta_index, variance + step);
+            let plus =
+                Self::objective_at_scalar_variance(evaluator, theta, theta_index, variance + step);
             if variance > 1.5 * step {
                 let minus_variance = variance - step;
                 if let (Ok(f_plus), Ok(f_minus)) = (
                     plus,
-                    self.objective_at_scalar_variance(theta, theta_index, minus_variance),
+                    Self::objective_at_scalar_variance(
+                        evaluator,
+                        theta,
+                        theta_index,
+                        minus_variance,
+                    ),
                 ) {
                     if f_plus.is_finite() && f_minus.is_finite() {
                         return Ok((f_plus - f_minus) / (2.0 * step));
@@ -2418,14 +2526,14 @@ impl LinearMixedModel {
     }
 
     fn objective_at_scalar_variance(
-        &self,
+        evaluator: &mut LinearMixedModel,
         theta: &[f64],
         theta_index: usize,
         variance: f64,
     ) -> Result<f64> {
         let mut trial = theta.to_vec();
         trial[theta_index] = variance.max(0.0).sqrt();
-        self.objective_at_theta_for_certificate(&trial)
+        evaluator.objective_at(&trial)
     }
 
     unstable_internal_method! {
@@ -2459,8 +2567,9 @@ impl LinearMixedModel {
         }
 
         let theta = self.theta();
-        let objective = self.objective_at_theta_for_certificate(&theta)?;
-        let covariance_tolerance = 1e-8;
+        let mut evaluator = self.clone();
+        let objective = evaluator.objective_at(&theta)?;
+        let covariance_tolerance = TWO_BY_TWO_KKT_COVARIANCE_TOLERANCE;
         let score_tolerance = (1e-5 * (1.0 + objective.abs())).max(1e-6);
         let complementarity_tolerance = 1e-4;
         let mut blocks = Vec::with_capacity(self.reterms.len());
@@ -2474,8 +2583,13 @@ impl LinearMixedModel {
                 theta[theta_start_index + 2],
             ];
             let covariance = two_by_two_covariance_from_theta(theta_block);
-            let score =
-                self.two_by_two_covariance_score(theta_start_index, &theta, objective, covariance)?;
+            let score = Self::two_by_two_covariance_score(
+                &mut evaluator,
+                theta_start_index,
+                &theta,
+                objective,
+                covariance,
+            )?;
             let (min_eig_g, max_eig_g) = symmetric_2x2_eigenvalues(covariance);
             let (min_eig_score, _) = symmetric_2x2_eigenvalues(score);
             let complementarity = two_by_two_complementarity(covariance, score);
@@ -2530,7 +2644,7 @@ impl LinearMixedModel {
     }
 
     fn two_by_two_covariance_score(
-        &self,
+        evaluator: &mut LinearMixedModel,
         theta_start_index: usize,
         theta: &[f64],
         objective: f64,
@@ -2541,28 +2655,32 @@ impl LinearMixedModel {
         let plus = [[0.5, 0.5], [0.5, 0.5]];
         let minus = [[0.5, -0.5], [-0.5, 0.5]];
 
-        let s00 = self.two_by_two_directional_covariance_score(
+        let s00 = Self::two_by_two_directional_covariance_score(
+            evaluator,
             theta_start_index,
             theta,
             objective,
             covariance,
             e1,
         )?;
-        let s11 = self.two_by_two_directional_covariance_score(
+        let s11 = Self::two_by_two_directional_covariance_score(
+            evaluator,
             theta_start_index,
             theta,
             objective,
             covariance,
             e2,
         )?;
-        let d_plus = self.two_by_two_directional_covariance_score(
+        let d_plus = Self::two_by_two_directional_covariance_score(
+            evaluator,
             theta_start_index,
             theta,
             objective,
             covariance,
             plus,
         )?;
-        let d_minus = self.two_by_two_directional_covariance_score(
+        let d_minus = Self::two_by_two_directional_covariance_score(
+            evaluator,
             theta_start_index,
             theta,
             objective,
@@ -2578,7 +2696,7 @@ impl LinearMixedModel {
     }
 
     fn two_by_two_directional_covariance_score(
-        &self,
+        evaluator: &mut LinearMixedModel,
         theta_start_index: usize,
         theta: &[f64],
         objective: f64,
@@ -2589,13 +2707,23 @@ impl LinearMixedModel {
 
         for _ in 0..8 {
             let plus_cov = two_by_two_add_direction(covariance, direction, step);
-            let plus = self.objective_at_two_by_two_covariance(theta, theta_start_index, plus_cov);
+            let plus = Self::objective_at_two_by_two_covariance(
+                evaluator,
+                theta,
+                theta_start_index,
+                plus_cov,
+            );
             let minus_cov = two_by_two_add_direction(covariance, direction, -step);
 
             if two_by_two_theta_from_covariance(minus_cov).is_some() {
                 if let (Ok(f_plus), Ok(f_minus)) = (
                     plus,
-                    self.objective_at_two_by_two_covariance(theta, theta_start_index, minus_cov),
+                    Self::objective_at_two_by_two_covariance(
+                        evaluator,
+                        theta,
+                        theta_start_index,
+                        minus_cov,
+                    ),
                 ) {
                     if f_plus.is_finite() && f_minus.is_finite() {
                         return Ok((f_plus - f_minus) / (2.0 * step));
@@ -2616,7 +2744,7 @@ impl LinearMixedModel {
     }
 
     fn objective_at_two_by_two_covariance(
-        &self,
+        evaluator: &mut LinearMixedModel,
         theta: &[f64],
         theta_start_index: usize,
         covariance: [[f64; 2]; 2],
@@ -2628,7 +2756,7 @@ impl LinearMixedModel {
         })?;
         let mut trial = theta.to_vec();
         trial[theta_start_index..theta_start_index + 3].copy_from_slice(&theta_block);
-        self.objective_at_theta_for_certificate(&trial)
+        evaluator.objective_at(&trial)
     }
 
     fn trust_bq_covariance_kkt_certifies_theta(
@@ -2812,12 +2940,25 @@ impl LinearMixedModel {
     }
 
     fn scalar_kkt_boundary_restart_candidate(&self) -> Result<Option<KktBoundaryRestartCandidate>> {
-        let certificate = self.scalar_covariance_kkt_certificate()?;
         let base_theta = self.theta();
+        // An InvalidBoundaryStop classification requires a block variance at
+        // or below the certificate's variance tolerance, so a fit with every
+        // scalar variance strictly interior can never produce a restart
+        // candidate. Checking that in theta space skips the certificate's
+        // finite-difference probes entirely on non-boundary fits.
+        if base_theta
+            .iter()
+            .all(|&value| value.max(0.0).powi(2) > SCALAR_KKT_VARIANCE_TOLERANCE)
+        {
+            return Ok(None);
+        }
+
+        let certificate = self.scalar_covariance_kkt_certificate()?;
         let base_objective = certificate.objective;
         let mut best_theta = base_theta.clone();
         let mut best_objective = base_objective;
         let mut reason = None;
+        let mut evaluator = self.clone();
 
         for block in certificate.blocks.iter().filter(|block| {
             block.classification == CovarianceKktClassification::InvalidBoundaryStop
@@ -2826,7 +2967,7 @@ impl LinearMixedModel {
             for delta in kkt_restart_delta_grid(scale) {
                 let mut trial = base_theta.clone();
                 trial[block.theta_index] = delta.sqrt();
-                let objective = self.objective_at_theta_for_certificate(&trial)?;
+                let objective = evaluator.objective_at(&trial)?;
                 if objective + self.optsum.ftol_abs.max(1e-10) < best_objective {
                     best_objective = objective;
                     best_theta = trial;
@@ -2845,12 +2986,27 @@ impl LinearMixedModel {
     fn two_by_two_kkt_boundary_restart_candidate(
         &self,
     ) -> Result<Option<KktBoundaryRestartCandidate>> {
-        let certificate = self.two_by_two_covariance_kkt_certificate()?;
         let base_theta = self.theta();
+        // An InvalidBoundaryStop classification requires a block covariance
+        // whose smallest eigenvalue is at or below the certificate's
+        // covariance tolerance, so a fit with every 2x2 block strictly inside
+        // the PSD cone can never produce a restart candidate. Checking that
+        // in theta space skips the certificate's finite-difference probes
+        // entirely on non-boundary fits.
+        let any_block_on_psd_boundary = base_theta.chunks_exact(3).any(|block| {
+            let covariance = two_by_two_covariance_from_theta([block[0], block[1], block[2]]);
+            symmetric_2x2_eigenvalues(covariance).0 <= TWO_BY_TWO_KKT_COVARIANCE_TOLERANCE
+        });
+        if !any_block_on_psd_boundary {
+            return Ok(None);
+        }
+
+        let certificate = self.two_by_two_covariance_kkt_certificate()?;
         let base_objective = certificate.objective;
         let mut best_theta = base_theta.clone();
         let mut best_objective = base_objective;
         let mut reason = None;
+        let mut evaluator = self.clone();
 
         for block in certificate.blocks.iter().filter(|block| {
             block.classification == CovarianceKktClassification::InvalidBoundaryStop
@@ -2869,7 +3025,7 @@ impl LinearMixedModel {
                 let mut trial = base_theta.clone();
                 trial[block.theta_start_index..block.theta_start_index + 3]
                     .copy_from_slice(&theta_block);
-                let objective = self.objective_at_theta_for_certificate(&trial)?;
+                let objective = evaluator.objective_at(&trial)?;
                 if objective + self.optsum.ftol_abs.max(1e-10) < best_objective {
                     best_objective = objective;
                     best_theta = trial;
@@ -5219,15 +5375,122 @@ impl LinearMixedModel {
             self.optsum.ftol_abs,
             self.optsum.ftol_rel,
         );
-        let trust_bq_initial = self.optsum.initial.clone();
+        let mut trust_bq_initial = self.optsum.initial.clone();
+        let lower_bounds = self.lower_bounds();
+        let upper_bounds = vec![f64::INFINITY; n_theta];
+
+        // Opt-in diagonal-first warm-start ladder: optimize the
+        // zero-correlation covariance (off-diagonal theta pinned at exactly
+        // zero) on a coarse budget, then hand the expanded optimum to the
+        // full-covariance stage below. The two stages share one evaluation
+        // budget and one fit log; the full stage still runs to its own
+        // convergence/certificate stop, so boundary diagnostics and KKT
+        // certificates are computed at the final full-covariance optimum
+        // exactly as in the single-start path.
+        let mut ladder_fevals = 0usize;
+        let mut ladder_label: Option<String> = None;
+        if self.trust_bq_start_ladder == TrustBqStartLadder::DiagonalFirst {
+            let diagonal_indices: Vec<usize> = self
+                .parmap
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, row, col))| row == col)
+                .map(|(index, _)| index)
+                .collect();
+            if !diagonal_indices.is_empty() && diagonal_indices.len() < n_theta {
+                let reduced_initial: Vec<f64> = diagonal_indices
+                    .iter()
+                    .map(|&index| trust_bq_initial[index])
+                    .collect();
+                let reduced_lower = vec![0.0_f64; diagonal_indices.len()];
+                let reduced_upper = vec![f64::INFINITY; diagonal_indices.len()];
+                let reduced_step: Vec<f64> = diagonal_indices
+                    .iter()
+                    .map(|&index| self.optsum.initial_step.get(index).copied().unwrap_or(0.75))
+                    .collect();
+                let reduced_xtol: Vec<f64> = diagonal_indices
+                    .iter()
+                    .map(|&index| self.optsum.xtol_abs.get(index).copied().unwrap_or(1e-10))
+                    .collect();
+                // A warm start needs the right neighborhood, not a certified
+                // optimum. Deliberately bypass the family policy's tolerance
+                // mapping (the small family clamps ftol to parity-grade
+                // bands, which makes the stage polish its constrained
+                // optimum and burn the shared budget): stop on a coarse
+                // accepted-step band and a short stall window instead.
+                let stage_budget = (policy.max_evaluations / 8).clamp(20, 60);
+                let mut expanded = trust_bq_initial.clone();
+                for (index, value) in expanded.iter_mut().enumerate() {
+                    if !diagonal_indices.contains(&index) {
+                        *value = 0.0;
+                    }
+                }
+                let stage_result = {
+                    let mut stage_objective = |reduced: &[f64]| -> Result<f64> {
+                        let mut full = expanded.clone();
+                        for (slot, &index) in diagonal_indices.iter().enumerate() {
+                            full[index] = reduced[slot];
+                        }
+                        objective_fn(&full)
+                    };
+                    minimize_trust_bq_with_progress(
+                        &reduced_initial,
+                        &reduced_lower,
+                        &reduced_upper,
+                        TrustBqOptions {
+                            initial_radius: trust_bq_initial_radius(
+                                &reduced_step,
+                                diagonal_indices.len(),
+                            ),
+                            final_radius: trust_bq_final_radius(
+                                &reduced_xtol,
+                                diagonal_indices.len(),
+                            )
+                            .max(1e-3),
+                            max_evaluations: stage_budget,
+                            ftol_abs: 1e-4,
+                            ftol_rel: 1e-6,
+                            max_cross_terms: if diagonal_indices.len() <= 3 {
+                                usize::MAX
+                            } else {
+                                0
+                            },
+                            reuse_samples: diagonal_indices.len() >= 7,
+                            stall_iterations: 3,
+                            stall_ftol_rel: 1e-6,
+                            stall_ftol_abs: 1e-8,
+                            stall_requires_stable_x: false,
+                            ..TrustBqOptions::default()
+                        },
+                        &mut stage_objective,
+                        |_| Ok(false),
+                    )
+                };
+                if let Ok(stage_result) = stage_result {
+                    ladder_fevals = stage_result.fevals;
+                    if stage_result.fmin.is_finite() {
+                        for (slot, &index) in diagonal_indices.iter().enumerate() {
+                            expanded[index] = stage_result.x[slot];
+                        }
+                        trust_bq_initial = expanded;
+                        ladder_label = Some(format!("diagonal_first:{ladder_fevals} evals"));
+                    }
+                }
+            }
+        }
+        // The full stage keeps the family's whole evaluation budget: the
+        // coarse warm-start stage is bounded overhead (opted into by the
+        // caller), and starving the full stage below the family budget was
+        // observed to trade certified FTOL stops for budget exhaustion on
+        // crossed rows.
+        let full_stage_max_evaluations = policy.max_evaluations;
+
         let mut certificate_stop = TrustBqCertificateStopState::new(
             n_theta,
-            policy.max_evaluations,
+            full_stage_max_evaluations,
             policy.certificate_ftol_abs,
             policy.certificate_ftol_rel,
         );
-        let lower_bounds = self.lower_bounds();
-        let upper_bounds = vec![f64::INFINITY; n_theta];
         let mut certificate_progress = |progress: &TrustBqProgress<'_>| -> Result<bool> {
             if !certificate_stop.should_check(progress) {
                 return Ok(false);
@@ -5244,9 +5507,16 @@ impl LinearMixedModel {
             &lower_bounds,
             &upper_bounds,
             TrustBqOptions {
-                initial_radius: policy.initial_radius,
+                // From a ladder warm start the optimum is expected nearby, so
+                // begin with a contracted trust region (it re-expands on
+                // successful steps); a cold start keeps the policy radius.
+                initial_radius: if ladder_label.is_some() {
+                    (policy.initial_radius / 8.0).max(policy.final_radius * 10.0)
+                } else {
+                    policy.initial_radius
+                },
                 final_radius: policy.final_radius,
-                max_evaluations: policy.max_evaluations,
+                max_evaluations: full_stage_max_evaluations,
                 ftol_abs: policy.ftol_abs,
                 ftol_rel: policy.ftol_rel,
                 max_cross_terms: policy.max_cross_terms,
@@ -5277,12 +5547,16 @@ impl LinearMixedModel {
             } else {
                 (result.x, result.fmin)
             };
-        let return_value = Some(Self::trust_bq_status_label(result.stop_reason));
+        let base_status = Self::trust_bq_status_label(result.stop_reason);
+        let return_value = Some(match &ladder_label {
+            Some(label) => format!("START_LADDER({label}): {base_status}"),
+            None => base_status,
+        });
 
         self.finalize_fit_result(
             final_theta,
             final_fmin,
-            result.fevals as i64,
+            (result.fevals + ladder_fevals) as i64,
             fit_log.into_inner(),
             Optimizer::TrustBq,
             return_value,
@@ -5908,6 +6182,7 @@ impl LinearMixedModel {
         }
 
         self.apply_kkt_guided_boundary_restart(reml)?;
+        self.apply_active_face_refit()?;
         self.refresh_optimizer_certificate();
         self.refresh_effective_covariance_summaries();
         self.refresh_covariance_parameter_traces();
@@ -7171,6 +7446,7 @@ impl LinearMixedModel {
         for _ in 0..options.requested_replicates {
             let y_sim = self.simulate_fixed_effect_null(&mut rng, target)?;
             let mut work = self.clone();
+            work.suppress_derivative_diagnostics = true;
             match work.refit(y_sim.as_slice()) {
                 Ok(()) => {
                     statistics.push(
@@ -10063,6 +10339,15 @@ fn div_zero(numerator: f64, denominator: f64, tolerance: f64) -> f64 {
 fn scalar_covariance_variance_step(variance: f64) -> f64 {
     (1e-5 * (1.0 + variance.abs())).max(1e-8)
 }
+
+/// Variance tolerance shared by the scalar covariance KKT certificate and the
+/// theta-space pre-check that gates the KKT-guided boundary restart.
+const SCALAR_KKT_VARIANCE_TOLERANCE: f64 = 1e-8;
+
+/// Covariance-eigenvalue tolerance shared by the 2x2 covariance KKT
+/// certificate and the theta-space pre-check that gates the KKT-guided
+/// boundary restart.
+const TWO_BY_TWO_KKT_COVARIANCE_TOLERANCE: f64 = 1e-8;
 
 fn classify_scalar_covariance_kkt(
     variance: f64,

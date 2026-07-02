@@ -4805,12 +4805,18 @@ fn optimizer_joint_glmm_final_code(return_value: &str) -> Option<&str> {
         .filter(|code| !code.is_empty())
 }
 
+/// Unwrap the post-fit wrapper prefixes the LMM driver prepends to
+/// `return_value` (`KKT_BOUNDARY_RESTART(…): <code>`, `START_LADDER(…):
+/// <code>`, `ACTIVE_FACE(…): <code>`) to the final stop code that produced
+/// the installed iterate. Wrapper labels never contain `": "`, so the last
+/// occurrence splits off the bare code even when wrappers stack.
 fn optimizer_recovery_final_code(return_value: &str) -> Option<&str> {
-    return_value
-        .starts_with("KKT_BOUNDARY_RESTART(")
-        .then(|| return_value.rsplit_once(": ").map(|(_, code)| code.trim()))
-        .flatten()
-        .filter(|code| !code.is_empty())
+    (return_value.starts_with("KKT_BOUNDARY_RESTART(")
+        || return_value.starts_with("START_LADDER(")
+        || return_value.starts_with("ACTIVE_FACE("))
+    .then(|| return_value.rsplit_once(": ").map(|(_, code)| code.trim()))
+    .flatten()
+    .filter(|code| !code.is_empty())
 }
 
 fn optimizer_recovery_reason(return_value: &str) -> Option<&str> {

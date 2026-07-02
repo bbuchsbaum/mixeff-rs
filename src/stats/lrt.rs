@@ -1785,6 +1785,11 @@ pub fn parametric_bootstrap_lrt<R: rand::Rng>(
         let y_star = smaller.simulate(rng);
         let mut null_fit = smaller.clone();
         let mut alt_fit = larger.clone();
+        // Replicates only contribute a likelihood-ratio statistic, so skip
+        // the optimizer certificate's finite-difference derivative
+        // diagnostics on these internal refits.
+        null_fit.suppress_derivative_diagnostics = true;
+        alt_fit.suppress_derivative_diagnostics = true;
         match (
             null_fit.refit(y_star.as_slice()),
             alt_fit.refit(y_star.as_slice()),

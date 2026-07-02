@@ -197,6 +197,27 @@ comparator_certification = "not_applicable"
 unit_test_name = "test_kkt_guided_restart_repairs_scalar_invalid_boundary_stop"
 
 [[scenario]]
+id = "singular_maximal_active_face_refit"
+axis = "overspecified_random_slopes_lmm"
+description = "Opt-in active-face continuation of the maximal over-specified singular row: refit on the detected lower-rank covariance face after the primary optimizer exhausts its budget."
+data_source = "src/model/linear/tests.rs unit test over datasets/singular"
+generator = "checked-in singular fixture with ActiveFaceRefit::Experimental"
+dataset = "unit_test"
+formula = "y ~ 1 + A * B * C + (A * B * C | group)"
+family = "Gaussian"
+link = "Identity"
+estimator = "REML"
+comparator_engines = ["lme4"]
+release_relevance = "This is the recovery experiment for the singular_maximal_overspecified documented divergence; default behavior is unchanged (ActiveFaceRefit::Off)."
+scorecard_class = "experimental_recovery"
+certification_status = "experimental_recovery"
+certification_claim = "test_active_face_refit_improves_maximal_singular_fit proves the opt-in refit moves the budget-exhausted objective (822.36) into the lme4 neighborhood (764.7 vs 766.554) and records the active rank in the ACTIVE_FACE audit label."
+required_metrics = ["objective_delta", "optimizer_status", "certification_status", "singular_status", "fevals", "wall_time_ms"]
+rust_certification = "active_face_refit"
+comparator_certification = "single_fit_warning"
+unit_test_name = "test_active_face_refit_improves_maximal_singular_fit"
+
+[[scenario]]
 id = "gopherdat2_near_zero_glmm"
 axis = "glmm_near_zero_random_effect"
 description = "Poisson GLMM with coefficient parity but near-zero theta / singular-flag disagreement."

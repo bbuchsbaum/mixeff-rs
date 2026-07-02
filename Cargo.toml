@@ -86,7 +86,15 @@ required-features = ["unstable-internals"]
 # pathology) only build when that feature is enabled, so the default
 # `cargo build --examples` stays on the stable public API.
 [[example]]
+name = "active_face_bench"
+required-features = ["unstable-internals"]
+
+[[example]]
 name = "bench_compiler_contract"
+required-features = ["unstable-internals"]
+
+[[example]]
+name = "bootstrap_refit_bench"
 required-features = ["unstable-internals"]
 
 [[example]]

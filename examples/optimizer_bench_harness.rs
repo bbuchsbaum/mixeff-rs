@@ -12,7 +12,9 @@ use std::time::Instant;
 
 use mixeff_rs::formula::parse_formula;
 use mixeff_rs::model::data::DataFrame;
-use mixeff_rs::model::linear::LinearMixedModel;
+use mixeff_rs::model::linear::{
+    FitOptions, LinearMixedModel, OptimizerControl, TrustBqStartLadder,
+};
 use mixeff_rs::model::traits::MixedModelFit;
 
 const DEFAULT_WARMUP: usize = 1;
@@ -458,11 +460,40 @@ fn compile_profile() -> &'static str {
     }
 }
 
+/// Opt-in TrustBQ start-ladder experiment lever for A/B runs:
+/// `MIXEFF_BENCH_TRUST_BQ_START_LADDER=diagonal_first`. Unset (the default)
+/// keeps the driver's standard single-start behavior.
+fn bench_start_ladder() -> TrustBqStartLadder {
+    match std::env::var("MIXEFF_BENCH_TRUST_BQ_START_LADDER").as_deref() {
+        Ok("diagonal_first") => TrustBqStartLadder::DiagonalFirst,
+        _ => TrustBqStartLadder::Off,
+    }
+}
+
+fn fit_with_bench_controls(
+    model: &mut LinearMixedModel,
+    reml: bool,
+) -> mixeff_rs::error::Result<()> {
+    let ladder = bench_start_ladder();
+    if ladder == TrustBqStartLadder::Off {
+        model.fit(reml)?;
+        return Ok(());
+    }
+    let options = if reml {
+        FitOptions::reml()
+    } else {
+        FitOptions::ml()
+    }
+    .with_optimizer_control(OptimizerControl::auto().with_trust_bq_start_ladder(ladder));
+    model.fit_with_options(options)?;
+    Ok(())
+}
+
 fn fit_once(scenario: Scenario, data: &DataFrame) -> Result<FitRecord, String> {
     let formula = parse_formula(scenario.formula).map_err(|err| err.to_string())?;
     let start = Instant::now();
     let mut model = LinearMixedModel::new(formula, data, None).map_err(|err| err.to_string())?;
-    model.fit(scenario.reml).map_err(|err| err.to_string())?;
+    fit_with_bench_controls(&mut model, scenario.reml).map_err(|err| err.to_string())?;
     let wall_ms = start.elapsed().as_secs_f64() * 1000.0;
     let (n, p, q, n_reterms) = model.model_size();
     let varcorr = model.varcorr();
@@ -522,7 +553,7 @@ fn main() {
 
         for _ in 0..DEFAULT_WARMUP {
             let mut model = LinearMixedModel::new(formula.clone(), &data, None).unwrap();
-            let _ = model.fit(scenario.reml);
+            let _ = fit_with_bench_controls(&mut model, scenario.reml);
         }
 
         let mut records = Vec::with_capacity(DEFAULT_REPS);

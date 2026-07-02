@@ -900,8 +900,13 @@ pub fn parametricbootstrap<R: rand::Rng>(
         // Simulate from the template (always use the original fitted model).
         let y_sim = model.simulate(rng);
 
-        // Fresh clone of the template for this replicate.
+        // Fresh clone of the template for this replicate. Replicates record
+        // only (objective, sigma, beta, se, theta), so the optimizer
+        // certificate's finite-difference derivative diagnostics are skipped;
+        // the KKT-guided boundary restart still runs because it can change
+        // the fitted estimates.
         let mut work = model.clone();
+        work.suppress_derivative_diagnostics = true;
 
         match work.refit(y_sim.as_slice()) {
             Ok(()) => {
