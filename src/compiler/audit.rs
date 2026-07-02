@@ -1303,10 +1303,27 @@ fn design_matrix_from_columns(n_rows: usize, columns: &[DesignColumn]) -> DMatri
     matrix
 }
 
+/// Column count above which the audit tries the Gram full-rank
+/// certificate before the O(n·p²) Householder pass. Wide (typically
+/// high-cardinality categorical) designs are almost always comfortably
+/// full rank, and the certificate answers that case from a p×p
+/// factorization; ambiguous designs still take the exact QR below, so
+/// the reported rank is unchanged in every case.
+const GRAM_RANK_FAST_PATH_MIN_COLS: usize = 32;
+
 fn fixed_rank_assessment(matrix: &DMatrix<f64>) -> RankAssessment {
     let expected = matrix.ncols();
     let rank = if expected == 0 {
         0
+    } else if expected >= GRAM_RANK_FAST_PATH_MIN_COLS
+        && crate::linalg::gram_full_rank_certificate(
+            &matrix.tr_mul(matrix),
+            1e-8,
+            crate::linalg::GRAM_CERTIFICATE_SAFETY_FACTOR,
+        )
+        .is_certified()
+    {
+        expected
     } else {
         let (rank, _pivots) = stats_rank_with_tol(matrix, 1e-8);
         rank

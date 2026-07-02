@@ -38,3 +38,4 @@ pub mod rank_update;
 // (`stats::lrt`); everything else is reached via submodule paths, so no
 // blanket re-export is warranted.
 pub use pivot::stats_rank;
+pub use pivot::{gram_full_rank_certificate, GramRankCertificate, GRAM_CERTIFICATE_SAFETY_FACTOR};

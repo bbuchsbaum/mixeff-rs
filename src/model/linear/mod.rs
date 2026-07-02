@@ -986,9 +986,10 @@ impl LinearMixedModel {
                     fixed_design_policy,
                 )?
             };
-        let feterm = FeTerm::new(
-            raw_fixed_design.materialize_dense(),
-            raw_fixed_design.column_names().to_vec(),
+        let feterm = feterm_for_fixed_design(
+            &raw_fixed_design,
+            &mut compiler_artifact,
+            fixed_design_policy,
         );
         let fixed_design = raw_fixed_design.select_columns(&feterm.piv[..feterm.rank])?;
         if fixed_design.storage() == FixedDesignStorage::Streamed {
@@ -3643,6 +3644,149 @@ pub(crate) fn prediction_interval_cutoff(level: f64) -> Result<f64> {
 }
 
 // === Helper functions for model construction ===
+
+/// Rank tolerance for fixed-effects rank/pivot detection. Must match the
+/// default used by [`crate::linalg::stats_rank`] so the streamed Gram
+/// certificate and the dense Householder fallback test the same boundary.
+const FIXED_EFFECTS_RANK_TOLERANCE: f64 = 1e-8;
+
+/// Rank/pivot seam for the streamed fixed-design backend.
+///
+/// Dense backends keep the exact pivoted-QR path unchanged. Streamed
+/// backends first try to certify full column rank from the (never
+/// densified) Gram matrix `X'X`; a certified design skips the dense
+/// Householder pass and the pivoted copy entirely — the result is
+/// byte-identical to `FeTerm::new`'s full-rank early return. When the
+/// certificate is ambiguous (possible rank deficiency or conditioning
+/// beyond the Gram safety margin) the exact dense `stats_rank` path runs
+/// as before, so Householder pivot parity is preserved; the taken path
+/// and its cost are recorded as a construction diagnostic either way.
+fn feterm_for_fixed_design(
+    raw_fixed_design: &FixedDesign,
+    compiler_artifact: &mut CompiledModelArtifact,
+    policy: FixedDesignBuildPolicy,
+) -> FeTerm {
+    if raw_fixed_design.storage() != FixedDesignStorage::Streamed {
+        return FeTerm::new(
+            raw_fixed_design.materialize_dense(),
+            raw_fixed_design.column_names().to_vec(),
+        );
+    }
+
+    let certificate = crate::linalg::gram_full_rank_certificate(
+        &raw_fixed_design.xtx(),
+        FIXED_EFFECTS_RANK_TOLERANCE,
+        crate::linalg::GRAM_CERTIFICATE_SAFETY_FACTOR,
+    );
+    compiler_artifact
+        .diagnostics
+        .push(streamed_rank_path_diagnostic(
+            &certificate,
+            raw_fixed_design,
+            policy,
+        ));
+    if certificate.is_certified() {
+        FeTerm::with_certified_full_rank(
+            raw_fixed_design.materialize_dense(),
+            raw_fixed_design.column_names().to_vec(),
+        )
+    } else {
+        FeTerm::new(
+            raw_fixed_design.materialize_dense(),
+            raw_fixed_design.column_names().to_vec(),
+        )
+    }
+}
+
+/// Diagnostic recording which rank/pivot path a streamed fixed design
+/// took at construction, and — for the dense fallback — whether the
+/// materialized pass exceeded the policy's dense-bytes bound.
+fn streamed_rank_path_diagnostic(
+    certificate: &crate::linalg::GramRankCertificate,
+    raw_fixed_design: &FixedDesign,
+    policy: FixedDesignBuildPolicy,
+) -> Diagnostic {
+    let dense_bytes = raw_fixed_design.dense_bytes();
+    let over_dense_bound = dense_bytes > policy.max_dense_bytes;
+    let (severity, message, actions) = if certificate.is_certified() {
+        (
+            DiagnosticSeverity::Info,
+            format!(
+                "streamed fixed-effect rank/pivot: Gram certificate established full rank \
+                 (min diagonal ratio {:.3e}); dense Householder pass and pivoted copy skipped",
+                certificate.min_ratio()
+            ),
+            vec![
+                "no action required; rank detection stayed on the streamed path".to_string(),
+                "the model matrix itself is still materialized once for downstream surfaces"
+                    .to_string(),
+            ],
+        )
+    } else if over_dense_bound {
+        (
+            DiagnosticSeverity::Warning,
+            format!(
+                "streamed fixed-effect rank/pivot: Gram certificate ambiguous \
+                 (min diagonal ratio {:.3e}); exact dense Householder pass materialized \
+                 {dense_bytes} bytes, exceeding the backend policy bound of {} bytes",
+                certificate.min_ratio(),
+                policy.max_dense_bytes
+            ),
+            vec![
+                "the design may be rank-deficient or ill-conditioned; the exact dense pivot \
+                 was computed for correctness"
+                    .to_string(),
+                "if construction memory is a concern, simplify or re-parameterize the fixed \
+                 effects so the design is comfortably full rank"
+                    .to_string(),
+            ],
+        )
+    } else {
+        (
+            DiagnosticSeverity::Info,
+            format!(
+                "streamed fixed-effect rank/pivot: Gram certificate ambiguous \
+                 (min diagonal ratio {:.3e}); fell back to the exact dense Householder pass",
+                certificate.min_ratio()
+            ),
+            vec![
+                "no action required; rank and pivot are exact (Householder parity preserved)"
+                    .to_string(),
+            ],
+        )
+    };
+    let mut diagnostic = Diagnostic::new(
+        DiagnosticCode::SupportNote,
+        severity,
+        DiagnosticStage::DesignAudit,
+        message,
+    )
+    .with_suggested_actions(actions);
+    diagnostic.payload.insert(
+        "diagnostic_kind".to_string(),
+        serde_json::json!("fixed_design_rank_path"),
+    );
+    diagnostic.payload.insert(
+        "rank_path".to_string(),
+        serde_json::json!(if certificate.is_certified() {
+            "streamed_gram_certified"
+        } else {
+            "dense_householder_fallback"
+        }),
+    );
+    diagnostic.payload.insert(
+        "gram_min_diagonal_ratio".to_string(),
+        serde_json::json!(certificate.min_ratio()),
+    );
+    diagnostic
+        .payload
+        .insert("dense_bytes".to_string(), serde_json::json!(dense_bytes));
+    diagnostic.payload.insert(
+        "policy_max_dense_bytes".to_string(),
+        serde_json::json!(policy.max_dense_bytes),
+    );
+    diagnostic
+}
 
 fn use_direct_dense_fixed_design(
     formula: &Formula,

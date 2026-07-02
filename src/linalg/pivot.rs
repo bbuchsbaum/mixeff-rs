@@ -179,6 +179,150 @@ fn compute_rank_from_r(r: &DMatrix<f64>, ranktol: f64) -> usize {
     rank
 }
 
+/// Outcome of the Gram-matrix full-rank certificate used by streamed
+/// fixed-effect designs to decide whether the dense Householder
+/// rank/pivot pass can be skipped.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GramRankCertificate {
+    /// The Gram matrix is comfortably positive definite: the design is
+    /// full column rank with margin to spare, and the pivot is the
+    /// identity permutation (matching the [`stats_rank`] full-rank
+    /// early return exactly).
+    ///
+    /// `min_ratio` is the smallest `sqrt(d_k)/sqrt(d_0)` seen across
+    /// the pivoted Cholesky diagonal — the Gram-side analogue of the
+    /// pivoted-QR `|R[k,k]|/|R[0,0]|` ratio that [`stats_rank`] tests.
+    CertifiedFullRank { min_ratio: f64 },
+
+    /// The certificate could not establish full rank with the required
+    /// safety margin (possible rank deficiency, near-collinearity, or a
+    /// non-finite/indefinite Gram entry). Callers must fall back to the
+    /// exact dense [`stats_rank`] path.
+    Ambiguous { min_ratio: f64 },
+}
+
+impl GramRankCertificate {
+    /// Whether the certificate established full rank.
+    pub fn is_certified(&self) -> bool {
+        matches!(self, GramRankCertificate::CertifiedFullRank { .. })
+    }
+
+    /// The observed minimum diagonal ratio, for diagnostics.
+    pub fn min_ratio(&self) -> f64 {
+        match self {
+            GramRankCertificate::CertifiedFullRank { min_ratio }
+            | GramRankCertificate::Ambiguous { min_ratio } => *min_ratio,
+        }
+    }
+}
+
+/// Safety factor applied on top of the rank tolerance when certifying
+/// full rank from a Gram matrix.
+///
+/// Working with `X'X` squares the condition number of `X`, so a Gram
+/// diagonal ratio near the raw `ranktol` cannot be trusted: rounding
+/// errors of order `eps * kappa(X)^2` can contaminate the trailing
+/// pivots. Requiring `sqrt`-diagonal ratios above `ranktol * 1e4`
+/// (i.e. an effective condition proxy below ~1e4 at the default
+/// `ranktol = 1e-8`) keeps `eps * kappa^2 ~ 1e-8` — far from the
+/// certification threshold — so a false *certification* is not
+/// possible in practice; ill-conditioned designs simply fall back to
+/// the exact dense Householder path. This is the guardrail that
+/// distinguishes this certificate from the naive Gram rank path that
+/// was removed in mote bd-01KRXCR3AG6Z28TZY8HT49F7JQ: the Gram result
+/// is only ever used to *skip work in the comfortably full-rank case*,
+/// never to declare a rank deficiency.
+pub const GRAM_CERTIFICATE_SAFETY_FACTOR: f64 = 1e4;
+
+/// Attempt to certify that a design matrix is full column rank from its
+/// Gram matrix `G = X'X`, without ever forming `X` densely.
+///
+/// Runs a diagonally-pivoted (Businger-Golub) Cholesky factorization of
+/// `G`. In exact arithmetic the pivoted Cholesky of `X'X` visits
+/// columns in the same greedy order as column-pivoted QR on `X`, and
+/// its diagonal satisfies `d_k = R[k,k]^2`; the certificate therefore
+/// tests `sqrt(d_k / d_0) > ranktol * safety` for every pivot, where
+/// `safety` (see [`GRAM_CERTIFICATE_SAFETY_FACTOR`]) absorbs the
+/// condition-number squaring inherent to the Gram formulation.
+///
+/// Returns [`GramRankCertificate::CertifiedFullRank`] only when every
+/// pivot clears the margin; any stall, non-positive pivot, or
+/// non-finite entry yields [`GramRankCertificate::Ambiguous`] and the
+/// caller must use the dense [`stats_rank`] path. A certified result
+/// implies the [`stats_rank`] full-rank early return `(p, 0..p)`, so
+/// Householder pivot parity is preserved by construction.
+pub fn gram_full_rank_certificate(
+    gram: &DMatrix<f64>,
+    ranktol: f64,
+    safety: f64,
+) -> GramRankCertificate {
+    let p = gram.ncols();
+    if gram.nrows() != p {
+        return GramRankCertificate::Ambiguous { min_ratio: 0.0 };
+    }
+    if p == 0 {
+        return GramRankCertificate::CertifiedFullRank { min_ratio: 1.0 };
+    }
+
+    // Working copy of the (symmetric) Gram matrix; only the lower
+    // triangle is referenced.
+    let mut work = gram.clone();
+    let mut order: Vec<usize> = (0..p).collect();
+
+    let first_pivot = (0..p)
+        .map(|j| work[(j, j)])
+        .fold(f64::NEG_INFINITY, f64::max);
+    if !first_pivot.is_finite() || first_pivot <= 0.0 {
+        return GramRankCertificate::Ambiguous { min_ratio: 0.0 };
+    }
+
+    let threshold_ratio = ranktol * safety;
+    let mut min_ratio = 1.0_f64;
+
+    for k in 0..p {
+        // Businger-Golub diagonal pivot: largest remaining diagonal.
+        let mut best = k;
+        let mut best_diag = work[(order[k], order[k])];
+        for (slot, &j) in order.iter().enumerate().skip(k + 1) {
+            let d = work[(j, j)];
+            if d > best_diag {
+                best = slot;
+                best_diag = d;
+            }
+        }
+        order.swap(k, best);
+        let col_k = order[k];
+
+        if !best_diag.is_finite() || best_diag <= 0.0 {
+            return GramRankCertificate::Ambiguous { min_ratio: 0.0 };
+        }
+
+        let ratio = (best_diag / first_pivot).sqrt();
+        if !ratio.is_finite() {
+            return GramRankCertificate::Ambiguous { min_ratio: 0.0 };
+        }
+        min_ratio = min_ratio.min(ratio);
+        if ratio <= threshold_ratio {
+            return GramRankCertificate::Ambiguous { min_ratio };
+        }
+
+        // Cholesky elimination step on the remaining diagonal block.
+        let pivot = best_diag;
+        for slot_i in (k + 1)..p {
+            let i = order[slot_i];
+            let lik = work[(i.max(col_k), i.min(col_k))];
+            for slot_j in (k + 1)..=slot_i {
+                let j = order[slot_j];
+                let ljk = work[(j.max(col_k), j.min(col_k))];
+                let target = (i.max(j), i.min(j));
+                work[target] -= lik * ljk / pivot;
+            }
+        }
+    }
+
+    GramRankCertificate::CertifiedFullRank { min_ratio }
+}
+
 /// Compute the numerical column rank of a matrix using a pivoted QR
 /// decomposition.
 ///
@@ -537,6 +681,137 @@ mod tests {
         assert!(
             kept.windows(2).all(|w| w[0] < w[1]),
             "independent columns must keep relative order, got {kept:?}"
+        );
+    }
+
+    fn gram_of(x: &DMatrix<f64>) -> DMatrix<f64> {
+        x.transpose() * x
+    }
+
+    #[test]
+    fn gram_certificate_certifies_well_conditioned_design() {
+        // Sleepstudy-like [1, days] design: comfortably full rank.
+        let n = 50;
+        let mut x = DMatrix::zeros(n, 2);
+        for i in 0..n {
+            x[(i, 0)] = 1.0;
+            x[(i, 1)] = (i % 10) as f64;
+        }
+        let cert = gram_full_rank_certificate(&gram_of(&x), 1e-8, GRAM_CERTIFICATE_SAFETY_FACTOR);
+        assert!(cert.is_certified(), "expected certification, got {cert:?}");
+
+        // Certification must imply the stats_rank full-rank early return.
+        let (rank, piv) = stats_rank(&x);
+        assert_eq!(rank, 2);
+        assert_eq!(piv, vec![0, 1]);
+    }
+
+    #[test]
+    fn gram_certificate_certifies_high_cardinality_dummy_design() {
+        // Intercept + (levels-1) treatment dummies for a 40-level factor,
+        // 6 observations per level: the streamed-backend shape.
+        let levels = 40;
+        let per_level = 6;
+        let n = levels * per_level;
+        let p = levels; // intercept + 39 dummies
+        let mut x = DMatrix::zeros(n, p);
+        for i in 0..n {
+            x[(i, 0)] = 1.0;
+            let level = i / per_level;
+            if level > 0 {
+                x[(i, level)] = 1.0;
+            }
+        }
+        let cert = gram_full_rank_certificate(&gram_of(&x), 1e-8, GRAM_CERTIFICATE_SAFETY_FACTOR);
+        assert!(cert.is_certified(), "expected certification, got {cert:?}");
+
+        let (rank, piv) = stats_rank(&x);
+        assert_eq!(rank, p);
+        assert_eq!(piv, (0..p).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn gram_certificate_ambiguous_on_exact_collinearity() {
+        // col2 = col0 + col1: singular Gram must never certify.
+        let n = 30;
+        let mut x = DMatrix::zeros(n, 3);
+        for i in 0..n {
+            x[(i, 0)] = 1.0;
+            x[(i, 1)] = (i % 7) as f64;
+            x[(i, 2)] = 1.0 + (i % 7) as f64;
+        }
+        let cert = gram_full_rank_certificate(&gram_of(&x), 1e-8, GRAM_CERTIFICATE_SAFETY_FACTOR);
+        assert!(!cert.is_certified(), "collinear design certified: {cert:?}");
+    }
+
+    #[test]
+    fn gram_certificate_ambiguous_inside_safety_margin() {
+        // Near-collinear design whose QR diagonal ratio sits between
+        // ranktol and ranktol * safety: dense stats_rank still reports
+        // full rank, but the Gram certificate must refuse (the margin
+        // exists precisely because Gram arithmetic cannot resolve this
+        // region reliably).
+        let n = 40;
+        let eps = 1e-6; // QR ratio ~ eps, inside (1e-8, 1e-4)
+        let mut x = DMatrix::zeros(n, 2);
+        for i in 0..n {
+            let t = (i as f64) / (n as f64);
+            x[(i, 0)] = 1.0 + t;
+            x[(i, 1)] = 1.0 + t + eps * (if i % 2 == 0 { 1.0 } else { -1.0 });
+        }
+        let (rank, _) = stats_rank(&x);
+        assert_eq!(rank, 2, "fixture must be QR-full-rank for this test");
+        let cert = gram_full_rank_certificate(&gram_of(&x), 1e-8, GRAM_CERTIFICATE_SAFETY_FACTOR);
+        assert!(
+            !cert.is_certified(),
+            "near-collinear design inside the safety margin certified: {cert:?}"
+        );
+    }
+
+    #[test]
+    fn gram_certificate_ambiguous_on_non_finite_or_bad_shape() {
+        let mut g = DMatrix::identity(2, 2);
+        g[(1, 1)] = f64::NAN;
+        assert!(!gram_full_rank_certificate(&g, 1e-8, 1e4).is_certified());
+
+        let rect = DMatrix::<f64>::zeros(2, 3);
+        assert!(!gram_full_rank_certificate(&rect, 1e-8, 1e4).is_certified());
+
+        let zero = DMatrix::<f64>::zeros(2, 2);
+        assert!(!gram_full_rank_certificate(&zero, 1e-8, 1e4).is_certified());
+    }
+
+    #[test]
+    fn gram_certificate_empty_design_is_trivially_certified() {
+        let g = DMatrix::<f64>::zeros(0, 0);
+        let cert = gram_full_rank_certificate(&g, 1e-8, 1e4);
+        assert!(cert.is_certified());
+        assert_eq!(cert.min_ratio(), 1.0);
+    }
+
+    #[test]
+    fn gram_certificate_diag_ratio_tracks_pivoted_qr_diag() {
+        // On a moderately conditioned design the certificate's min_ratio
+        // must approximate the pivoted-QR |R[p-1,p-1]|/|R[0,0]| ratio
+        // (they agree in exact arithmetic).
+        let n = 25;
+        let mut x = DMatrix::zeros(n, 3);
+        for i in 0..n {
+            let t = i as f64;
+            x[(i, 0)] = 1.0;
+            x[(i, 1)] = t;
+            x[(i, 2)] = (t * 0.7).sin();
+        }
+        let (_, _, r) = pivoted_qr_with_tol(&x, 1e-8);
+        let qr_ratio = (r[(2, 2)] / r[(0, 0)]).abs();
+        let cert = gram_full_rank_certificate(&gram_of(&x), 1e-8, GRAM_CERTIFICATE_SAFETY_FACTOR);
+        assert!(cert.is_certified());
+        let rel = (cert.min_ratio() - qr_ratio).abs() / qr_ratio;
+        assert!(
+            rel < 1e-6,
+            "gram min_ratio {} vs qr ratio {} (rel err {rel})",
+            cert.min_ratio(),
+            qr_ratio
         );
     }
 }

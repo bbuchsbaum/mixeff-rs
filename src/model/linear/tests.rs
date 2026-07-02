@@ -3051,7 +3051,10 @@ fn test_lmm_constructor_keeps_high_cardinality_fixed_design_streamed() {
 
     let report = model.audit_report().to_text();
     assert!(report.contains("fixed-effect design backend selected: streamed"));
-    assert!(report.contains("rank and pivot detection still materialize dense X"));
+    assert!(report.contains("rank/pivot detection uses a streamed Gram certificate"));
+    assert!(
+        report.contains("streamed fixed-effect rank/pivot: Gram certificate established full rank")
+    );
 }
 
 fn streamed_fixed_effect_parity_fixture(n_levels: usize, obs_per_level: usize) -> DataFrame {
@@ -10511,4 +10514,139 @@ fn deterministic_bootstrap_sample() -> MixedModelBootstrap {
             })
             .collect(),
     }
+}
+
+// === K6: streamed fixed-design rank/pivot boundary ===
+
+fn rank_path_diagnostic(model: &LinearMixedModel) -> Option<&crate::compiler::Diagnostic> {
+    model.compiler_artifact().diagnostics.iter().find(|diag| {
+        diag.payload.get("diagnostic_kind") == Some(&serde_json::json!("fixed_design_rank_path"))
+    })
+}
+
+#[test]
+fn streamed_full_rank_design_takes_gram_certified_rank_path() {
+    let data = high_cardinality_streamed_fixture(120, 6);
+    let formula = parse_formula("y ~ 1 + x + sku + (1 | group)").unwrap();
+
+    let streamed = LinearMixedModel::new_with_fixed_design_policy(
+        formula.clone(),
+        &data,
+        None,
+        FixedDesignBuildPolicy::streamed(),
+    )
+    .unwrap();
+    let dense = LinearMixedModel::new_with_fixed_design_policy(
+        formula,
+        &data,
+        None,
+        FixedDesignBuildPolicy::dense(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        streamed.fixed_design.storage(),
+        FixedDesignStorage::Streamed
+    );
+    let diag = rank_path_diagnostic(&streamed)
+        .expect("streamed constructor must record a fixed_design_rank_path diagnostic");
+    assert_eq!(
+        diag.payload.get("rank_path"),
+        Some(&serde_json::json!("streamed_gram_certified")),
+        "comfortably full-rank streamed design must take the Gram-certified path"
+    );
+    assert_eq!(diag.severity, crate::compiler::DiagnosticSeverity::Info);
+
+    // The certified path must agree exactly with the dense Householder result.
+    assert_eq!(streamed.feterm.rank, dense.feterm.rank);
+    assert_eq!(streamed.feterm.piv, dense.feterm.piv);
+    assert_eq!(streamed.feterm.cnames, dense.feterm.cnames);
+
+    // The dense backend records no rank-path diagnostic (path unchanged).
+    assert!(rank_path_diagnostic(&dense).is_none());
+}
+
+fn collinear_streamed_fixture() -> (DataFrame, crate::formula::Formula) {
+    let n_levels = 24usize;
+    let n_obs = 240usize;
+    let mut data = DataFrame::new();
+    data.add_numeric(
+        "y",
+        (0..n_obs).map(|idx| (idx % 17) as f64 * 0.25).collect(),
+    )
+    .unwrap();
+    let labels: Vec<String> = (0..n_obs)
+        .map(|idx| format!("sku{:02}", idx % n_levels))
+        .collect();
+    // `dup` duplicates `sku` exactly, so its dummy block is collinear with
+    // sku's and the joint fixed design is rank-deficient.
+    data.add_categorical("sku", labels.clone()).unwrap();
+    data.add_categorical("dup", labels).unwrap();
+    data.add_categorical(
+        "group",
+        (0..n_obs).map(|idx| format!("g{}", idx % 12)).collect(),
+    )
+    .unwrap();
+    let formula = parse_formula("y ~ 1 + sku + dup + (1 | group)").unwrap();
+    (data, formula)
+}
+
+#[test]
+fn streamed_rank_deficient_design_falls_back_to_dense_householder() {
+    let (data, formula) = collinear_streamed_fixture();
+
+    let streamed = LinearMixedModel::new_with_fixed_design_policy(
+        formula.clone(),
+        &data,
+        None,
+        FixedDesignBuildPolicy::streamed(),
+    )
+    .unwrap();
+    let dense = LinearMixedModel::new_with_fixed_design_policy(
+        formula,
+        &data,
+        None,
+        FixedDesignBuildPolicy::dense(),
+    )
+    .unwrap();
+
+    let diag = rank_path_diagnostic(&streamed)
+        .expect("streamed constructor must record a fixed_design_rank_path diagnostic");
+    assert_eq!(
+        diag.payload.get("rank_path"),
+        Some(&serde_json::json!("dense_householder_fallback")),
+        "rank-deficient streamed design must fall back to the exact dense pass"
+    );
+
+    // Householder pivot parity: the fallback must reproduce the dense
+    // backend's rank, pivot, and kept-column names exactly.
+    assert!(streamed.feterm.rank < streamed.feterm.n_cols());
+    assert_eq!(streamed.feterm.rank, dense.feterm.rank);
+    assert_eq!(streamed.feterm.piv, dense.feterm.piv);
+    assert_eq!(streamed.feterm.cnames, dense.feterm.cnames);
+}
+
+#[test]
+fn streamed_rank_fallback_over_dense_bound_is_a_warning() {
+    let (data, formula) = collinear_streamed_fixture();
+
+    let policy = FixedDesignBuildPolicy::streamed().with_max_dense_bytes(1);
+    let model =
+        LinearMixedModel::new_with_fixed_design_policy(formula, &data, None, policy).unwrap();
+
+    let diag = rank_path_diagnostic(&model)
+        .expect("streamed constructor must record a fixed_design_rank_path diagnostic");
+    assert_eq!(
+        diag.payload.get("rank_path"),
+        Some(&serde_json::json!("dense_householder_fallback"))
+    );
+    assert_eq!(
+        diag.severity,
+        crate::compiler::DiagnosticSeverity::Warning,
+        "ambiguous rank over the dense-bytes policy bound must surface as a warning"
+    );
+    assert_eq!(
+        diag.payload.get("policy_max_dense_bytes"),
+        Some(&serde_json::json!(1))
+    );
 }

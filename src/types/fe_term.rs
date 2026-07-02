@@ -91,6 +91,40 @@ impl FeTerm {
         }
     }
 
+    /// Create a `FeTerm` from a design matrix already certified to be
+    /// full column rank, skipping the pivoted-QR pass entirely.
+    ///
+    /// This is the streamed fixed-design seam: when a
+    /// [`crate::linalg::pivot::gram_full_rank_certificate`] run on the
+    /// (never-densified) Gram matrix certifies full rank, the result is
+    /// byte-identical to what [`FeTerm::new`] would produce — the
+    /// full-rank early return of `stats_rank` uses the identity
+    /// permutation and leaves the matrix untouched — so no rank
+    /// detection and no pivoted copy are needed. Callers must NOT use
+    /// this constructor without such a certificate; an undetected rank
+    /// deficiency would silently corrupt downstream inference.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `cnames.len() != x.ncols()`.
+    pub fn with_certified_full_rank(x: DMatrix<f64>, cnames: Vec<String>) -> Self {
+        assert_eq!(
+            cnames.len(),
+            x.ncols(),
+            "FeTerm::with_certified_full_rank: cnames length ({}) must match number of columns ({})",
+            cnames.len(),
+            x.ncols()
+        );
+
+        let p = x.ncols();
+        FeTerm {
+            x,
+            piv: (0..p).collect(),
+            rank: p,
+            cnames,
+        }
+    }
+
     /// Return a view of the first `rank` (linearly independent) columns.
     ///
     /// This is the submatrix used in fitting; redundant columns are excluded.
@@ -199,6 +233,27 @@ mod tests {
         assert_eq!(fe.piv[0], 0);
         assert_eq!(fe.cnames[0], "(Intercept)");
         assert!(fe.piv[0..fe.rank].windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn certified_full_rank_matches_qr_constructor_on_full_rank_input() {
+        let x = DMatrix::from_row_slice(
+            4,
+            3,
+            &[
+                1.0, 0.0, 2.0, //
+                1.0, 1.0, 0.5, //
+                1.0, 2.0, -1.0, //
+                1.0, 3.0, 4.0, //
+            ],
+        );
+        let cnames = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let via_qr = FeTerm::new(x.clone(), cnames.clone());
+        let via_cert = FeTerm::with_certified_full_rank(x, cnames);
+        assert_eq!(via_cert.rank, via_qr.rank);
+        assert_eq!(via_cert.piv, via_qr.piv);
+        assert_eq!(via_cert.cnames, via_qr.cnames);
+        assert_eq!(via_cert.x, via_qr.x);
     }
 
     #[test]

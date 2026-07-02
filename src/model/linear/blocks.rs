@@ -485,7 +485,7 @@ pub(super) fn fixed_design_backend_diagnostic(fixed_design: &FixedDesign) -> Dia
     )
     .with_suggested_actions(vec![
         "no action required; streamed fixed effects avoid materializing dense X for solver cross-products".to_string(),
-        "rank and pivot detection still materialize dense X in this release".to_string(),
+        "rank/pivot detection uses a streamed Gram certificate when the design is comfortably full rank; ambiguous designs fall back to an exact dense Householder pass (see the fixed_design_rank_path diagnostic)".to_string(),
     ]);
     diagnostic.payload.insert(
         "diagnostic_kind".to_string(),
