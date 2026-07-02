@@ -603,10 +603,10 @@ fn unit_scenario_matches_test(block: &str, formula: &str, family: &str) -> bool 
 #[test]
 fn unit_test_backed_recovery_scenarios_point_to_existing_tests() {
     let scoreboard = difficult_scoreboard();
-    let linear_rs = fs::read_to_string(repo_root().join("src/model/linear.rs"))
-        .expect("read src/model/linear.rs");
-    let generalized_rs = fs::read_to_string(repo_root().join("src/model/generalized.rs"))
-        .expect("read src/model/generalized.rs");
+    let linear_rs = fs::read_to_string(repo_root().join("src/model/linear/tests.rs"))
+        .expect("read src/model/linear/tests.rs");
+    let generalized_rs = fs::read_to_string(repo_root().join("src/model/generalized/tests.rs"))
+        .expect("read src/model/generalized/tests.rs");
     let mut unit_rows = 0;
 
     for scenario in scoreboard
