@@ -541,7 +541,8 @@ fn glmm_comparison_rows_have_expected_status_and_payload_shape() {
         if row.status == "ok" {
             assert_ok_glmm_payload(rust_record, "rust_results.json", &key);
             assert_ok_glmm_payload(r_record, "lme4_results.json", &key);
-            let is_promoted_joint_laplace = key == expected_row_key(CULCITA_BINOMIAL_LAPLACE);
+            let is_promoted_joint_laplace =
+                key == expected_row_key(CULCITA_BINOMIAL_LAPLACE) || key == expected_row_key(CBPP);
             let is_promoted_joint_agq = key == expected_row_key(CULCITA_BINOMIAL_AGQ);
             assert_eq!(
                 rust_record
@@ -1061,10 +1062,11 @@ fn experimental_joint_binomial_rows_stay_below_promotion_gate() {
     assert_eq!(
         passed,
         vec![
+            expected_row_key(CBPP),
             expected_row_key(CULCITA_BINOMIAL_LAPLACE),
             expected_row_key(CULCITA_BINOMIAL_AGQ)
         ],
-        "only the culcitalogreg Laplace and AGQ rows are currently certified for promotion"
+        "only the cbpp Laplace and culcitalogreg Laplace/AGQ rows are currently certified for promotion"
     );
     assert!(
         !missed_objective_gate.is_empty(),
@@ -1081,7 +1083,6 @@ fn glmm_report_contains_expected_numeric_classifications() {
         "GLMM numeric disagreements must be classified in comparison/REPORT.md"
     );
     for required in [
-        "small Binomial/Logit row uses the current fast-PIRLS profiled path",
         "Poisson/Log multi-random-intercept row matches MixedModels.jl 5.3.0 fast=true",
         "rare-event Bernoulli/Logit row uses the current fast-PIRLS profiled path",
         "large crossed Binomial/Logit row matches MixedModels.jl 5.3.0 fast=true",

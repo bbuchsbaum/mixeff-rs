@@ -112,11 +112,11 @@ joint objective/certificate/scorecard gate may be marked
 The current documented-divergence rows are deliberate release exclusions, not
 soft passes:
 
-- `cbpp`, `contraception`, and `verbagg` are fast-PIRLS /
+- `contraception` and `verbagg` are fast-PIRLS /
   profiled-objective rows. Some large rows match the MixedModels.jl
   `fast=true` objective, but they are not `lme4` joint-estimation parity rows.
-  The `culcitalogreg` Laplace and AGQ rows are promoted separately through the
-  labelled `fast=false` joint gates.
+  The `culcitalogreg` Laplace and AGQ rows and the `cbpp` Laplace row are
+  promoted separately through the labelled `fast=false` joint gates.
 - `gopherdat2` has coefficient parity, but Rust records a near-zero covariance
   parameter without lme4's singular flag. This is a diagnostic threshold /
   convention gap plus the normal GLMM objective-constant difference.

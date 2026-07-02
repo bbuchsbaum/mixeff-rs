@@ -1,14 +1,14 @@
 {
   "results": [
     {
-      "aic": 20863.898875520823,
+      "aic": 20863.898875520827,
       "beta": [
-        2.272179547734558,
-        0.4464568704730582,
-        1.4245441923886815,
-        -0.39542507645291464
+        2.272179547737212,
+        0.44645687047315225,
+        1.4245441923887772,
+        -0.3954250764530175
       ],
-      "bic": 20894.96313706898,
+      "bic": 20894.963137068982,
       "coef_names": [
         "(Intercept)",
         "amd: unclipped",
@@ -25,7 +25,7 @@
       "formula": "total.fruits ~ amd * nutrient + (1 | reg/popu) + (1 | gen)",
       "is_singular": false,
       "link": "Log",
-      "loglik": -10424.949437760411,
+      "loglik": -10424.949437760413,
       "n_obs": 625,
       "objective": 18486.86514628248,
       "objective_definition": "profiled_glmm_deviance",
@@ -115,14 +115,14 @@
       ]
     },
     {
-      "aic": 194.10859094432692,
+      "aic": 194.05256539926233,
       "beta": [
-        -1.3604717551880712,
-        -0.9761774711272286,
-        -1.1110768934914064,
-        -1.5596805158496163
+        -1.398513633376335,
+        -0.9922666541351465,
+        -1.1287191780479133,
+        -1.5808163614498365
       ],
-      "bic": 204.23534939800265,
+      "bic": 204.17932385293807,
       "coef_names": [
         "(Intercept)",
         "period: 2",
@@ -139,34 +139,34 @@
       "formula": "incidence / size ~ 1 + period + (1 | herd)",
       "is_singular": false,
       "link": "Logit",
-      "loglik": -92.05429547216346,
+      "loglik": -92.02628269963117,
       "n_obs": 56,
-      "objective": 100.1518834064572,
-      "objective_definition": "profiled_glmm_deviance",
+      "objective": 184.05256539926233,
+      "objective_definition": "joint_glmm_laplace_deviance",
       "optimizer": "bobyqa",
       "optimizer_backend": "nlopt",
-      "optimizer_fevals": 19,
-      "optimizer_fmin": 100.1518834064572,
-      "optimizer_max_fevals": -1,
-      "optimizer_return_code": "FTOL_REACHED",
-      "response_constants": "dropped",
+      "optimizer_fevals": 98,
+      "optimizer_fmin": 184.05256539926233,
+      "optimizer_max_fevals": 200,
+      "optimizer_return_code": "JOINT_LAPLACE:FTOL_REACHED",
+      "response_constants": "included",
       "sigma": 1.0,
       "status": "ok",
       "theta": [
-        0.6418150692630495
+        0.6422138384102672
       ]
     },
     {
-      "aic": 2427.6626372063224,
+      "aic": 2427.662637206322,
       "beta": [
-        0.38329042374742917,
-        -0.02614195792347487,
-        -1.3235176481381632,
-        0.03062986489649587,
-        -0.23173380070089758,
-        -0.7196879722814982
+        0.38329042374742656,
+        -0.026141957923474804,
+        -1.3235176481381608,
+        0.03062986489649705,
+        -0.23173380070089597,
+        -0.7196879722814968
       ],
-      "bic": 2466.634056938415,
+      "bic": 2466.6340569384147,
       "coef_names": [
         "(Intercept)",
         "age",
@@ -185,7 +185,7 @@
       "formula": "use ~ 1 + age + livch + urban + (1 | dist)",
       "is_singular": false,
       "link": "Logit",
-      "loglik": -1206.8313186031612,
+      "loglik": -1206.831318603161,
       "n_obs": 1934,
       "objective": 2413.662637206323,
       "objective_definition": "profiled_glmm_deviance",
@@ -203,16 +203,16 @@
       ]
     },
     {
-      "aic": 2417.1067800853025,
+      "aic": 2417.106780085302,
       "beta": [
-        0.4468202169790753,
-        -0.025834467566539013,
-        -1.3214797309361563,
-        0.012342046725026095,
-        -0.2234352611136878,
-        -0.7906956353953127
+        0.4468202169790747,
+        -0.02583446756653894,
+        -1.3214797309361546,
+        0.012342046725027233,
+        -0.22343526111368625,
+        -0.7906956353953131
       ],
-      "bic": 2467.2128911694217,
+      "bic": 2467.2128911694213,
       "coef_names": [
         "(Intercept)",
         "age",
@@ -231,7 +231,7 @@
       "formula": "use ~ 1 + age + livch + urban + (1 + urban | dist)",
       "is_singular": false,
       "link": "Logit",
-      "loglik": -1199.5533900426512,
+      "loglik": -1199.553390042651,
       "n_obs": 1934,
       "objective": 2399.106780085303,
       "objective_definition": "profiled_glmm_deviance",
@@ -251,14 +251,14 @@
       ]
     },
     {
-      "aic": 70.70584129673875,
+      "aic": 70.70584129683769,
       "beta": [
-        5.0957008745205945,
-        -3.8421086031207934,
-        -4.430886751620132,
-        -5.5989605355256415
+        5.095700425856385,
+        -3.8421085951613168,
+        -4.430886649445779,
+        -5.598960392476394
       ],
-      "bic": 82.61597447010816,
+      "bic": 82.61597447020709,
       "coef_names": [
         "(Intercept)",
         "ttt: crabs",
@@ -275,32 +275,32 @@
       "formula": "predation ~ ttt + (1 | block)",
       "is_singular": false,
       "link": "Logit",
-      "loglik": -30.352920648369377,
+      "loglik": -30.352920648418845,
       "n_obs": 80,
-      "objective": 60.705841296738754,
+      "objective": 60.70584129683769,
       "objective_definition": "joint_glmm_laplace_deviance",
       "optimizer": "bobyqa",
       "optimizer_backend": "nlopt",
       "optimizer_fevals": 73,
-      "optimizer_fmin": 60.705841296738754,
+      "optimizer_fmin": 60.70584129683769,
       "optimizer_max_fevals": 200,
       "optimizer_return_code": "JOINT_LAPLACE:FTOL_REACHED",
       "response_constants": "included",
       "sigma": 1.0,
       "status": "ok",
       "theta": [
-        3.436698934006344
+        3.436698905645628
       ]
     },
     {
-      "aic": 70.32988200110753,
+      "aic": 70.32988200110857,
       "beta": [
-        4.99765491043794,
-        -3.74358801617106,
-        -4.352686664559525,
-        -5.537312747346107
+        4.997654910414464,
+        -3.743588004274415,
+        -4.352686663926799,
+        -5.537312742193546
       ],
-      "bic": 82.24001517447695,
+      "bic": 82.24001517447797,
       "coef_names": [
         "(Intercept)",
         "ttt: crabs",
@@ -317,21 +317,21 @@
       "formula": "predation ~ ttt + (1 | block)",
       "is_singular": false,
       "link": "Logit",
-      "loglik": -30.16494100055377,
+      "loglik": -30.164941000554286,
       "n_obs": 80,
-      "objective": 60.32988200110754,
+      "objective": 60.32988200110857,
       "objective_definition": "joint_glmm_agq_deviance",
       "optimizer": "bobyqa",
       "optimizer_backend": "nlopt",
       "optimizer_fevals": 55,
-      "optimizer_fmin": 60.32988200110754,
+      "optimizer_fmin": 60.32988200110857,
       "optimizer_max_fevals": 200,
       "optimizer_return_code": "JOINT_AGQ:FTOL_REACHED",
       "response_constants": "included",
       "sigma": 1.0,
       "status": "ok",
       "theta": [
-        3.482013313437893
+        3.4820133139513625
       ]
     },
     {
@@ -521,14 +521,14 @@
       ]
     },
     {
-      "aic": 86.33730129599316,
+      "aic": 86.33730129599314,
       "beta": [
-        -3.1973174327416722,
-        -0.6448576305729102,
-        -0.42875881273752614,
-        0.021133953124106573
+        -3.197317432741673,
+        -0.6448576305729115,
+        -0.42875881273752847,
+        0.021133953124106614
       ],
-      "bic": 93.34328820430393,
+      "bic": 93.34328820430392,
       "coef_names": [
         "(Intercept)",
         "year: 2005",
@@ -545,7 +545,7 @@
       "formula": "shells ~ year + prev + offset(log(Area)) + (1 | Site)",
       "is_singular": false,
       "link": "Log",
-      "loglik": -38.16865064799658,
+      "loglik": -38.16865064799657,
       "n_obs": 30,
       "objective": 22.483120908059906,
       "objective_definition": "profiled_glmm_deviance",
@@ -563,14 +563,14 @@
       ]
     },
     {
-      "aic": 1796.4033170283833,
+      "aic": 1796.403317028383,
       "beta": [
-        0.5293111684362596,
-        1.1072988135669513,
-        -0.9184125217234982,
-        -0.02219195796706991
+        0.5293111684363159,
+        1.1072988135668,
+        -0.9184125217235556,
+        -0.022191957967068437
       ],
-      "bic": 1824.3958729620101,
+      "bic": 1824.39587296201,
       "coef_names": [
         "(Intercept)",
         "YEAR: 96",
@@ -587,7 +587,7 @@
       "formula": "TICKS ~ 1 + YEAR + cHEIGHT + (1 | BROOD) + (1 | INDEX) + (1 | LOCATION)",
       "is_singular": false,
       "link": "Log",
-      "loglik": -891.2016585141916,
+      "loglik": -891.2016585141915,
       "n_obs": 403,
       "objective": 851.4046370814442,
       "objective_definition": "profiled_glmm_deviance",
@@ -1324,12 +1324,12 @@
       ]
     },
     {
-      "aic": 73.4743968439136,
+      "aic": 73.47439684391361,
       "beta": [
-        -2.462977334955961,
-        0.5100595303680713
+        -2.462977334955964,
+        0.5100595303680718
       ],
-      "bic": 81.83687207225974,
+      "bic": 81.83687207225975,
       "coef_names": [
         "(Intercept)",
         "exposure"
@@ -1344,7 +1344,7 @@
       "formula": "y ~ 1 + exposure + (1 | group)",
       "is_singular": false,
       "link": "Logit",
-      "loglik": -33.7371984219568,
+      "loglik": -33.737198421956805,
       "n_obs": 120,
       "objective": 67.47439684391372,
       "objective_definition": "profiled_glmm_deviance",
@@ -1824,17 +1824,17 @@
       "theta": null
     },
     {
-      "aic": 8154.170871706002,
+      "aic": 8154.170871706001,
       "beta": [
-        0.5485425285010215,
-        0.054380198551414315,
+        0.5485425285010179,
+        0.05438019855141483,
         0.3042435368646503,
-        -1.0174895804258473,
-        -2.0206721190081525,
-        -1.0125459780831656,
-        -0.6791019041463462
+        -1.0174895804258532,
+        -2.020672119008162,
+        -1.0125459780831694,
+        -0.6791019041463477
       ],
-      "bic": 8216.575036101416,
+      "bic": 8216.575036101414,
       "coef_names": [
         "(Intercept)",
         "Anger",
@@ -1854,7 +1854,7 @@
       "formula": "r2 ~ 1 + Anger + Gender + btype + situ + mode + (1 | id) + (1 | item)",
       "is_singular": false,
       "link": "Logit",
-      "loglik": -4068.085435853001,
+      "loglik": -4068.0854358530005,
       "n_obs": 7584,
       "objective": 8136.170871706006,
       "objective_definition": "profiled_glmm_deviance",

@@ -176,9 +176,14 @@ fit_one <- function(entry) {
     if (is.null(fam_fn)) NULL else {
       formula_str <- adapt_formula_for_glmer(formula_str, weights_col)
       n_agq <- if (identical(est, "AGQ")) 7L else 1L
+      # tolPwrss is tightened from the 1e-7 default so the recorded deviance is
+      # the at-mode Laplace objective: at the default, lme4's final ldL2 is
+      # factored from one-iteration-stale PIRLS weights (5.6e-4 high on cbpp),
+      # which tilts the reported optimum by ~1e-3 in beta. See mote
+      # bd-01KWFNE6GB3FN3FQJM0VKGXCG0 for the component-level decomposition.
       quote(lme4::glmer(stats::as.formula(formula_str), data = df, family = fam_fn,
                        nAGQ = n_agq,
-                       control = lme4::glmerControl(calc.derivs = FALSE)))
+                       control = lme4::glmerControl(calc.derivs = FALSE, tolPwrss = 1e-9)))
     }
   }
 

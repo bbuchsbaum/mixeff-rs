@@ -524,8 +524,10 @@ fn use_fast_glmm_comparison_path(
     // The comparison harness stays row-scoped: only rows that have passed the
     // certified joint gate use `fast=false` here. Other GLMM rows keep the
     // profiled-PIRLS path and documented-divergence classification.
-    !(dataset == "culcitalogreg"
+    let joint_certified = (dataset == "culcitalogreg"
         && (estimator.eq_ignore_ascii_case("Laplace") || estimator.eq_ignore_ascii_case("AGQ")))
+        || (dataset == "cbpp" && estimator.eq_ignore_ascii_case("Laplace"));
+    !joint_certified
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

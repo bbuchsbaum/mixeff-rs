@@ -2166,19 +2166,25 @@ fn experimental_joint_cbpp_objective_matches_lme4_at_lme4_parameters() {
         weights,
     )
     .unwrap();
+    // lme4 optimum fitted with glmerControl(optimizer = "bobyqa",
+    // tolPwrss = 1e-13, optCtrl = list(maxfun = 200000, rhoend = 1e-11)).
+    // The tightened inner tolerance matters: at the 1e-7 default, lme4's
+    // recorded deviance carries a one-inner-iteration-stale ldL2 (5.6e-4 on
+    // this row), while the Rust joint objective is the exact at-mode
+    // Laplace value. See mote bd-01KWFNE6GB3FN3FQJM0VKGXCG0.
     let params = vec![
-        -1.398_342_864_233_42,
-        -0.991_924_975_185_999,
-        -1.128_216_216_147_423,
-        -1.579_745_413_889_423,
-        0.642_069_926_557_109,
+        -1.398_532_13,
+        -0.992_332_69,
+        -1.128_672_11,
+        -1.580_313_90,
+        0.642_261_43,
     ];
     let objective = model.joint_glmm_deviance_at_params(&params, 4, 1);
-    let lme4_objective = 184.053_132_779_073_5;
+    let lme4_objective = 184.052_563_74;
     let delta = (objective - lme4_objective).abs();
     assert!(
-            delta <= 1.0e-3,
-            "cbpp joint objective should match lme4 at the exact lme4 optimum; rust={objective:.9}, lme4={lme4_objective:.9}, delta={delta:.9}"
+            delta <= 5.0e-6,
+            "cbpp joint objective should match lme4's at-mode deviance at the tolPwrss-tight lme4 optimum; rust={objective:.9}, lme4={lme4_objective:.9}, delta={delta:.9}"
         );
 }
 

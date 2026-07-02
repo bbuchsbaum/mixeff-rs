@@ -146,9 +146,6 @@ fn is_glmm(r: &ResultRecord) -> bool {
 
 fn known_glmm_numeric_classification(r: &ResultRecord) -> Option<&'static str> {
     match (r.dataset.as_str(), r.estimator.as_str()) {
-        ("cbpp", "Laplace") => Some(
-            "small Binomial/Logit row uses the current fast-PIRLS profiled path; lme4 beta gap is tracked until the joint GLMM path is restored",
-        ),
         ("ergostool", "Laplace") if r.family == "Gamma" && r.link == "Log" => Some(
             "Gamma/Log dispersion and theta conventions are not treated as an lme4-only oracle; see the MixedModels.jl Gamma fixture",
         ),

@@ -274,7 +274,6 @@ fn glmm_fast_pirls_divergences_are_quantified_and_kept_non_lme4() {
     let lme4 = results_by_key("comparison/lme4_results.json");
 
     let expectations = [
-        (CBPP, 0.03, 0.05, "fast_pirls_profiled_glmm"),
         (
             CONTRACEPTION_INTERCEPT,
             0.02,
@@ -331,6 +330,68 @@ fn glmm_fast_pirls_divergences_are_quantified_and_kept_non_lme4() {
             "{key}: expected documented lme4 beta gap in [{min_beta_delta}, {max_beta_delta}], got {beta_delta}"
         );
     }
+}
+
+#[test]
+fn cbpp_laplace_is_promoted_to_joint_laplace_parity() {
+    let scorecard = scorecard_by_key();
+    let key = row_key(CBPP);
+    let score = scorecard_row(&scorecard, CBPP);
+    assert_eq!(score.class_name, "release_blocking_parity", "{key}");
+    assert_eq!(score.reference, "lme4_joint_laplace", "{key}");
+    assert_eq!(
+        score.issue_id.as_deref(),
+        Some("bd-01KWFNE6GB3FN3FQJM0VKGXCG0")
+    );
+    let reason = score.reason.as_deref().unwrap_or("");
+    assert!(
+        reason.contains("fast=false") && reason.contains("objective"),
+        "{key}: promoted GLMM row must name the certified joint path and objective evidence"
+    );
+    assert!(
+        reason.contains("tolPwrss"),
+        "{key}: reason must record the tightened lme4 inner tolerance that makes the reference the at-mode Laplace objective"
+    );
+
+    // Numeric lockstep: both engines on the included-constants joint
+    // Laplace objective, certified return code, and deltas inside the
+    // report tolerances.
+    let rust = results_by_key("comparison/rust_results.json");
+    let lme4 = results_by_key("comparison/lme4_results.json");
+    let rust_row = comparison_row(&rust, CBPP, "rust_results.json");
+    let lme4_row = comparison_row(&lme4, CBPP, "lme4_results.json");
+    assert_eq!(field_str(rust_row, "status", &key), "ok", "{key}");
+    assert_eq!(field_str(lme4_row, "status", &key), "ok", "{key}");
+    assert_eq!(
+        field_str(rust_row, "response_constants", &key),
+        "included",
+        "{key}: certified joint row must keep response constants"
+    );
+    assert_eq!(
+        field_str(lme4_row, "response_constants", &key),
+        "included",
+        "{key}"
+    );
+    assert!(
+        field_str(rust_row, "optimizer_return_code", &key).starts_with("JOINT_LAPLACE:"),
+        "{key}: promoted row must carry the certified joint Laplace label, got {}",
+        field_str(rust_row, "optimizer_return_code", &key)
+    );
+    let beta_delta = max_abs_delta(
+        &numeric_array(rust_row, "beta", &key),
+        &numeric_array(lme4_row, "beta", &key),
+        &format!("{key}: beta"),
+    );
+    assert!(
+        beta_delta <= 1.0e-3,
+        "{key}: promoted joint Laplace beta gap must sit inside the report tolerance, got {beta_delta}"
+    );
+    let objective_delta =
+        (field_f64(rust_row, "objective", &key) - field_f64(lme4_row, "objective", &key)).abs();
+    assert!(
+        objective_delta <= 1.0e-2,
+        "{key}: promoted joint Laplace objective gap must sit inside the report tolerance, got {objective_delta}"
+    );
 }
 
 #[test]

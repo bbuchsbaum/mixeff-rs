@@ -253,16 +253,23 @@ fn release_blocking_scorecard_rows_pass_checked_in_comparison_artifacts() {
         if row.reference == "lme4_joint_laplace" || row.reference == "lme4_joint_agq" {
             let reason = row.reason.as_deref().unwrap_or("");
             let is_joint_agq = row.reference == "lme4_joint_agq";
+            // Every promoted joint row must route to the mote that carries its
+            // promotion evidence; the map is explicit so an unexpected new
+            // promotion cannot ride in on an old issue id.
+            let expected_issue = match (row.dataset.as_str(), is_joint_agq) {
+                ("culcitalogreg", false) => "bd-01KRVGT0H37JYNYB5FA2EZD5CW",
+                ("culcitalogreg", true) => "bd-01KRVGW2H561CF8GY70E1072M3",
+                ("cbpp", false) => "bd-01KWFNE6GB3FN3FQJM0VKGXCG0",
+                other => panic!(
+                    "{key}: joint GLMM release row {other:?} has no registered promotion issue; \
+                     add it to the expected-issue map together with its promotion evidence"
+                ),
+            };
             assert!(
-                row.issue_id.as_deref()
-                    == Some(if is_joint_agq {
-                        "bd-01KRVGW2H561CF8GY70E1072M3"
-                    } else {
-                        "bd-01KRVGT0H37JYNYB5FA2EZD5CW"
-                    })
+                row.issue_id.as_deref() == Some(expected_issue)
                     && reason.contains("fast=false")
                     && (reason.contains("objective") || reason.contains("AGQ")),
-                "{key}: joint GLMM release rows must name the certified fast=false evidence and phase-6 issue"
+                "{key}: joint GLMM release rows must name the certified fast=false evidence and their promotion issue"
             );
             assert_eq!(
                 rust_row.get("objective_definition").and_then(Value::as_str),

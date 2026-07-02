@@ -333,9 +333,9 @@ comparator_time_multiplier = 1.0
 comparator_extra_ms = 0.0
 
 [[scenario]]
-id = "cbpp_fast_pirls_divergence"
+id = "cbpp_certified_joint_laplace"
 axis = "glmm_fast_pirls_divergence"
-description = "Grouped-binomial GLMM on the fast-PIRLS profiled objective family with a documented lme4 joint-estimation beta gap."
+description = "Grouped-binomial GLMM promoted to certified fast=false joint Laplace parity against a tolPwrss-tightened lme4 reference."
 data_source = "datasets/cbpp"
 generator = "checked-in fixture"
 dataset = "cbpp"
@@ -344,12 +344,12 @@ family = "Binomial"
 link = "Logit"
 estimator = "Laplace"
 comparator_engines = ["lme4"]
-release_relevance = "The canonical fast-PIRLS divergence row: keeps the approximation-gap class visible and honestly non-lme4 until the certified joint optimizer lands."
-scorecard_class = "documented_divergence"
-certification_status = "documented_divergence"
-certification_claim = "Rust fits the profiled fast-PIRLS objective; the lme4 beta gap is an approximation difference, not an optimizer bug, and objective constants are non-comparable."
-required_metrics = ["beta_delta", "theta_delta", "optimizer_status", "singular_status", "warnings", "wall_time_ms", "fevals", "time_to_certified_fit_ms"]
-rust_certification = "fast_pirls_profiled_glmm_non_parity"
+release_relevance = "First case-weighted binomial row through the certified joint gate; also documents that Rust evaluates the exact at-mode Laplace logdet while lme4's default tolPwrss leaves a stale-ldL2 offset."
+scorecard_class = "release_blocking_parity"
+certification_status = "release_blocking_parity"
+certification_claim = "Rust fits the included-constants joint Laplace objective (JOINT_LAPLACE label) and matches the tolPwrss=1e-9 lme4 reference on objective, beta, and theta within report tolerances."
+required_metrics = ["objective_delta", "beta_delta", "theta_delta", "optimizer_status", "certification_status", "warnings", "wall_time_ms", "fevals", "time_to_certified_fit_ms"]
+rust_certification = "certified_joint_laplace"
 comparator_certification = "single_fit"
 rust_time_multiplier = 1.0
 comparator_time_multiplier = 1.0

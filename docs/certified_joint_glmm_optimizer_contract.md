@@ -35,10 +35,15 @@ A certified joint optimizer removes the *objective* and *β-estimation*
 mismatch. It must therefore satisfy every requirement below before its rows
 re-enter the `lme4` parity gate.
 
-Current evidence: certification is row-scoped. The fixed-beta conditional
-PIRLS solve now evaluates the same included-constants joint Laplace objective
-as `lme4` at the `cbpp` optimum, and `culcitalogreg` Laplace plus AGQ have
-passed the labelled joint-promotion gates. `cbpp` and `contraception` still
+Current evidence: certification is row-scoped. `culcitalogreg` Laplace plus
+AGQ and `cbpp` Laplace have passed the labelled joint-promotion gates. The
+`cbpp` promotion also established that the Rust joint Laplace objective is
+the exact at-mode value: `lme4`'s recorded `ldL2` at its default
+`tolPwrss = 1e-7` is factored from one-inner-iteration-stale PIRLS weights
+(a 5.6e-4 objective offset on `cbpp` that tilts the reported optimum by
+~1e-3 in β), so the comparison pipeline fits `glmer` references with
+`tolPwrss = 1e-9`, at which both engines agree on objective, β, and θ
+within report tolerances. `contraception` and the larger binomial rows
 remain below the promotion line because their fitted estimates miss row
 tolerances.
 

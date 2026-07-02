@@ -180,10 +180,12 @@ fn five_glmm_failure_modes_map_to_distinct_artifact_signals() {
 #[test]
 fn response_constant_convention_is_a_mode_not_a_failure() {
     // The convention difference must coexist with an ok optimizer status: it
-    // is a convention, not a fit failure or identification problem.
+    // is a convention, not a fit failure or identification problem. Uses a row
+    // still on the profiled fast-PIRLS `dropped` path (cbpp was promoted to the
+    // certified joint `included` convention in mote bd-01KWFNE6GB3FN3FQJM0VKGXCG0).
     let rust = results_by_key("comparison/rust_results.json");
-    let key = "cbpp\nLaplace".to_string();
-    let rust_row = rust.get(&key).expect("rust cbpp Laplace row");
+    let key = "contraception\nLaplace".to_string();
+    let rust_row = rust.get(&key).expect("rust contraception Laplace row");
     assert_eq!(
         rust_row.get("response_constants").and_then(Value::as_str),
         Some("dropped")
