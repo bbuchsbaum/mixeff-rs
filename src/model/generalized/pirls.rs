@@ -680,3 +680,653 @@ pub(crate) fn link_label(link: LinkFunction) -> &'static str {
         LinkFunction::Sqrt => "sqrt",
     }
 }
+
+impl GeneralizedLinearMixedModel {
+    /// PIRLS: Penalized Iteratively Reweighted Least Squares.
+    ///
+    /// Updates β and u until convergence. The working response and weights
+    /// are derived from the current μ = g⁻¹(Xβ + Zb).
+    ///
+    /// * `vary_beta` – if false, β is held fixed and only u is updated
+    ///
+    /// Returns `Ok(true)` if PIRLS reached its convergence tolerance within
+    /// the iteration budget, `Ok(false)` if it exhausted the budget without
+    /// converging (the conditional modes are the best seen but unverified).
+    /// The non-converged case is deliberately *not* an `Err`: callers decide
+    /// how to surface it (the final fit records a diagnostic; interior
+    /// optimizer probes tolerate it). `Err` is reserved for hard linear-
+    /// algebra/state failures.
+    pub fn pirls(&mut self, vary_beta: bool, verbose: bool) -> Result<bool> {
+        self.pirls_with_options(vary_beta, verbose, GLMM_PIRLS_MAX_ITER, true)
+    }
+
+    fn pirls_with_options(
+        &mut self,
+        vary_beta: bool,
+        verbose: bool,
+        max_iter: usize,
+        reset_modes: bool,
+    ) -> Result<bool> {
+        // Mirrors MixedModels.jl/src/generalizedlinearmixedmodel.jl pirls!
+        // (lines 614-669): step-halving toward the previous accepted iterate
+        // whenever a fresh IRLS step would worsen the Laplace objective. Keeps
+        // the outer optimizer's view of obj(θ) consistent across probes —
+        // without this, BOBYQA on multi-RE GLMM surfaces (e.g. grouseticks
+        // Poisson) sees noisy values and reports `RoundoffLimited`.
+        let tol = 1.0e-5;
+        let max_halvings = 10;
+
+        let n = self.y.len();
+
+        // Reset the conditional modes when callers need deterministic probe
+        // values instead of path-dependent warm starts.
+        if reset_modes {
+            for u in self.u.iter_mut() {
+                u.fill(0.0);
+            }
+        }
+        for (i, rt) in self.lmm.reterms.iter().enumerate() {
+            self.b[i] = &rt.lambda * &self.u[i];
+        }
+        self.update_eta();
+
+        // Save the initial accepted state for halving. The 1.0001 slack is
+        // only an acceptance bound for the first step-halving loop; convergence
+        // is compared with the uninflated accepted objective.
+        let mut u_prev: Vec<DMatrix<f64>> = self.u.clone();
+        let mut beta_prev = self.beta.clone();
+        let mut obj0 = self.laplace_objective();
+        let mut halving_bound = obj0 * 1.0001;
+
+        let mut sqrtwts = vec![0.0f64; n];
+        let mut working_y = vec![0.0f64; n];
+
+        // Whether PIRLS reached its convergence tolerance within `max_iter`.
+        // Returned to the caller so a non-converged conditional-mode solve is
+        // *observable* rather than silently accepted (audit 03·H1). We do not
+        // hard-error inside the loop: the outer optimizer legitimately probes
+        // near the variance-component boundary where an interior step may
+        // exhaust halving, and turning that into an error perturbs the
+        // soft-barrier search away from valid boundary fits.
+        let mut converged = false;
+
+        for iter in 0..max_iter.max(1) {
+            // --- Compute IRLS weights and working response ---
+            for obs in 0..n {
+                let mu_obs = self.mu[obs];
+                let eta_obs = self.eta[obs];
+                let y_obs = self.y[obs];
+
+                let case_w = if self.wt.is_empty() {
+                    1.0
+                } else {
+                    self.wt[obs]
+                };
+                (sqrtwts[obs], working_y[obs]) =
+                    pirls_working_observation_with_offset_and_family_parameters(
+                        self.family,
+                        self.link,
+                        self.negative_binomial_theta,
+                        y_obs,
+                        eta_obs,
+                        mu_obs,
+                        case_w,
+                        self.offset[obs],
+                    );
+            }
+
+            // --- Update the LMM with new IRLS weights ---
+            self.lmm.update_irls_weights(&sqrtwts, &working_y)?;
+            self.lmm.update_l()?;
+
+            // --- Propose new β / u from the LMM solution ---
+            let new_u = if vary_beta {
+                self.beta = self.lmm.beta();
+                self.lmm.ranef_u()
+            } else {
+                self.ranef_u_given_beta(&self.beta)
+            };
+            for (i, rt) in self.lmm.reterms.iter().enumerate() {
+                self.u[i].copy_from(&new_u[i]);
+                self.b[i] = &rt.lambda * &self.u[i];
+            }
+            self.update_eta();
+            let mut obj = self.laplace_objective();
+
+            // --- Step-halving: average toward the previous accepted state
+            //     until obj is no worse, up to `max_halvings` averagings. ---
+            // A non-finite obj must count as "worse": `NaN > bound` is false,
+            // so without the explicit check a NaN/Inf iterate would skip
+            // halving and be silently accepted (audit 03·H2 defense-in-depth;
+            // the family μ-floors above are the primary fix).
+            let mut nhalf = 0;
+            while (!obj.is_finite() || obj > halving_bound) && nhalf < max_halvings {
+                nhalf += 1;
+                for i in 0..self.u.len() {
+                    self.u[i] = 0.5 * (&self.u[i] + &u_prev[i]);
+                }
+                if vary_beta {
+                    self.beta = 0.5 * (&self.beta + &beta_prev);
+                }
+                for (i, rt) in self.lmm.reterms.iter().enumerate() {
+                    self.b[i] = &rt.lambda * &self.u[i];
+                }
+                self.update_eta();
+                obj = self.laplace_objective();
+            }
+
+            if verbose {
+                eprintln!("  PIRLS iter {iter}: obj = {obj:.6} (nhalf = {nhalf})");
+            }
+
+            if pirls_converged(obj, obj0, tol) {
+                converged = true;
+                break;
+            }
+
+            // Accept iterate as the new previous state.
+            for i in 0..self.u.len() {
+                u_prev[i].copy_from(&self.u[i]);
+            }
+            beta_prev = self.beta.clone();
+            obj0 = obj;
+            halving_bound = obj;
+        }
+
+        self.refresh_dispersion();
+
+        Ok(converged)
+    }
+
+    /// Conditional modes of the random effects with β held fixed.
+    ///
+    /// `LinearMixedModel::ranef_u()` intentionally profiles β before forming
+    /// residuals. The joint GLMM objective needs the lme4-style
+    /// `nAGQ > 0` surface where the candidate β is part of the outer parameter
+    /// vector, so the inner PIRLS step must solve only for `u` conditional on
+    /// that β.
+    fn ranef_u_given_beta(&self, beta: &DVector<f64>) -> Vec<DMatrix<f64>> {
+        let k = self.lmm.reterms.len();
+        let p = self.lmm.feterm.rank;
+        let n = self.lmm.dims.n;
+        let wtxy = &self.lmm.xy_mat.wtxy;
+
+        let mut wr = vec![0.0f64; n];
+        for obs in 0..n {
+            let mut val = wtxy[(obs, p)];
+            for q in 0..p {
+                val -= wtxy[(obs, q)] * beta[q];
+            }
+            wr[obs] = val;
+        }
+
+        let mut c_vecs = Vec::with_capacity(k);
+        for re in &self.lmm.reterms {
+            let vs = re.vsize;
+            let nranef = re.n_ranef();
+            let n_levels = re.n_levels();
+
+            let mut c = vec![0.0; nranef];
+            for (obs, &wr_obs) in wr.iter().enumerate() {
+                let r = re.refs[obs] as usize;
+                for s in 0..vs {
+                    c[r * vs + s] += re.wtz[(s, obs)] * wr_obs;
+                }
+            }
+
+            let lambda = &re.lambda;
+            let mut c_scaled = vec![0.0; nranef];
+            for lev in 0..n_levels {
+                for i in 0..vs {
+                    let mut val = 0.0;
+                    for row in i..vs {
+                        val += lambda[(row, i)] * c[lev * vs + row];
+                    }
+                    c_scaled[lev * vs + i] = val;
+                }
+            }
+            c_vecs.push(DVector::from_vec(c_scaled));
+        }
+
+        let mut v_vecs: Vec<DVector<f64>> = Vec::with_capacity(k);
+        for j in 0..k {
+            let nranef_j = self.lmm.reterms[j].n_ranef();
+            let mut rhs = c_vecs[j].clone();
+
+            for (m, v_m) in v_vecs.iter().enumerate().take(j) {
+                let l_jm = self.lmm.l_blocks[glmm_block_index(j, m)].as_dense();
+                for row in 0..nranef_j {
+                    let mut dot = 0.0;
+                    for col in 0..v_m.len() {
+                        dot += l_jm[(row, col)] * v_m[col];
+                    }
+                    rhs[row] -= dot;
+                }
+            }
+
+            let mut v_j = rhs.as_slice().to_vec();
+            solve_dense_lower_against_rhs(
+                &self.lmm.l_blocks[glmm_block_index(j, j)].as_dense(),
+                &mut v_j,
+            );
+            v_vecs.push(DVector::from_vec(v_j));
+        }
+
+        let mut u_vecs: Vec<DVector<f64>> = vec![DVector::zeros(0); k];
+        for j in (0..k).rev() {
+            let nranef_j = self.lmm.reterms[j].n_ranef();
+            let mut rhs = v_vecs[j].clone();
+
+            for m in (j + 1)..k {
+                let l_mj = self.lmm.l_blocks[glmm_block_index(m, j)].as_dense();
+                let u_m = &u_vecs[m];
+                for row in 0..nranef_j {
+                    let mut dot = 0.0;
+                    for col in 0..u_m.len() {
+                        dot += l_mj[(col, row)] * u_m[col];
+                    }
+                    rhs[row] -= dot;
+                }
+            }
+
+            let mut u_j = rhs.as_slice().to_vec();
+            solve_dense_upper_from_lower_transpose_against_rhs(
+                &self.lmm.l_blocks[glmm_block_index(j, j)].as_dense(),
+                &mut u_j,
+            );
+            u_vecs[j] = DVector::from_vec(u_j);
+        }
+
+        self.lmm
+            .reterms
+            .iter()
+            .zip(u_vecs)
+            .map(|(rt, u)| DMatrix::from_column_slice(rt.vsize, rt.n_levels(), u.as_slice()))
+            .collect()
+    }
+
+    /// Laplace approximation objective: deviance residuals + u penalty + log|L|.
+    pub fn laplace_objective(&self) -> f64 {
+        // For binomial-with-trials data the response is a per-trial proportion
+        // and `wt[i]` is the trial count; weighting the per-observation
+        // deviance contribution by `wt[i]` recovers the binomial deviance.
+        let dev: f64 = (0..self.y.len())
+            .map(|i| self.case_weight(i) * self.dev_resid_component(self.y[i], self.mu[i]))
+            .sum();
+        let u_penalty: f64 = self
+            .u
+            .iter()
+            .map(|u| u.iter().map(|x| x * x).sum::<f64>())
+            .sum();
+        dev + u_penalty + self.lmm_logdet()
+    }
+
+    fn u_penalty(&self) -> f64 {
+        self.u
+            .iter()
+            .map(|u| u.iter().map(|x| x * x).sum::<f64>())
+            .sum()
+    }
+
+    fn minus_two_loglik_observation(&self, index: usize) -> f64 {
+        let y = self.y[index];
+        let mu = self.mu[index].max(f64::MIN_POSITIVE);
+        match self.family {
+            Family::Bernoulli | Family::Binomial => {
+                let trials = self.case_weight(index).max(0.0);
+                let successes = (trials * y).clamp(0.0, trials);
+                let failures = trials - successes;
+                let p = mu.clamp(1.0e-15, 1.0 - 1.0e-15);
+                let log_choose = if trials == 0.0 {
+                    0.0
+                } else {
+                    ln_gamma(trials + 1.0) - ln_gamma(successes + 1.0) - ln_gamma(failures + 1.0)
+                };
+                let success_term = if successes == 0.0 {
+                    0.0
+                } else {
+                    successes * p.ln()
+                };
+                let failure_term = if failures == 0.0 {
+                    0.0
+                } else {
+                    failures * (1.0 - p).ln()
+                };
+                -2.0 * (log_choose + success_term + failure_term)
+            }
+            Family::Poisson => {
+                let count_term = if y == 0.0 { 0.0 } else { y * mu.ln() };
+                -2.0 * (count_term - mu - ln_gamma(y + 1.0))
+            }
+            Family::NegativeBinomial => {
+                let theta = self
+                    .negative_binomial_theta
+                    .expect("negative-binomial GLMM stores fixed theta");
+                let loglik = ln_gamma(y + theta) - ln_gamma(theta) - ln_gamma(y + 1.0)
+                    + theta * (theta / (theta + mu)).ln()
+                    + if y == 0.0 {
+                        0.0
+                    } else {
+                        y * (mu / (theta + mu)).ln()
+                    };
+                -2.0 * loglik
+            }
+            Family::Gamma => {
+                let phi = self.dispersion(true).max(f64::MIN_POSITIVE);
+                let shape = 1.0 / phi;
+                let scale = mu * phi;
+                -2.0 * ((shape - 1.0) * y.ln() - y / scale - shape * scale.ln() - ln_gamma(shape))
+            }
+            Family::Normal => {
+                let variance = self.dispersion(true).max(f64::MIN_POSITIVE);
+                let residual = y - mu;
+                (2.0 * std::f64::consts::PI * variance).ln() + residual * residual / variance
+            }
+            Family::InverseGaussian => {
+                let phi = self.dispersion(true).max(f64::MIN_POSITIVE);
+                (2.0 * std::f64::consts::PI * phi * y.powi(3)).ln()
+                    + (y - mu).powi(2) / (phi * y * mu * mu)
+            }
+        }
+    }
+
+    /// Additive difference between the current dropped-constant Laplace
+    /// objective and the same conditional objective with response constants
+    /// retained.
+    ///
+    /// For Poisson, negative-binomial, and binomial-family GLMMs this is an
+    /// observation-only constant once family parameters are fixed.
+    /// Dispersion families also depend on the current scale
+    /// convention, so callers should treat those values as explicit metadata
+    /// rather than as a cross-engine parity claim.
+    pub fn response_constants_offset(&self) -> f64 {
+        let dropped: f64 = (0..self.y.len())
+            .map(|i| self.case_weight(i) * self.dev_resid_component(self.y[i], self.mu[i]))
+            .sum();
+        let included: f64 = (0..self.y.len())
+            .map(|i| self.minus_two_loglik_observation(i))
+            .sum();
+        included - dropped
+    }
+
+    /// Laplace objective with response normalising constants retained.
+    ///
+    /// This is the objective convention needed for meaningful comparison to
+    /// `lme4`'s `-2 logLik` scale. It deliberately lives alongside
+    /// [`laplace_objective`](Self::laplace_objective) so current fast-PIRLS
+    /// fitting and comparison artifacts keep their existing dropped-constant
+    /// semantics while certified joint GLMM parity is promoted row by row.
+    pub fn laplace_objective_with_response_constants(&self) -> f64 {
+        (0..self.y.len())
+            .map(|i| self.minus_two_loglik_observation(i))
+            .sum::<f64>()
+            + self.u_penalty()
+            + self.lmm_logdet()
+    }
+
+    /// Deviance of the GLMM.
+    ///
+    /// For `n_agq <= 1`, returns the Laplace approximation
+    /// (`laplace_objective`).
+    ///
+    /// For `n_agq > 1`, returns the deviance evaluated by `n_agq`-point
+    /// adaptive Gauss-Hermite quadrature. AGQ is only defined for models
+    /// with a single scalar random-effects term; on multi-term or
+    /// vector-valued RE models, calling with `n_agq > 1` is a programmer
+    /// error (use [`validate_agq`](Self::validate_agq) up front, or call
+    /// via [`fit_with_options`](Self::fit_with_options) which preflights).
+    ///
+    /// Mutates internal `u`, `eta`, `mu` during the AGQ sweep but restores
+    /// observable state before returning.
+    pub fn deviance(&mut self, n_agq: usize) -> f64 {
+        if n_agq <= 1 {
+            return self.laplace_objective();
+        }
+        // Hard runtime check (not debug_assert!): in release a violated
+        // invariant here would otherwise feed a multi-/vector-valued RE model
+        // into the single-scalar AGQ math below, silently producing wrong
+        // numbers (or an opaque index panic) rather than a clear refusal.
+        assert!(
+            self.is_single_scalar_re(),
+            "AGQ with n_agq > 1 requires exactly one scalar random-effects term; \
+             callers must invoke validate_agq() before reaching this path"
+        );
+
+        let n_levels = self.u[0].ncols();
+        let n_obs = self.y.len();
+
+        // Snapshot u₀ (a flat vector of length n_levels since vsize == 1).
+        let u0_flat: Vec<f64> = self.u[0].as_slice().to_vec();
+        debug_assert_eq!(u0_flat.len(), n_levels);
+
+        // Per-group sd from the diagonal of the (1,1) Cholesky block:
+        // sd[g] = 1 / |L₁₁_diag[g]|.
+        let l11_diag = self.l11_diag();
+        debug_assert_eq!(l11_diag.len(), n_levels);
+        let sd: Vec<f64> = l11_diag.iter().map(|d| 1.0 / d.abs()).collect();
+
+        // Group index per observation. Clone to release the borrow on
+        // `self.lmm` so we can call `update_eta(&mut self)` inside the loop.
+        let refs: Vec<u32> = self.lmm.reterms[0].refs.clone();
+
+        // devc0[g] = u₀[g]² + Σ_{i in group g} devresid_i  (at the conditional modes)
+        let mut devc0 = vec![0.0_f64; n_levels];
+        for (g, &uv) in u0_flat.iter().enumerate() {
+            devc0[g] = uv * uv;
+        }
+        for i in 0..n_obs {
+            devc0[refs[i] as usize] +=
+                self.case_weight(i) * self.dev_resid_component(self.y[i], self.mu[i]);
+        }
+
+        // Sweep over GH nodes.
+        let rule = crate::types::gh_norm(n_agq);
+        let mut mult = vec![0.0_f64; n_levels];
+        let mut devc = vec![0.0_f64; n_levels];
+
+        // From here on `u[0]`/`eta`/`mu` are perturbed at each node. The guard
+        // restores them when this scope ends — including if the sweep panics.
+        let mut work = AgqRestoreGuard {
+            glmm: self,
+            u0_flat: u0_flat.clone(),
+        };
+
+        for (&z, &w) in rule.z.iter().zip(rule.w.iter()) {
+            if w == 0.0 {
+                continue;
+            }
+            if z == 0.0 {
+                // devc == devc0, exp(0) * w simplifies to w
+                for g in 0..n_levels {
+                    mult[g] += w;
+                }
+                continue;
+            }
+            // u[g] = u₀[g] + z * sd[g]
+            for g in 0..n_levels {
+                work.u[0][(0, g)] = u0_flat[g] + z * sd[g];
+            }
+            work.update_eta();
+            // devc[g] = u[g]² + Σ devresid_i (per group)
+            for g in 0..n_levels {
+                let uv = work.u[0][(0, g)];
+                devc[g] = uv * uv;
+            }
+            for i in 0..n_obs {
+                devc[refs[i] as usize] +=
+                    work.case_weight(i) * work.dev_resid_component(work.y[i], work.mu[i]);
+            }
+            // mult[g] += exp((z² + devc0[g] - devc[g]) / 2) * w
+            let z2 = z * z;
+            for g in 0..n_levels {
+                mult[g] += ((z2 + devc0[g] - devc[g]) * 0.5).exp() * w;
+            }
+        }
+
+        // `work` drops here, restoring u and η/μ (also on a panic above).
+        drop(work);
+
+        let sum_devc0: f64 = devc0.iter().sum();
+        let log_mult: f64 = mult.iter().map(|m| m.ln()).sum();
+        let log_sd: f64 = sd.iter().map(|s| s.ln()).sum();
+        sum_devc0 - 2.0 * (log_mult + log_sd)
+    }
+
+    /// Deviance with response normalising constants retained.
+    ///
+    /// For `n_agq <= 1`, this is the Laplace objective on the `-2 logLik`
+    /// scale. For AGQ, the quadrature objective is shifted by the same
+    /// response-constant offset used by the Laplace path.
+    pub fn deviance_with_response_constants(&mut self, n_agq: usize) -> f64 {
+        if n_agq <= 1 {
+            return self.laplace_objective_with_response_constants();
+        }
+        let offset = self.response_constants_offset();
+        self.deviance(n_agq) + offset
+    }
+
+    fn case_weight(&self, obs: usize) -> f64 {
+        if self.wt.is_empty() {
+            1.0
+        } else {
+            self.wt[obs]
+        }
+    }
+
+    /// True iff the model has exactly one random-effects term and that
+    /// term has `vsize == 1` (a scalar random effect).
+    pub fn is_single_scalar_re(&self) -> bool {
+        self.lmm.reterms.len() == 1 && self.lmm.reterms[0].vsize == 1
+    }
+
+    /// Diagonal of the (1,1) block of the lower-Cholesky factor `L`.
+    ///
+    /// For a single scalar RE term this is a per-level vector of length
+    /// `n_levels`. Used by [`deviance`](Self::deviance) to derive AGQ
+    /// node spacings.
+    fn l11_diag(&self) -> Vec<f64> {
+        matrix_block_diag(&self.lmm.l_blocks[0])
+    }
+
+    /// Log-determinant from the LMM's Cholesky factor.
+    pub(super) fn lmm_logdet(&self) -> f64 {
+        // Delegate to the internal LMM's block structure
+        let k = self.lmm.dims.nretrms;
+        let mut logdet = 0.0;
+        for j in 0..k {
+            let idx = j * (j + 1) / 2 + j; // block_index(j, j)
+            logdet += match &self.lmm.l_blocks[idx] {
+                MatrixBlock::Dense(m) => {
+                    let n = m.nrows().min(m.ncols());
+                    (0..n).map(|i| m[(i, i)].abs().ln()).sum::<f64>()
+                }
+                MatrixBlock::Diagonal(v) => v.iter().map(|x| x.abs().ln()).sum::<f64>(),
+                MatrixBlock::BlockDiagonal(blocks) => blocks
+                    .iter()
+                    .map(|blk| {
+                        let n = blk.nrows();
+                        (0..n).map(|i| blk[(i, i)].abs().ln()).sum::<f64>()
+                    })
+                    .sum::<f64>(),
+                MatrixBlock::Sparse(m) => {
+                    let dense = MatrixBlock::Sparse(m.clone()).as_dense();
+                    let n = dense.nrows().min(dense.ncols());
+                    (0..n).map(|i| dense[(i, i)].abs().ln()).sum::<f64>()
+                }
+            };
+        }
+        2.0 * logdet
+    }
+
+    /// Returns whether the inner PIRLS converged (see [`Self::pirls`]).
+    pub(super) fn update_pirls_at_theta(&mut self, theta: &[f64], vary_beta: bool) -> Result<bool> {
+        self.update_pirls_at_theta_with_options(theta, vary_beta, GLMM_PIRLS_MAX_ITER, true)
+    }
+
+    pub(super) fn update_pirls_at_theta_with_options(
+        &mut self,
+        theta: &[f64],
+        vary_beta: bool,
+        max_iter: usize,
+        reset_modes: bool,
+    ) -> Result<bool> {
+        if theta.len() != self.theta.len() {
+            return Err(MixedModelError::DimensionMismatch(format!(
+                "theta vector length {} does not match fitted GLMM theta length {}",
+                theta.len(),
+                self.theta.len()
+            )));
+        }
+        if !theta.iter().all(|value| value.is_finite()) {
+            return Err(MixedModelError::InvalidArgument(
+                "theta values must be finite".to_string(),
+            ));
+        }
+        self.lmm.set_theta(theta)?;
+        self.lmm.update_l()?;
+        self.theta = theta.to_vec();
+        let converged = self.pirls_with_options(vary_beta, false, max_iter, reset_modes)?;
+        Ok(converged)
+    }
+
+    pub(super) fn penalized_pirls_deviance_at_theta(&mut self, theta: &[f64], n_agq: usize) -> f64 {
+        match self.update_pirls_at_theta(theta, true) {
+            Ok(_) => {
+                let deviance = self.deviance(n_agq);
+                if deviance.is_finite() {
+                    deviance
+                } else {
+                    f64::INFINITY
+                }
+            }
+            Err(_) => f64::INFINITY,
+        }
+    }
+
+    pub(super) fn refresh_dispersion(&mut self) {
+        self.dispersion = self.estimated_dispersion_scale();
+    }
+
+    fn estimated_dispersion_scale(&self) -> f64 {
+        if let Some(theta) = self.negative_binomial_theta {
+            return theta;
+        }
+        if !self.family.has_dispersion() {
+            return 1.0;
+        }
+
+        let pearson = self.pearson_dispersion_numerator();
+        let denom = self.y.len().saturating_sub(self.lmm.feterm.rank).max(1) as f64;
+        let variance = (pearson / denom).max(f64::MIN_POSITIVE);
+        variance.sqrt()
+    }
+
+    pub(super) fn estimate_negative_binomial_theta_given_fit(&self) -> Result<f64> {
+        if self.family != Family::NegativeBinomial {
+            return Err(MixedModelError::InvalidArgument(
+                "negative-binomial theta estimation is only valid for Family::NegativeBinomial"
+                    .to_string(),
+            ));
+        }
+        let weights = (!self.wt.is_empty()).then_some(self.wt.as_slice());
+        Ok(estimate_negative_binomial_theta_conditional(
+            self.y.as_slice(),
+            self.mu.as_slice(),
+            weights,
+        ))
+    }
+
+    pub(super) fn pearson_dispersion_numerator(&self) -> f64 {
+        let mut total = 0.0;
+        for obs in 0..self.y.len() {
+            let mu = self.mu[obs];
+            let variance = self.variance(mu);
+            if !variance.is_finite() || variance <= 0.0 {
+                continue;
+            }
+            let residual = self.y[obs] - mu;
+            total += self.case_weight(obs) * residual * residual / variance;
+        }
+        total
+    }
+}
