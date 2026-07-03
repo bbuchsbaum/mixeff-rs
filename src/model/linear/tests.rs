@@ -282,7 +282,6 @@ fn assert_theta_diagonals_nonnegative(model: &LinearMixedModel) {
     }
 }
 
-#[cfg(feature = "nlopt")]
 fn simulate_large_theta_crossed(seed: u64) -> DataFrame {
     let mut rng = StdRng::seed_from_u64(seed);
     let normal = Normal::new(0.0, 1.0).unwrap();
@@ -2339,7 +2338,7 @@ fn test_rank_k_downdate_small_dense_large_k_matches_gemm() {
     let a = DMatrix::from_fn(3, 520, |row, col| {
         (((row + 1) * (col + 3)) % 17) as f64 / 13.0 - 0.4
     });
-    let init = DMatrix::from_row_slice(3, 3, &[3.0, 0.2, 0.4, 0.2, 2.5, -0.1, 0.4, -0.1, 1.7]);
+    let init = DMatrix::from_row_slice(3, 3, &[3.0, 0.8, 0.4, 0.2, 2.5, -0.7, -0.3, -0.1, 1.7]);
     let mut optimized = MatrixBlock::Dense(init.clone());
     let mut expected = init;
     expected.gemm(-1.0, &a, &a.transpose(), 1.0);
@@ -2350,13 +2349,48 @@ fn test_rank_k_downdate_small_dense_large_k_matches_gemm() {
         panic!("expected dense block");
     };
     for row in 0..3 {
-        for col in 0..=row {
+        for col in 0..3 {
             assert_relative_eq!(
                 result[(row, col)],
                 expected[(row, col)],
                 epsilon = 1e-10,
                 max_relative = 1e-12
             );
+        }
+    }
+}
+
+#[test]
+fn test_rank_k_downdate_vsize2_blockdiag_large_k_matches_gemm() {
+    let a = DMatrix::from_fn(4, 520, |row, col| {
+        (((row + 5) * (col + 7)) % 23) as f64 / 19.0 - 0.35
+    });
+    let blocks = vec![
+        DMatrix::from_row_slice(2, 2, &[2.0, 0.7, -0.2, 1.5]),
+        DMatrix::from_row_slice(2, 2, &[3.0, -0.4, 0.9, 2.2]),
+    ];
+    let mut optimized = MatrixBlock::BlockDiagonal(blocks.clone());
+    let mut expected_blocks = blocks;
+    for (block_idx, expected) in expected_blocks.iter_mut().enumerate() {
+        let a_block = a.rows(block_idx * 2, 2);
+        expected.gemm(-1.0, &a_block, &a_block.transpose(), 1.0);
+    }
+
+    rank_k_downdate(&mut optimized, &a);
+
+    let MatrixBlock::BlockDiagonal(result_blocks) = optimized else {
+        panic!("expected block-diagonal block");
+    };
+    for (result, expected) in result_blocks.iter().zip(expected_blocks.iter()) {
+        for row in 0..2 {
+            for col in 0..2 {
+                assert_relative_eq!(
+                    result[(row, col)],
+                    expected[(row, col)],
+                    epsilon = 1e-10,
+                    max_relative = 1e-12
+                );
+            }
         }
     }
 }

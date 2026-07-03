@@ -95,7 +95,7 @@ impl FeTerm {
     /// full column rank, skipping the pivoted-QR pass entirely.
     ///
     /// This is the streamed fixed-design seam: when a
-    /// [`crate::linalg::pivot::gram_full_rank_certificate`] run on the
+    /// `crate::linalg::pivot::gram_full_rank_certificate` run on the
     /// (never-densified) Gram matrix certifies full rank, the result is
     /// byte-identical to what [`FeTerm::new`] would produce — the
     /// full-rank early return of `stats_rank` uses the identity

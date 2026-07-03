@@ -1857,16 +1857,7 @@ pub(super) fn rank_k_downdate(c: &mut MatrixBlock, a: &DMatrix<f64>) {
                 && c_mat.nrows() <= 4
                 && a.ncols() >= 512
             {
-                let n = c_mat.nrows();
-                for row in 0..n {
-                    for col in 0..=row {
-                        let mut sum = 0.0;
-                        for k in 0..a.ncols() {
-                            sum += a[(row, k)] * a[(col, k)];
-                        }
-                        c_mat[(row, col)] -= sum;
-                    }
-                }
+                rank_k_downdate_small_dense(c_mat, a);
             } else {
                 gemm_sub_abt(c_mat, a, a);
             }
@@ -1879,16 +1870,11 @@ pub(super) fn rank_k_downdate(c: &mut MatrixBlock, a: &DMatrix<f64>) {
             }
         }
         MatrixBlock::BlockDiagonal(blocks) => {
-            if a.ncols() >= 512 && blocks.first().is_some_and(|blk| blk.nrows() == 2) {
-                let mut row_offset = 0;
-                for blk in blocks.iter_mut() {
-                    let a0 = a.row(row_offset);
-                    let a1 = a.row(row_offset + 1);
-                    blk[(0, 0)] -= a0.dot(&a0);
-                    blk[(1, 0)] -= a1.dot(&a0);
-                    blk[(1, 1)] -= a1.dot(&a1);
-                    row_offset += 2;
-                }
+            if a.ncols() >= 512
+                && a.nrows() == blocks.len() * 2
+                && blocks.iter().all(|blk| blk.shape() == (2, 2))
+            {
+                rank_k_downdate_vsize2_blocks(blocks, a);
                 return;
             }
 
@@ -1905,6 +1891,56 @@ pub(super) fn rank_k_downdate(c: &mut MatrixBlock, a: &DMatrix<f64>) {
             gemm_sub_abt(&mut dense, a, a);
             *c = MatrixBlock::Dense(dense);
         }
+    }
+}
+
+fn rank_k_downdate_small_dense(c: &mut DMatrix<f64>, a: &DMatrix<f64>) {
+    debug_assert_eq!(c.nrows(), c.ncols());
+    debug_assert_eq!(c.nrows(), a.nrows());
+    debug_assert!(c.nrows() <= 4);
+
+    let n = c.nrows();
+    let mut sums = [0.0; 16];
+    for k in 0..a.ncols() {
+        for row in 0..n {
+            let row_val = a[(row, k)];
+            for col in 0..=row {
+                sums[row * 4 + col] += row_val * a[(col, k)];
+            }
+        }
+    }
+    for row in 0..n {
+        for col in 0..=row {
+            let sum = sums[row * 4 + col];
+            c[(row, col)] -= sum;
+            if row != col {
+                c[(col, row)] -= sum;
+            }
+        }
+    }
+}
+
+fn rank_k_downdate_vsize2_blocks(blocks: &mut [DMatrix<f64>], a: &DMatrix<f64>) {
+    debug_assert_eq!(a.nrows(), blocks.len() * 2);
+
+    let mut row_offset = 0;
+    for blk in blocks.iter_mut() {
+        debug_assert_eq!(blk.shape(), (2, 2));
+        let mut s00 = 0.0;
+        let mut s10 = 0.0;
+        let mut s11 = 0.0;
+        for col in 0..a.ncols() {
+            let a0 = a[(row_offset, col)];
+            let a1 = a[(row_offset + 1, col)];
+            s00 += a0 * a0;
+            s10 += a1 * a0;
+            s11 += a1 * a1;
+        }
+        blk[(0, 0)] -= s00;
+        blk[(1, 0)] -= s10;
+        blk[(0, 1)] -= s10;
+        blk[(1, 1)] -= s11;
+        row_offset += 2;
     }
 }
 

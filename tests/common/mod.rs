@@ -15,6 +15,7 @@ use mixeff_rs::compiler::{ContrastMatrix, FixedEffectHypothesis};
 use mixeff_rs::formula::parse_formula;
 use mixeff_rs::model::data::{Column, DataFrame};
 use mixeff_rs::model::linear::*;
+#[cfg(feature = "unstable-internals")]
 use mixeff_rs::model::traits::MixedModelFit;
 use nalgebra::{DMatrix, DVector};
 use rand::rngs::StdRng;
