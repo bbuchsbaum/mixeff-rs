@@ -12,6 +12,10 @@ vs. `unstable-internals` surface inventory.
 
 ## [Unreleased]
 
+No changes yet.
+
+## [1.0.0-rc.1] - 2026-07-03
+
 Work toward the 1.0.0 release. The numerics (PLS/PIRLS, blocked Cholesky,
 profiled (RE)ML) are structurally stable; the remaining churn is in the public
 API framing, the inference surface, and release infrastructure.
@@ -80,10 +84,14 @@ API framing, the inference surface, and release infrastructure.
 
 ### Notes
 
-- No public release has been tagged yet. Until 1.0.0, minor-version bumps may
-  contain breaking changes (see SemVer policy).
+- This is a 1.0 release candidate. The stable API and wire-contract surface are
+  intended to soak before the final 1.0.0 tag; any breaking RC feedback will
+  require a new `-rc.N` release and restart the soak clock.
 - Multivariate response (`cbind(y1, y2) ~ ...`), Gamma GLMM bootstrap,
   Kenward-Roger beyond the current scalar-test scope, full `I()` /
   formula-level transformations, first-class `polars`/`arrow` ingestion, and
   GLMM profile likelihood are explicitly **out of scope for 1.0** and tracked
   as post-1.0 work.
+
+[Unreleased]: https://github.com/bbuchsbaum/mixeff-rs/compare/v1.0.0-rc.1...HEAD
+[1.0.0-rc.1]: https://github.com/bbuchsbaum/mixeff-rs/releases/tag/v1.0.0-rc.1

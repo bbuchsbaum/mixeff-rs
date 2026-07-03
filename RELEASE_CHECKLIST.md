@@ -36,7 +36,7 @@ See `VERSIONING.md` for what bump a change requires.
 - [ ] `RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`
 - [ ] `cargo deny check && cargo audit`
 - [ ] `cargo test --test boundary_lrt_contract --test profile_likelihood_json \
-        --test public_api --test fit_summary_contract`
+        --test public_api --test glmm_artifact_contract`
 - [ ] `bash scripts/check_julia_parity_fixtures.sh`   # BLOCK on release; exits !=0 on drift
       # If drift is an intentional upstream MixedModels.jl correction:
       #   document it in CHANGELOG as a PATCH-level numeric change, then

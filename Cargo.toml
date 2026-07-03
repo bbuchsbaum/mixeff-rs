@@ -1,6 +1,6 @@
 [package]
 name = "mixeff-rs"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 edition = "2021"
 rust-version = "1.85"
 description = "Linear and generalized linear mixed-effects models in Rust; engine for the mixeff R package, parity-tested against Julia's MixedModels.jl"
