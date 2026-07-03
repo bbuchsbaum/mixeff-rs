@@ -19,7 +19,7 @@ cargo run --release --example bench_rust    # Rust-side benchmark suite
 cargo run --release --example parity_dump   # dump fits as JSON for cross-checking with Julia
 ```
 
-There is no integration-test directory; tests live next to the code in `#[cfg(test)] mod tests` blocks.
+Tests live in two places: public-API tests in `tests/` (integration suites; the engine-level ones are `tests/lmm_engine_*.rs` with shared fixtures in `tests/common/mod.rs`), and internals-bound tests in inline `#[cfg(test)] mod tests` blocks next to the code (anything touching private fields, `pub(crate)`/`pub(super)` functions, or optimizer state). Tests needing the compiler/artifact surface go in `tests/` gated with `#![cfg(feature = "unstable-internals")]` — CI runs that lane separately.
 
 ## Cross-language parity & benchmarking
 
