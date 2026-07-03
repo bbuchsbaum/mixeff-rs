@@ -140,8 +140,8 @@ fn fitted_cobyla_inference_table_structure_is_well_formed() {
         // estimate/std_error when the row is Available.
         let _ = row.method;
         let _ = row.status;
-        if row.estimate.is_some() {
-            assert!(row.estimate.unwrap().is_finite());
+        if let Some(estimate) = row.estimate {
+            assert!(estimate.is_finite());
         }
     }
 
