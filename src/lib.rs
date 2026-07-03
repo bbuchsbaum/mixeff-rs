@@ -141,8 +141,6 @@ macro_rules! unstable_internal_method {
     };
 }
 
-pub(crate) use unstable_internal_method;
-
 // `compiler`, `datasets`, and `pathology` are NOT part of the stable 1.0
 // public API (the compiler/IR is still in flux; dataset provenance metadata
 // churns). They are public only under the opt-in `unstable-internals`

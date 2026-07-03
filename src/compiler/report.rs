@@ -208,7 +208,7 @@ fn attention_lines(sections: &[AuditReportSection]) -> Vec<AttentionLine> {
             }
         }
     }
-    lines.sort_by(|left, right| status_rank(right.status).cmp(&status_rank(left.status)));
+    lines.sort_by_key(|line| std::cmp::Reverse(status_rank(line.status)));
     lines
 }
 

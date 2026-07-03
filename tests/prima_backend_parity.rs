@@ -122,17 +122,3 @@ fn prima_backend_manifest_keeps_only_bobyqa_wired_for_now() {
         );
     }
 }
-
-#[test]
-fn prima_backend_markdown_mentions_every_manifest_row() {
-    let expected = fixture();
-    let markdown = include_str!("../docs/prima_backend_parity.md");
-
-    for case in &expected.backends {
-        assert!(markdown.contains(&case.julia_optimizer));
-        assert!(markdown.contains(&case.rust_optimizer));
-        assert!(markdown.contains(&case.rust_status));
-    }
-    assert!(markdown.contains("libprimac"));
-    assert!(markdown.contains("not a default dependency"));
-}

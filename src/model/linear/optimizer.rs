@@ -778,7 +778,7 @@ impl LinearMixedModel {
                 let loadings = requested_basis
                     .iter()
                     .cloned()
-                    .zip(oriented.into_iter())
+                    .zip(oriented)
                     .map(|(basis, loading)| BasisLoading { basis, loading })
                     .collect::<Vec<_>>();
                 let nonnegative_eigenvalue = eigenvalue.max(0.0);

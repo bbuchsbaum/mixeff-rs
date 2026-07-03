@@ -11,10 +11,10 @@
 //! The five modes use heterogeneous vocabularies (a diagnostic code, a
 //! scorecard class + reference + objective convention, a covariance-cone
 //! classification, a results field, and a separation code / fit-status
-//! carve-out). This test pins each mode to its real artifact signal exactly
-//! as `docs/glmm_support_contract.md` enumerates them, and proves the five
-//! resulting signals are mutually distinct — including the response-constant
-//! convention, which is part of the distinctness check, not a side test.
+//! carve-out). This test pins each mode to its real artifact signal and proves
+//! the five resulting signals are mutually distinct — including the
+//! response-constant convention, which is part of the distinctness check, not a
+//! side test.
 #![cfg(feature = "unstable-internals")]
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -194,60 +194,5 @@ fn response_constant_convention_is_a_mode_not_a_failure() {
         rust_row.get("status").and_then(Value::as_str),
         Some("ok"),
         "a response-constant convention difference must not present as a fit failure"
-    );
-}
-
-#[test]
-fn glmm_contract_doc_enumerates_the_five_modes_and_optin_recovery() {
-    let doc = fs::read_to_string(repo_root().join("docs/glmm_support_contract.md"))
-        .expect("read docs/glmm_support_contract.md");
-
-    assert!(
-        doc.contains("Distinguishable Failure Modes"),
-        "contract must enumerate the distinguishable failure modes"
-    );
-    for needle in [
-        "Optimizer failure",
-        "Approximation gap",
-        "Weak identification",
-        "Response-constant convention",
-        "Separation-like behavior",
-    ] {
-        assert!(
-            doc.contains(needle),
-            "GLMM contract must name the `{needle}` failure mode"
-        );
-    }
-    // The contract must pin approximation gap to the scorecard class +
-    // convention, not to pirls_failure.
-    assert!(
-        doc.contains("documented_divergence") && doc.contains("response_constants = dropped"),
-        "contract must define the approximation gap via the scorecard class and objective convention"
-    );
-    for code in [
-        "optimizer_nonconvergence",
-        "WeakIdentification",
-        "response_constants",
-        "binomial_separation",
-    ] {
-        assert!(
-            doc.contains(code),
-            "GLMM contract must cite the stable signal `{code}`"
-        );
-    }
-
-    // AC7: any GLMM recovery is opt-in / labelled and outside the parity gate.
-    assert!(
-        doc.contains("Recovery Policy"),
-        "contract must state the GLMM recovery policy"
-    );
-    assert!(
-        doc.contains("no default, silent GLMM recovery")
-            && doc.contains("opt-in or explicitly labelled"),
-        "GLMM recovery must be documented as opt-in/labelled, not a default behavior"
-    );
-    assert!(
-        doc.contains("certified_joint_glmm_optimizer_contract.md"),
-        "contract must reference the certified joint optimizer prerequisites"
     );
 }

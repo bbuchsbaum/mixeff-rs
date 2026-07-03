@@ -58,7 +58,6 @@ use crate::types::matrix_block::{
 #[cfg(feature = "prima")]
 use crate::types::opt_summary::OptimizerBackend;
 use crate::types::{FeMat, FeTerm, FitLogEntry, OptSummary, Optimizer, OptimizerSource, ReMat};
-use crate::unstable_internal_method;
 
 mod active_face;
 
@@ -1059,7 +1058,7 @@ impl LinearMixedModel {
         }
 
         // Sort by decreasing nranef (matches Julia behavior)
-        ordered_reterms.sort_by(|a, b| b.1.n_ranef().cmp(&a.1.n_ranef()));
+        ordered_reterms.sort_by_key(|(_, remat)| std::cmp::Reverse(remat.n_ranef()));
         let optimizer_order = ordered_reterms
             .iter()
             .map(|(semantic_index, _)| *semantic_index)

@@ -43,8 +43,6 @@ use crate::optimizer::trust_bq::{
 };
 use crate::stats::{BlockDescription, MixedModelProfile, ModelSummary, VarCorr};
 use crate::types::{gh_norm, FitLogEntry, MatrixBlock, OptSummary, Optimizer, ReMat};
-use crate::unstable_internal_method;
-
 mod certify;
 mod joint;
 mod metadata;
