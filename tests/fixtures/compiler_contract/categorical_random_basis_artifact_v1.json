@@ -2,7 +2,7 @@
   "schema": {
     "schema_name": "mixedmodels.compiled_model_artifact",
     "schema_version": 1,
-    "crate_version": "0.1.0"
+    "crate_version": "1.0.0-rc.1"
   },
   "model_boundary": {
     "model_kind": "linear_mixed_model",

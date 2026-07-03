@@ -2,7 +2,7 @@
   "schema": {
     "schema_name": "mixedmodels.compiled_model_artifact",
     "schema_version": 1,
-    "crate_version": "0.1.0"
+    "crate_version": "1.0.0-rc.1"
   },
   "model_boundary": {
     "model_kind": "linear_mixed_model",
@@ -24,7 +24,7 @@
   "fixed_effect_inference_table": {
     "schema_name": "mixedmodels.fixed_effect_inference_table",
     "schema_version": "1.0.0",
-    "crate_version": "0.1.0",
+    "crate_version": "1.0.0-rc.1",
     "rows": [
       {
         "label": "(Intercept)",
@@ -89,7 +89,7 @@
   "fixed_effect_covariance_matrix": {
     "schema_name": "mixedmodels.fixed_effect_covariance_matrix",
     "schema_version": "1.0.0",
-    "crate_version": "0.1.0",
+    "crate_version": "1.0.0-rc.1",
     "coef_names": [
       "(Intercept)",
       "x"
