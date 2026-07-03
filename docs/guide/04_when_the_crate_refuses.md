@@ -1,11 +1,9 @@
 # When the crate refuses
 
-This crate's defining stance is in
-[`docs/mixed_model_compiler_inference_contract.md`](https://github.com/bbuchsbaum/mixeff-rs/blob/main/docs/mixed_model_compiler_inference_contract.md):
-**no fake p-values, no hidden model surgery, explicit identifiability and
-refusal paths.** When something cannot be computed honestly, you get a typed
-error or a typed refusal with a stable reason code — never a fabricated
-number and never a silently altered model.
+This crate's defining stance is: **no fake p-values, no hidden model surgery,
+explicit identifiability and refusal paths.** When something cannot be
+computed honestly, you get a typed error or a typed refusal with a stable
+reason code — never a fabricated number and never a silently altered model.
 
 ## Refusal as a typed error
 
@@ -71,8 +69,6 @@ tests return a taxonomy, not a bare p-value:
 
 The practical contract: **a number this crate hands you means what it says.**
 If it cannot mean that, you get a refusal you can match on, with a reason code
-stable across releases — see the
-[SemVer policy](https://github.com/bbuchsbaum/mixeff-rs/blob/main/docs/semver_policy.md)
-for which codes and schemas are covered.
+stable across releases.
 
 Back to [getting started][crate::guide::getting_started].

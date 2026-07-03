@@ -59,8 +59,8 @@ under `types`. Advanced implementation modules such as compiler artifacts,
 pathology internals, bundled datasets, response-matrix batch helpers, and
 fixed-design backends are either behind `unstable-internals` or hidden from
 the primary `model::*` barrel until their contracts are ready for SemVer
-protection. See [`docs/semver_policy.md`](docs/semver_policy.md) for the
-current public-surface inventory.
+protection. The current public-surface inventory is summarized by this README,
+the Cargo feature list below, and the rustdoc module visibility.
 
 New to the crate? The [`guide`](https://docs.rs/mixeff-rs/latest/mixeff_rs/guide/)
 module is a short, doctested tutorial: getting started, reading results,
@@ -148,8 +148,8 @@ update, and the profiled (RE)ML objective — is stable and parity-tested
 against MixedModels.jl; the public API framing is still settling. Per Cargo's
 `0.x` semantics **any release may contain breaking changes**, so pin an exact
 version if you need stability. The stable vs. explicitly-unstable surface and
-the precise breaking-change definition live in the
-[SemVer policy](https://github.com/bbuchsbaum/mixeff-rs/blob/main/docs/semver_policy.md);
+the practical breaking-change boundary are described in this README and in
+the docs.rs API surface;
 [`CHANGELOG.md`](CHANGELOG.md) records release notes, and the API reference is
 on [docs.rs](https://docs.rs/mixeff-rs).
 
@@ -163,9 +163,9 @@ diagnostic", not "always faster" or "always more convergent" than other
 engines. Boundary and reduced-rank LMMs are interpreted through optimizer
 certificates and covariance KKT checks; GLMM rows marked as documented
 divergence remain non-parity claims until their scorecard row and tests are
-promoted together. See the
-[difficult-model release contract](docs/difficult_model_release_contract.md)
-and [certification note](docs/difficult_model_certification.md).
+promoted together. The
+[`guide`](https://docs.rs/mixeff-rs/latest/mixeff_rs/guide/) explains how to
+read results and typed refusals.
 
 **GLMM estimation semantics.** The default GLMM path is `fast=true`: profiled
 fast-PIRLS estimation with Laplace/AGQ approximation metadata carried in the

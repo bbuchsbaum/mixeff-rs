@@ -7,3 +7,13 @@ MixedModels.jl/
 .mote/
 .beads/
 .claude/
+.codex/
+.agents/
+AGENTS.md
+CLAUDE.md
+Cargo.toml.orig
+
+# Internal planning/design docs. Keep docs/guide/ user-facing and tracked.
+docs/*.md
+!docs/guide/
+!docs/guide/**

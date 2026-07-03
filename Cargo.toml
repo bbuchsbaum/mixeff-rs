@@ -65,7 +65,7 @@ prima = []
 # Exposes the unstable internal surface (`compiler`, `datasets`, `pathology`)
 # as public modules. These are NOT covered by the 1.0 SemVer guarantee — the
 # compiler/IR is still in flux and dataset provenance churns. Off by default
-# so IR refinements are not SemVer-major breaks. See docs/semver_policy.md.
+# so IR refinements are not SemVer-major breaks.
 unstable-internals = []
 # Enables opt-in deterministic parallel execution for response-matrix batch
 # fitting (`BatchParallelism::Rayon`). Off by default; the serial path stays
