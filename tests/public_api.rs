@@ -34,6 +34,10 @@ fn source(relative: &str) -> String {
         .unwrap_or_else(|error| panic!("failed to read {relative}: {error}"))
 }
 
+fn toml_string(value: &Path) -> String {
+    format!("{:?}", value.to_string_lossy())
+}
+
 #[test]
 fn model_and_stats_barrels_do_not_use_glob_reexports() {
     for path in ["src/model/mod.rs", "src/stats/mod.rs"] {
@@ -78,9 +82,9 @@ version = "0.0.0"
 edition = "2021"
 
 [dependencies]
-mixeff-rs = {{ path = "{}" }}
+mixeff-rs = {{ path = {} }}
 "#,
-            manifest_dir.display()
+            toml_string(manifest_dir)
         ),
     )
     .unwrap();
@@ -140,9 +144,9 @@ version = "0.0.0"
 edition = "2021"
 
 [dependencies]
-mixeff-rs = {{ path = "{}" }}
+mixeff-rs = {{ path = {} }}
 "#,
-            manifest_dir.display()
+            toml_string(manifest_dir)
         ),
     )
     .unwrap();
