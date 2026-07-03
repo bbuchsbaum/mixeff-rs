@@ -3494,6 +3494,7 @@ impl LinearMixedModel {
             }
             #[cfg(not(feature = "nlopt"))]
             {
+                self.configure_native_auto_crossed_large_recourse();
                 self.fit_trust_bq_with_maxeval(reml, None)?;
             }
         }
@@ -3507,6 +3508,41 @@ impl LinearMixedModel {
         self.refresh_fixed_effect_inference_table();
         Ok(self)
     }
+
+    #[cfg(any(test, not(feature = "nlopt")))]
+    pub(super) fn configure_native_auto_crossed_large_recourse(&mut self) {
+        if !self.should_auto_use_native_crossed_large_ladder() {
+            return;
+        }
+
+        self.trust_bq_start_ladder = TrustBqStartLadder::DiagonalFirst;
+        if self.optsum.max_feval <= 0 {
+            self.optsum.max_feval = NATIVE_AUTO_CROSSED_LARGE_MAX_FEVAL;
+        }
+    }
+
+    #[cfg(any(test, not(feature = "nlopt")))]
+    pub(super) fn should_auto_use_native_crossed_large_ladder(&self) -> bool {
+        self.optsum.optimizer_source == OptimizerSource::Auto
+            && self.trust_bq_start_ladder == TrustBqStartLadder::Off
+            && self.n_theta() >= 7
+            && self.has_crossed_full_cholesky_vector_terms()
+    }
+
+    #[cfg(any(test, not(feature = "nlopt")))]
+    fn has_crossed_full_cholesky_vector_terms(&self) -> bool {
+        for (left_index, left) in self.reterms.iter().enumerate() {
+            if !full_cholesky_vector_term(left) {
+                continue;
+            }
+            for right in self.reterms.iter().skip(left_index + 1) {
+                if full_cholesky_vector_term(right) && random_terms_are_crossed(left, right) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
 }
 
 /// Variance tolerance shared by the scalar covariance KKT certificate and the
@@ -3517,6 +3553,36 @@ const SCALAR_KKT_VARIANCE_TOLERANCE: f64 = 1e-8;
 /// certificate and the theta-space pre-check that gates the KKT-guided
 /// boundary restart.
 const TWO_BY_TWO_KKT_COVARIANCE_TOLERANCE: f64 = 1e-8;
+
+#[cfg(any(test, not(feature = "nlopt")))]
+pub(super) const NATIVE_AUTO_CROSSED_LARGE_MAX_FEVAL: i64 = 2_000;
+
+#[cfg(any(test, not(feature = "nlopt")))]
+fn full_cholesky_vector_term(term: &ReMat) -> bool {
+    term.vsize >= 2 && term.n_theta() == term.vsize * (term.vsize + 1) / 2
+}
+
+#[cfg(any(test, not(feature = "nlopt")))]
+fn random_terms_are_crossed(left: &ReMat, right: &ReMat) -> bool {
+    !refs_nested_within(&left.refs, &right.refs) && !refs_nested_within(&right.refs, &left.refs)
+}
+
+#[cfg(any(test, not(feature = "nlopt")))]
+fn refs_nested_within(child: &[u32], parent: &[u32]) -> bool {
+    if child.len() != parent.len() {
+        return false;
+    }
+
+    let mut mapping = std::collections::BTreeMap::new();
+    for (&child_ref, &parent_ref) in child.iter().zip(parent) {
+        if let Some(previous) = mapping.insert(child_ref, parent_ref) {
+            if previous != parent_ref {
+                return false;
+            }
+        }
+    }
+    true
+}
 
 fn classify_scalar_covariance_kkt(
     variance: f64,

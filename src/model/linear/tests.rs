@@ -1313,6 +1313,50 @@ fn test_trust_bq_start_ladder_defaults_off() {
 }
 
 #[test]
+fn test_native_auto_crossed_large_recourse_targets_crossed_vector_blocks() {
+    let crossed_data = simulate_large_theta_crossed(123);
+    let crossed_formula = parse_formula(
+        "reaction ~ 1 + days + (1 + days | subj) + (1 + days | item) + (1 + days | site)",
+    )
+    .unwrap();
+    let mut crossed = LinearMixedModel::new(crossed_formula, &crossed_data, None).unwrap();
+
+    assert!(crossed.should_auto_use_native_crossed_large_ladder());
+    crossed.configure_native_auto_crossed_large_recourse();
+    assert_eq!(
+        crossed.trust_bq_start_ladder,
+        TrustBqStartLadder::DiagonalFirst
+    );
+    assert_eq!(
+        crossed.optsum.max_feval,
+        NATIVE_AUTO_CROSSED_LARGE_MAX_FEVAL
+    );
+
+    let mut capped = LinearMixedModel::new(
+        parse_formula(
+            "reaction ~ 1 + days + (1 + days | subj) + (1 + days | item) + (1 + days | site)",
+        )
+        .unwrap(),
+        &crossed_data,
+        None,
+    )
+    .unwrap();
+    capped.optsum.max_feval = 750;
+    capped.configure_native_auto_crossed_large_recourse();
+    assert_eq!(capped.optsum.max_feval, 750);
+
+    let sleep_data = simulate_sleepstudy_like(24, 10, 42);
+    let sleep_formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+    let sleep = LinearMixedModel::new(sleep_formula, &sleep_data, None).unwrap();
+    assert!(!sleep.should_auto_use_native_crossed_large_ladder());
+
+    let scalar_formula =
+        parse_formula("reaction ~ 1 + days + (1 | subj) + (1 | item) + (1 | site)").unwrap();
+    let scalar = LinearMixedModel::new(scalar_formula, &crossed_data, None).unwrap();
+    assert!(!scalar.should_auto_use_native_crossed_large_ladder());
+}
+
+#[test]
 fn test_trust_bq_sample_reuse_defaults_to_family_policy() {
     assert_eq!(
         OptimizerControl::default().trust_bq_sample_reuse,
