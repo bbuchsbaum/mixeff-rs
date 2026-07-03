@@ -151,6 +151,11 @@ Do not extend `LinearMixedModel` in place first. Introduce a new internal split:
 The current `[X | y]` representation should not be the basis of the
 multivariate implementation.
 
+The scalar-response stepping stone is
+[`lazy_fixed_design_materialization.md`](lazy_fixed_design_materialization.md):
+split fixed-design structure from response right-hand sides before adding a
+matrix-valued response.
+
 Instead, the scalar and multivariate paths should eventually share:
 
 - the structural factorization of `[Z X]' [Z X]`

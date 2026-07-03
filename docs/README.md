@@ -58,6 +58,8 @@ but are explicitly **not** part of the 1.0 stability surface.
 - [`random_term_card_prd.md`](random_term_card_prd.md) — random-term card PRD.
 - [`multivariate_shared_theta.md`](multivariate_shared_theta.md) — planned
   split between shared `[Z X]` factorization and per-response RHS (post-1.0).
+- [`lazy_fixed_design_materialization.md`](lazy_fixed_design_materialization.md)
+  — design for removing persistent dense `n x p` copies from streamed LMM fits.
 - [`response_matrix_batch_lmm.md`](response_matrix_batch_lmm.md) — batch
   response-matrix API design.
 - [`fixed_effect_p_values_plan.md`](fixed_effect_p_values_plan.md) — design

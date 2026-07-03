@@ -2624,6 +2624,7 @@ impl LinearMixedModel {
         let dims = self.dims;
         let is_reml = reml;
         let fixed_sigma = self.optsum.sigma;
+        let sample_reuse_control = self.trust_bq_sample_reuse;
         let cholesky_zero_pad_tolerance = self
             .compiler_policy()
             .thresholds
@@ -2689,6 +2690,8 @@ impl LinearMixedModel {
             self.optsum.ftol_abs,
             self.optsum.ftol_rel,
         );
+        let resolve_reuse_samples =
+            |family_policy_reuse: bool| sample_reuse_control.resolve(family_policy_reuse);
         let mut trust_bq_initial = self.optsum.initial.clone();
         let lower_bounds = self.lower_bounds();
         let upper_bounds = vec![f64::INFINITY; n_theta];
@@ -2769,7 +2772,7 @@ impl LinearMixedModel {
                             } else {
                                 0
                             },
-                            reuse_samples: diagonal_indices.len() >= 7,
+                            reuse_samples: resolve_reuse_samples(diagonal_indices.len() >= 7),
                             stall_iterations: 3,
                             stall_ftol_rel: 1e-6,
                             stall_ftol_abs: 1e-8,
@@ -2834,7 +2837,7 @@ impl LinearMixedModel {
                 ftol_abs: policy.ftol_abs,
                 ftol_rel: policy.ftol_rel,
                 max_cross_terms: policy.max_cross_terms,
-                reuse_samples: policy.reuse_samples,
+                reuse_samples: resolve_reuse_samples(policy.reuse_samples),
                 stall_iterations: policy.stall_iterations,
                 stall_ftol_rel: policy.stall_ftol_rel,
                 stall_ftol_abs: policy.stall_ftol_abs,

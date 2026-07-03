@@ -38,6 +38,9 @@ jobs:
           - name: no-default-features
             os: ubuntu-latest
             command: cargo test --no-default-features
+          - name: faer-backend
+            os: ubuntu-latest
+            command: cargo test --features faer-backend
           - name: prima
             os: ubuntu-latest
             command: cargo test --no-default-features --features prima

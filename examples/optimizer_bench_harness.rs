@@ -13,7 +13,7 @@ use std::time::Instant;
 use mixeff_rs::formula::parse_formula;
 use mixeff_rs::model::data::DataFrame;
 use mixeff_rs::model::linear::{
-    FitOptions, LinearMixedModel, OptimizerControl, TrustBqStartLadder,
+    FitOptions, LinearMixedModel, OptimizerControl, TrustBqSampleReuse, TrustBqStartLadder,
 };
 use mixeff_rs::model::traits::MixedModelFit;
 
@@ -470,12 +470,25 @@ fn bench_start_ladder() -> TrustBqStartLadder {
     }
 }
 
+/// Opt-in TrustBQ exact-sample reuse experiment lever for A/B runs:
+/// `MIXEFF_BENCH_TRUST_BQ_SAMPLE_REUSE=all` broadens reuse to every family,
+/// `disabled` turns it off for every family, and unset keeps the production
+/// family policy.
+fn bench_sample_reuse() -> TrustBqSampleReuse {
+    match std::env::var("MIXEFF_BENCH_TRUST_BQ_SAMPLE_REUSE").as_deref() {
+        Ok("all") | Ok("all_families") => TrustBqSampleReuse::AllFamilies,
+        Ok("disabled") | Ok("off") => TrustBqSampleReuse::Disabled,
+        _ => TrustBqSampleReuse::FamilyPolicy,
+    }
+}
+
 fn fit_with_bench_controls(
     model: &mut LinearMixedModel,
     reml: bool,
 ) -> mixeff_rs::error::Result<()> {
     let ladder = bench_start_ladder();
-    if ladder == TrustBqStartLadder::Off {
+    let sample_reuse = bench_sample_reuse();
+    if ladder == TrustBqStartLadder::Off && sample_reuse == TrustBqSampleReuse::FamilyPolicy {
         model.fit(reml)?;
         return Ok(());
     }
@@ -484,7 +497,11 @@ fn fit_with_bench_controls(
     } else {
         FitOptions::ml()
     }
-    .with_optimizer_control(OptimizerControl::auto().with_trust_bq_start_ladder(ladder));
+    .with_optimizer_control(
+        OptimizerControl::auto()
+            .with_trust_bq_start_ladder(ladder)
+            .with_trust_bq_sample_reuse(sample_reuse),
+    );
     model.fit_with_options(options)?;
     Ok(())
 }

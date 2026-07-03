@@ -42,6 +42,28 @@ diagnostics, covariance summaries, and inference surface. That matters for
 binary distribution, embedded use, restricted build systems, and package
 managers that prefer fewer compiled third-party dependencies.
 
+## Wrapper Feature Matrix
+
+Downstream packages should choose and pin a feature profile explicitly. This
+keeps wrapper source builds stable if the Rust crate later changes its default
+feature set.
+
+| Consumer profile | Cargo features | Build/dependency posture |
+| --- | --- | --- |
+| Rust default | `default` (`nlopt`) | Performance-oriented Rust profile; requires the NLopt build surface. |
+| Rust fast gemm | `features = ["nlopt", "faer-backend"]` | Opt-in acceleration profile for blocked-Cholesky gemm-heavy workloads. |
+| Rust dependency-light | `--no-default-features` | Native TrustBQ/GLMM fallback profile with no NLopt or CMake dependency. |
+| R wrapper initial CRAN build | `default-features = false` | Keep the first CRAN path dependency-light and predictable. |
+| R wrapper performance builds | explicit `nlopt`; optional `faer-backend` after CI evidence | Suitable for R-universe, GitHub, local, or later CRAN-performance profiles. |
+| Future Python wrapper | explicit feature pin chosen by wheel/source-build policy | Do not inherit crate defaults implicitly. |
+
+`faer-backend` is not part of the default profile today. It may be certified as
+an opt-in acceleration path independently of any default-promotion decision.
+Promoting it into `default` requires separate wrapper packaging evidence:
+dependency graph delta, source-build behavior on supported platforms, wrapper
+CI coverage, benchmark benefit, and recertified parity fixtures under the
+chosen default.
+
 ## TrustBQ Policy
 
 The TrustBQ LMM policy is centralized in `trust_bq_model_family_policy` in
@@ -63,6 +85,30 @@ missed the objective tolerance while 475 retained `objective_pass=true`.
 Certificate-aware stopping is
 available for scalar and 2x2 covariance certificates, but it refuses
 invalid-boundary and weak-identification classifications.
+
+### Sample Reuse Experiment Policy
+
+Exact interpolation-sample reuse is policy-controlled. The production default
+is [`TrustBqSampleReuse::FamilyPolicy`](../src/model/linear/mod.rs), which
+keeps the table above unchanged. Two opt-in modes exist for benchmark and
+diagnostic runs:
+
+- `TrustBqSampleReuse::AllFamilies` enables exact reuse for every TrustBQ
+  model family.
+- `TrustBqSampleReuse::Disabled` disables exact reuse for every TrustBQ model
+  family, including crossed/large theta.
+
+These modes are audit-recorded through `OptimizerControl` and can change
+optimizer traces or evaluation counts. They should not become defaults unless
+fit results and certificates are unchanged and benchmark evidence shows a clear
+trace or runtime benefit. The benchmark harness exposes the same control with
+`MIXEFF_BENCH_TRUST_BQ_SAMPLE_REUSE=all` or `disabled`.
+
+Scope: the override governs every native `LinearMixedModel` TrustBQ solve —
+the main theta optimization, the diagonal warm start, and the active-face refit
+sub-solve — through the shared `TrustBqSampleReuse::resolve` helper. It does not
+reach the GLMM joint Laplace inner solve in `model::generalized`, which fixes
+its own reuse policy independently of `OptimizerControl`.
 
 ### Start Ladder Policy
 

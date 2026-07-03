@@ -46,7 +46,7 @@ pub use linear::{
     FixedEffectNullBootstrapTarget, FixedEffectNullCovariancePolicy, LinearMixedModel,
     LinearMixedModelBuilder, MixedModelBootstrap, ModelCriterion, NewReLevels, OptimizerChoice,
     OptimizerControl, PredictionVarianceMethod, PredictionVariancePayload, PredictionVarianceRow,
-    PredictionVarianceStatus, TrustBqStartLadder, BOOTSTRAP_RUN_SCHEMA,
+    PredictionVarianceStatus, TrustBqSampleReuse, TrustBqStartLadder, BOOTSTRAP_RUN_SCHEMA,
     BOOTSTRAP_RUN_SCHEMA_VERSION,
 };
 pub use summary_estimates::{ResidualSource, SamplingVarianceScale, SummaryEstimateOptions};

@@ -48,6 +48,8 @@ details.
 The native TrustBQ profile is useful for downstream packages, binary
 distribution, embedded use, and build systems that prefer to avoid additional C
 dependencies. NLopt-backed builds remain the default performance path.
+The experimental `faer-backend` feature is an opt-in acceleration profile, not
+part of the default feature set.
 
 ## API documentation
 
@@ -126,6 +128,18 @@ The lower-level form (`LinearMixedModel::new(formula, &df, None)?` then
   evaluations on crossed-design models, but objectives drift at rounding
   level versus the certified default backend, so parity fixtures and the
   performance gate are pinned to the default. Benchmark before adopting.
+
+Downstream wrappers should pin the feature set they intend to ship instead of
+inheriting whatever this crate's default becomes in a later release:
+
+| Consumer profile | Recommended features | Packaging intent |
+| --- | --- | --- |
+| Rust default | `default` (`nlopt`) | Main performance-oriented Rust profile. |
+| Rust dependency-light | `default-features = false` | Pure-Rust/native TrustBQ profile for restricted build systems. |
+| Rust fast gemm experiment | `features = ["nlopt", "faer-backend"]` | Opt-in acceleration profile; benchmark and parity-check locally. |
+| R wrapper initial CRAN profile | `default-features = false` | Avoid extra compiled dependency surface for the first CRAN path. |
+| R wrapper performance builds | explicit `nlopt`; optional `faer-backend` only after wrapper CI evidence | R-universe/GitHub/local builds may choose heavier performance profiles. |
+| Future Python wrapper | explicit feature pin | Match the wheel/source-build policy; do not inherit defaults accidentally. |
 
 ## Status
 

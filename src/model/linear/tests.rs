@@ -1314,6 +1314,104 @@ fn test_trust_bq_start_ladder_defaults_off() {
 }
 
 #[test]
+fn test_trust_bq_sample_reuse_defaults_to_family_policy() {
+    assert_eq!(
+        OptimizerControl::default().trust_bq_sample_reuse,
+        TrustBqSampleReuse::FamilyPolicy
+    );
+    assert!(!OptimizerControl::default()
+        .caller_set_fields()
+        .contains(&"trust_bq_sample_reuse".to_string()));
+}
+
+#[test]
+fn test_trust_bq_sample_reuse_override_is_audit_recorded() {
+    let data = simulate_sleepstudy_like(24, 10, 42);
+    let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+    let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+    model
+        .fit_with_options(
+            FitOptions::reml().with_optimizer_control(
+                OptimizerControl::auto()
+                    .with_optimizer(Optimizer::TrustBq)
+                    .with_trust_bq_sample_reuse(TrustBqSampleReuse::AllFamilies),
+            ),
+        )
+        .unwrap();
+
+    assert!(model
+        .optsum
+        .caller_set_fields
+        .contains(&"trust_bq_sample_reuse".to_string()));
+}
+
+#[test]
+fn test_trust_bq_sample_reuse_resolve_maps_every_variant() {
+    // FamilyPolicy passes the family default through unchanged in both
+    // directions.
+    assert!(TrustBqSampleReuse::FamilyPolicy.resolve(true));
+    assert!(!TrustBqSampleReuse::FamilyPolicy.resolve(false));
+    // Disabled forces reuse off even for a family that would reuse
+    // (e.g. crossed/large theta).
+    assert!(!TrustBqSampleReuse::Disabled.resolve(true));
+    assert!(!TrustBqSampleReuse::Disabled.resolve(false));
+    // AllFamilies forces reuse on even for a non-crossed family whose policy
+    // default is `false` — the case the audit-recording test does not cover.
+    assert!(TrustBqSampleReuse::AllFamilies.resolve(false));
+    assert!(TrustBqSampleReuse::AllFamilies.resolve(true));
+}
+
+/// Fit the same crossed/large-theta model on the native TrustBQ path with the
+/// default family policy (which reuses samples) and with reuse disabled, and
+/// confirm the override actually reaches the optimizer: the recorded evaluation
+/// count moves while the fitted objective stays identical (exact reuse).
+#[test]
+fn test_trust_bq_sample_reuse_override_changes_optimizer_trace() {
+    let data = simulate_large_theta_crossed(123);
+    let formula = parse_formula(
+        "reaction ~ 1 + days + (1 + days | subj) + (1 + days | item) + (1 + days | site)",
+    )
+    .unwrap();
+
+    let fit = |reuse: TrustBqSampleReuse| {
+        let mut model = LinearMixedModel::new(formula.clone(), &data, None).unwrap();
+        model.optsum.max_feval = 3000;
+        model
+            .fit_with_options(
+                FitOptions::reml().with_optimizer_control(
+                    OptimizerControl::auto()
+                        .with_optimizer(Optimizer::TrustBq)
+                        .with_trust_bq_sample_reuse(reuse),
+                ),
+            )
+            .unwrap();
+        model
+    };
+
+    // CrossedLarge (n_theta == 9) reuses samples under the family policy, so
+    // Disabled is a genuine toggle rather than a no-op.
+    let family_policy = fit(TrustBqSampleReuse::FamilyPolicy);
+    assert_eq!(family_policy.n_theta(), 9);
+    let disabled = fit(TrustBqSampleReuse::Disabled);
+
+    // Exact reuse: turning it off must not move the fitted objective.
+    assert!(
+        (family_policy.objective_value() - disabled.objective_value()).abs() < 1e-6,
+        "reuse is exact: fmin {} (family policy) vs {} (disabled)",
+        family_policy.objective_value(),
+        disabled.objective_value()
+    );
+    // Wiring: the override must reach the optimizer, so the evaluation trace
+    // differs. If this ever ties, a call site stopped honoring the override.
+    assert_ne!(
+        family_policy.optsum.feval, disabled.optsum.feval,
+        "sample-reuse override did not change the TrustBQ evaluation trace \
+         (family policy feval {}, disabled feval {})",
+        family_policy.optsum.feval, disabled.optsum.feval
+    );
+}
+
+#[test]
 fn test_trust_bq_diagonal_first_ladder_matches_single_start_objective() {
     let data = simulate_sleepstudy_like(24, 10, 42);
     let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();

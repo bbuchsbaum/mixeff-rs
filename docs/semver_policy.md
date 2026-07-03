@@ -27,7 +27,9 @@ The following modules and their documented public items are part of the stable
 - **`mixeff_rs::model`** — the primary fitting surface: `DataFrame`,
   `LinearMixedModel`, `LinearMixedModelBuilder`,
   `GeneralizedLinearMixedModel`, `GeneralizedLinearMixedModelBuilder`,
-  `FitOptions`, `ModelCriterion`, `MixedModelFit`, `Family`,
+  `FitOptions`, `FitToleranceOverrides`, `ModelCriterion`,
+  `OptimizerChoice`, `OptimizerControl`, `ActiveFaceRefit`,
+  `TrustBqSampleReuse`, `TrustBqStartLadder`, `MixedModelFit`, `Family`,
   `LinkFunction`, `NewReLevels`, and the documented fit / inference /
   bootstrap / prediction entry points, including
   `LinearMixedModel::fixed_effect_fitted()` for training-frame

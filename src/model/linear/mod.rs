@@ -136,6 +136,10 @@ pub struct LinearMixedModel {
     /// Opt-in TrustBQ warm-start ladder, carried from
     /// [`OptimizerControl::trust_bq_start_ladder`]. Defaults to `Off`.
     pub(crate) trust_bq_start_ladder: TrustBqStartLadder,
+    /// Opt-in TrustBQ exact-sample reuse policy override, carried from
+    /// [`OptimizerControl::trust_bq_sample_reuse`]. Defaults to the family
+    /// policy.
+    pub(crate) trust_bq_sample_reuse: TrustBqSampleReuse,
     /// Opt-in post-fit active-face refit for singular vector blocks, carried
     /// from [`OptimizerControl::active_face_refit`]. Defaults to `Off`.
     pub(crate) active_face_refit: ActiveFaceRefit,
@@ -611,6 +615,43 @@ pub enum TrustBqStartLadder {
     DiagonalFirst,
 }
 
+/// Opt-in exact interpolation-sample reuse policy for the native TrustBQ path.
+///
+/// Experimental and benchmark-gated: the default is
+/// [`TrustBqSampleReuse::FamilyPolicy`], which keeps the central TrustBQ model
+/// family policy unchanged. Use the other modes only for A/B benchmark runs or
+/// tightly scoped diagnostics; they can alter optimizer traces and reported
+/// evaluation counts even when the final fit is numerically unchanged.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TrustBqSampleReuse {
+    /// Use the model-family policy in `trust_bq_model_family_policy` (the
+    /// default). Today that means exact sample reuse only for crossed/large
+    /// theta families.
+    #[default]
+    FamilyPolicy,
+    /// Disable exact sample reuse for every TrustBQ family.
+    Disabled,
+    /// Enable exact sample reuse for every TrustBQ family.
+    AllFamilies,
+}
+
+impl TrustBqSampleReuse {
+    /// Resolve the effective `reuse_samples` flag for a single TrustBQ solve,
+    /// given the value the model-family policy would otherwise use.
+    ///
+    /// This is the single source of truth for every native-TrustBQ option
+    /// site (main θ-optimization, diagonal warm start, and the active-face
+    /// refit sub-solve) so the override cannot silently miss a path.
+    pub(crate) fn resolve(self, family_policy_reuse: bool) -> bool {
+        match self {
+            TrustBqSampleReuse::FamilyPolicy => family_policy_reuse,
+            TrustBqSampleReuse::Disabled => false,
+            TrustBqSampleReuse::AllFamilies => true,
+        }
+    }
+}
+
 /// Opt-in post-fit active-face refit for singular vector random-effect
 /// blocks.
 ///
@@ -650,6 +691,9 @@ pub struct OptimizerControl {
     /// Opt-in TrustBQ warm-start ladder. Defaults to
     /// [`TrustBqStartLadder::Off`].
     pub trust_bq_start_ladder: TrustBqStartLadder,
+    /// Opt-in exact-sample reuse override for native TrustBQ. Defaults to
+    /// [`TrustBqSampleReuse::FamilyPolicy`].
+    pub trust_bq_sample_reuse: TrustBqSampleReuse,
     /// Opt-in post-fit active-face refit for singular vector blocks.
     /// Defaults to [`ActiveFaceRefit::Off`].
     pub active_face_refit: ActiveFaceRefit,
@@ -691,6 +735,12 @@ impl OptimizerControl {
         self
     }
 
+    /// Override exact interpolation-sample reuse for native TrustBQ.
+    pub fn with_trust_bq_sample_reuse(mut self, reuse: TrustBqSampleReuse) -> Self {
+        self.trust_bq_sample_reuse = reuse;
+        self
+    }
+
     /// Opt into the experimental post-fit active-face refit.
     pub fn with_active_face_refit(mut self, refit: ActiveFaceRefit) -> Self {
         self.active_face_refit = refit;
@@ -725,6 +775,9 @@ impl OptimizerControl {
         }
         if self.trust_bq_start_ladder != TrustBqStartLadder::Off {
             fields.push("trust_bq_start_ladder".to_string());
+        }
+        if self.trust_bq_sample_reuse != TrustBqSampleReuse::FamilyPolicy {
+            fields.push("trust_bq_sample_reuse".to_string());
         }
         if self.active_face_refit != ActiveFaceRefit::Off {
             fields.push("active_face_refit".to_string());
@@ -1084,6 +1137,7 @@ impl LinearMixedModel {
             training_categorical,
             suppress_derivative_diagnostics: false,
             trust_bq_start_ladder: TrustBqStartLadder::default(),
+            trust_bq_sample_reuse: TrustBqSampleReuse::default(),
             active_face_refit: ActiveFaceRefit::default(),
         };
         debug_assert_eq!(
@@ -1346,6 +1400,7 @@ impl LinearMixedModel {
         let n_theta = self.n_theta();
 
         self.trust_bq_start_ladder = control.trust_bq_start_ladder;
+        self.trust_bq_sample_reuse = control.trust_bq_sample_reuse;
         self.active_face_refit = control.active_face_refit;
 
         if let Some(value) = control.tolerances.ftol_rel {

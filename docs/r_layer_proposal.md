@@ -633,6 +633,9 @@ Default recommendation:
 - use `mixeff-rs` with `default-features = false` for the first CRAN
   submission; reserve the default NLopt-backed Rust profile for r-universe,
   GitHub, local, and later CRAN-performance builds
+- treat `faer-backend` as an opt-in Rust acceleration profile until the R
+  wrapper has source-build and CI evidence that its extra Rust linalg stack is
+  acceptable for the selected distribution channel
 - keep `lme4` in `Suggests`, not `Imports`; use it for parity tests and
   optional generic compatibility
 - do not mask `lme4::lmer()` or `lme4::glmer()` on attach
@@ -857,7 +860,8 @@ Expected dependency posture:
   `tibble`, `pillar`
 - `Suggests`: `lme4`, `emmeans`, `testthat`, `withr`, `knitr`, `rmarkdown`
 - `SystemRequirements`: `Cargo, rustc` for the initial CRAN profile; add
-  CMake only if a future CRAN build enables NLopt
+  CMake only if a future CRAN build enables NLopt; add any faer-related build
+  posture only after `faer-backend` is intentionally selected for that channel
 
 The Rust bridge can be implemented with `extendr` or a small C ABI. The
 contract should not depend on that choice. The stable boundary is the model
@@ -872,6 +876,9 @@ Settle the operational contracts before R code grows around them:
 - CRAN-compatible build target, with R-universe/GitHub for development builds
 - first CRAN build compiles Rust with `--no-default-features`; NLopt is a
   performance profile outside the initial CRAN submission
+- default-feature policy for optional Rust acceleration backends, including
+  whether `faer-backend` remains opt-in or is allowed in a wrapper-specific
+  performance profile
 - bridge prototype choice and C ABI escape hatch
 - Rust MSRV and stable-only build policy
 - lme4 as `Suggests`, not `Imports`

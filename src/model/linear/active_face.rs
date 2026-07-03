@@ -350,6 +350,10 @@ impl LinearMixedModel {
                 self.optsum.ftol_abs,
                 self.optsum.ftol_rel,
             );
+            // Honor the opt-in exact-sample-reuse override on the active-face
+            // refit sub-solve too, so a diagnostic A/B run is faithful across
+            // every native-TrustBQ path, not just the main optimization.
+            let face_reuse_samples = self.trust_bq_sample_reuse.resolve(policy.reuse_samples);
             let result = {
                 let mut objective_fn = |combined: &[f64]| -> Result<f64> {
                     stage_fevals += 1;
@@ -380,7 +384,7 @@ impl LinearMixedModel {
                         ftol_abs: policy.ftol_abs,
                         ftol_rel: policy.ftol_rel,
                         max_cross_terms: policy.max_cross_terms,
-                        reuse_samples: policy.reuse_samples,
+                        reuse_samples: face_reuse_samples,
                         stall_iterations: policy.stall_iterations,
                         stall_ftol_rel: policy.stall_ftol_rel,
                         stall_ftol_abs: policy.stall_ftol_abs,
