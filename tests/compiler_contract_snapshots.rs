@@ -1375,7 +1375,7 @@ fn singular_prefit_audit_report_matches_wire_fixture() {
     assert!(budget["detail"]
         .as_str()
         .unwrap()
-        .contains("diagonal/reduced-rank covariance"));
+        .contains("diagonal or reduced-rank covariance"));
 
     let policy = &json_section_by_title(&value, "Policy Recommendations")["lines"][0];
     assert_eq!(policy["status"], "warning");

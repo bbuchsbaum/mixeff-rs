@@ -27,7 +27,7 @@
           "detail": "exact_gaussian"
         },
         {
-          "label": "certificate scope",
+          "label": "convergence certificate",
           "status": "info",
           "detail": "exact_objective"
         },
@@ -42,7 +42,7 @@
           "detail": "1"
         },
         {
-          "label": "theta maps",
+          "label": "covariance parameter maps",
           "status": "info",
           "detail": "1 map(s)"
         }
@@ -114,7 +114,7 @@
         {
           "label": "r0",
           "status": "warning",
-          "detail": "levels=10, rows=150, obs_per_level=15..15, basis=8, cov_params=36, levels/basis=1.25, levels/param=0.28, rows/param=4.17; total rows can be misleading for covariance support; risk=maximal covariance structure is too rich for the grouping-level budget; recommendation=full covariance asks for 36 parameter(s); use design_compiled with diagonal/reduced-rank covariance, treat the grouping factor as fixed when it is designed or directly compared, or collect at least 180 grouping levels; explanation=150 rows are clustered into 10 grouping levels; covariance support is limited by grouping levels, not by total rows"
+          "detail": "levels=10, rows=150, obs_per_level=15..15, basis=8, cov_params=36, levels/basis=1.25, levels/param=0.28, rows/param=4.17; total rows can be misleading for covariance support; risk=maximal covariance structure is too rich for the grouping-level budget; recommendation=full covariance asks for 36 parameter(s); options include using design_compiled with diagonal or reduced-rank covariance, treating the grouping factor as fixed when it is designed or directly compared, or collecting at least 180 grouping levels; explanation=150 rows are clustered into 10 grouping levels; covariance support is limited by grouping levels, not by total rows"
         }
       ]
     },

@@ -54,7 +54,7 @@ impl LinearMixedModel {
     ///
     /// Run this after [`fit`](Self::fit) when the compact print shows
     /// `convergence: caution` or `convergence: ok` with a
-    /// `next: run verify_convergence()` hint — that is, when the
+    /// `next: verify convergence` hint — that is, when the
     /// optimizer stopped acceptably but gradient/Hessian evidence is
     /// weak or unavailable, or when the model is at a boundary or
     /// reduced-rank optimum and you want optimizer-agreement

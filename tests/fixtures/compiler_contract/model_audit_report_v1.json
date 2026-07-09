@@ -27,7 +27,7 @@
           "detail": "exact_gaussian"
         },
         {
-          "label": "certificate scope",
+          "label": "convergence certificate",
           "status": "info",
           "detail": "exact_objective"
         },
@@ -42,7 +42,7 @@
           "detail": "1"
         },
         {
-          "label": "theta maps",
+          "label": "covariance parameter maps",
           "status": "info",
           "detail": "1 map(s)"
         }
@@ -114,7 +114,7 @@
         {
           "label": "r0",
           "status": "warning",
-          "detail": "levels=3, rows=6, obs_per_level=2..2, basis=2, cov_params=3, levels/basis=1.50, levels/param=1.00, rows/param=2.00; total rows can be misleading for covariance support; risk=maximal covariance structure is too rich for the grouping-level budget; recommendation=random-effect coefficients saturate the rows for this term; drop unsupported random slopes, split/simplify the random-effect structure, treat the grouping factor as fixed when appropriate, or collect more observations per grouping level; explanation=6 rows are clustered into 3 grouping levels; covariance support is limited by grouping levels, not by total rows"
+          "detail": "levels=3, rows=6, obs_per_level=2..2, basis=2, cov_params=3, levels/basis=1.50, levels/param=1.00, rows/param=2.00; total rows can be misleading for covariance support; risk=maximal covariance structure is too rich for the grouping-level budget; recommendation=random-effect coefficients saturate the rows for this term; options include dropping unsupported random slopes, splitting or simplifying the random-effect structure, treating the grouping factor as fixed, or collecting more observations per grouping level; explanation=6 rows are clustered into 3 grouping levels; covariance support is limited by grouping levels, not by total rows"
         }
       ]
     },

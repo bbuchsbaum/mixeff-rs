@@ -332,7 +332,7 @@ fn requested_model_section(artifact: &CompiledModelArtifact) -> AuditReportSecti
                 ),
             },
             AuditReportLine {
-                label: "certificate scope".to_string(),
+                label: "convergence certificate".to_string(),
                 status: AuditReportStatus::Info,
                 detail: optimizer_certificate_scope_label(
                     artifact.model_boundary.optimizer_certificate_scope,
@@ -350,7 +350,7 @@ fn requested_model_section(artifact: &CompiledModelArtifact) -> AuditReportSecti
                 detail: artifact.semantic_model.random_terms.len().to_string(),
             },
             AuditReportLine {
-                label: "theta maps".to_string(),
+                label: "covariance parameter maps".to_string(),
                 status: AuditReportStatus::Info,
                 detail: format!("{} map(s)", artifact.theta_maps.len()),
             },
@@ -1332,7 +1332,7 @@ fn policy_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
                     recommendation
                         .recommended_covariance
                         .as_ref()
-                        .map(|covariance| format!("; recommended covariance={covariance}"))
+                        .map(|covariance| format!("; lower-dimensional covariance={covariance}"))
                         .unwrap_or_default(),
                     recommendation.inference_consequence
                 ),
@@ -1452,7 +1452,7 @@ fn optimizer_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
         label: "gradient evidence".to_string(),
         status: evidence_method_status(&certificate.evidence.gradient.method),
         detail: format!(
-            "method={}; raw={}; scaled={}; free={}; projected={}; kkt_boundary={}",
+            "method={}; raw={}; scaled={}; free={}; projected={}; boundary_gradient={}",
             evidence_method_label(&certificate.evidence.gradient.method),
             option_f64(certificate.evidence.gradient.raw_gradient_norm),
             option_f64(certificate.evidence.gradient.scaled_gradient_norm),
@@ -1526,10 +1526,65 @@ fn optimizer_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
         verification_surface,
     ));
 
+    dedup_boundary_skip_reason(certificate, &mut lines);
+
     AuditReportSection {
         title: "Optimizer".to_string(),
         lines,
     }
+}
+
+/// The derivative KKT/Hessian skip reason for a boundary / reduced-rank fit is
+/// computed once but surfaces in several optimizer lines (convergence
+/// interpretation, gradient and Hessian evidence, certification quality).
+/// Re-stating the whole sentence at every site turns one boundary fact into a
+/// wall of identical prose, so we keep the first, fully-stated occurrence and
+/// collapse every later copy — within a line and across lines — to a concise,
+/// self-contained tag. Render-only: the stored certificate is untouched.
+fn dedup_boundary_skip_reason(
+    certificate: &super::audit::OptimizerCertificate,
+    lines: &mut [AuditReportLine],
+) {
+    const SHORT: &str = "boundary fit, not by itself an optimizer failure";
+    let Some(reason) = boundary_skip_reason(certificate) else {
+        return;
+    };
+    let mut stated = false;
+    for line in lines.iter_mut() {
+        if !line.detail.contains(&reason) {
+            continue;
+        }
+        let mut rebuilt = String::with_capacity(line.detail.len());
+        let mut rest = line.detail.as_str();
+        while let Some(pos) = rest.find(&reason) {
+            rebuilt.push_str(&rest[..pos]);
+            if stated {
+                rebuilt.push_str(SHORT);
+            } else {
+                rebuilt.push_str(&reason);
+                stated = true;
+            }
+            rest = &rest[pos + reason.len()..];
+        }
+        rebuilt.push_str(rest);
+        line.detail = rebuilt;
+    }
+}
+
+/// The boundary / reduced-rank derivative-skip reason, when present. It is the
+/// identical string attached to the gradient (and Hessian) evidence whenever
+/// KKT / Hessian checks are skipped for a fit sitting on a variance-component
+/// boundary; matching on that marker keeps the dedup scoped to the repeated
+/// boundary case and leaves unrelated skip reasons alone.
+fn boundary_skip_reason(certificate: &super::audit::OptimizerCertificate) -> Option<String> {
+    let reason = match &certificate.evidence.gradient.method {
+        super::audit::EvidenceMethod::NotAvailable { reason }
+        | super::audit::EvidenceMethod::NotAssessed { reason } => reason,
+        _ => return None,
+    };
+    reason
+        .contains("variance-component boundary")
+        .then(|| reason.clone())
 }
 
 /// Compact, action-oriented summary of model convergence quality.
@@ -1812,7 +1867,8 @@ impl ConvergenceVerdict {
 enum NextActionKind {
     /// "increase optimizer budget or try an alternate optimizer"
     BudgetOrAlternate,
-    /// "run verify_convergence() to compare restart and alternate-optimizer agreement"
+    /// "verify convergence to compare restart and alternate-optimizer agreement
+    /// (verify_convergence, where the host exposes it)"
     SuggestVerify,
     /// "compare tighter GLMM refits or alternate optimizer fits before relying on optimizer agreement"
     CompareManualGlmmRefits,
@@ -1820,7 +1876,7 @@ enum NextActionKind {
     GateInferenceOnDerivative,
     /// "gate weak-identification claims until Hessian evidence is available"
     GateWeakIdentification,
-    /// "scale predictors, simplify the random-effects structure, or collect more grouping levels"
+    /// "consider scaling predictors, simplifying the random-effects structure, or collecting more grouping levels"
     PredictorScalingOrSimplifyRe,
     /// "inspect Effective Covariance and consider diagonal covariance, a simpler random-effect term, or design_compiled policy"
     InspectEffectiveCovariance,
@@ -1837,7 +1893,7 @@ impl NextActionKind {
                 "increase optimizer budget or try an alternate optimizer"
             }
             NextActionKind::SuggestVerify => {
-                "run verify_convergence() to compare restart and alternate-optimizer agreement"
+                "verify convergence to compare restart and alternate-optimizer agreement (verify_convergence, where the host exposes it)"
             }
             NextActionKind::CompareManualGlmmRefits => {
                 "compare tighter GLMM refits or alternate optimizer fits before relying on optimizer agreement"
@@ -1849,7 +1905,7 @@ impl NextActionKind {
                 "gate weak-identification claims until Hessian evidence is available"
             }
             NextActionKind::PredictorScalingOrSimplifyRe => {
-                "scale predictors, simplify the random-effects structure, or collect more grouping levels"
+                "consider scaling predictors, simplifying the random-effects structure, or collecting more grouping levels"
             }
             NextActionKind::InspectEffectiveCovariance => {
                 "inspect Effective Covariance and consider diagonal covariance, a simpler random-effect term, or design_compiled policy"
@@ -1953,7 +2009,7 @@ impl ConvergenceVerificationSurface {
     fn not_run_detail(self) -> &'static str {
         match self {
             Self::VerifyConvergenceApi => {
-                "not run; call verify_convergence() to compare bounded restarts and alternate optimizer fits"
+                "not run; convergence verification compares bounded restarts and alternate optimizer fits (verify_convergence, where the host exposes it)"
             }
             Self::ManualGlmmRefit => {
                 "not run; GLMM bounded verification is not exposed in compiler v0; compare tighter GLMM refits or alternate optimizer fits if optimizer agreement matters"
@@ -4134,7 +4190,7 @@ mod tests {
                     "optimizer certificate is unavailable before fitting",
                 )
                 .with_suggested_actions(vec![
-                    "run verify_convergence() after fitting if optimizer agreement matters"
+                    "verify convergence after fitting if optimizer agreement matters (verify_convergence, where the host exposes it)"
                         .to_string(),
                 ]),
             );
@@ -4254,7 +4310,7 @@ mod tests {
             && evidence.test_name.contains("mismatch")));
 
         let line = convergence_next_steps_line(&cert, &[]);
-        assert!(line.detail.contains("scale predictors"));
+        assert!(line.detail.contains("scaling predictors"));
     }
 
     #[test]
@@ -4395,7 +4451,7 @@ mod tests {
             line.detail
         );
         assert!(
-            !line.detail.contains("run verify_convergence()"),
+            !line.detail.contains("verify_convergence"),
             "structural finding should suppress verify_convergence hint: {}",
             line.detail
         );

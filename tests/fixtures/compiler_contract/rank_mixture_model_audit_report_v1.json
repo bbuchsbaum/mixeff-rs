@@ -27,7 +27,7 @@
           "detail": "exact_gaussian"
         },
         {
-          "label": "certificate scope",
+          "label": "convergence certificate",
           "status": "info",
           "detail": "exact_objective"
         },
@@ -42,7 +42,7 @@
           "detail": "1"
         },
         {
-          "label": "theta maps",
+          "label": "covariance parameter maps",
           "status": "info",
           "detail": "1 map(s)"
         }
@@ -199,7 +199,7 @@
         {
           "label": "convergence interpretation",
           "status": "warning",
-          "detail": "optimizer reported an acceptable stop; effective covariance is reduced rank; unsupported directions are weakly identified, not proof of zero population variance; stationarity is not certified: one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged; Hessian weak-identification check is unavailable: one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged; bounded verification is fragile; compare objectives and theta before routine inference"
+          "detail": "optimizer reported an acceptable stop; effective covariance is reduced rank; unsupported directions are weakly identified, not proof of zero population variance; stationarity is not certified: one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged; Hessian weak-identification check is unavailable: boundary fit, not by itself an optimizer failure; bounded verification is fragile; compare objectives and theta before routine inference"
         },
         {
           "label": "optimizer",
@@ -229,17 +229,17 @@
         {
           "label": "gradient evidence",
           "status": "not_assessed",
-          "detail": "method=not_assessed (one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged); raw=unknown; scaled=unknown; free=unknown; projected=unknown; kkt_boundary=unknown"
+          "detail": "method=not_assessed (boundary fit, not by itself an optimizer failure); raw=unknown; scaled=unknown; free=unknown; projected=unknown; boundary_gradient=unknown"
         },
         {
           "label": "hessian evidence",
           "status": "not_assessed",
-          "detail": "method=not_assessed (one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged); quality=not_assessed (one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged); min_eigen=unknown; condition=unknown; rank=unknown"
+          "detail": "method=not_assessed (boundary fit, not by itself an optimizer failure); quality=not_assessed (boundary fit, not by itself an optimizer failure); min_eigen=unknown; condition=unknown; rank=unknown"
         },
         {
           "label": "certification quality",
           "status": "info",
-          "detail": "approximate (optimizer stop accepted; derivative KKT/Hessian inspection skipped: one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged)"
+          "detail": "approximate (optimizer stop accepted; derivative KKT/Hessian inspection skipped: boundary fit, not by itself an optimizer failure)"
         },
         {
           "label": "convergence next steps",

@@ -343,7 +343,7 @@
             "rows_per_covariance_parameter": 20.0,
             "total_rows_can_mislead": true,
             "explanation": "120 rows are clustered into 40 grouping levels; covariance support is limited by grouping levels, not by total rows",
-            "recommendation": "random-effect coefficients saturate the rows for this term; drop unsupported random slopes, split/simplify the random-effect structure, treat the grouping factor as fixed when appropriate, or collect more observations per grouping level"
+            "recommendation": "random-effect coefficients saturate the rows for this term; options include dropping unsupported random slopes, splitting or simplifying the random-effect structure, treating the grouping factor as fixed, or collecting more observations per grouping level"
           },
           "status": "too_rich",
           "reason": "number of observations (120) is <= random coefficients (120) for grouping factor 'subject' with basis dimension 3; random-effect variances and the residual scale are probably not separately identifiable"

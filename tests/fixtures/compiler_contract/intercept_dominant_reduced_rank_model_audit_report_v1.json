@@ -27,7 +27,7 @@
           "detail": "exact_gaussian"
         },
         {
-          "label": "certificate scope",
+          "label": "convergence certificate",
           "status": "info",
           "detail": "exact_objective"
         },
@@ -42,7 +42,7 @@
           "detail": "1"
         },
         {
-          "label": "theta maps",
+          "label": "covariance parameter maps",
           "status": "info",
           "detail": "1 map(s)"
         }
@@ -229,7 +229,7 @@
         {
           "label": "gradient evidence",
           "status": "ok",
-          "detail": "method=finite_difference; raw=184.57; scaled=0.10; free=184.57; projected=184.57; kkt_boundary=0.00"
+          "detail": "method=finite_difference; raw=184.57; scaled=0.10; free=184.57; projected=184.57; boundary_gradient=0.00"
         },
         {
           "label": "hessian evidence",
@@ -244,7 +244,7 @@
         {
           "label": "convergence next steps",
           "status": "info",
-          "detail": "inspect Effective Covariance and consider diagonal covariance, a simpler random-effect term, or design_compiled policy | run verify_convergence() to compare restart and alternate-optimizer agreement | scale predictors, simplify the random-effects structure, or collect more grouping levels"
+          "detail": "consider scaling predictors, simplifying the random-effects structure, or collecting more grouping levels | inspect Effective Covariance and consider diagonal covariance, a simpler random-effect term, or design_compiled policy | verify convergence to compare restart and alternate-optimizer agreement (verify_convergence, where the host exposes it)"
         },
         {
           "label": "derivative checks",
@@ -254,7 +254,7 @@
         {
           "label": "convergence verification",
           "status": "not_assessed",
-          "detail": "not run; call verify_convergence() to compare bounded restarts and alternate optimizer fits"
+          "detail": "not run; convergence verification compares bounded restarts and alternate optimizer fits (verify_convergence, where the host exposes it)"
         }
       ]
     },

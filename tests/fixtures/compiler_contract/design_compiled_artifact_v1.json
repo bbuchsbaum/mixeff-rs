@@ -384,7 +384,7 @@
             "rows_per_covariance_parameter": 6.0,
             "total_rows_can_mislead": true,
             "explanation": "18 rows are clustered into 6 grouping levels; covariance support is limited by grouping levels, not by total rows",
-            "recommendation": "full covariance asks for 3 parameter(s); use design_compiled with diagonal/reduced-rank covariance, treat the grouping factor as fixed when it is designed or directly compared, or collect at least 15 grouping levels"
+            "recommendation": "full covariance asks for 3 parameter(s); options include using design_compiled with diagonal or reduced-rank covariance, treating the grouping factor as fixed when it is designed or directly compared, or collecting at least 15 grouping levels"
           },
           "status": "too_rich",
           "reason": "6 levels are below the v0 full-covariance threshold 15 for 3 covariance parameters"

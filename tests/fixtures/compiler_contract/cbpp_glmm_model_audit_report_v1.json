@@ -27,7 +27,7 @@
           "detail": "laplace(inner=pirls)"
         },
         {
-          "label": "certificate scope",
+          "label": "convergence certificate",
           "status": "info",
           "detail": "approximated_objective"
         },
@@ -42,7 +42,7 @@
           "detail": "1"
         },
         {
-          "label": "theta maps",
+          "label": "covariance parameter maps",
           "status": "info",
           "detail": "1 map(s)"
         }

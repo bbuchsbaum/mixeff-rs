@@ -2626,25 +2626,25 @@ fn effective_n_recommendation(
 ) -> String {
     match status {
         InformationBudgetStatus::TooRich if row_saturated => {
-            "random-effect coefficients saturate the rows for this term; drop unsupported random slopes, split/simplify the random-effect structure, treat the grouping factor as fixed when appropriate, or collect more observations per grouping level".to_string()
+            "random-effect coefficients saturate the rows for this term; options include dropping unsupported random slopes, splitting or simplifying the random-effect structure, treating the grouping factor as fixed, or collecting more observations per grouping level".to_string()
         }
         InformationBudgetStatus::Sufficient => {
             "information budget is sufficient under v0 thresholds".to_string()
         }
         InformationBudgetStatus::WeaklySupported if covariance_parameters == 1 => format!(
-            "scalar random intercept is fit-eligible but low-reliability; report weak precision/boundary risk and prefer more than {} grouping levels for routine inference",
+            "scalar random intercept is fit-eligible but low-reliability; precision is weak and boundary risk is elevated, and more than {} grouping levels would support routine inference",
             min_levels_random_intercept_reliability()
         ),
         InformationBudgetStatus::WeaklySupported => format!(
-            "use design_compiled to simplify or withhold confirmatory inference; treat the grouping factor as fixed when it is designed or directly compared; collect at least {min_levels_variance} grouping levels for these variance directions"
+            "options include using design_compiled to simplify or withhold confirmatory inference, treating the grouping factor as fixed when it is designed or directly compared, or collecting at least {min_levels_variance} grouping levels for these variance directions"
         ),
         InformationBudgetStatus::TooRich => {
             if let Some(min_full) = min_levels_full_covariance {
                 format!(
-                    "full covariance asks for {covariance_parameters} parameter(s); use design_compiled with diagonal/reduced-rank covariance, treat the grouping factor as fixed when it is designed or directly compared, or collect at least {min_full} grouping levels"
+                    "full covariance asks for {covariance_parameters} parameter(s); options include using design_compiled with diagonal or reduced-rank covariance, treating the grouping factor as fixed when it is designed or directly compared, or collecting at least {min_full} grouping levels"
                 )
             } else {
-                "use design_compiled to simplify unsupported random-effect structure, treat the grouping factor as fixed when it is designed or directly compared, or collect more grouping levels".to_string()
+                "options include using design_compiled to simplify unsupported random-effect structure, treating the grouping factor as fixed when it is designed or directly compared, or collecting more grouping levels".to_string()
             }
         }
         InformationBudgetStatus::NotAssessable => {
@@ -4151,7 +4151,7 @@ impl OptimizerCertificate {
                 )
                 .with_suggested_actions(vec![
                     "fit the model before reading convergence evidence".to_string(),
-                    "run verify_convergence() after fitting if optimizer agreement matters"
+                    "verify convergence after fitting if optimizer agreement matters (verify_convergence, where the host exposes it)"
                         .to_string(),
                 ])],
             };

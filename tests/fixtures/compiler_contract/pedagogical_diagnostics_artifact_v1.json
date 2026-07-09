@@ -888,7 +888,7 @@
             "rows_per_covariance_parameter": 8.0,
             "total_rows_can_mislead": true,
             "explanation": "8 rows are clustered into 2 grouping levels; covariance support is limited by grouping levels, not by total rows",
-            "recommendation": "scalar random intercept is fit-eligible but low-reliability; report weak precision/boundary risk and prefer more than 5 grouping levels for routine inference"
+            "recommendation": "scalar random intercept is fit-eligible but low-reliability; precision is weak and boundary risk is elevated, and more than 5 grouping levels would support routine inference"
           },
           "status": "weakly_supported",
           "reason": "2 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5"
@@ -996,7 +996,7 @@
             "rows_per_covariance_parameter": 2.6666666666666665,
             "total_rows_can_mislead": true,
             "explanation": "8 rows are clustered into 2 grouping levels; covariance support is limited by grouping levels, not by total rows",
-            "recommendation": "full covariance asks for 3 parameter(s); use design_compiled with diagonal/reduced-rank covariance, treat the grouping factor as fixed when it is designed or directly compared, or collect at least 15 grouping levels"
+            "recommendation": "full covariance asks for 3 parameter(s); options include using design_compiled with diagonal or reduced-rank covariance, treating the grouping factor as fixed when it is designed or directly compared, or collecting at least 15 grouping levels"
           },
           "status": "too_rich",
           "reason": "2 levels are below the v0 full-covariance threshold 15 for 3 covariance parameters"
@@ -1076,7 +1076,7 @@
             "rows_per_covariance_parameter": 2.6666666666666665,
             "total_rows_can_mislead": true,
             "explanation": "8 rows are clustered into 4 grouping levels; covariance support is limited by grouping levels, not by total rows",
-            "recommendation": "random-effect coefficients saturate the rows for this term; drop unsupported random slopes, split/simplify the random-effect structure, treat the grouping factor as fixed when appropriate, or collect more observations per grouping level"
+            "recommendation": "random-effect coefficients saturate the rows for this term; options include dropping unsupported random slopes, splitting or simplifying the random-effect structure, treating the grouping factor as fixed, or collecting more observations per grouping level"
           },
           "status": "too_rich",
           "reason": "number of observations (8) is <= random coefficients (8) for grouping factor 'school:class' with basis dimension 2; random-effect variances and the residual scale are probably not separately identifiable"
@@ -1183,7 +1183,7 @@
             "rows_per_covariance_parameter": 8.0,
             "total_rows_can_mislead": true,
             "explanation": "8 rows are clustered into 2 grouping levels; covariance support is limited by grouping levels, not by total rows",
-            "recommendation": "scalar random intercept is fit-eligible but low-reliability; report weak precision/boundary risk and prefer more than 5 grouping levels for routine inference"
+            "recommendation": "scalar random intercept is fit-eligible but low-reliability; precision is weak and boundary risk is elevated, and more than 5 grouping levels would support routine inference"
           },
           "status": "weakly_supported",
           "reason": "2 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5"
@@ -1274,7 +1274,7 @@
             "rows_per_covariance_parameter": 8.0,
             "total_rows_can_mislead": true,
             "explanation": "8 rows are clustered into 2 grouping levels; covariance support is limited by grouping levels, not by total rows",
-            "recommendation": "scalar random intercept is fit-eligible but low-reliability; report weak precision/boundary risk and prefer more than 5 grouping levels for routine inference"
+            "recommendation": "scalar random intercept is fit-eligible but low-reliability; precision is weak and boundary risk is elevated, and more than 5 grouping levels would support routine inference"
           },
           "status": "weakly_supported",
           "reason": "2 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5"
@@ -1365,7 +1365,7 @@
             "rows_per_covariance_parameter": 8.0,
             "total_rows_can_mislead": true,
             "explanation": "8 rows are clustered into 4 grouping levels; covariance support is limited by grouping levels, not by total rows",
-            "recommendation": "scalar random intercept is fit-eligible but low-reliability; report weak precision/boundary risk and prefer more than 5 grouping levels for routine inference"
+            "recommendation": "scalar random intercept is fit-eligible but low-reliability; precision is weak and boundary risk is elevated, and more than 5 grouping levels would support routine inference"
           },
           "status": "weakly_supported",
           "reason": "4 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5"
@@ -1456,7 +1456,7 @@
             "rows_per_covariance_parameter": 8.0,
             "total_rows_can_mislead": true,
             "explanation": "8 rows are clustered into 4 grouping levels; covariance support is limited by grouping levels, not by total rows",
-            "recommendation": "scalar random intercept is fit-eligible but low-reliability; report weak precision/boundary risk and prefer more than 5 grouping levels for routine inference"
+            "recommendation": "scalar random intercept is fit-eligible but low-reliability; precision is weak and boundary risk is elevated, and more than 5 grouping levels would support routine inference"
           },
           "status": "weakly_supported",
           "reason": "4 levels are fit-eligible for a scalar random intercept but below the v0 reliability threshold 5"

@@ -48,7 +48,7 @@ fn test_lmm_audit_report_updates_after_fit() {
     assert!(fitted_report.contains("ConvergedInterior"));
     assert!(fitted_report.contains("pattern_search"));
     assert!(fitted_report.contains("convergence interpretation"));
-    assert!(fitted_report.contains("run verify_convergence()"));
+    assert!(fitted_report.contains("verify_convergence"));
 }
 
 #[test]
