@@ -50,8 +50,10 @@ See `VERSIONING.md` for what bump a change requires.
 - [ ] Add/refresh compare links at bottom of CHANGELOG.md.
 - [ ] Wire-contract / numeric-parity callouts added if any schema_version or
       fitted value moved (see VERSIONING.md §2.B / §2.D).
-- [ ] (FINAL 1.0.0 only) README.md install snippet -> `mixeff-rs = "1.0"`.
-      (RC: leave README at the prior stable string.)
+- [ ] README.md install/status matches the publication phase:
+      RC -> exact pre-release pin `mixeff-rs = "=<VER>"` plus a Git fallback
+      if crates.io publication has not happened yet; final 1.0.0 ->
+      `mixeff-rs = "1.0"`.
 
 ## 4. Package verification
 - [ ] `cargo publish --dry-run`

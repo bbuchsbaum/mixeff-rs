@@ -31,13 +31,23 @@ package.
 
 For a concrete, current-as-of-the-tip inventory — supported family/link
 matrix, formula DSL, inference paths, and out-of-scope items — see
-[`guide::what_is_supported`](https://docs.rs/mixeff-rs/latest/mixeff_rs/guide/what_is_supported/).
+[`guide::what_is_supported`](docs/guide/05_what_is_supported.md).
 
 ## Installation
 
+The crate is staged for first crates.io publication as `1.0.0-rc.1`. Until
+that release appears on crates.io, use the Git dependency:
+
 ```toml
 [dependencies]
-mixeff-rs = "0.1"
+mixeff-rs = { git = "https://github.com/bbuchsbaum/mixeff-rs", branch = "main" }
+```
+
+After `1.0.0-rc.1` is published, pin the release candidate exactly:
+
+```toml
+[dependencies]
+mixeff-rs = "=1.0.0-rc.1"
 ```
 
 The default build enables the NLopt optimizer backend for fast BOBYQA/NEWUOA
@@ -53,18 +63,20 @@ part of the default feature set.
 
 ## API documentation
 
-The docs.rs surface is intentionally centered on the stable fitting API:
+The rustdoc surface is intentionally centered on the stable fitting API:
 `prelude`, `formula`, `model`, `stats`, `error`, and the small support surface
 under `types`. Advanced implementation modules such as compiler artifacts,
 pathology internals, bundled datasets, response-matrix batch helpers, and
 fixed-design backends are either behind `unstable-internals` or hidden from
 the primary `model::*` barrel until their contracts are ready for SemVer
 protection. The current public-surface inventory is summarized by this README,
-the Cargo feature list below, and the rustdoc module visibility.
+the Cargo feature list below, and the rustdoc module visibility. The guide
+source is tracked under [`docs/guide`](docs/guide/) so it is visible on GitHub;
+the same pages render under the `guide` module on docs.rs after crates.io
+publication.
 
-New to the crate? The [`guide`](https://docs.rs/mixeff-rs/latest/mixeff_rs/guide/)
-module is a short, doctested tutorial: getting started, reading results,
-GLMMs, and the refusal contract.
+New to the crate? The [`guide`](docs/guide/) module is a short, doctested
+tutorial: getting started, reading results, GLMMs, and the refusal contract.
 
 ## Quick start
 
@@ -143,15 +155,15 @@ inheriting whatever this crate's default becomes in a later release:
 
 ## Status
 
-Early release (`0.x`). The numerical core — PLS/PIRLS, the blocked Cholesky
-update, and the profiled (RE)ML objective — is stable and parity-tested
-against MixedModels.jl; the public API framing is still settling. Per Cargo's
-`0.x` semantics **any release may contain breaking changes**, so pin an exact
-version if you need stability. The stable vs. explicitly-unstable surface and
-the practical breaking-change boundary are described in this README and in
-the docs.rs API surface;
-[`CHANGELOG.md`](CHANGELOG.md) records release notes, and the API reference is
-on [docs.rs](https://docs.rs/mixeff-rs).
+Release candidate (`1.0.0-rc.1`). The numerical core — PLS/PIRLS, the blocked
+Cholesky update, and the profiled (RE)ML objective — is stable and
+parity-tested against MixedModels.jl; the public API and wire-contract surface
+are in final soak before `1.0.0`. Pin the exact pre-release version when
+testing an RC. The stable vs. explicitly-unstable surface and the practical
+breaking-change boundary are described in this README and in the rustdoc API
+surface; [`CHANGELOG.md`](CHANGELOG.md) records release notes. After crates.io
+publication, the API reference is available on
+[docs.rs](https://docs.rs/mixeff-rs).
 
 **Scope.** Single-response models only. Multivariate response
 (`cbind(y1, y2) ~ …`), GLMM profile likelihood, InverseGaussian /
@@ -164,8 +176,7 @@ engines. Boundary and reduced-rank LMMs are interpreted through optimizer
 certificates and covariance KKT checks; GLMM rows marked as documented
 divergence remain non-parity claims until their scorecard row and tests are
 promoted together. The
-[`guide`](https://docs.rs/mixeff-rs/latest/mixeff_rs/guide/) explains how to
-read results and typed refusals.
+[`guide`](docs/guide/) explains how to read results and typed refusals.
 
 **GLMM estimation semantics.** The default GLMM path is `fast=true`: profiled
 fast-PIRLS estimation with Laplace/AGQ approximation metadata carried in the

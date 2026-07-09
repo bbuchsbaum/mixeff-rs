@@ -295,19 +295,20 @@ band is by definition a MAJOR release.
 
 ---
 
-## 5. Pre-1.0 vs post-1.0
+## 5. Release candidates vs post-1.0
 
-### Pre-1.0 (current — `0.x`)
+### Release candidates before final 1.0
 
-No `1.0.0` has been tagged. Per Cargo's `0.x` semantics, **any release,
-including a MINOR bump, may contain breaking changes** on any of the five
-surfaces. Consumers needing stability before 1.0 must pin an exact version
-(`=0.x.y`). The release sequence to 1.0 is in
-[`docs/v1_0_release_roadmap.md`](docs/v1_0_release_roadmap.md).
+Before final `1.0.0`, release candidates use the `1.0.0-rc.N` pre-release
+line. Cargo will not select a pre-release for a plain `"1.0"` requirement, so
+consumers testing an RC must pin the exact version (`=1.0.0-rc.N`). The RC
+surface is intended to soak as the future 1.0 contract; any breaking feedback
+before final requires a new RC and resets the soak clock. The release sequence
+to 1.0 is in [`docs/v1_0_release_roadmap.md`](docs/v1_0_release_roadmap.md).
 
-During `0.x`, schema versions may still advance independently; downstream
-wrappers should already key off `schema_name`+`schema_version`, not the crate
-version, so this habit is in place before 1.0.
+During the RC line, schema versions may still advance independently;
+downstream wrappers should already key off `schema_name`+`schema_version`, not
+the crate version, so this habit is in place before 1.0.
 
 ### What `1.0.0` promises downstream R/Python consumers
 
