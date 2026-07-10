@@ -894,9 +894,37 @@ pub fn parametricbootstrap<R: rand::Rng>(
     n_rep: usize,
     model: &LinearMixedModel,
 ) -> MixedModelBootstrap {
-    let mut fits = Vec::with_capacity(n_rep);
+    // Preserve the original infallible API. Hosts that install an interrupt
+    // callback should call `try_parametricbootstrap`, whose `Result` can carry
+    // callback errors across the FFI boundary.
+    let mut template = model.clone();
+    template.progress_callback = None;
+    run_parametricbootstrap(rng, n_rep, &template, false)
+        .expect("an LMM bootstrap without a host callback is infallible")
+}
 
-    for _ in 0..n_rep {
+/// Run a parametric bootstrap with host progress and interrupt propagation.
+///
+/// Unlike [`parametricbootstrap`], callback errors are returned immediately
+/// instead of being classified as numerical replicate failures.
+pub fn try_parametricbootstrap<R: rand::Rng>(
+    rng: &mut R,
+    n_rep: usize,
+    model: &LinearMixedModel,
+) -> Result<MixedModelBootstrap> {
+    run_parametricbootstrap(rng, n_rep, model, true)
+}
+
+fn run_parametricbootstrap<R: rand::Rng>(
+    rng: &mut R,
+    n_rep: usize,
+    model: &LinearMixedModel,
+    report_progress: bool,
+) -> Result<MixedModelBootstrap> {
+    let mut fits = Vec::with_capacity(n_rep);
+    let mut last_progress = 0usize;
+
+    for replicate in 0..n_rep {
         // Simulate from the template (always use the original fitted model).
         let y_sim = model.simulate(rng);
 
@@ -918,6 +946,7 @@ pub fn parametricbootstrap<R: rand::Rng>(
                     theta: work.theta(),
                 });
             }
+            Err(error @ MixedModelError::Interrupted(_)) => return Err(error),
             Err(_) => {
                 // On numerical failure, record the current (possibly partial) state.
                 // Julia silently records the last accepted iterate in such cases.
@@ -931,7 +960,17 @@ pub fn parametricbootstrap<R: rand::Rng>(
                 });
             }
         }
+        if report_progress {
+            if let Some(callback) = &model.progress_callback {
+                callback.report_if_due(
+                    FitProgressPhase::Bootstrap,
+                    replicate + 1,
+                    Some(n_rep),
+                    &mut last_progress,
+                )?;
+            }
+        }
     }
 
-    MixedModelBootstrap { fits }
+    Ok(MixedModelBootstrap { fits })
 }

@@ -5,6 +5,8 @@ use crate::model::linear::FitToleranceOverrides;
 use approx::assert_relative_eq;
 use rand::SeedableRng;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 fn agq_poisson_fixture() -> GeneralizedLinearMixedModel {
     let mut y = Vec::new();
@@ -3586,4 +3588,73 @@ fn test_glmm_new_with_compiler_policy_applies_internal_policy() {
         .thresholds
         .iter()
         .any(|(name, value)| name == "effective_rank_relative_tolerance" && value == "0.125"));
+}
+
+fn progress_callback_poisson_fixture() -> GeneralizedLinearMixedModel {
+    let mut data = DataFrame::new();
+    data.add_numeric("y", vec![1.0, 2.0, 1.0, 3.0, 2.0, 4.0])
+        .unwrap();
+    data.add_numeric("x", vec![-1.0, 0.0, 1.0, -1.0, 0.0, 1.0])
+        .unwrap();
+    data.add_categorical(
+        "group",
+        vec!["a", "a", "a", "b", "b", "b"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    )
+    .unwrap();
+    GeneralizedLinearMixedModel::new(
+        parse_formula("y ~ 1 + x + (1 | group)").unwrap(),
+        &data,
+        Family::Poisson,
+        Some(LinkFunction::Log),
+    )
+    .unwrap()
+}
+
+#[test]
+fn fast_glmm_fit_propagates_pirls_host_interrupt_callback_error() {
+    let mut model = progress_callback_poisson_fixture();
+    let callback = FitProgressCallback::new(|progress| {
+        if progress.phase == FitProgressPhase::Pirls {
+            return Err(MixedModelError::Interrupted("test interrupt".to_string()));
+        }
+        Ok(())
+    });
+
+    let error = model
+        .fit_with_glmm_options(
+            GlmmFitOptions::fast_laplace()
+                .with_optimizer(Optimizer::PatternSearch)
+                .with_progress_callback(callback),
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "interrupted");
+}
+
+#[test]
+fn joint_trust_bq_propagates_host_interrupt_callback_error() {
+    let mut model = progress_callback_poisson_fixture();
+    let events = Arc::new(AtomicUsize::new(0));
+    let callback_events = Arc::clone(&events);
+    let callback = FitProgressCallback::new(move |progress| {
+        if progress.phase == FitProgressPhase::JointGlmmOptimizer {
+            callback_events.fetch_add(1, Ordering::SeqCst);
+            return Err(MixedModelError::Interrupted("test interrupt".to_string()));
+        }
+        Ok(())
+    });
+
+    let error = model
+        .fit_with_glmm_options(
+            GlmmFitOptions::joint_laplace()
+                .with_optimizer(Optimizer::TrustBq)
+                .with_progress_callback(callback),
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "interrupted");
+    assert_eq!(events.load(Ordering::SeqCst), 1);
 }

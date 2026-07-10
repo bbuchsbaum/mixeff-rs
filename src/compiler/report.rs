@@ -65,7 +65,7 @@ impl ModelAuditReport {
             fixed_effect_section(artifact),
             random_effect_section(artifact),
             random_effect_information_budget_section(artifact),
-            random_term_cards_section(&random_term_cards),
+            random_term_cards_section(&random_term_cards, artifact),
             cross_card_constraints_section(&cross_card_constraints),
             dependence_path_section(artifact),
             parameterization_trace_section(artifact),
@@ -540,7 +540,7 @@ fn random_effect_section(artifact: &CompiledModelArtifact) -> AuditReportSection
         .map(|term| {
             let budget = &term.information_budget;
             AuditReportLine {
-                label: term.term_id.clone(),
+                label: random_term_display_label(artifact, &term.term_id),
                 status: information_budget_status(budget.status),
                 detail: random_effect_budget_detail(term),
             }
@@ -593,7 +593,7 @@ fn random_effect_information_budget_section(
         .map(|term| {
             let budget = &term.information_budget;
             AuditReportLine {
-                label: term.term_id.clone(),
+                label: random_term_display_label(artifact, &term.term_id),
                 status: information_budget_status(budget.status),
                 detail: random_effect_information_budget_detail(term),
             }
@@ -643,7 +643,10 @@ fn random_effect_information_budget_detail(term: &super::audit::RandomTermAudit)
     )
 }
 
-fn random_term_cards_section(cards: &[RandomTermCard]) -> AuditReportSection {
+fn random_term_cards_section(
+    cards: &[RandomTermCard],
+    artifact: &CompiledModelArtifact,
+) -> AuditReportSection {
     let lines = if cards.is_empty() {
         vec![AuditReportLine {
             label: "cards".to_string(),
@@ -654,7 +657,7 @@ fn random_term_cards_section(cards: &[RandomTermCard]) -> AuditReportSection {
         cards
             .iter()
             .map(|card| AuditReportLine {
-                label: card.term_id.clone(),
+                label: random_term_display_label(artifact, &card.term_id),
                 status: information_budget_status(card.design_support.status),
                 detail: random_term_card_detail(card),
             })
@@ -702,22 +705,113 @@ fn random_term_card_detail(card: &RandomTermCard) -> String {
         .blocks
         .iter()
         .map(|block| {
+            let parameter_word = if block.theta_parameters == 1 {
+                "parameter"
+            } else {
+                "parameters"
+            };
             format!(
-                "basis=[{}], covariance={}, params={}",
+                "{} It uses {} covariance {} for {}.",
+                block.english,
+                block.theta_parameters,
+                parameter_word,
                 block.basis.join(", "),
-                covariance_form_label(&block.covariance),
-                block.theta_parameters
             )
         })
         .collect::<Vec<_>>()
-        .join("; ");
-    format!(
-        "original={}, canonical={}, group={}, blocks={}",
-        card.original_fragment,
-        card.canonical_fragment,
-        card.group.label(),
-        blocks
-    )
+        .join(" ");
+    let group = card.group.label();
+    let design = match (
+        card.design_support.group_levels,
+        card.design_support.min_rows_per_group,
+        card.design_support.median_rows_per_group,
+    ) {
+        (Some(levels), Some(minimum), Some(median)) => format!(
+            "The data contain {levels} `{group}` levels, with at least {minimum} rows per level (median {median})."
+        ),
+        (Some(levels), _, _) => format!("The data contain {levels} `{group}` levels."),
+        _ => format!("The number of `{group}` levels was not assessed."),
+    };
+    let variation = variation_detail(&card.design_support.within_group_variation);
+    let support = match card.design_support.status {
+        InformationBudgetStatus::Sufficient => {
+            "The grouping-level information is sufficient under the current audit thresholds."
+        }
+        InformationBudgetStatus::WeaklySupported => {
+            "The grouping-level information is weak for some requested variance directions."
+        }
+        InformationBudgetStatus::TooRich => {
+            "The requested covariance is too rich for the available grouping-level information."
+        }
+        InformationBudgetStatus::NotAssessable => "Grouping-level support could not be assessed.",
+    };
+    let formula = if card.original_fragment == card.canonical_fragment {
+        format!("Formula detail: `{}`.", card.canonical_fragment)
+    } else {
+        format!(
+            "Formula detail: written as `{}`; expanded to `{}`.",
+            card.original_fragment, card.canonical_fragment
+        )
+    };
+    [blocks, design, variation, support.to_string(), formula]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn variation_detail(variation: &BTreeMap<String, WithinGroupVariation>) -> String {
+    let names = |status| {
+        variation
+            .iter()
+            .filter(|(_, value)| **value == status)
+            .map(|(name, _)| format!("`{name}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut sentences = Vec::new();
+    let present = names(WithinGroupVariation::Present);
+    if !present.is_empty() {
+        sentences.push(format!("Within-group support is present for {present}."));
+    }
+    let absent = names(WithinGroupVariation::Absent);
+    if !absent.is_empty() {
+        sentences.push(format!("Within-group support is absent for {absent}."));
+    }
+    let constant = names(WithinGroupVariation::Constant);
+    if !constant.is_empty() {
+        sentences.push(format!("Within-group values are constant for {constant}."));
+    }
+    let not_assessed = names(WithinGroupVariation::NotAssessed);
+    if !not_assessed.is_empty() {
+        sentences.push(format!(
+            "Within-group support was not assessed for {not_assessed}."
+        ));
+    }
+    sentences.join(" ")
+}
+
+fn random_term_display_label(artifact: &CompiledModelArtifact, term_id: &str) -> String {
+    let Some(term) = artifact
+        .semantic_model
+        .random_terms
+        .iter()
+        .find(|term| term.id == term_id)
+    else {
+        return term_id.to_string();
+    };
+    let group = term.group.label();
+    let occurrences = artifact
+        .semantic_model
+        .random_terms
+        .iter()
+        .filter(|candidate| candidate.group.label() == group)
+        .count();
+    if occurrences == 1 {
+        group
+    } else {
+        term_id.to_string()
+    }
 }
 
 fn random_term_cards(artifact: &CompiledModelArtifact) -> Vec<RandomTermCard> {
@@ -960,20 +1054,6 @@ fn covariance_parameter_count(covariance: &CovarianceForm, basis_size: usize) ->
     }
 }
 
-fn covariance_form_label(covariance: &CovarianceForm) -> String {
-    match covariance {
-        CovarianceForm::Scalar => "scalar".to_string(),
-        CovarianceForm::Diagonal => "diagonal".to_string(),
-        CovarianceForm::Full => "full".to_string(),
-        CovarianceForm::Structured { kind } => format!("structured:{kind}"),
-        CovarianceForm::ReducedRank { rank } => match rank {
-            Some(rank) => format!("reduced_rank:{rank}"),
-            None => "reduced_rank".to_string(),
-        },
-        CovarianceForm::Unsupported { reason } => format!("unsupported:{reason}"),
-    }
-}
-
 fn cross_card_constraints(artifact: &CompiledModelArtifact) -> Vec<CrossCardConstraint> {
     let terms = &artifact.semantic_model.random_terms;
     let mut constraints = Vec::new();
@@ -1107,14 +1187,22 @@ fn covariance_kernel_detail(graph: &super::audit::CovarianceKernelGraphAudit) ->
         .kernels
         .iter()
         .map(|kernel| {
+            let coefficients = if kernel.basis.is_empty() {
+                "the requested random coefficients".to_string()
+            } else {
+                kernel
+                    .basis
+                    .iter()
+                    .map(|basis| format!("`{basis}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
             format!(
-                "{}={}({}, intercept={}, covariance={}, basis={})",
-                kernel.term_id,
-                dependence_path_kind_label(kernel.path),
+                "Observations sharing `{}` are linked through {}, with {} covariance ({} path).",
                 kernel.group,
-                kernel.has_intercept,
+                coefficients,
                 kernel.covariance_family,
-                kernel.basis.join(", ")
+                dependence_path_kind_label(kernel.path),
             )
         })
         .collect::<Vec<_>>()
@@ -1130,19 +1218,24 @@ fn repeated_units_detail(graph: &super::audit::CovarianceKernelGraphAudit) -> St
         .repeated_units
         .iter()
         .map(|unit| {
+            let coverage = if unit.covered_by_terms.is_empty() {
+                "no requested random-effect term".to_string()
+            } else if unit.covered_by_terms.len() == 1 {
+                "one requested random-effect term".to_string()
+            } else {
+                format!(
+                    "{} requested random-effect terms",
+                    unit.covered_by_terms.len()
+                )
+            };
             format!(
-                "{}={}({}, levels={}, obs_per_level={}..{}, covered_by={})",
+                "`{}` has {} levels and {}..{} rows per level; its {} path is covered by {}.",
                 unit.unit,
-                dependence_path_kind_label(unit.path),
-                unit.parts.join(":"),
                 unit.n_levels,
                 unit.min_obs_per_level,
                 unit.max_obs_per_level,
-                if unit.covered_by_terms.is_empty() {
-                    "none".to_string()
-                } else {
-                    unit.covered_by_terms.join(", ")
-                }
+                dependence_path_kind_label(unit.path),
+                coverage,
             )
         })
         .collect::<Vec<_>>()
@@ -1197,7 +1290,7 @@ fn effective_covariance_section(artifact: &CompiledModelArtifact) -> AuditReport
             .effective_covariance
             .iter()
             .map(|summary| AuditReportLine {
-                label: summary.term_id.clone(),
+                label: random_term_display_label(artifact, &summary.term_id),
                 status: effective_rank_status(summary.status),
                 detail: effective_covariance_detail(summary),
             })
@@ -1256,7 +1349,7 @@ fn parameterization_trace_section(artifact: &CompiledModelArtifact) -> AuditRepo
             let first = traces[0];
 
             AuditReportLine {
-                label: term_id,
+                label: random_term_display_label(artifact, &term_id),
                 status: if parmap_count == traces.len() && parmap_aligned {
                     AuditReportStatus::Ok
                 } else if parmap_count == 0 {
@@ -1323,7 +1416,7 @@ fn policy_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
             .policy_recommendations
             .iter()
             .map(|recommendation| AuditReportLine {
-                label: recommendation.term_id.clone(),
+                label: random_term_display_label(artifact, &recommendation.term_id),
                 status: recommendation_status(&recommendation.diagnostics),
                 detail: format!(
                     "{}: {}{}; inference={}",
@@ -3759,6 +3852,10 @@ mod tests {
         assert!(text.contains("Policy Recommendations"));
         assert!(text.contains("Optimizer"));
         assert!(text.contains("model has not been fitted"));
+        assert!(text.contains("subject [WARNING]"));
+        assert!(text.contains("Observations sharing `subject` are linked through"));
+        assert!(text.contains("Formula detail: `(1 + x | subject)`."));
+        assert!(!text.contains("r0=marginal"));
     }
 
     #[test]
@@ -4272,7 +4369,7 @@ mod tests {
     }
 
     #[test]
-    fn test_acceptable_stop_with_derivative_mismatch_stays_converged() {
+    fn test_acceptable_stop_with_derivative_mismatch_is_not_optimized() {
         let mut cert = certificate_ready_for_derivatives();
         cert.apply_derivative_evidence(
             OptimizerDerivativeEvidence {
@@ -4303,14 +4400,19 @@ mod tests {
         ));
 
         let v = ConvergenceVerdict::compose(&cert, &[]);
-        assert_eq!(v.level, ConvergenceLevel::Ok);
-        assert_eq!(v.source, ConvergenceSource::Clean);
-        assert!(v.evidence.iter().any(|evidence| evidence.status
-            == ConvergenceTestStatus::Informational
-            && evidence.test_name.contains("mismatch")));
+        assert_eq!(v.level, ConvergenceLevel::Failed);
+        assert_eq!(v.source, ConvergenceSource::Optimizer);
+        assert!(cert
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == DiagnosticCode::OptimizerNonconvergence));
 
         let line = convergence_next_steps_line(&cert, &[]);
-        assert!(line.detail.contains("scaling predictors"));
+        assert!(
+            line.detail.contains("stationarity") || line.detail.contains("verify convergence"),
+            "derivative failure should produce an optimizer-quality next step: {}",
+            line.detail
+        );
     }
 
     #[test]

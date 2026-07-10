@@ -24,8 +24,35 @@ use mixeff_rs::types::*;
 use nalgebra::DVector;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 // ── Parametric bootstrap parity tests (bootstrap.jl) ─────────────────────
+
+#[test]
+fn try_parametricbootstrap_propagates_host_interrupt() {
+    let data = dyestuff_fixture();
+    let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+    let bootstrap_events = Arc::new(AtomicUsize::new(0));
+    let callback_events = Arc::clone(&bootstrap_events);
+    let callback = FitProgressCallback::new(move |progress| {
+        if progress.phase == FitProgressPhase::Bootstrap {
+            callback_events.fetch_add(1, Ordering::SeqCst);
+            return Err(MixedModelError::Interrupted("test interrupt".to_string()));
+        }
+        Ok(())
+    });
+    let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+    model
+        .fit_with_options(FitOptions::ml().with_progress_callback(callback))
+        .unwrap();
+
+    let mut rng = StdRng::seed_from_u64(1234321);
+    let error = try_parametricbootstrap(&mut rng, 5, &model).unwrap_err();
+
+    assert_eq!(error.code(), "interrupted");
+    assert_eq!(bootstrap_events.load(Ordering::SeqCst), 1);
+}
 
 #[test]
 fn test_parametricbootstrap_length() {

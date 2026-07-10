@@ -102,7 +102,7 @@
       "title": "Random Effects",
       "lines": [
         {
-          "label": "r0",
+          "label": "group",
           "status": "warning",
           "detail": "group=group, rows=150, levels=10, obs_per_level=15..15, basis=8, covariance=full, params=36, budget=too_rich; reason=10 levels are below the v0 full-covariance threshold 180 for 36 covariance parameters"
         }
@@ -112,7 +112,7 @@
       "title": "Random-Effect Information Budget",
       "lines": [
         {
-          "label": "r0",
+          "label": "group",
           "status": "warning",
           "detail": "levels=10, rows=150, obs_per_level=15..15, basis=8, cov_params=36, levels/basis=1.25, levels/param=0.28, rows/param=4.17; total rows can be misleading for covariance support; risk=maximal covariance structure is too rich for the grouping-level budget; recommendation=full covariance asks for 36 parameter(s); options include using design_compiled with diagonal or reduced-rank covariance, treating the grouping factor as fixed when it is designed or directly compared, or collecting at least 180 grouping levels; explanation=150 rows are clustered into 10 grouping levels; covariance support is limited by grouping levels, not by total rows"
         }
@@ -122,9 +122,9 @@
       "title": "Random Term Cards",
       "lines": [
         {
-          "label": "r0",
+          "label": "group",
           "status": "warning",
-          "detail": "original=(A * B * C | group), canonical=(1 + A + B + C + A:B + A:C + B:C + A:B:C | group), group=group, blocks=basis=[intercept, A, B, C, A:B, A:C, B:C, A:B:C], covariance=full, params=36"
+          "detail": "`group` units may differ in average outcome and slopes for `A`, `B`, `C`, `A:B`, `A:C`, `B:C`, `A:B:C`. It uses 36 covariance parameters for intercept, A, B, C, A:B, A:C, B:C, A:B:C. The data contain 10 `group` levels, with at least 15 rows per level (median 15). Within-group support is present for `A`, `A:B`, `A:B:C`, `A:C`, `B`, `B:C`, `C`. Within-group support was not assessed for `intercept`. The requested covariance is too rich for the available grouping-level information. Formula detail: written as `(A * B * C | group)`; expanded to `(1 + A + B + C + A:B + A:C + B:C + A:B:C | group)`."
         }
       ]
     },
@@ -144,12 +144,12 @@
         {
           "label": "kernels",
           "status": "info",
-          "detail": "r0=marginal(group, intercept=true, covariance=full, basis=intercept, A, B, C, A:B, A:C, B:C, A:B:C)"
+          "detail": "Observations sharing `group` are linked through `intercept`, `A`, `B`, `C`, `A:B`, `A:C`, `B:C`, `A:B:C`, with full covariance (marginal path)."
         },
         {
           "label": "repeated units",
           "status": "ok",
-          "detail": "group=marginal(group, levels=10, obs_per_level=15..15, covered_by=r0)"
+          "detail": "`group` has 10 levels and 15..15 rows per level; its marginal path is covered by one requested random-effect term."
         },
         {
           "label": "missing paths",
@@ -162,7 +162,7 @@
       "title": "Parameterization Trace",
       "lines": [
         {
-          "label": "r0",
+          "label": "group",
           "status": "ok",
           "detail": "source=(1 + A + B + C + A:B + A:C + B:C + A:B:C | group); group=group; family=FullCholesky; user_basis=intercept, A, B, C, A:B, A:C, B:C, A:B:C; optimizer_basis=intercept, A, B, C, A:B, A:C, B:C, A:B:C; theta_slots=theta[0], theta[1], theta[2], theta[3], theta[4], theta[5], theta[6], theta[7], theta[8], theta[9], theta[10], theta[11], theta[12], theta[13], theta[14], theta[15], theta[16], theta[17], theta[18], theta[19], theta[20], theta[21], theta[22], theta[23], theta[24], theta[25], theta[26], theta[27], theta[28], theta[29], theta[30], theta[31], theta[32], theta[33], theta[34], theta[35]; lambda_slots=(0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (5, 0), (6, 0), (7, 0), (1, 1), (2, 1), (3, 1), (4, 1), (5, 1), (6, 1), (7, 1), (2, 2), (3, 2), (4, 2), (5, 2), (6, 2), (7, 2), (3, 3), (4, 3), (5, 3), (6, 3), (7, 3), (4, 4), (5, 4), (6, 4), (7, 4), (5, 5), (6, 5), (7, 5), (6, 6), (7, 6), (7, 7); parmap_aligned=36/36; varcorr_entries=sd(intercept), sd(A), corr(A,intercept), sd(B), corr(B,intercept), corr(B,A), sd(C), corr(C,intercept), corr(C,A), corr(C,B), sd(A:B), corr(A:B,intercept), corr(A:B,A), corr(A:B,B), corr(A:B,C), sd(A:C), corr(A:C,intercept), corr(A:C,A), corr(A:C,B), corr(A:C,C), corr(A:C,A:B), sd(B:C), corr(B:C,intercept), corr(B:C,A), corr(B:C,B), corr(B:C,C), corr(B:C,A:B), corr(B:C,A:C), sd(A:B:C), corr(A:B:C,intercept), corr(A:B:C,A), corr(A:B:C,B), corr(A:B:C,C), corr(A:B:C,A:B), corr(A:B:C,A:C), corr(A:B:C,B:C)"
         }
@@ -182,7 +182,7 @@
       "title": "Policy Recommendations",
       "lines": [
         {
-          "label": "r0",
+          "label": "group",
           "status": "warning",
           "detail": "refuse_random_term_distribution: 10 levels are below the v0 variance-direction threshold 17; inference=confirmatory fixed-effect p-values should be withheld or recomputed after a declared design-level change"
         }

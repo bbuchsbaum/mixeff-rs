@@ -841,13 +841,12 @@
           "objective_delta": 0.016889407189637495,
           "max_abs_theta_delta": 0.6100629984794068,
           "max_abs_beta_delta": 3.175763012563948e-7,
-          "effective_ranks": [
-            1
-          ],
+          "effective_ranks": [],
           "agrees": false,
           "diagnostics": [
             "objective changed beyond tolerance",
-            "theta parameterization changed beyond tolerance"
+            "theta parameterization changed beyond tolerance",
+            "effective covariance ranks changed during verification"
           ]
         },
         {
@@ -858,13 +857,12 @@
           "objective_delta": 0.0009500380419922294,
           "max_abs_theta_delta": 0.005511932373046875,
           "max_abs_beta_delta": 2.8082730274547885e-7,
-          "effective_ranks": [
-            1
-          ],
+          "effective_ranks": [],
           "agrees": false,
           "diagnostics": [
             "objective changed beyond tolerance",
-            "theta parameterization changed beyond tolerance"
+            "theta parameterization changed beyond tolerance",
+            "effective covariance ranks changed during verification"
           ]
         }
       ],

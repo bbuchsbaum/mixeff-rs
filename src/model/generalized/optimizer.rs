@@ -70,6 +70,7 @@ impl GeneralizedLinearMixedModel {
             n_agq,
             verbose,
             optimizer_control: OptimizerControl::default(),
+            progress_callback: None,
         })
     }
 
@@ -80,6 +81,7 @@ impl GeneralizedLinearMixedModel {
             n_agq,
             verbose,
             optimizer_control,
+            progress_callback,
         } = options;
         if let Err(error) = self.validate_agq(n_agq) {
             self.record_invalid_agq_diagnostic(n_agq, &error.to_string());
@@ -88,6 +90,8 @@ impl GeneralizedLinearMixedModel {
         if self.lmm.optsum.feval > 0 {
             return Err(MixedModelError::AlreadyFitted);
         }
+        self.pending_progress_error = None;
+        self.lmm.progress_callback = progress_callback;
         self.lmm.apply_optimizer_control(&optimizer_control)?;
         if let Some(start_theta) = &optimizer_control.start_theta {
             self.theta = start_theta.clone();
@@ -340,6 +344,9 @@ impl GeneralizedLinearMixedModel {
 
         // Optimizer (and its closure) dropped: reclaim exclusive `&mut self`.
         let me = model.into_inner();
+        if let Some(message) = me.pending_progress_error.take() {
+            return Err(MixedModelError::Interrupted(message));
+        }
         me.finalize_theta_after_optimizer(&mut theta, n_agq)?;
         me.lmm.optsum.return_value = match nlopt_result {
             Ok((status, _fmin)) => experimental_nlopt_status_label(&format!("{status:?}")),
@@ -465,6 +472,9 @@ impl GeneralizedLinearMixedModel {
 
         // Optimizer finished and consumed its closure: reclaim `&mut self`.
         let me = model.into_inner();
+        if let Some(message) = me.pending_progress_error.take() {
+            return Err(MixedModelError::Interrupted(message));
+        }
         me.finalize_theta_after_optimizer(&mut theta, n_agq)?;
         me.lmm.optsum.return_value = return_value;
         me.lmm.optsum.feval = feval_count.get();
@@ -528,7 +538,7 @@ impl GeneralizedLinearMixedModel {
             &mut fit_log,
             &mut best_theta,
             &mut best_fmin,
-        );
+        )?;
         self.lmm.optsum.finitial = current_f;
 
         while feval_count < maxeval && !steps_are_small(&step, &step_tol) {
@@ -553,7 +563,7 @@ impl GeneralizedLinearMixedModel {
                         &mut fit_log,
                         &mut best_theta,
                         &mut best_fmin,
-                    );
+                    )?;
                     if ftrial + self.lmm.optsum.ftol_abs < current_f {
                         theta = trial;
                         current_f = ftrial;
@@ -591,7 +601,7 @@ impl GeneralizedLinearMixedModel {
                         &mut fit_log,
                         &mut best_theta,
                         &mut best_fmin,
-                    );
+                    )?;
                     if fpattern + self.lmm.optsum.ftol_abs < current_f {
                         theta = pattern;
                         current_f = fpattern;
@@ -716,7 +726,7 @@ pub(crate) fn record_pattern_search_eval(
     fit_log: &mut Vec<FitLogEntry>,
     best_theta: &mut Vec<f64>,
     best_fmin: &mut f64,
-) -> f64 {
+) -> Result<f64> {
     *feval_count += 1;
     let objective = model.penalized_pirls_deviance_at_theta(theta, n_agq);
     fit_log.push(FitLogEntry {
@@ -727,7 +737,10 @@ pub(crate) fn record_pattern_search_eval(
         *best_fmin = objective;
         *best_theta = theta.to_vec();
     }
-    objective
+    if let Some(message) = model.pending_progress_error.take() {
+        return Err(MixedModelError::Interrupted(message));
+    }
+    Ok(objective)
 }
 
 pub(crate) fn lower_triangle_pair(offset: usize) -> (usize, usize) {

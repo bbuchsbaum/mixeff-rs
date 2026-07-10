@@ -102,7 +102,7 @@
       "title": "Random Effects",
       "lines": [
         {
-          "label": "r0",
+          "label": "group",
           "status": "ok",
           "detail": "group=group, rows=72, levels=18, obs_per_level=4..4, basis=2, covariance=full, params=3, budget=sufficient"
         }
@@ -112,7 +112,7 @@
       "title": "Random-Effect Information Budget",
       "lines": [
         {
-          "label": "r0",
+          "label": "group",
           "status": "ok",
           "detail": "levels=18, rows=72, obs_per_level=4..4, basis=2, cov_params=3, levels/basis=9.00, levels/param=6.00, rows/param=24.00; grouping levels are the effective n for covariance support; risk=v0 information budget is sufficient; recommendation=information budget is sufficient under v0 thresholds; explanation=72 rows are clustered into 18 grouping levels; grouping levels are the effective n for random-effect distribution support"
         }
@@ -122,9 +122,9 @@
       "title": "Random Term Cards",
       "lines": [
         {
-          "label": "r0",
+          "label": "group",
           "status": "ok",
-          "detail": "original=(1 + x | group), canonical=(1 + x | group), group=group, blocks=basis=[intercept, x], covariance=full, params=3"
+          "detail": "`group` units differ in baseline and `x` slope; the model estimates whether these are associated. It uses 3 covariance parameters for intercept, x. The data contain 18 `group` levels, with at least 4 rows per level (median 4). Within-group support is present for `x`. Within-group support was not assessed for `intercept`. The grouping-level information is sufficient under the current audit thresholds. Formula detail: `(1 + x | group)`."
         }
       ]
     },
@@ -144,12 +144,12 @@
         {
           "label": "kernels",
           "status": "info",
-          "detail": "r0=marginal(group, intercept=true, covariance=full, basis=intercept, x)"
+          "detail": "Observations sharing `group` are linked through `intercept`, `x`, with full covariance (marginal path)."
         },
         {
           "label": "repeated units",
           "status": "ok",
-          "detail": "group=marginal(group, levels=18, obs_per_level=4..4, covered_by=r0)"
+          "detail": "`group` has 18 levels and 4..4 rows per level; its marginal path is covered by one requested random-effect term."
         },
         {
           "label": "missing paths",
@@ -162,7 +162,7 @@
       "title": "Parameterization Trace",
       "lines": [
         {
-          "label": "r0",
+          "label": "group",
           "status": "ok",
           "detail": "source=(1 + x | group); group=group; family=FullCholesky; user_basis=intercept, x; optimizer_basis=intercept, x; theta_slots=theta[0], theta[1], theta[2]; lambda_slots=(0, 0), (1, 0), (1, 1); parmap_aligned=3/3; varcorr_entries=sd(intercept), sd(x), corr(x,intercept)"
         }
@@ -172,7 +172,7 @@
       "title": "Effective Covariance",
       "lines": [
         {
-          "label": "r0",
+          "label": "group",
           "status": "info",
           "detail": "requested rank 2, supported rank 1; basis=intercept, x; supported direction PC1: 0.919*intercept + 0.394*x (1.000 variance explained); unsupported direction PC2: -0.394*intercept + 0.919*x (0.000 variance explained); inference consequence: fixed-effect inference is conditional on a certificate-time reduced-rank covariance summary; unsupported directions are not evidence of zero population variance"
         }

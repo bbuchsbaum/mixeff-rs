@@ -332,6 +332,7 @@ impl GeneralizedLinearMixedModel {
         let best_fmin = Cell::new(profiled_start_objective);
         let fit_log: Rc<RefCell<Vec<FitLogEntry>>> = Rc::new(RefCell::new(Vec::new()));
 
+        let progress_callback = self.lmm.progress_callback.clone();
         let model = std::cell::RefCell::new(self);
         let mut objective_fn = |params: &[f64]| -> Result<f64> {
             let raw_objective = model
@@ -352,7 +353,18 @@ impl GeneralizedLinearMixedModel {
             }
             Ok(objective)
         };
-        let mut progress_fn = |_progress: &TrustBqProgress<'_>| -> Result<bool> { Ok(false) };
+        let mut last_progress = 0usize;
+        let mut progress_fn = |progress: &TrustBqProgress<'_>| -> Result<bool> {
+            if let Some(callback) = &progress_callback {
+                callback.report_if_due(
+                    FitProgressPhase::JointGlmmOptimizer,
+                    progress.fevals,
+                    Some(maxeval.max(1) as usize),
+                    &mut last_progress,
+                )?;
+            }
+            Ok(false)
+        };
 
         let result = minimize_trust_bq_with_progress(
             &initial,
@@ -364,6 +376,7 @@ impl GeneralizedLinearMixedModel {
                 max_evaluations: maxeval.max(1) as usize,
                 ftol_abs,
                 ftol_rel,
+                ftol_requires_local_radius: true,
                 max_cross_terms: if compact_joint_space { usize::MAX } else { 0 },
                 stall_iterations: if compact_joint_space { 4 } else { 3 },
                 stall_ftol_abs: if compact_joint_space { -1.0 } else { 1.0e-6 },

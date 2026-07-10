@@ -3,6 +3,8 @@ use approx::assert_relative_eq;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use rand_distr::{Distribution, Normal};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use crate::compiler::{
     CertificateCheck, CompiledModelArtifact, CompilerPolicy, ContrastMatrix, ContrastRhs,
@@ -755,7 +757,7 @@ fn test_random_effect_categorical_slope_uses_treatment_coding_with_intercept() {
 }
 
 #[test]
-fn test_explicit_categorical_contrast_basis_drives_fixed_random_and_interaction_columns() {
+fn test_explicit_categorical_contrast_basis_respects_non_marginal_interaction_expansion() {
     let mut data = DataFrame::new();
     data.add_numeric("y", vec![1.0, 2.0, 1.5, 2.5, 1.2, 2.2])
         .unwrap();
@@ -795,7 +797,20 @@ fn test_explicit_categorical_contrast_basis_drives_fixed_random_and_interaction_
         .cnames
         .iter()
         .any(|name| name == "anchor: hi_minus_lo"));
+    // R's `model.matrix(~ anchor + x:anchor)` uses the explicit contrast for
+    // the anchor main effect, but full anchor indicators in the non-marginal
+    // interaction so the missing x main-effect component remains spanned.
     assert!(model
+        .feterm
+        .cnames
+        .iter()
+        .any(|name| name == "anchor: low:x"));
+    assert!(model
+        .feterm
+        .cnames
+        .iter()
+        .any(|name| name == "anchor: high:x"));
+    assert!(!model
         .feterm
         .cnames
         .iter()
@@ -1354,6 +1369,19 @@ fn test_native_auto_crossed_large_recourse_targets_crossed_vector_blocks() {
         parse_formula("reaction ~ 1 + days + (1 | subj) + (1 | item) + (1 | site)").unwrap();
     let scalar = LinearMixedModel::new(scalar_formula, &crossed_data, None).unwrap();
     assert!(!scalar.should_auto_use_native_crossed_large_ladder());
+
+    // Brown-style layout: one full vector block is crossed with covariance
+    // directions represented as separate scalar blocks. The diagonal-first
+    // ladder still has off-diagonal theta to remove from the full block and
+    // must not require a second full-Cholesky vector term.
+    let mixed_formula = parse_formula(
+        "reaction ~ 1 + days + (1 + days | subj) + \
+         (1 | item) + (0 + days | item) + (1 | site) + (0 + days | site)",
+    )
+    .unwrap();
+    let mixed = LinearMixedModel::new(mixed_formula, &crossed_data, None).unwrap();
+    assert_eq!(mixed.n_theta(), 7);
+    assert!(mixed.should_auto_use_native_crossed_large_ladder());
 }
 
 #[test]
@@ -1500,13 +1528,24 @@ fn test_trust_bq_diagonal_first_ladder_matches_single_start_objective() {
         laddered.optsum.fit_log.len(),
         "feval must count ladder-stage evaluations"
     );
-    // The certificate must classify by the inner stop code, not the
-    // START_LADDER wrapper (a converged ladder fit is not NotOptimized).
-    if laddered.optsum.converged() {
-        assert_ne!(
-            laddered.optimizer_certificate().unwrap().status,
-            FitStatus::NotOptimized,
-            "converged ladder fit must not be certified NotOptimized"
+    // The optimizer-stop parser must classify by the inner stop code, not the
+    // START_LADDER wrapper. The final certificate may still be NotOptimized
+    // when its independent derivative checks reject stationarity; that is an
+    // intentionally stricter, honest status rather than a wrapper-parsing
+    // failure.
+    let certificate = laddered.optimizer_certificate().unwrap();
+    assert_eq!(
+        certificate.evidence.optimizer_stop.acceptable_stop,
+        laddered.optsum.converged(),
+        "START_LADDER must preserve the inner optimizer stop classification"
+    );
+    if certificate.status == FitStatus::NotOptimized {
+        assert!(
+            certificate
+                .checks
+                .iter()
+                .any(|check| matches!(check, CertificateCheck::DerivativeMismatch { .. })),
+            "an accepted ladder stop may be demoted only by independent certificate evidence"
         );
     }
 }
@@ -6656,4 +6695,35 @@ fn streamed_rank_fallback_over_dense_bound_is_a_warning() {
         diag.payload.get("policy_max_dense_bytes"),
         Some(&serde_json::json!(1))
     );
+}
+
+#[test]
+fn trust_bq_propagates_host_interrupt_callback_error() {
+    let data = sleepstudy_fixture();
+    let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+    let events = Arc::new(AtomicUsize::new(0));
+    let callback_events = Arc::clone(&events);
+    let callback = FitProgressCallback::new(move |progress| {
+        if progress.phase == FitProgressPhase::LmmOptimizer {
+            callback_events.fetch_add(1, Ordering::SeqCst);
+            return Err(MixedModelError::Interrupted("test interrupt".to_string()));
+        }
+        Ok(())
+    })
+    .with_interval(2);
+    let control = OptimizerControl::auto()
+        .with_optimizer(Optimizer::TrustBq)
+        .with_max_feval(100);
+    let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+
+    let error = model
+        .fit_with_options(
+            FitOptions::reml()
+                .with_optimizer_control(control)
+                .with_progress_callback(callback),
+        )
+        .unwrap_err();
+
+    assert_eq!(error.code(), "interrupted");
+    assert_eq!(events.load(Ordering::SeqCst), 1);
 }

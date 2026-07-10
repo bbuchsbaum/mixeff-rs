@@ -1204,7 +1204,7 @@ fn rank_mixture_audit_report_matches_wire_fixture() {
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
 
     let section = json_section_by_title(&value, "Effective Covariance");
-    assert_eq!(section["lines"][0]["label"], "r0");
+    assert_eq!(section["lines"][0]["label"], "group");
     assert_eq!(section["lines"][0]["status"], "info");
     assert!(section["lines"][0]["detail"]
         .as_str()
@@ -1410,7 +1410,12 @@ fn intercept_dominant_reduced_rank_artifact() -> CompiledModelArtifact {
         let slope_shift = intercept_shift * 0.1;
         for k in 0..6_usize {
             let x_val = (k as f64 - 2.5) * 0.4;
-            y.push(10.0 + intercept_shift + (2.0 + slope_shift) * x_val);
+            // Keep the rank-one group covariance while retaining a positive
+            // residual scale; the former exactly deterministic response made
+            // the Gaussian likelihood unbounded as sigma approached zero and
+            // was therefore not a valid optimizer-certification fixture.
+            let residual = [0.18, -0.11, 0.07, -0.08, 0.13, -0.19][k];
+            y.push(10.0 + intercept_shift + (2.0 + slope_shift) * x_val + residual);
             x.push(x_val);
             group.push(format!("g{}", g + 1));
         }
@@ -1433,7 +1438,11 @@ fn intercept_dominant_reduced_rank_emits_interpretable_submodel() {
 
     assert_eq!(value["requested_formula"], "y ~ 1 + x + (1 + x | group)");
     assert!(value["effective_formula"].is_null());
-    assert_eq!(value["effective_covariance"][0]["status"], "reduced_rank");
+    assert_eq!(
+        value["effective_covariance"][0]["status"], "reduced_rank",
+        "optimizer certificate: {}",
+        value["optimizer_certificate"]
+    );
     let suggestion = &value["effective_covariance"][0]["interpretable_submodel"];
     assert!(
         !suggestion.is_null(),
@@ -1456,19 +1465,20 @@ fn intercept_dominant_reduced_rank_emits_interpretable_submodel() {
         "objective_gap must be a non-negative finite number, got {gap}"
     );
     assert_eq!(suggestion["within_tolerance"], serde_json::json!(true));
+    let reduced_rank_diagnostic = value["optimizer_certificate"]["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|diagnostic| {
+            diagnostic["message"]
+                == "fitted covariance for (1 + x | group) has effective rank 1 of requested rank 2"
+        })
+        .expect("reduced-rank diagnostic should be present");
     assert_eq!(
-        value["optimizer_certificate"]["diagnostics"][0]["payload"]["interpretable_submodel"]
-            ["suggested_formula"],
+        reduced_rank_diagnostic["payload"]["interpretable_submodel"]["suggested_formula"],
         "(1 | group)"
     );
-    assert_eq!(
-        value["optimizer_certificate"]["diagnostics"][0]["message"],
-        "fitted covariance for (1 + x | group) has effective rank 1 of requested rank 2"
-    );
-    assert_eq!(
-        value["optimizer_certificate"]["diagnostics"][0]["payload"]["term_id"],
-        "r0"
-    );
+    assert_eq!(reduced_rank_diagnostic["payload"]["term_id"], "r0");
     assert_wire_fixture(
         "tests/fixtures/compiler_contract/intercept_dominant_reduced_rank_artifact_v1.json",
         &json,
@@ -1484,7 +1494,10 @@ fn intercept_dominant_reduced_rank_audit_report_matches_wire_fixture() {
 
     let section = json_section_by_title(&value, "Effective Covariance");
     let detail = section["lines"][0]["detail"].as_str().unwrap();
-    assert!(detail.contains("interpretable submodel suggestion: (1 | group)"));
+    assert!(
+        detail.contains("interpretable submodel suggestion: (1 | group)"),
+        "unexpected Effective Covariance detail: {detail}"
+    );
     assert!(detail.contains("dominant loadings="));
     assert!(detail.contains("objective gap="));
     assert!(detail.contains("within tolerance=true"));

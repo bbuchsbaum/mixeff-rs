@@ -2743,6 +2743,8 @@ impl LinearMixedModel {
                     }
                 }
                 let stage_result = {
+                    let progress_callback = self.progress_callback.clone();
+                    let mut last_progress = 0usize;
                     let mut stage_objective = |reduced: &[f64]| -> Result<f64> {
                         let mut full = expanded.clone();
                         for (slot, &index) in diagonal_indices.iter().enumerate() {
@@ -2780,7 +2782,17 @@ impl LinearMixedModel {
                             ..TrustBqOptions::default()
                         },
                         &mut stage_objective,
-                        |_| Ok(false),
+                        |progress| {
+                            if let Some(callback) = &progress_callback {
+                                callback.report_if_due(
+                                    FitProgressPhase::LmmOptimizer,
+                                    progress.fevals,
+                                    Some(stage_budget),
+                                    &mut last_progress,
+                                )?;
+                            }
+                            Ok(false)
+                        },
                     )
                 };
                 if let Ok(stage_result) = stage_result {
@@ -2808,7 +2820,17 @@ impl LinearMixedModel {
             policy.certificate_ftol_abs,
             policy.certificate_ftol_rel,
         );
+        let progress_callback = self.progress_callback.clone();
+        let mut last_progress = 0usize;
         let mut certificate_progress = |progress: &TrustBqProgress<'_>| -> Result<bool> {
+            if let Some(callback) = &progress_callback {
+                callback.report_if_due(
+                    FitProgressPhase::LmmOptimizer,
+                    progress.fevals,
+                    Some(full_stage_max_evaluations),
+                    &mut last_progress,
+                )?;
+            }
             if !certificate_stop.should_check(progress) {
                 return Ok(false);
             }
@@ -2836,6 +2858,7 @@ impl LinearMixedModel {
                 max_evaluations: full_stage_max_evaluations,
                 ftol_abs: policy.ftol_abs,
                 ftol_rel: policy.ftol_rel,
+                ftol_requires_local_radius: true,
                 max_cross_terms: policy.max_cross_terms,
                 reuse_samples: resolve_reuse_samples(policy.reuse_samples),
                 stall_iterations: policy.stall_iterations,
@@ -3416,6 +3439,7 @@ impl LinearMixedModel {
         if self.optsum.feval > 0 {
             return Err(MixedModelError::AlreadyFitted);
         }
+        self.progress_callback = options.progress_callback.clone();
         let reml = options.criterion.is_reml();
 
         // Check for constant response. Skipped for summary-estimate fits:
@@ -3526,22 +3550,18 @@ impl LinearMixedModel {
         self.optsum.optimizer_source == OptimizerSource::Auto
             && self.trust_bq_start_ladder == TrustBqStartLadder::Off
             && self.n_theta() >= 7
-            && self.has_crossed_full_cholesky_vector_terms()
+            && self.has_crossed_full_cholesky_vector_term()
     }
 
     #[cfg(any(test, not(feature = "nlopt")))]
-    fn has_crossed_full_cholesky_vector_terms(&self) -> bool {
-        for (left_index, left) in self.reterms.iter().enumerate() {
-            if !full_cholesky_vector_term(left) {
-                continue;
-            }
-            for right in self.reterms.iter().skip(left_index + 1) {
-                if full_cholesky_vector_term(right) && random_terms_are_crossed(left, right) {
-                    return true;
-                }
-            }
-        }
-        false
+    fn has_crossed_full_cholesky_vector_term(&self) -> bool {
+        self.reterms.iter().any(|vector_term| {
+            full_cholesky_vector_term(vector_term)
+                && self.reterms.iter().any(|other| {
+                    !std::ptr::eq(vector_term, other)
+                        && random_terms_are_crossed(vector_term, other)
+                })
+        })
     }
 }
 

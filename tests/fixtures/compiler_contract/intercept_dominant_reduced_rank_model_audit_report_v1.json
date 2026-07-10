@@ -102,7 +102,7 @@
       "title": "Random Effects",
       "lines": [
         {
-          "label": "r0",
+          "label": "group",
           "status": "ok",
           "detail": "group=group, rows=180, levels=30, obs_per_level=6..6, basis=2, covariance=full, params=3, budget=sufficient"
         }
@@ -112,7 +112,7 @@
       "title": "Random-Effect Information Budget",
       "lines": [
         {
-          "label": "r0",
+          "label": "group",
           "status": "ok",
           "detail": "levels=30, rows=180, obs_per_level=6..6, basis=2, cov_params=3, levels/basis=15.00, levels/param=10.00, rows/param=60.00; grouping levels are the effective n for covariance support; risk=v0 information budget is sufficient; recommendation=information budget is sufficient under v0 thresholds; explanation=180 rows are clustered into 30 grouping levels; grouping levels are the effective n for random-effect distribution support"
         }
@@ -122,9 +122,9 @@
       "title": "Random Term Cards",
       "lines": [
         {
-          "label": "r0",
+          "label": "group",
           "status": "ok",
-          "detail": "original=(1 + x | group), canonical=(1 + x | group), group=group, blocks=basis=[intercept, x], covariance=full, params=3"
+          "detail": "`group` units differ in baseline and `x` slope; the model estimates whether these are associated. It uses 3 covariance parameters for intercept, x. The data contain 30 `group` levels, with at least 6 rows per level (median 6). Within-group support is present for `x`. Within-group support was not assessed for `intercept`. The grouping-level information is sufficient under the current audit thresholds. Formula detail: `(1 + x | group)`."
         }
       ]
     },
@@ -144,12 +144,12 @@
         {
           "label": "kernels",
           "status": "info",
-          "detail": "r0=marginal(group, intercept=true, covariance=full, basis=intercept, x)"
+          "detail": "Observations sharing `group` are linked through `intercept`, `x`, with full covariance (marginal path)."
         },
         {
           "label": "repeated units",
           "status": "ok",
-          "detail": "group=marginal(group, levels=30, obs_per_level=6..6, covered_by=r0)"
+          "detail": "`group` has 30 levels and 6..6 rows per level; its marginal path is covered by one requested random-effect term."
         },
         {
           "label": "missing paths",
@@ -162,7 +162,7 @@
       "title": "Parameterization Trace",
       "lines": [
         {
-          "label": "r0",
+          "label": "group",
           "status": "ok",
           "detail": "source=(1 + x | group); group=group; family=FullCholesky; user_basis=intercept, x; optimizer_basis=intercept, x; theta_slots=theta[0], theta[1], theta[2]; lambda_slots=(0, 0), (1, 0), (1, 1); parmap_aligned=3/3; varcorr_entries=sd(intercept), sd(x), corr(x,intercept)"
         }
@@ -172,7 +172,7 @@
       "title": "Effective Covariance",
       "lines": [
         {
-          "label": "r0",
+          "label": "group",
           "status": "info",
           "detail": "requested rank 2, supported rank 1; basis=intercept, x; supported direction PC1: 0.995*intercept + 0.100*x (1.000 variance explained); unsupported direction PC2: -0.100*intercept + 0.995*x (0.000 variance explained); inference consequence: fixed-effect inference is conditional on a certificate-time reduced-rank covariance summary; unsupported directions are not evidence of zero population variance; interpretable submodel suggestion: (1 | group); dominant loadings=0.995*intercept + 0.100*x; objective gap=0.000; within tolerance=true"
         }
@@ -199,7 +199,7 @@
         {
           "label": "convergence interpretation",
           "status": "not_assessed",
-          "detail": "optimizer reported an acceptable stop; effective covariance is reduced rank; unsupported directions are weakly identified, not proof of zero population variance; stationarity checked by finite_difference; Hessian evidence is approximate (finite-difference active-subspace Hessian is positive semidefinite); bounded convergence verification was not run"
+          "detail": "optimizer reported an acceptable stop; effective covariance is reduced rank; unsupported directions are weakly identified, not proof of zero population variance; stationarity is not certified: one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged; Hessian weak-identification check is unavailable: boundary fit, not by itself an optimizer failure; bounded convergence verification was not run"
         },
         {
           "label": "optimizer",
@@ -209,17 +209,17 @@
         {
           "label": "objective",
           "status": "info",
-          "detail": "-1823.641298"
+          "detail": "34.454605"
         },
         {
           "label": "optimizer stop",
           "status": "ok",
-          "detail": "return_code=SUCCESS; acceptable=true; budget_exhausted=false; fevals=521; final_trust_radius=unknown; objective_delta=2532.81"
+          "detail": "return_code=FTOL_REACHED; acceptable=true; budget_exhausted=false; fevals=104; final_trust_radius=unknown; objective_delta=676.17"
         },
         {
           "label": "parameter space",
-          "status": "ok",
-          "detail": "theta=3, free=3, boundary=0, boundary_indices=none"
+          "status": "info",
+          "detail": "theta=3, free=2, boundary=1, boundary_indices=2"
         },
         {
           "label": "sample-size context",
@@ -228,28 +228,28 @@
         },
         {
           "label": "gradient evidence",
-          "status": "ok",
-          "detail": "method=finite_difference; raw=184.57; scaled=0.10; free=184.57; projected=184.57; boundary_gradient=0.00"
+          "status": "not_assessed",
+          "detail": "method=not_assessed (boundary fit, not by itself an optimizer failure); raw=unknown; scaled=unknown; free=unknown; projected=unknown; boundary_gradient=unknown"
         },
         {
           "label": "hessian evidence",
-          "status": "info",
-          "detail": "method=finite_difference; quality=approximate (finite-difference active-subspace Hessian is positive semidefinite); min_eigen=0.18; condition=44170259193.51; rank=3"
+          "status": "not_assessed",
+          "detail": "method=not_assessed (boundary fit, not by itself an optimizer failure); quality=not_assessed (boundary fit, not by itself an optimizer failure); min_eigen=unknown; condition=unknown; rank=unknown"
         },
         {
           "label": "certification quality",
           "status": "info",
-          "detail": "approximate (free-gradient norm 1.845664e2 exceeds tolerance 4.270411e-3)"
+          "detail": "approximate (optimizer stop accepted; derivative KKT/Hessian inspection skipped: boundary fit, not by itself an optimizer failure)"
         },
         {
           "label": "convergence next steps",
-          "status": "info",
-          "detail": "consider scaling predictors, simplifying the random-effects structure, or collecting more grouping levels | inspect Effective Covariance and consider diagonal covariance, a simpler random-effect term, or design_compiled policy | verify convergence to compare restart and alternate-optimizer agreement (verify_convergence, where the host exposes it)"
+          "status": "not_assessed",
+          "detail": "gate weak-identification claims until Hessian evidence is available | inspect Effective Covariance and consider diagonal covariance, a simpler random-effect term, or design_compiled policy | verify convergence to compare restart and alternate-optimizer agreement (verify_convergence, where the host exposes it)"
         },
         {
           "label": "derivative checks",
-          "status": "info",
-          "detail": "0 failed; 1 mismatch; 0 not assessed"
+          "status": "not_assessed",
+          "detail": "0 failed; 0 mismatch; 3 not assessed"
         },
         {
           "label": "convergence verification",
@@ -276,6 +276,11 @@
     {
       "title": "Diagnostics",
       "lines": [
+        {
+          "label": "boundary_parameter",
+          "status": "info",
+          "detail": "standard deviation for x in (1 + x | group) is on its lower bound; affected=(1 + x | group); suggested=treat a boundary covariance estimate as a valid fitted boundary, not by itself an optimizer failure | inspect the Effective Covariance section for unsupported random-effect directions | consider diagonal covariance, a simpler random-effect term, or design_compiled policy if the boundary direction is not scientifically central"
+        },
         {
           "label": "covariance_reduced",
           "status": "info",
@@ -332,6 +337,28 @@
   "cross_card_constraints": [],
   "diagnostics": [
     {
+      "code": "boundary_parameter",
+      "severity": "info",
+      "stage": "certification",
+      "message": "standard deviation for x in (1 + x | group) is on its lower bound",
+      "affected_terms": [
+        "(1 + x | group)"
+      ],
+      "suggested_actions": [
+        "treat a boundary covariance estimate as a valid fitted boundary, not by itself an optimizer failure",
+        "inspect the Effective Covariance section for unsupported random-effect directions",
+        "consider diagonal covariance, a simpler random-effect term, or design_compiled policy if the boundary direction is not scientifically central"
+      ],
+      "payload": {
+        "lower_bound": 0.0,
+        "parameter_role": "standard deviation for x",
+        "source_syntax": "(1 + x | group)",
+        "term_id": "r0",
+        "theta_index": 2,
+        "value": 0.0
+      }
+    },
+    {
       "code": "covariance_reduced",
       "severity": "info",
       "stage": "certification",
@@ -350,18 +377,18 @@
           "loadings_dominant": [
             {
               "basis": "intercept",
-              "loading": 0.9950371950409282
+              "loading": 0.995037266662379
             },
             {
               "basis": "x",
-              "loading": 0.09950367071159558
+              "loading": 0.09950295449413396
             }
           ],
           "objective_gap": 0.0,
           "suggested_formula": "(1 | group)",
           "within_tolerance": true
         },
-        "rank_tolerance": 2.0404208990918134e-6,
+        "rank_tolerance": 0.000012520622661566308,
         "requested_rank": 2,
         "source_syntax": "(1 + x | group)",
         "supported_rank": 1,

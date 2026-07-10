@@ -1780,8 +1780,17 @@ pub fn parametric_bootstrap_lrt<R: rand::Rng>(
     let mut completed = 0usize;
     let mut failures = 0usize;
     let mut at_least_as_extreme = 0usize;
+    let mut last_progress = 0usize;
 
-    for _ in 0..n_sim {
+    for replicate in 0..n_sim {
+        if let Some(callback) = &smaller.progress_callback {
+            callback.report_if_due(
+                crate::model::linear::FitProgressPhase::Bootstrap,
+                replicate + 1,
+                Some(n_sim),
+                &mut last_progress,
+            )?;
+        }
         let y_star = smaller.simulate(rng);
         let mut null_fit = smaller.clone();
         let mut alt_fit = larger.clone();
@@ -1802,6 +1811,8 @@ pub fn parametric_bootstrap_lrt<R: rand::Rng>(
                 }
                 completed += 1;
             }
+            (Err(error @ MixedModelError::Interrupted(_)), _)
+            | (_, Err(error @ MixedModelError::Interrupted(_))) => return Err(error),
             _ => failures += 1,
         }
     }

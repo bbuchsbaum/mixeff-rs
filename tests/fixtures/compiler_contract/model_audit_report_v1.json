@@ -102,7 +102,7 @@
       "title": "Random Effects",
       "lines": [
         {
-          "label": "r0",
+          "label": "subject",
           "status": "warning",
           "detail": "group=subject, rows=6, levels=3, obs_per_level=2..2, basis=2, covariance=full, params=3, budget=too_rich; reason=number of observations (6) is <= random coefficients (6) for grouping factor 'subject' with basis dimension 2; random-effect variances and the residual scale are probably not separately identifiable"
         }
@@ -112,7 +112,7 @@
       "title": "Random-Effect Information Budget",
       "lines": [
         {
-          "label": "r0",
+          "label": "subject",
           "status": "warning",
           "detail": "levels=3, rows=6, obs_per_level=2..2, basis=2, cov_params=3, levels/basis=1.50, levels/param=1.00, rows/param=2.00; total rows can be misleading for covariance support; risk=maximal covariance structure is too rich for the grouping-level budget; recommendation=random-effect coefficients saturate the rows for this term; options include dropping unsupported random slopes, splitting or simplifying the random-effect structure, treating the grouping factor as fixed, or collecting more observations per grouping level; explanation=6 rows are clustered into 3 grouping levels; covariance support is limited by grouping levels, not by total rows"
         }
@@ -122,9 +122,9 @@
       "title": "Random Term Cards",
       "lines": [
         {
-          "label": "r0",
+          "label": "subject",
           "status": "warning",
-          "detail": "original=(1 + x | subject), canonical=(1 + x | subject), group=subject, blocks=basis=[intercept, x], covariance=full, params=3"
+          "detail": "`subject` units differ in baseline and `x` slope; the model estimates whether these are associated. It uses 3 covariance parameters for intercept, x. The data contain 3 `subject` levels, with at least 2 rows per level (median 2). Within-group support is present for `x`. Within-group support was not assessed for `intercept`. The requested covariance is too rich for the available grouping-level information. Formula detail: `(1 + x | subject)`."
         }
       ]
     },
@@ -144,12 +144,12 @@
         {
           "label": "kernels",
           "status": "info",
-          "detail": "r0=marginal(subject, intercept=true, covariance=full, basis=intercept, x)"
+          "detail": "Observations sharing `subject` are linked through `intercept`, `x`, with full covariance (marginal path)."
         },
         {
           "label": "repeated units",
           "status": "ok",
-          "detail": "subject=marginal(subject, levels=3, obs_per_level=2..2, covered_by=r0)"
+          "detail": "`subject` has 3 levels and 2..2 rows per level; its marginal path is covered by one requested random-effect term."
         },
         {
           "label": "missing paths",
@@ -162,7 +162,7 @@
       "title": "Parameterization Trace",
       "lines": [
         {
-          "label": "r0",
+          "label": "subject",
           "status": "info",
           "detail": "source=(1 + x | subject); group=subject; family=FullCholesky; user_basis=intercept, x; optimizer_basis=intercept, x; theta_slots=theta[0], theta[1], theta[2]; lambda_slots=(0, 0), (1, 0), (1, 1); parmap_aligned=0/3; varcorr_entries=sd(intercept), sd(x), corr(x,intercept)"
         }
@@ -182,7 +182,7 @@
       "title": "Policy Recommendations",
       "lines": [
         {
-          "label": "r0",
+          "label": "subject",
           "status": "warning",
           "detail": "refuse_random_term_distribution: number of observations (6) is <= random coefficients (6) for grouping factor 'subject' with basis dimension 2; random-effect variances and the residual scale are probably not separately identifiable; inference=confirmatory fixed-effect p-values should be withheld or recomputed after a declared design-level change"
         }

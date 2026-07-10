@@ -32,9 +32,9 @@ use crate::error::{MixedModelError, Result};
 use crate::formula::Formula;
 use crate::model::data::DataFrame;
 use crate::model::linear::{
-    prediction_interval_cutoff, CovarianceKktClassification, LinearMixedModel, NewReLevels,
-    OptimizerControl, PredictionVarianceMethod, PredictionVariancePayload,
-    PredictionVarianceStatus,
+    prediction_interval_cutoff, CovarianceKktClassification, FitProgressCallback, FitProgressPhase,
+    LinearMixedModel, NewReLevels, OptimizerControl, PredictionVarianceMethod,
+    PredictionVariancePayload, PredictionVarianceStatus,
 };
 use crate::model::traits::{Family, LinkFunction, MixedModelFit, RandomEffectTermInfo};
 use crate::optimizer::trust_bq::{
@@ -126,6 +126,11 @@ pub struct GeneralizedLinearMixedModel {
     /// fits leave this `None` and certify through the joint Hessian instead.
     pirls_profiled_optimum_certificate:
         Option<std::result::Result<PirlsProfiledOptimumCertificate, String>>,
+
+    /// Callback failure captured inside an optimizer API whose objective
+    /// callback cannot return `Result`. The driver takes and returns it as soon
+    /// as the external optimizer yields control.
+    pending_progress_error: Option<String>,
 }
 
 /// Options controlling how a GLMM is fit.
@@ -141,6 +146,8 @@ pub struct GlmmFitOptions {
     pub verbose: bool,
     /// Optional audit-recorded optimizer controls.
     pub optimizer_control: OptimizerControl,
+    /// Optional throttled host progress/interrupt callback.
+    pub progress_callback: Option<FitProgressCallback>,
 }
 
 /// Scale for GLMM new-data predictions.
@@ -160,6 +167,7 @@ impl Default for GlmmFitOptions {
             n_agq: 1,
             verbose: false,
             optimizer_control: OptimizerControl::default(),
+            progress_callback: None,
         }
     }
 }
@@ -199,6 +207,12 @@ impl GlmmFitOptions {
     /// Request a specific optimizer while leaving other controls at default.
     pub fn with_optimizer(mut self, optimizer: Optimizer) -> Self {
         self.optimizer_control = self.optimizer_control.with_optimizer(optimizer);
+        self
+    }
+
+    /// Attach a host progress/interrupt callback to this fit and later refits.
+    pub fn with_progress_callback(mut self, callback: FitProgressCallback) -> Self {
+        self.progress_callback = Some(callback);
         self
     }
 }
@@ -789,6 +803,7 @@ impl GeneralizedLinearMixedModel {
             sd: vec![0.0; agq_len],
             mult: vec![0.0; agq_len],
             pirls_profiled_optimum_certificate: None,
+            pending_progress_error: None,
         };
         model.initialize_beta_from_response();
         Ok(model)
@@ -1612,7 +1627,9 @@ impl MixedModelFit for GeneralizedLinearMixedModel {
         self.lmm.coef_names()
     }
     fn vcov(&self) -> DMatrix<f64> {
-        self.lmm.vcov()
+        self.recorded_fixed_effect_covariance()
+            .or_else(|| self.profiled_glmm_fixed_effect_covariance())
+            .unwrap_or_else(|| self.lmm.vcov())
     }
     fn stderror(&self) -> DVector<f64> {
         self.fixed_effect_inference_standard_errors()

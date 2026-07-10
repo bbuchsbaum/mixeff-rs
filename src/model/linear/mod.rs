@@ -18,6 +18,7 @@ use nlopt::{
 use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::compiler::{
     compile_formula_ir, BasisLoading, BootstrapInferenceDetails, CertificateCheck,
@@ -66,11 +67,12 @@ pub(crate) use blocks::*;
 
 mod bootstrap;
 pub use bootstrap::{
-    parametricbootstrap, BootstrapFailedRefitPolicy, BootstrapInterval, BootstrapIntervalMethod,
-    BootstrapQuantile, BootstrapRefitOptions, BootstrapReplicate, BootstrapRunMetadata,
-    BootstrapRunPayload, BootstrapSeedRecord, BootstrapTarget, BootstrapTargetKind,
-    FixedEffectBootstrapOptions, FixedEffectNullBootstrapTarget, FixedEffectNullCovariancePolicy,
-    MixedModelBootstrap, BOOTSTRAP_RUN_SCHEMA, BOOTSTRAP_RUN_SCHEMA_VERSION,
+    parametricbootstrap, try_parametricbootstrap, BootstrapFailedRefitPolicy, BootstrapInterval,
+    BootstrapIntervalMethod, BootstrapQuantile, BootstrapRefitOptions, BootstrapReplicate,
+    BootstrapRunMetadata, BootstrapRunPayload, BootstrapSeedRecord, BootstrapTarget,
+    BootstrapTargetKind, FixedEffectBootstrapOptions, FixedEffectNullBootstrapTarget,
+    FixedEffectNullCovariancePolicy, MixedModelBootstrap, BOOTSTRAP_RUN_SCHEMA,
+    BOOTSTRAP_RUN_SCHEMA_VERSION,
 };
 use bootstrap::{quantile_sorted, validate_level};
 
@@ -81,6 +83,97 @@ use optimizer::*;
 
 mod inference;
 use inference::*;
+
+/// Long-running engine phase reported to a host progress callback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum FitProgressPhase {
+    /// Profiled LMM covariance-parameter optimization.
+    LmmOptimizer,
+    /// Joint GLMM fixed-effect/covariance-parameter optimization.
+    JointGlmmOptimizer,
+    /// A PIRLS conditional-mode solve.
+    Pirls,
+    /// A parametric or resampling bootstrap replicate loop.
+    Bootstrap,
+}
+
+/// One throttled progress event emitted by a long-running fit loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct FitProgress {
+    /// Engine phase emitting this event.
+    pub phase: FitProgressPhase,
+    /// Current evaluation, iteration, or replicate in this phase.
+    pub current: usize,
+    /// Known phase total, when the driver has one.
+    pub total: Option<usize>,
+}
+
+/// Cloneable host callback used for progress reporting and interruption.
+///
+/// Returning an error stops the active engine loop immediately. Hosts can use
+/// this to translate their native interrupt mechanism (for example,
+/// `R_CheckUserInterrupt`) into [`MixedModelError::Interrupted`]. The callback
+/// is invoked at most once per `every` units of progress, and when a known
+/// total is reached.
+#[derive(Clone)]
+pub struct FitProgressCallback {
+    callback: Arc<dyn Fn(FitProgress) -> Result<()> + Send + Sync + 'static>,
+    every: usize,
+}
+
+impl std::fmt::Debug for FitProgressCallback {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("FitProgressCallback")
+            .field("every", &self.every)
+            .finish_non_exhaustive()
+    }
+}
+
+impl FitProgressCallback {
+    /// Create an unthrottled callback (one event per driver progress unit).
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn(FitProgress) -> Result<()> + Send + Sync + 'static,
+    {
+        Self {
+            callback: Arc::new(callback),
+            every: 1,
+        }
+    }
+
+    /// Invoke the callback at most once per `every` units of progress.
+    pub fn with_interval(mut self, every: usize) -> Self {
+        self.every = every.max(1);
+        self
+    }
+
+    pub(crate) fn report_if_due(
+        &self,
+        phase: FitProgressPhase,
+        current: usize,
+        total: Option<usize>,
+        last_reported: &mut usize,
+    ) -> Result<()> {
+        let final_event = total.is_some_and(|total| current >= total);
+        if current.saturating_sub(*last_reported) < self.every && !final_event {
+            return Ok(());
+        }
+        (self.callback)(FitProgress {
+            phase,
+            current,
+            total,
+        })
+        .map_err(|error| match error {
+            MixedModelError::Interrupted(_) => error,
+            other => MixedModelError::Interrupted(other.to_string()),
+        })?;
+        *last_reported = current;
+        Ok(())
+    }
+}
 
 /// A fitted (or constructed but unfitted) linear mixed-effects model.
 ///
@@ -142,6 +235,8 @@ pub struct LinearMixedModel {
     /// Opt-in post-fit active-face refit for singular vector blocks, carried
     /// from [`OptimizerControl::active_face_refit`]. Defaults to `Off`.
     pub(crate) active_face_refit: ActiveFaceRefit,
+    /// Optional host progress/interrupt callback inherited by refits.
+    pub(crate) progress_callback: Option<FitProgressCallback>,
 }
 
 /// Snapshot of a training categorical column's encoding contract: the
@@ -798,6 +893,8 @@ pub struct FitOptions {
     pub criterion: ModelCriterion,
     /// Optional audit-recorded optimizer controls.
     pub optimizer_control: OptimizerControl,
+    /// Optional throttled host progress/interrupt callback.
+    pub progress_callback: Option<FitProgressCallback>,
 }
 
 impl FitOptions {
@@ -806,6 +903,7 @@ impl FitOptions {
         Self {
             criterion: ModelCriterion::Ml,
             optimizer_control: OptimizerControl::default(),
+            progress_callback: None,
         }
     }
 
@@ -814,6 +912,7 @@ impl FitOptions {
         Self {
             criterion: ModelCriterion::Reml,
             optimizer_control: OptimizerControl::default(),
+            progress_callback: None,
         }
     }
 
@@ -826,6 +925,12 @@ impl FitOptions {
     /// Request a specific optimizer while leaving other controls at default.
     pub fn with_optimizer(mut self, optimizer: Optimizer) -> Self {
         self.optimizer_control = self.optimizer_control.with_optimizer(optimizer);
+        self
+    }
+
+    /// Attach a host progress/interrupt callback to this fit and later refits.
+    pub fn with_progress_callback(mut self, callback: FitProgressCallback) -> Self {
+        self.progress_callback = Some(callback);
         self
     }
 }
@@ -1138,6 +1243,7 @@ impl LinearMixedModel {
             trust_bq_start_ladder: TrustBqStartLadder::default(),
             trust_bq_sample_reuse: TrustBqSampleReuse::default(),
             active_face_refit: ActiveFaceRefit::default(),
+            progress_callback: None,
         };
         debug_assert_eq!(
             model.dims.p, model.feterm.rank,

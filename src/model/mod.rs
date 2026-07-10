@@ -39,10 +39,11 @@ pub use generalized::{
     GlmmPredictionScale,
 };
 pub use linear::{
-    parametricbootstrap, ActiveFaceRefit, BootstrapFailedRefitPolicy, BootstrapInterval,
-    BootstrapIntervalMethod, BootstrapQuantile, BootstrapRefitOptions, BootstrapReplicate,
-    BootstrapRunMetadata, BootstrapRunPayload, BootstrapSeedRecord, BootstrapTarget,
-    BootstrapTargetKind, FitOptions, FitToleranceOverrides, FixedEffectBootstrapOptions,
+    parametricbootstrap, try_parametricbootstrap, ActiveFaceRefit, BootstrapFailedRefitPolicy,
+    BootstrapInterval, BootstrapIntervalMethod, BootstrapQuantile, BootstrapRefitOptions,
+    BootstrapReplicate, BootstrapRunMetadata, BootstrapRunPayload, BootstrapSeedRecord,
+    BootstrapTarget, BootstrapTargetKind, FitOptions, FitProgress, FitProgressCallback,
+    FitProgressPhase, FitToleranceOverrides, FixedEffectBootstrapOptions,
     FixedEffectNullBootstrapTarget, FixedEffectNullCovariancePolicy, LinearMixedModel,
     LinearMixedModelBuilder, MixedModelBootstrap, ModelCriterion, NewReLevels, OptimizerChoice,
     OptimizerControl, PredictionVarianceMethod, PredictionVariancePayload, PredictionVarianceRow,

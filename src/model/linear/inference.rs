@@ -465,8 +465,17 @@ impl LinearMixedModel {
         };
         let mut fits = Vec::with_capacity(options.requested_replicates);
         let mut statistics = Vec::with_capacity(options.requested_replicates);
+        let mut last_progress = 0usize;
 
-        for _ in 0..options.requested_replicates {
+        for replicate in 0..options.requested_replicates {
+            if let Some(callback) = &self.progress_callback {
+                callback.report_if_due(
+                    FitProgressPhase::Bootstrap,
+                    replicate + 1,
+                    Some(options.requested_replicates),
+                    &mut last_progress,
+                )?;
+            }
             let y_sim = self.simulate_fixed_effect_null(&mut rng, target)?;
             let mut work = self.clone();
             work.suppress_derivative_diagnostics = true;
@@ -485,6 +494,7 @@ impl LinearMixedModel {
                         theta: work.theta(),
                     });
                 }
+                Err(error @ MixedModelError::Interrupted(_)) => return Err(error),
                 Err(_) => {
                     let beta = work.beta();
                     statistics.push(f64::NAN);
@@ -583,8 +593,17 @@ impl LinearMixedModel {
         let mut statistics = Vec::with_capacity(options.requested_replicates);
         let mut distinct_counts = Vec::with_capacity(options.requested_replicates);
         let mut duplicate_counts = Vec::with_capacity(options.requested_replicates);
+        let mut last_progress = 0usize;
 
-        for _ in 0..options.requested_replicates {
+        for replicate in 0..options.requested_replicates {
+            if let Some(callback) = &self.progress_callback {
+                callback.report_if_due(
+                    FitProgressPhase::Bootstrap,
+                    replicate + 1,
+                    Some(options.requested_replicates),
+                    &mut last_progress,
+                )?;
+            }
             let (resampled, draw) = data.cluster_resample(group, &mut rng)?;
             distinct_counts.push(draw.distinct_sampled_level_count);
             duplicate_counts.push(draw.duplicate_count);
@@ -600,6 +619,7 @@ impl LinearMixedModel {
                     continue;
                 }
             };
+            work.progress_callback = self.progress_callback.clone();
 
             match work.fit(self.optsum.reml) {
                 Ok(_) => {
@@ -613,6 +633,7 @@ impl LinearMixedModel {
                         theta: work.theta(),
                     });
                 }
+                Err(error @ MixedModelError::Interrupted(_)) => return Err(error),
                 Err(_) => {
                     statistics.push(f64::NAN);
                     fits.push(failed_bootstrap_replicate_like(self));

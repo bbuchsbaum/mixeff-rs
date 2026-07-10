@@ -4,6 +4,7 @@ use nalgebra::{DMatrix, DVector, SymmetricEigen};
 
 use crate::linalg::pivot::{pivoted_qr_with_tol, stats_rank_with_tol};
 use crate::model::data::{CategoricalCoding, Column, ContrastSource, DataFrame};
+use crate::types::opt_summary::optimizer_final_status_code;
 use crate::types::OptSummary;
 
 use super::diagnostics::{
@@ -3106,6 +3107,47 @@ mod tests {
     }
 
     #[test]
+    fn optimizer_certificate_rejects_nonstationary_ftol_stop() {
+        let params = vec![0.23, 0.14];
+        let lower_bounds = vec![0.0, 0.0];
+        let mut optsum = OptSummary::new(params.clone());
+        optsum.return_value = "FTOL_REACHED".to_string();
+        optsum.finitial = 900.0;
+        optsum.fmin = 818.44;
+        optsum.feval = 43;
+        optsum.final_params = params.clone();
+
+        let mut certificate = OptimizerCertificate::from_opt_summary_with_context(
+            &optsum,
+            &params,
+            &lower_bounds,
+            Some(727),
+        );
+        assert_eq!(certificate.status, FitStatus::ConvergedInterior);
+
+        certificate.apply_derivative_evidence(
+            OptimizerDerivativeEvidence {
+                method: EvidenceMethod::FiniteDifference,
+                gradient: vec![17.7, -2.0],
+                hessian: Some(DMatrix::identity(2, 2)),
+            },
+            1.0e-3,
+            1.0e-5,
+        );
+
+        assert_eq!(certificate.status, FitStatus::NotOptimized);
+        assert_eq!(certificate.free_gradient_norm, Some(17.7));
+        assert!(certificate
+            .checks
+            .iter()
+            .any(|check| matches!(check, CertificateCheck::DerivativeMismatch { kind, .. } if kind == "free_gradient_kkt_mismatch")));
+        assert!(certificate
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == DiagnosticCode::OptimizerNonconvergence));
+    }
+
+    #[test]
     fn design_audit_reports_full_rank_fixed_effects() {
         let formula = parse_formula("y ~ x + (1 | subject)").unwrap();
         let semantic = compile_formula_ir(&formula);
@@ -4414,12 +4456,16 @@ impl OptimizerCertificate {
         };
 
         let mut failures = Vec::new();
+        let mut convergence_failed = false;
+        const MATERIAL_SCALED_GRADIENT_TOLERANCE: f64 = 1.0e-4;
         if free_gradient_norm <= gradient_tolerance {
             self.checks.push(CertificateCheck::FreeGradientOk {
                 tolerance: gradient_tolerance,
                 value: free_gradient_norm,
             });
         } else {
+            convergence_failed =
+                free_gradient_norm / objective_scale > MATERIAL_SCALED_GRADIENT_TOLERANCE;
             let message = format!(
                 "free-gradient norm {free_gradient_norm:.6e} exceeds tolerance {gradient_tolerance:.6e}"
             );
@@ -4439,6 +4485,8 @@ impl OptimizerCertificate {
                 value: boundary_violation_max,
             });
         } else {
+            convergence_failed |=
+                boundary_violation_max / objective_scale > MATERIAL_SCALED_GRADIENT_TOLERANCE;
             let message = format!(
                 "boundary KKT gradient violation {boundary_violation_max:.6e} exceeds tolerance {gradient_tolerance:.6e}"
             );
@@ -4485,6 +4533,7 @@ impl OptimizerCertificate {
                             min_eigenvalue: active.min_eigenvalue.unwrap_or(0.0),
                         });
                 } else {
+                    convergence_failed = true;
                     let min_eigen = active.min_eigenvalue.unwrap_or(f64::NAN);
                     let message = format!(
                         "active-subspace Hessian minimum eigenvalue {min_eigen:.6e} is below tolerance -{hessian_tolerance:.6e}"
@@ -4573,6 +4622,34 @@ impl OptimizerCertificate {
                 reason: failures.join("; "),
             }
         };
+
+        // An optimizer return code is only one piece of convergence
+        // evidence. If a fitted interior point materially fails the
+        // free-gradient KKT check on both raw and objective-relative scales
+        // (or has negative active-subspace curvature), it is not an optimized
+        // solution even when the backend emitted FTOL/XTOL. The relative gate
+        // prevents finite-difference noise on very large deviance scales from
+        // mislabelling objective-equivalent fits. Keep the raw stop evidence
+        // intact for auditability, but make the public fit status honest about
+        // substantive derivative failure.
+        if convergence_failed {
+            self.status = FitStatus::NotOptimized;
+            let mut diagnostic = Diagnostic::new(
+                DiagnosticCode::OptimizerNonconvergence,
+                DiagnosticSeverity::Warning,
+                DiagnosticStage::Certification,
+                "optimizer stop was accepted, but derivative checks rejected convergence",
+            )
+            .with_suggested_actions(vec![
+                "treat this fit as not optimized despite the optimizer return code".to_string(),
+                "restart from the fitted parameters or compare an alternate optimizer".to_string(),
+            ]);
+            diagnostic.payload.insert(
+                "derivative_failures".to_string(),
+                serde_json::json!(failures),
+            );
+            self.diagnostics.push(diagnostic);
+        }
     }
 
     pub fn mark_derivative_checks_not_assessed(&mut self, reason: impl Into<String>) {
@@ -4772,68 +4849,20 @@ impl HessianEvidence {
 }
 
 fn optimizer_stop_is_acceptable(return_value: &str) -> bool {
-    if let Some(final_code) = optimizer_recovery_final_code(return_value) {
-        return optimizer_stop_is_acceptable(final_code);
-    }
-    if let Some(final_code) = optimizer_joint_glmm_final_code(return_value) {
-        return optimizer_stop_is_acceptable(final_code);
-    }
     matches!(
-        return_value,
+        optimizer_final_status_code(return_value),
         "SUCCESS" | "FTOL_REACHED" | "XTOL_REACHED" | "STOPVAL_REACHED" | "RADIUS_REACHED"
     )
 }
 
 fn optimizer_budget_exhausted(optsum: &OptSummary) -> bool {
-    if optimizer_recovery_final_code(&optsum.return_value)
-        .map(optimizer_stop_is_acceptable)
-        .unwrap_or(false)
-    {
-        return false;
-    }
-    if optimizer_joint_glmm_final_code(&optsum.return_value)
-        .map(optimizer_stop_is_acceptable)
-        .unwrap_or(false)
-    {
-        return false;
-    }
     if optimizer_stop_is_acceptable(&optsum.return_value) {
         return false;
     }
-    let return_value = optimizer_joint_glmm_final_code(&optsum.return_value)
-        .or_else(|| optsum.return_value.strip_prefix("JOINT_LAPLACE_FAILED:"))
-        .or_else(|| optsum.return_value.strip_prefix("JOINT_AGQ_FAILED:"))
-        .or_else(|| {
-            optsum
-                .return_value
-                .strip_prefix("EXPERIMENTAL_JOINT_FAILED:")
-        })
-        .unwrap_or(&optsum.return_value);
+    let return_value = optimizer_final_status_code(&optsum.return_value);
     return_value == "MAXEVAL_REACHED"
         || return_value == "MAXTIME_REACHED"
         || (optsum.max_feval > 0 && optsum.feval >= optsum.max_feval)
-}
-
-fn optimizer_joint_glmm_final_code(return_value: &str) -> Option<&str> {
-    return_value
-        .strip_prefix("JOINT_LAPLACE:")
-        .or_else(|| return_value.strip_prefix("JOINT_AGQ:"))
-        .or_else(|| return_value.strip_prefix("EXPERIMENTAL_JOINT:"))
-        .filter(|code| !code.is_empty())
-}
-
-/// Unwrap the post-fit wrapper prefixes the LMM driver prepends to
-/// `return_value` (`KKT_BOUNDARY_RESTART(…): <code>`, `START_LADDER(…):
-/// <code>`, `ACTIVE_FACE(…): <code>`) to the final stop code that produced
-/// the installed iterate. Wrapper labels never contain `": "`, so the last
-/// occurrence splits off the bare code even when wrappers stack.
-fn optimizer_recovery_final_code(return_value: &str) -> Option<&str> {
-    (return_value.starts_with("KKT_BOUNDARY_RESTART(")
-        || return_value.starts_with("START_LADDER(")
-        || return_value.starts_with("ACTIVE_FACE("))
-    .then(|| return_value.rsplit_once(": ").map(|(_, code)| code.trim()))
-    .flatten()
-    .filter(|code| !code.is_empty())
 }
 
 fn optimizer_recovery_reason(return_value: &str) -> Option<&str> {

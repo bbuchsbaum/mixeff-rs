@@ -749,8 +749,19 @@ impl GeneralizedLinearMixedModel {
         // exhaust halving, and turning that into an error perturbs the
         // soft-barrier search away from valid boundary fits.
         let mut converged = false;
+        let progress_callback = self.lmm.progress_callback.clone();
+        let total_iterations = max_iter.max(1);
+        let mut last_progress = 0usize;
 
-        for iter in 0..max_iter.max(1) {
+        for iter in 0..total_iterations {
+            if let Some(callback) = &progress_callback {
+                callback.report_if_due(
+                    FitProgressPhase::Pirls,
+                    iter + 1,
+                    Some(total_iterations),
+                    &mut last_progress,
+                )?;
+            }
             // --- Compute IRLS weights and working response ---
             for obs in 0..n {
                 let mu_obs = self.mu[obs];
@@ -1270,6 +1281,9 @@ impl GeneralizedLinearMixedModel {
     }
 
     pub(super) fn penalized_pirls_deviance_at_theta(&mut self, theta: &[f64], n_agq: usize) -> f64 {
+        if self.pending_progress_error.is_some() {
+            return f64::INFINITY;
+        }
         match self.update_pirls_at_theta(theta, true) {
             Ok(_) => {
                 let deviance = self.deviance(n_agq);
@@ -1278,6 +1292,10 @@ impl GeneralizedLinearMixedModel {
                 } else {
                     f64::INFINITY
                 }
+            }
+            Err(MixedModelError::Interrupted(message)) => {
+                self.pending_progress_error = Some(message);
+                f64::INFINITY
             }
             Err(_) => f64::INFINITY,
         }

@@ -30,6 +30,10 @@ pub enum MixedModelError {
     #[error("Model already fitted: use refit() instead")]
     AlreadyFitted,
 
+    /// A host callback requested that the current fit or inference loop stop.
+    #[error("Operation interrupted: {0}")]
+    Interrupted(String),
+
     /// The response is constant and cannot identify the requested model.
     #[error("Constant response: model fitting failed")]
     ConstantResponse,
@@ -121,6 +125,7 @@ impl MixedModelError {
             MixedModelError::DimensionMismatch(_) => "dimension_mismatch",
             MixedModelError::NotFitted => "not_fitted",
             MixedModelError::AlreadyFitted => "already_fitted",
+            MixedModelError::Interrupted(_) => "interrupted",
             MixedModelError::ConstantResponse => "constant_response",
             MixedModelError::NoRandomEffects => "no_random_effects",
             MixedModelError::InvalidArgument(_) => "invalid_argument",

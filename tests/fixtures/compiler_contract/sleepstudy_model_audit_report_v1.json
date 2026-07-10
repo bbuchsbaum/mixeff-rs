@@ -102,7 +102,7 @@
       "title": "Random Effects",
       "lines": [
         {
-          "label": "r0",
+          "label": "Subject",
           "status": "ok",
           "detail": "group=Subject, rows=180, levels=18, obs_per_level=10..10, basis=2, covariance=full, params=3, budget=sufficient"
         }
@@ -112,7 +112,7 @@
       "title": "Random-Effect Information Budget",
       "lines": [
         {
-          "label": "r0",
+          "label": "Subject",
           "status": "ok",
           "detail": "levels=18, rows=180, obs_per_level=10..10, basis=2, cov_params=3, levels/basis=9.00, levels/param=6.00, rows/param=60.00; grouping levels are the effective n for covariance support; risk=v0 information budget is sufficient; recommendation=information budget is sufficient under v0 thresholds; explanation=180 rows are clustered into 18 grouping levels; grouping levels are the effective n for random-effect distribution support"
         }
@@ -122,9 +122,9 @@
       "title": "Random Term Cards",
       "lines": [
         {
-          "label": "r0",
+          "label": "Subject",
           "status": "ok",
-          "detail": "original=(1 + Days | Subject), canonical=(1 + Days | Subject), group=Subject, blocks=basis=[intercept, Days], covariance=full, params=3"
+          "detail": "`Subject` units differ in baseline and `Days` slope; the model estimates whether these are associated. It uses 3 covariance parameters for intercept, Days. The data contain 18 `Subject` levels, with at least 10 rows per level (median 10). Within-group support is present for `Days`. Within-group support was not assessed for `intercept`. The grouping-level information is sufficient under the current audit thresholds. Formula detail: `(1 + Days | Subject)`."
         }
       ]
     },
@@ -144,12 +144,12 @@
         {
           "label": "kernels",
           "status": "info",
-          "detail": "r0=marginal(Subject, intercept=true, covariance=full, basis=intercept, Days)"
+          "detail": "Observations sharing `Subject` are linked through `intercept`, `Days`, with full covariance (marginal path)."
         },
         {
           "label": "repeated units",
           "status": "ok",
-          "detail": "Subject=marginal(Subject, levels=18, obs_per_level=10..10, covered_by=r0)"
+          "detail": "`Subject` has 18 levels and 10..10 rows per level; its marginal path is covered by one requested random-effect term."
         },
         {
           "label": "missing paths",
@@ -162,7 +162,7 @@
       "title": "Parameterization Trace",
       "lines": [
         {
-          "label": "r0",
+          "label": "Subject",
           "status": "ok",
           "detail": "source=(1 + Days | Subject); group=Subject; family=FullCholesky; user_basis=intercept, Days; optimizer_basis=intercept, Days; theta_slots=theta[0], theta[1], theta[2]; lambda_slots=(0, 0), (1, 0), (1, 1); parmap_aligned=3/3; varcorr_entries=sd(intercept), sd(Days), corr(Days,intercept)"
         }

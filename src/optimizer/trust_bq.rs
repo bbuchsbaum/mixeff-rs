@@ -11,6 +11,11 @@ pub(crate) struct TrustBqOptions {
     pub(crate) max_evaluations: usize,
     pub(crate) ftol_abs: f64,
     pub(crate) ftol_rel: f64,
+    /// Require the trust region to contract by at least four halvings before
+    /// objective-tolerance or stagnation stops are accepted. Profiled/joint
+    /// mixed-model drivers enable this to avoid coarse-radius false FTOL
+    /// stops; auxiliary sub-solves keep the historical eager FTOL behavior.
+    pub(crate) ftol_requires_local_radius: bool,
     pub(crate) eta_accept: f64,
     pub(crate) eta_expand: f64,
     pub(crate) shrink_factor: f64,
@@ -60,6 +65,7 @@ impl Default for TrustBqOptions {
             max_evaluations: 1000,
             ftol_abs: 1e-10,
             ftol_rel: 1e-10,
+            ftol_requires_local_radius: false,
             eta_accept: 0.05,
             eta_expand: 0.75,
             shrink_factor: 0.5,
@@ -251,6 +257,10 @@ where
     } else {
         options.ftol_abs
     };
+    // FTOL/stagnation only certify a local model after the trust region has
+    // contracted materially from its startup scale. See the accepted-step
+    // check below for the production failure this guards.
+    let ftol_radius = (options.initial_radius / 16.0).max(options.final_radius);
     loop {
         if fevals >= options.max_evaluations {
             return Ok(TrustBqResult {
@@ -331,7 +341,12 @@ where
         // contracting until a step is finally accepted and the descent reaches
         // the true optimum (after which a genuine plateau stalls as intended).
         let has_descended = best_f < initial_objective;
-        if has_descended && stalled >= options.stall_iterations && radius < options.initial_radius {
+        let stall_radius_is_local = if options.ftol_requires_local_radius {
+            radius <= ftol_radius
+        } else {
+            radius < options.initial_radius
+        };
+        if has_descended && stalled >= options.stall_iterations && stall_radius_is_local {
             return Ok(TrustBqResult {
                 x: best_x,
                 fmin: best_f,
@@ -423,7 +438,18 @@ where
             }
 
             let objective_tol = options.ftol_abs + options.ftol_rel * old_f.abs().max(1.0);
-            if actual_reduction.abs() <= objective_tol {
+            // A tiny accepted reduction is only meaningful once the
+            // interpolation radius is local. At a coarse radius the
+            // quadratic model can propose a very short, well-predicted step
+            // even when the true objective gradient is still large. Treating
+            // that single step as FTOL convergence caused the iamciera
+            // two-variance ML fit to stop with radius 8.4e-2 and
+            // |gradient|=17.7. Continue contracting until the model has
+            // localized by at least four halvings; the existing stagnation
+            // and caller-certificate stops remain available in the meantime.
+            if actual_reduction.abs() <= objective_tol
+                && (!options.ftol_requires_local_radius || radius <= ftol_radius)
+            {
                 return Ok(TrustBqResult {
                     x: best_x,
                     fmin: best_f,
@@ -1024,6 +1050,7 @@ mod tests {
                 stall_ftol_rel: 1e-3,
                 stall_ftol_abs: 1e-4,
                 stall_requires_stable_x: false,
+                ftol_requires_local_radius: true,
                 ..TrustBqOptions::default()
             },
             |x| Ok(100.0 * (x[1] - x[0] * x[0]).powi(2) + (1.0 - x[0]).powi(2)),
@@ -1038,6 +1065,10 @@ mod tests {
         assert_eq!(
             result.trace_classification(),
             TrustBqTraceClassification::StatisticalStall
+        );
+        assert!(
+            result.final_radius <= 0.5 / 16.0,
+            "a stagnation stop must come from a localized trust region: {result:?}"
         );
         assert!(result.fevals < 20_000, "{result:?}");
         // The loose band trades a little accuracy for far fewer evaluations,

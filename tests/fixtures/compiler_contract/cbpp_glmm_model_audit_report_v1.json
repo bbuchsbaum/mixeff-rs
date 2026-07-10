@@ -102,7 +102,7 @@
       "title": "Random Effects",
       "lines": [
         {
-          "label": "r0",
+          "label": "herd",
           "status": "ok",
           "detail": "group=herd, rows=56, levels=15, obs_per_level=1..4, basis=1, covariance=scalar, params=1, budget=sufficient"
         }
@@ -112,7 +112,7 @@
       "title": "Random-Effect Information Budget",
       "lines": [
         {
-          "label": "r0",
+          "label": "herd",
           "status": "ok",
           "detail": "levels=15, rows=56, obs_per_level=1..4, basis=1, cov_params=1, levels/basis=15.00, levels/param=15.00, rows/param=56.00; grouping levels are the effective n for covariance support; risk=v0 information budget is sufficient; recommendation=information budget is sufficient under v0 thresholds; explanation=56 rows are clustered into 15 grouping levels; grouping levels are the effective n for random-effect distribution support"
         }
@@ -122,9 +122,9 @@
       "title": "Random Term Cards",
       "lines": [
         {
-          "label": "r0",
+          "label": "herd",
           "status": "ok",
-          "detail": "original=(1 | herd), canonical=(1 | herd), group=herd, blocks=basis=[intercept], covariance=scalar, params=1"
+          "detail": "`herd` units may differ in average outcome. It uses 1 covariance parameter for intercept. The data contain 15 `herd` levels, with at least 1 rows per level (median 4). Within-group support was not assessed for `intercept`. The grouping-level information is sufficient under the current audit thresholds. Formula detail: `(1 | herd)`."
         }
       ]
     },
@@ -144,12 +144,12 @@
         {
           "label": "kernels",
           "status": "info",
-          "detail": "r0=marginal(herd, intercept=true, covariance=scalar, basis=intercept)"
+          "detail": "Observations sharing `herd` are linked through `intercept`, with scalar covariance (marginal path)."
         },
         {
           "label": "repeated units",
           "status": "ok",
-          "detail": "herd=marginal(herd, levels=15, obs_per_level=1..4, covered_by=r0)"
+          "detail": "`herd` has 15 levels and 1..4 rows per level; its marginal path is covered by one requested random-effect term."
         },
         {
           "label": "missing paths",
@@ -162,7 +162,7 @@
       "title": "Parameterization Trace",
       "lines": [
         {
-          "label": "r0",
+          "label": "herd",
           "status": "ok",
           "detail": "source=(1 | herd); group=herd; family=Scalar; user_basis=intercept; optimizer_basis=intercept; theta_slots=theta[0]; lambda_slots=(0, 0); parmap_aligned=1/1; varcorr_entries=sd(intercept)"
         }

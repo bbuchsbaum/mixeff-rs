@@ -38,6 +38,15 @@ pub(crate) fn annotate_glmm_covariance_status(
 
     if let Some(free_gradient_norm) = certificate.free_gradient_norm {
         if !free_gradient_norm.is_finite() || free_gradient_norm > gradient_tolerance {
+            // `apply_derivative_evidence` emits a generic convergence
+            // diagnostic before this GLMM-specific, noise-aware pass. Replace
+            // it here: the assembled reading may be an assessed failure or an
+            // explicitly unassessable noise-dominated probe, and reporting
+            // both would contradict the latter verdict.
+            certificate.diagnostics.retain(|diagnostic| {
+                !(diagnostic.code == DiagnosticCode::OptimizerNonconvergence
+                    && diagnostic.payload.contains_key("derivative_failures"))
+            });
             // The assembled gradient failed the free-component KKT check. A
             // failure is only an *assessed* non-stationarity when some
             // failing free component carries a trusted reading; if every

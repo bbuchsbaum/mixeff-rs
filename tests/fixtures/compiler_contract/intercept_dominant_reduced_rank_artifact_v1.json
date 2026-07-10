@@ -29,11 +29,11 @@
       {
         "label": "(Intercept)",
         "kind": "coefficient",
-        "estimate": 10.000002108507031,
-        "std_error": 0.2595007322730084,
+        "estimate": 9.999999999990424,
+        "std_error": 0.6428977007177505,
         "numerator_df": null,
         "denominator_df": null,
-        "statistic": 38.535544855366744,
+        "statistic": 15.554574217369451,
         "statistic_name": "z",
         "p_value": 0.0,
         "method": "asymptotic_wald_z",
@@ -58,11 +58,11 @@
       {
         "label": "x",
         "kind": "coefficient",
-        "estimate": 2.000000210850595,
-        "std_error": 0.025950081951799236,
+        "estimate": 1.9085714285704687,
+        "std_error": 0.06585469662487982,
         "numerator_df": null,
         "denominator_df": null,
-        "statistic": 77.07105567394657,
+        "statistic": 28.981553729448247,
         "statistic_name": "z",
         "p_value": 0.0,
         "method": "asymptotic_wald_z",
@@ -96,12 +96,12 @@
     ],
     "matrix": [
       [
-        0.06734063005022758,
-        0.006734059650723549
+        0.4133174535881703,
+        0.04132187268188342
       ],
       [
-        0.006734059650723549,
-        0.0006734067533050965
+        0.04132187268188342,
+        0.0043368410675549566
       ]
     ],
     "method": "model_based",
@@ -449,14 +449,14 @@
           "loadings": [
             {
               "basis": "intercept",
-              "loading": 0.9950371950409282
+              "loading": 0.995037266662379
             },
             {
               "basis": "x",
-              "loading": 0.09950367071159558
+              "loading": 0.09950295449413396
             }
           ],
-          "eigenvalue": 2.0404208990918136,
+          "eigenvalue": 12.520622661566309,
           "variance_explained": 1.0,
           "user_scale_summary": "0.995*intercept + 0.100*x"
         }
@@ -467,11 +467,11 @@
           "loadings": [
             {
               "basis": "intercept",
-              "loading": -0.09950367071159558
+              "loading": -0.09950295449413396
             },
             {
               "basis": "x",
-              "loading": 0.9950371950409282
+              "loading": 0.995037266662379
             }
           ],
           "eigenvalue": 0.0,
@@ -485,11 +485,11 @@
         "loadings_dominant": [
           {
             "basis": "intercept",
-            "loading": 0.9950371950409282
+            "loading": 0.995037266662379
           },
           {
             "basis": "x",
-            "loading": 0.09950367071159558
+            "loading": 0.09950295449413396
           }
         ],
         "objective_gap": 0.0,
@@ -549,14 +549,14 @@
           }
         },
         "status": "free",
-        "value": 4637.165612347472
+        "value": 26.85151162256068
       },
       "lambda": {
         "row": 0,
         "col": 0,
         "row_basis": "intercept",
         "col_basis": "intercept",
-        "value": 4637.165612347472
+        "value": 26.85151162256068
       },
       "parmap_entry": {
         "theta_index": 0,
@@ -572,7 +572,7 @@
           "basis": [
             "intercept"
           ],
-          "value": 1.4213439877765526
+          "value": 3.520888809025742
         }
       ]
     },
@@ -598,14 +598,14 @@
         "name": "theta[0:x,intercept]",
         "constraint": "unconstrained",
         "status": "free",
-        "value": 463.71633384737765
+        "value": 2.6851303248573917
       },
       "lambda": {
         "row": 1,
         "col": 0,
         "row_basis": "x",
         "col_basis": "intercept",
-        "value": 463.71633384737765
+        "value": 2.6851303248573917
       },
       "parmap_entry": {
         "theta_index": 1,
@@ -621,7 +621,7 @@
           "basis": [
             "x"
           ],
-          "value": 0.14213432908084095
+          "value": 0.3520861486108195
         },
         {
           "kind": "correlation",
@@ -660,14 +660,14 @@
           }
         },
         "status": "free",
-        "value": 6.778359715499919e-7
+        "value": 0.0
       },
       "lambda": {
         "row": 1,
         "col": 1,
         "row_basis": "x",
         "col_basis": "x",
-        "value": 6.778359715499919e-7
+        "value": 0.0
       },
       "parmap_entry": {
         "theta_index": 2,
@@ -683,7 +683,7 @@
           "basis": [
             "x"
           ],
-          "value": 0.14213432908084095
+          "value": 0.3520861486108195
         },
         {
           "kind": "correlation",
@@ -755,25 +755,27 @@
   "optimizer_certificate": {
     "status": "converged_reduced_rank",
     "optimizer_name": "bobyqa",
-    "objective_value": -1823.641297566387,
-    "iterations": 521,
+    "objective_value": 34.45460488976741,
+    "iterations": 104,
     "evidence": {
       "optimizer_stop": {
-        "return_code": "SUCCESS",
+        "return_code": "FTOL_REACHED",
         "acceptable_stop": true,
         "budget_exhausted": false,
-        "function_evaluations": 521,
+        "function_evaluations": 104,
         "max_function_evaluations": null,
         "max_time_seconds": null,
-        "initial_objective": 709.1682894500626,
-        "final_objective": -1823.641297566387,
-        "objective_delta": 2532.8095870164498
+        "initial_objective": 710.6291084458468,
+        "final_objective": 34.45460488976741,
+        "objective_delta": 676.1745035560793
       },
       "parameter_space": {
         "n_theta": 3,
-        "n_free": 3,
-        "n_boundary": 0,
-        "boundary_indices": []
+        "n_free": 2,
+        "n_boundary": 1,
+        "boundary_indices": [
+          2
+        ]
       },
       "sample_size": {
         "n_observations": 180,
@@ -781,65 +783,84 @@
         "observations_per_theta": 60.0
       },
       "gradient": {
-        "method": "finite_difference",
-        "raw_gradient_norm": 184.56642368391837,
-        "scaled_gradient_norm": 0.10120763547646053,
-        "free_gradient_norm": 184.56642368391837,
-        "projected_gradient_norm": 184.56642368391837,
-        "kkt_boundary_gradient_max": 0.0
-      },
-      "hessian": {
-        "method": "finite_difference",
-        "quality": {
-          "approximate": {
-            "reason": "finite-difference active-subspace Hessian is positive semidefinite"
+        "method": {
+          "not_assessed": {
+            "reason": "one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged"
           }
         },
-        "min_eigenvalue": 0.17723296244510425,
-        "condition_number": 44170259193.51223,
-        "rank": 3
+        "raw_gradient_norm": null,
+        "scaled_gradient_norm": null,
+        "free_gradient_norm": null,
+        "projected_gradient_norm": null,
+        "kkt_boundary_gradient_max": null
+      },
+      "hessian": {
+        "method": {
+          "not_assessed": {
+            "reason": "one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged"
+          }
+        },
+        "quality": {
+          "not_assessed": {
+            "reason": "one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged"
+          }
+        },
+        "min_eigenvalue": null,
+        "condition_number": null,
+        "rank": null
       },
       "certification_quality": {
         "approximate": {
-          "reason": "free-gradient norm 1.845664e2 exceeds tolerance 4.270411e-3"
+          "reason": "optimizer stop accepted; derivative KKT/Hessian inspection skipped: one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged"
         }
       }
     },
     "verification": null,
-    "free_gradient_norm": 184.56642368391837,
-    "projected_gradient_norm": 184.56642368391837,
-    "hessian_eigen_min": 0.17723296244510425,
-    "hessian_rank": 3,
-    "information_rank": 3,
+    "free_gradient_norm": null,
+    "projected_gradient_norm": null,
+    "hessian_eigen_min": null,
+    "hessian_rank": null,
+    "information_rank": null,
     "checks": [
       {
-        "derivative_mismatch": {
-          "kind": "free_gradient_kkt_mismatch",
-          "observed": 184.56642368391837,
-          "tolerance": 0.004270411335651856,
-          "regime": "interior_theta",
-          "message": "free-gradient norm 1.845664e2 exceeds tolerance 4.270411e-3"
+        "not_assessed": {
+          "reason": "free-gradient KKT check skipped: one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged"
         }
       },
       {
-        "boundary_gradient_ok": {
-          "tolerance": 0.004270411335651856,
-          "value": 0.0
+        "not_assessed": {
+          "reason": "projected boundary-gradient KKT check skipped: one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged"
         }
       },
       {
-        "hessian_psd_on_active_subspace": {
-          "min_eigenvalue": 0.17723296244510425
-        }
-      },
-      {
-        "rank_ok": {
-          "rank": 3,
-          "expected": 3
+        "not_assessed": {
+          "reason": "active-subspace Hessian check skipped: one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged"
         }
       }
     ],
     "diagnostics": [
+      {
+        "code": "boundary_parameter",
+        "severity": "info",
+        "stage": "certification",
+        "message": "standard deviation for x in (1 + x | group) is on its lower bound",
+        "affected_terms": [
+          "(1 + x | group)"
+        ],
+        "suggested_actions": [
+          "treat a boundary covariance estimate as a valid fitted boundary, not by itself an optimizer failure",
+          "inspect the Effective Covariance section for unsupported random-effect directions",
+          "consider diagonal covariance, a simpler random-effect term, or design_compiled policy if the boundary direction is not scientifically central"
+        ],
+        "payload": {
+          "lower_bound": 0.0,
+          "parameter_role": "standard deviation for x",
+          "source_syntax": "(1 + x | group)",
+          "term_id": "r0",
+          "theta_index": 2,
+          "value": 0.0
+        }
+      },
       {
         "code": "covariance_reduced",
         "severity": "info",
@@ -859,18 +880,18 @@
             "loadings_dominant": [
               {
                 "basis": "intercept",
-                "loading": 0.9950371950409282
+                "loading": 0.995037266662379
               },
               {
                 "basis": "x",
-                "loading": 0.09950367071159558
+                "loading": 0.09950295449413396
               }
             ],
             "objective_gap": 0.0,
             "suggested_formula": "(1 | group)",
             "within_tolerance": true
           },
-          "rank_tolerance": 2.0404208990918134e-6,
+          "rank_tolerance": 0.000012520622661566308,
           "requested_rank": 2,
           "source_syntax": "(1 + x | group)",
           "supported_rank": 1,

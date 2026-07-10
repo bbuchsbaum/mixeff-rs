@@ -491,7 +491,7 @@ impl GeneralizedLinearMixedModel {
         Ok(payload)
     }
 
-    fn glmm_conditional_prediction_covariance_scale(&self) -> Option<f64> {
+    pub(super) fn glmm_conditional_prediction_covariance_scale(&self) -> Option<f64> {
         if !self.family.has_dispersion() {
             return Some(1.0);
         }

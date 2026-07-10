@@ -331,33 +331,7 @@ impl OptSummary {
         if raw.is_empty() {
             return ConvergenceStatus::NotRun;
         }
-        // Unwrap post-fit wrapper prefixes (`KKT_BOUNDARY_RESTART(<n>):
-        // <inner>`, `START_LADDER(<label>): <inner>`, `ACTIVE_FACE(<label>):
-        // <inner>`) to the inner status that actually determined the final
-        // iterate. Wrappers can stack, so strip repeatedly.
-        let mut status = raw;
-        loop {
-            let stripped = ["KKT_BOUNDARY_RESTART", "START_LADDER", "ACTIVE_FACE"]
-                .iter()
-                .find_map(|prefix| {
-                    status
-                        .strip_prefix(prefix)
-                        .and_then(|rest| rest.split_once(": "))
-                        .map(|(_, inner)| inner.trim())
-                });
-            match stripped {
-                Some(inner) => status = inner,
-                None => break,
-            }
-        }
-        let status = status
-            .strip_prefix("JOINT_LAPLACE:")
-            .or_else(|| status.strip_prefix("JOINT_AGQ:"))
-            .or_else(|| status.strip_prefix("EXPERIMENTAL_JOINT:"))
-            .or_else(|| status.strip_prefix("JOINT_LAPLACE_FAILED:"))
-            .or_else(|| status.strip_prefix("JOINT_AGQ_FAILED:"))
-            .or_else(|| status.strip_prefix("EXPERIMENTAL_JOINT_FAILED:"))
-            .unwrap_or(status);
+        let status = optimizer_final_status_code(raw);
         match status {
             // Clean convergence criteria across all backends.
             "SUCCESS" | "STOPVAL_REACHED" | "FTOL_REACHED" | "XTOL_REACHED" | "RADIUS_REACHED"
@@ -613,6 +587,47 @@ impl OptSummary {
             latex_escape_code(&self.return_value)
         )
     }
+}
+
+/// Extract the stop code that describes the estimates actually installed in
+/// the model. Post-fit wrappers describe recovery/provenance; direct joint
+/// prefixes describe the joint optimizer; labelled fallback wrappers carry
+/// both the failed joint code and the returned fast-PIRLS code. Classification
+/// must use the latter so `OptSummary::converged()` and the optimizer
+/// certificate describe the same returned fit.
+pub(crate) fn optimizer_final_status_code(mut status: &str) -> &str {
+    loop {
+        let stripped = ["KKT_BOUNDARY_RESTART", "START_LADDER", "ACTIVE_FACE"]
+            .iter()
+            .find_map(|prefix| {
+                status
+                    .strip_prefix(prefix)
+                    .and_then(|rest| rest.split_once(": "))
+                    .map(|(_, inner)| inner.trim())
+            });
+        match stripped {
+            Some(inner) => status = inner,
+            None => break,
+        }
+    }
+
+    let is_fallback = status.starts_with("JOINT_LAPLACE_FALLBACK_FAST_PIRLS(")
+        || status.starts_with("JOINT_AGQ_FALLBACK_FAST_PIRLS(")
+        || status.starts_with("EXPERIMENTAL_JOINT_FALLBACK_FAST_PIRLS(");
+    if is_fallback {
+        if let Some((_, fast_code)) = status.rsplit_once("; fast=") {
+            return fast_code.strip_suffix(')').unwrap_or(fast_code).trim();
+        }
+    }
+
+    status
+        .strip_prefix("JOINT_LAPLACE:")
+        .or_else(|| status.strip_prefix("JOINT_AGQ:"))
+        .or_else(|| status.strip_prefix("EXPERIMENTAL_JOINT:"))
+        .or_else(|| status.strip_prefix("JOINT_LAPLACE_FAILED:"))
+        .or_else(|| status.strip_prefix("JOINT_AGQ_FAILED:"))
+        .or_else(|| status.strip_prefix("EXPERIMENTAL_JOINT_FAILED:"))
+        .unwrap_or(status)
 }
 
 impl fmt::Display for OptSummary {
@@ -920,6 +935,21 @@ mod tests {
         assert_eq!(
             status_of(10, "JOINT_LAPLACE_FAILED:ROUNDOFF_LIMITED"),
             ConvergenceStatus::RoundoffLimited
+        );
+        assert_eq!(
+            status_of(
+                78,
+                "JOINT_LAPLACE_FALLBACK_FAST_PIRLS(joint=JOINT_LAPLACE:MAXEVAL_REACHED; fast=FTOL_REACHED)"
+            ),
+            ConvergenceStatus::Converged,
+            "a labelled fallback must classify the returned fast-PIRLS fit"
+        );
+        assert_eq!(
+            status_of(
+                25,
+                "JOINT_LAPLACE_FALLBACK_FAST_PIRLS(joint=JOINT_LAPLACE:MAXEVAL_REACHED; fast=MAXEVAL_REACHED)"
+            ),
+            ConvergenceStatus::BudgetExhausted
         );
     }
 

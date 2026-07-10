@@ -852,7 +852,7 @@ pub fn build_streamed_fixed_effects_design(
                 append_streamed_main_effect(name, data, &mut column_names, &mut rows)?;
             }
             FixedTerm::Interaction(vars) => {
-                append_streamed_interaction(vars, data, &mut column_names, &mut rows)?;
+                append_streamed_interaction(vars, formula, data, &mut column_names, &mut rows)?;
             }
         }
     }
@@ -912,14 +912,28 @@ struct StreamedFactorColumn {
 
 fn append_streamed_interaction(
     vars: &[String],
+    formula: &Formula,
     data: &DataFrame,
     column_names: &mut Vec<String>,
     rows: &mut [Vec<(usize, f64)>],
 ) -> Result<()> {
     let n = data.nrow();
-    let factors = vars
+    let treatment_variables = interaction_treatment_variables(formula, vars);
+    let global_order = fixed_effect_variable_order(formula);
+    let ordered_vars = global_order
+        .into_iter()
+        .filter(|name| vars.iter().any(|var| var == name))
+        .collect::<Vec<_>>();
+    let factors = ordered_vars
         .iter()
-        .map(|name| streamed_factor_columns(name, data, n))
+        .map(|name| {
+            let coding = if treatment_variables.contains(*name) {
+                CategoricalCoding::Treatment
+            } else {
+                CategoricalCoding::CellMeans
+            };
+            streamed_factor_columns(name, data, n, coding)
+        })
         .collect::<Result<Vec<_>>>()?;
 
     let mut current = Vec::with_capacity(factors.len());
@@ -931,6 +945,7 @@ fn streamed_factor_columns(
     name: &str,
     data: &DataFrame,
     n: usize,
+    coding: CategoricalCoding,
 ) -> Result<Vec<StreamedFactorColumn>> {
     match data.column(name) {
         Some(Column::Numeric(values)) => Ok(vec![StreamedFactorColumn {
@@ -938,7 +953,7 @@ fn streamed_factor_columns(
             values: values.clone(),
         }]),
         Some(Column::Categorical(cat)) => Ok(cat
-            .encoded_columns(name, CategoricalCoding::Treatment)
+            .encoded_columns(name, coding)
             .into_iter()
             .map(|column| StreamedFactorColumn {
                 label: column.name,
@@ -958,6 +973,97 @@ fn streamed_factor_columns(
             )))
         }
     })
+}
+
+/// R's terms machinery assigns contrast code 1 (ordinary contrasts) or 2
+/// (full indicators) to each factor occurrence in an interaction. The code is
+/// determined by marginality: the interaction term contributes the ANOVA
+/// components not already spanned by lower-order fixed terms. Variables that
+/// occur in every still-uncovered component use ordinary contrasts; the
+/// others need full indicators. For `b + a:b`, for example, the uncovered
+/// components are `{a}` and `{a,b}`, so `a` is treatment-coded while `b` is
+/// full-coded — exactly R's `contrasts=1/2` assignment.
+fn interaction_treatment_variables(
+    formula: &Formula,
+    vars: &[String],
+) -> std::collections::BTreeSet<String> {
+    let lower_terms = formula
+        .fixed_terms
+        .iter()
+        .filter_map(fixed_term_variables)
+        .filter(|term| {
+            term.len() < vars.len() && term.iter().all(|name| vars.iter().any(|var| var == name))
+        })
+        .collect::<Vec<_>>();
+
+    let mut intersection: Option<std::collections::BTreeSet<String>> = None;
+    let mut current = Vec::new();
+    visit_interaction_components(vars, 0, &mut current, &lower_terms, &mut intersection);
+    intersection.unwrap_or_default()
+}
+
+fn fixed_term_variables(term: &FixedTerm) -> Option<Vec<String>> {
+    match term {
+        FixedTerm::Column(name) => Some(vec![name.clone()]),
+        FixedTerm::Interaction(vars) => Some(vars.clone()),
+        FixedTerm::Intercept | FixedTerm::NoIntercept => None,
+    }
+}
+
+fn fixed_effect_variable_order(formula: &Formula) -> Vec<&str> {
+    let mut order = Vec::new();
+    for term in &formula.fixed_terms {
+        match term {
+            FixedTerm::Column(name) => {
+                if !order.contains(&name.as_str()) {
+                    order.push(name.as_str());
+                }
+            }
+            FixedTerm::Interaction(vars) => {
+                for name in vars {
+                    if !order.contains(&name.as_str()) {
+                        order.push(name.as_str());
+                    }
+                }
+            }
+            FixedTerm::Intercept | FixedTerm::NoIntercept => {}
+        }
+    }
+    order
+}
+
+fn visit_interaction_components(
+    vars: &[String],
+    index: usize,
+    current: &mut Vec<String>,
+    lower_terms: &[Vec<String>],
+    intersection: &mut Option<std::collections::BTreeSet<String>>,
+) {
+    if index == vars.len() {
+        if current.is_empty()
+            || lower_terms.iter().any(|term| {
+                current
+                    .iter()
+                    .all(|name| term.iter().any(|candidate| candidate == name))
+            })
+        {
+            return;
+        }
+        let component = current
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        match intersection {
+            Some(existing) => existing.retain(|name| component.contains(name)),
+            None => *intersection = Some(component),
+        }
+        return;
+    }
+
+    visit_interaction_components(vars, index + 1, current, lower_terms, intersection);
+    current.push(vars[index].clone());
+    visit_interaction_components(vars, index + 1, current, lower_terms, intersection);
+    current.pop();
 }
 
 fn append_streamed_interaction_products(
@@ -1194,6 +1300,7 @@ fn validate_design_vector(
 mod tests {
     use super::*;
     use crate::formula::parse_formula;
+    use crate::model::data::CategoricalContrast;
     use crate::types::FeTerm;
     use nalgebra::{DMatrix, DVector};
 
@@ -1582,20 +1689,122 @@ mod tests {
         let streamed = build_streamed_fixed_effects_design(&formula, &data).unwrap();
         let expected = DMatrix::from_row_slice(
             4,
-            2,
+            3,
             &[
-                0.0, 0.0, //
-                0.0, 0.0, //
-                0.0, 3.0, //
-                4.0, 0.0, //
+                2.0, 0.0, 0.0, //
+                0.0, 0.0, 0.0, //
+                0.0, 0.0, 3.0, //
+                0.0, 4.0, 0.0, //
             ],
         );
 
         assert_eq!(
             streamed.column_names(),
-            &["x:sku: a".to_string(), "x:sku: b".to_string()]
+            &[
+                "x:sku: ref".to_string(),
+                "x:sku: a".to_string(),
+                "x:sku: b".to_string(),
+            ]
         );
         assert_eq!(streamed.materialize_dense(), expected);
+    }
+
+    #[test]
+    fn non_marginal_interaction_matches_r_full_dummy_expansion() {
+        let temperature_levels = ["175", "185", "195", "205", "215", "225"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let recipe_levels = ["A", "B", "C"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let mut temperature = Vec::new();
+        let mut recipe = Vec::new();
+        for recipe_level in &recipe_levels {
+            for temperature_level in &temperature_levels {
+                temperature.push(temperature_level.clone());
+                recipe.push(recipe_level.clone());
+            }
+        }
+        let mut data = DataFrame::new();
+        data.add_numeric("angle", vec![0.0; temperature.len()])
+            .unwrap();
+        data.add_categorical_with_contrast(
+            "temperature",
+            temperature.clone(),
+            temperature_levels.clone(),
+            CategoricalContrast::polynomial(temperature_levels.clone()).unwrap(),
+        )
+        .unwrap();
+        data.add_categorical_with_levels("recipe", recipe.clone(), recipe_levels.clone())
+            .unwrap();
+
+        let non_marginal = build_streamed_fixed_effects_design(
+            &parse_formula("angle ~ temperature + recipe:temperature").unwrap(),
+            &data,
+        )
+        .unwrap();
+        assert_eq!(non_marginal.n_cols(), 18);
+        assert_eq!(
+            &non_marginal.column_names()[..6],
+            &[
+                "(Intercept)".to_string(),
+                "temperature: .L".to_string(),
+                "temperature: .Q".to_string(),
+                "temperature: .C".to_string(),
+                "temperature: ^4".to_string(),
+                "temperature: ^5".to_string(),
+            ]
+        );
+        let expected_interaction_names = temperature_levels
+            .iter()
+            .flat_map(|temperature| {
+                ["B", "C"]
+                    .into_iter()
+                    .map(move |recipe| format!("temperature: {temperature}:recipe: {recipe}"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &non_marginal.column_names()[6..],
+            expected_interaction_names
+        );
+
+        // Independent dummy-product oracle: every B/C row activates exactly
+        // the column for its full temperature level and treatment-coded
+        // recipe; A rows activate none of the 12 interaction columns.
+        let x = non_marginal.materialize_dense();
+        for row in 0..temperature.len() {
+            let active = (6..18)
+                .filter(|&column| x[(row, column)] == 1.0)
+                .collect::<Vec<_>>();
+            if recipe[row] == "A" {
+                assert!(active.is_empty());
+            } else {
+                let temperature_index = temperature_levels
+                    .iter()
+                    .position(|level| level == &temperature[row])
+                    .unwrap();
+                let recipe_index = usize::from(recipe[row] == "C");
+                assert_eq!(active, vec![6 + 2 * temperature_index + recipe_index]);
+            }
+        }
+
+        let marginal = build_streamed_fixed_effects_design(
+            &parse_formula("angle ~ temperature + recipe + recipe:temperature").unwrap(),
+            &data,
+        )
+        .unwrap();
+        assert_eq!(marginal.n_cols(), 18);
+        assert_eq!(
+            marginal
+                .column_names()
+                .iter()
+                .filter(|name| name.contains(":recipe:"))
+                .count(),
+            10,
+            "with both main effects present, R uses reduced contrasts in the interaction"
+        );
     }
 
     #[test]

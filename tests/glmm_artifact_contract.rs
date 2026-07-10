@@ -36,6 +36,29 @@ fn gamma_log_contract_data() -> DataFrame {
     data
 }
 
+fn bernoulli_profiled_covariance_data() -> DataFrame {
+    let mut y = Vec::new();
+    let mut x = Vec::new();
+    let mut group = Vec::new();
+    for g in 0..12 {
+        for obs in 0..12 {
+            let xv = (obs as f64 - 5.5) / 2.5;
+            let eta = -0.25 + 0.55 * xv + (g as f64 - 5.5) * 0.06;
+            let probability = 1.0 / (1.0 + (-eta).exp());
+            let deterministic_quantile = ((g * 17 + obs * 11 + 3) % 101) as f64 / 101.0;
+            y.push((deterministic_quantile < probability) as u8 as f64);
+            x.push(xv);
+            group.push(format!("g{}", g + 1));
+        }
+    }
+
+    let mut data = DataFrame::new();
+    data.add_numeric("y", y).unwrap();
+    data.add_numeric("x", x).unwrap();
+    data.add_categorical("group", group).unwrap();
+    data
+}
+
 fn poisson_correlated_slope_contract_data() -> DataFrame {
     let mut y = Vec::new();
     let mut x = Vec::new();
@@ -389,7 +412,68 @@ fn native_glmm_artifact_records_support_contract_metadata() {
     assert!(value["fixed_effect_covariance_matrix"]["matrix"].is_array());
     let json = serde_json::to_string(artifact).unwrap();
     let decoded: CompiledModelArtifact = serde_json::from_str(&json).unwrap();
-    assert_eq!(&decoded, artifact);
+    assert_eq!(decoded.schema, artifact.schema);
+    let decoded_covariance = decoded.fixed_effect_covariance_matrix.unwrap();
+    assert_eq!(decoded_covariance.method, covariance.method);
+    assert_eq!(decoded_covariance.status, covariance.status);
+    for (decoded_value, original_value) in decoded_covariance
+        .matrix
+        .unwrap()
+        .iter()
+        .flatten()
+        .zip(matrix.iter().flatten())
+    {
+        assert!(
+            (decoded_value - original_value).abs() <= f64::EPSILON * (1.0 + original_value.abs()),
+            "serialized covariance entry changed beyond one floating-point roundoff unit"
+        );
+    }
+}
+
+#[test]
+fn profiled_bernoulli_vcov_uses_unit_glmm_dispersion_scale() {
+    let data = bernoulli_profiled_covariance_data();
+    let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
+    let mut model = GeneralizedLinearMixedModel::new(
+        formula,
+        &data,
+        Family::Bernoulli,
+        Some(LinkFunction::Logit),
+    )
+    .unwrap();
+    model.fit_with_options(true, 1, false).unwrap();
+
+    let raw_working_lmm = model.lmm().vcov();
+    let inner_sigma = model.lmm().sigma();
+    assert!(
+        (inner_sigma - 1.0).abs() > 1.0e-4,
+        "fixture must expose the scale correction rather than accidentally using sigma=1"
+    );
+    let expected = raw_working_lmm / inner_sigma.powi(2);
+    let corrected = model.vcov();
+    assert_eq!(corrected.shape(), expected.shape());
+    for (observed, oracle) in corrected.iter().zip(expected.iter()) {
+        assert!(
+            (observed - oracle).abs() <= 1.0e-12 * (1.0 + oracle.abs()),
+            "Bernoulli covariance must remove the inner working-LMM sigma^2 scale: observed {observed}, expected {oracle}"
+        );
+    }
+
+    let payload = model
+        .compiler_artifact()
+        .fixed_effect_covariance_matrix
+        .as_ref()
+        .expect("profiled fit should record corrected covariance geometry");
+    let recorded = payload.matrix.as_ref().unwrap();
+    for row in 0..corrected.nrows() {
+        for col in 0..corrected.ncols() {
+            assert!((recorded[row][col] - corrected[(row, col)]).abs() <= 1.0e-12);
+        }
+    }
+    assert!(payload
+        .notes
+        .iter()
+        .any(|note| note.contains("GLMM dispersion scale 1.000000000")));
 }
 
 #[test]

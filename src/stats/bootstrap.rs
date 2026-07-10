@@ -9,14 +9,14 @@ use std::io::{Read, Write};
 
 use crate::error::{MixedModelError, Result};
 use crate::model::generalized::GeneralizedLinearMixedModel;
-use crate::model::linear::LinearMixedModel;
 pub use crate::model::linear::{
-    parametricbootstrap, BootstrapFailedRefitPolicy, BootstrapInterval, BootstrapIntervalMethod,
-    BootstrapQuantile, BootstrapRefitOptions, BootstrapReplicate, BootstrapRunMetadata,
-    BootstrapRunPayload, BootstrapSeedRecord, BootstrapTarget, BootstrapTargetKind,
-    FixedEffectNullBootstrapTarget, FixedEffectNullCovariancePolicy, MixedModelBootstrap,
-    BOOTSTRAP_RUN_SCHEMA, BOOTSTRAP_RUN_SCHEMA_VERSION,
+    parametricbootstrap, try_parametricbootstrap, BootstrapFailedRefitPolicy, BootstrapInterval,
+    BootstrapIntervalMethod, BootstrapQuantile, BootstrapRefitOptions, BootstrapReplicate,
+    BootstrapRunMetadata, BootstrapRunPayload, BootstrapSeedRecord, BootstrapTarget,
+    BootstrapTargetKind, FixedEffectNullBootstrapTarget, FixedEffectNullCovariancePolicy,
+    MixedModelBootstrap, BOOTSTRAP_RUN_SCHEMA, BOOTSTRAP_RUN_SCHEMA_VERSION,
 };
+use crate::model::linear::{FitProgressPhase, LinearMixedModel};
 use crate::model::traits::Family;
 
 /// Save bootstrap replicates as JSON.
@@ -103,7 +103,8 @@ pub fn parametricbootstrap_glmm<R: rand::Rng>(
     }
 
     let mut fits = Vec::with_capacity(n_rep);
-    for _ in 0..n_rep {
+    let mut last_progress = 0usize;
+    for replicate in 0..n_rep {
         let y_sim = model.simulate_response(rng)?;
         let mut work = model.clone();
         match work.refit(&y_sim) {
@@ -120,6 +121,7 @@ pub fn parametricbootstrap_glmm<R: rand::Rng>(
                     theta: work.theta(),
                 });
             }
+            Err(error @ MixedModelError::Interrupted(_)) => return Err(error),
             Err(_) => {
                 let beta = MixedModelFit::coef(&work);
                 fits.push(BootstrapReplicate {
@@ -130,6 +132,14 @@ pub fn parametricbootstrap_glmm<R: rand::Rng>(
                     theta: work.theta(),
                 });
             }
+        }
+        if let Some(callback) = &model.lmm.progress_callback {
+            callback.report_if_due(
+                FitProgressPhase::Bootstrap,
+                replicate + 1,
+                Some(n_rep),
+                &mut last_progress,
+            )?;
         }
     }
 

@@ -102,7 +102,7 @@
       "title": "Random Effects",
       "lines": [
         {
-          "label": "r0",
+          "label": "subject",
           "status": "ok",
           "detail": "group=subject, rows=12, levels=6, obs_per_level=2..2, basis=1, covariance=scalar, params=1, budget=sufficient"
         }
@@ -112,7 +112,7 @@
       "title": "Random-Effect Information Budget",
       "lines": [
         {
-          "label": "r0",
+          "label": "subject",
           "status": "ok",
           "detail": "levels=6, rows=12, obs_per_level=2..2, basis=1, cov_params=1, levels/basis=6.00, levels/param=6.00, rows/param=12.00; grouping levels are the effective n for covariance support; risk=v0 information budget is sufficient; recommendation=information budget is sufficient under v0 thresholds; explanation=12 rows are clustered into 6 grouping levels; grouping levels are the effective n for random-effect distribution support"
         }
@@ -122,9 +122,9 @@
       "title": "Random Term Cards",
       "lines": [
         {
-          "label": "r0",
+          "label": "subject",
           "status": "ok",
-          "detail": "original=(1 | subject), canonical=(1 | subject), group=subject, blocks=basis=[intercept], covariance=scalar, params=1"
+          "detail": "`subject` units may differ in average outcome. It uses 1 covariance parameter for intercept. The data contain 6 `subject` levels, with at least 2 rows per level (median 2). Within-group support was not assessed for `intercept`. The grouping-level information is sufficient under the current audit thresholds. Formula detail: `(1 | subject)`."
         }
       ]
     },
@@ -144,12 +144,12 @@
         {
           "label": "kernels",
           "status": "info",
-          "detail": "r0=marginal(subject, intercept=true, covariance=scalar, basis=intercept)"
+          "detail": "Observations sharing `subject` are linked through `intercept`, with scalar covariance (marginal path)."
         },
         {
           "label": "repeated units",
           "status": "ok",
-          "detail": "subject=marginal(subject, levels=6, obs_per_level=2..2, covered_by=r0)"
+          "detail": "`subject` has 6 levels and 2..2 rows per level; its marginal path is covered by one requested random-effect term."
         },
         {
           "label": "missing paths",
@@ -162,7 +162,7 @@
       "title": "Parameterization Trace",
       "lines": [
         {
-          "label": "r0",
+          "label": "subject",
           "status": "ok",
           "detail": "source=(1 | subject); group=subject; family=Scalar; user_basis=intercept; optimizer_basis=intercept; theta_slots=theta[0]; lambda_slots=(0, 0); parmap_aligned=1/1; varcorr_entries=sd(intercept)"
         }

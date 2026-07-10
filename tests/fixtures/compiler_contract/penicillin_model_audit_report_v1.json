@@ -102,12 +102,12 @@
       "title": "Random Effects",
       "lines": [
         {
-          "label": "r0",
+          "label": "plate",
           "status": "ok",
           "detail": "group=plate, rows=144, levels=24, obs_per_level=6..6, basis=1, covariance=scalar, params=1, budget=sufficient"
         },
         {
-          "label": "r1",
+          "label": "sample",
           "status": "ok",
           "detail": "group=sample, rows=144, levels=6, obs_per_level=24..24, basis=1, covariance=scalar, params=1, budget=sufficient"
         }
@@ -117,12 +117,12 @@
       "title": "Random-Effect Information Budget",
       "lines": [
         {
-          "label": "r0",
+          "label": "plate",
           "status": "ok",
           "detail": "levels=24, rows=144, obs_per_level=6..6, basis=1, cov_params=1, levels/basis=24.00, levels/param=24.00, rows/param=144.00; grouping levels are the effective n for covariance support; risk=v0 information budget is sufficient; recommendation=information budget is sufficient under v0 thresholds; explanation=144 rows are clustered into 24 grouping levels; grouping levels are the effective n for random-effect distribution support"
         },
         {
-          "label": "r1",
+          "label": "sample",
           "status": "ok",
           "detail": "levels=6, rows=144, obs_per_level=24..24, basis=1, cov_params=1, levels/basis=6.00, levels/param=6.00, rows/param=144.00; grouping levels are the effective n for covariance support; risk=v0 information budget is sufficient; recommendation=information budget is sufficient under v0 thresholds; explanation=144 rows are clustered into 6 grouping levels; grouping levels are the effective n for random-effect distribution support"
         }
@@ -132,14 +132,14 @@
       "title": "Random Term Cards",
       "lines": [
         {
-          "label": "r0",
+          "label": "plate",
           "status": "ok",
-          "detail": "original=(1 | plate), canonical=(1 | plate), group=plate, blocks=basis=[intercept], covariance=scalar, params=1"
+          "detail": "`plate` units may differ in average outcome. It uses 1 covariance parameter for intercept. The data contain 24 `plate` levels, with at least 6 rows per level (median 6). Within-group support was not assessed for `intercept`. The grouping-level information is sufficient under the current audit thresholds. Formula detail: `(1 | plate)`."
         },
         {
-          "label": "r1",
+          "label": "sample",
           "status": "ok",
-          "detail": "original=(1 | sample), canonical=(1 | sample), group=sample, blocks=basis=[intercept], covariance=scalar, params=1"
+          "detail": "`sample` units may differ in average outcome. It uses 1 covariance parameter for intercept. The data contain 6 `sample` levels, with at least 24 rows per level (median 24). Within-group support was not assessed for `intercept`. The grouping-level information is sufficient under the current audit thresholds. Formula detail: `(1 | sample)`."
         }
       ]
     },
@@ -159,12 +159,12 @@
         {
           "label": "kernels",
           "status": "info",
-          "detail": "r0=marginal(plate, intercept=true, covariance=scalar, basis=intercept) | r1=marginal(sample, intercept=true, covariance=scalar, basis=intercept)"
+          "detail": "Observations sharing `plate` are linked through `intercept`, with scalar covariance (marginal path). | Observations sharing `sample` are linked through `intercept`, with scalar covariance (marginal path)."
         },
         {
           "label": "repeated units",
           "status": "ok",
-          "detail": "plate=marginal(plate, levels=24, obs_per_level=6..6, covered_by=r0) | sample=marginal(sample, levels=6, obs_per_level=24..24, covered_by=r1)"
+          "detail": "`plate` has 24 levels and 6..6 rows per level; its marginal path is covered by one requested random-effect term. | `sample` has 6 levels and 24..24 rows per level; its marginal path is covered by one requested random-effect term."
         },
         {
           "label": "missing paths",
@@ -177,12 +177,12 @@
       "title": "Parameterization Trace",
       "lines": [
         {
-          "label": "r0",
+          "label": "plate",
           "status": "ok",
           "detail": "source=(1 | plate); group=plate; family=Scalar; user_basis=intercept; optimizer_basis=intercept; theta_slots=theta[0]; lambda_slots=(0, 0); parmap_aligned=1/1; varcorr_entries=sd(intercept)"
         },
         {
-          "label": "r1",
+          "label": "sample",
           "status": "ok",
           "detail": "source=(1 | sample); group=sample; family=Scalar; user_basis=intercept; optimizer_basis=intercept; theta_slots=theta[1]; lambda_slots=(0, 0); parmap_aligned=1/1; varcorr_entries=sd(intercept)"
         }

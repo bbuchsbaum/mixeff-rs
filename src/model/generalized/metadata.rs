@@ -6,6 +6,77 @@
 use super::*;
 
 impl GeneralizedLinearMixedModel {
+    /// Fixed-effect covariance from the final PIRLS working Hessian, rescaled
+    /// from the inner working-LMM residual convention to the GLMM dispersion
+    /// convention. For Bernoulli/Poisson families the target scale is exactly
+    /// one; scaled families use the same ML `sqrt(pwrss / n)` convention as
+    /// GLMM prediction covariance.
+    pub(super) fn profiled_glmm_fixed_effect_covariance(&self) -> Option<DMatrix<f64>> {
+        let inner_scale = self.lmm.sigma();
+        let glmm_scale = self.glmm_conditional_prediction_covariance_scale()?;
+        if !inner_scale.is_finite()
+            || inner_scale <= 0.0
+            || !glmm_scale.is_finite()
+            || glmm_scale <= 0.0
+        {
+            return None;
+        }
+        let multiplier = (glmm_scale / inner_scale).powi(2);
+        let covariance = self.lmm.vcov() * multiplier;
+        covariance
+            .iter()
+            .all(|value| value.is_finite())
+            .then_some(covariance)
+    }
+
+    pub(super) fn profiled_glmm_fixed_effect_covariance_matrix(
+        &self,
+    ) -> FixedEffectCovarianceMatrix {
+        let mut payload = self.lmm.glmm_fixed_effect_covariance_matrix();
+        let Some(covariance) = self.profiled_glmm_fixed_effect_covariance() else {
+            return FixedEffectCovarianceMatrix::unavailable(
+                payload.coef_names,
+                "glmm_fixed_effect_covariance_scale_unavailable",
+                payload.details,
+                vec![
+                    "PIRLS/Laplace fixed-effect covariance could not be rescaled from the inner working-LMM residual convention to the GLMM dispersion convention"
+                        .to_string(),
+                ],
+            );
+        };
+        payload.matrix = Some(matrix_rows_local(&covariance));
+        let inner_scale = self.lmm.sigma();
+        let glmm_scale = self
+            .glmm_conditional_prediction_covariance_scale()
+            .expect("profiled covariance already validated the GLMM scale");
+        payload.notes = vec![format!(
+            "PIRLS/Laplace working-Hessian fixed-effect covariance rescaled from inner working-LMM sigma {inner_scale:.9} to GLMM dispersion scale {glmm_scale:.9}; inference claims remain on fixed_effect_inference_table rows"
+        )];
+        payload
+    }
+
+    pub(super) fn recorded_fixed_effect_covariance(&self) -> Option<DMatrix<f64>> {
+        let payload = self
+            .lmm
+            .compiler_artifact
+            .fixed_effect_covariance_matrix
+            .as_ref()?;
+        if payload.status != FixedEffectCovarianceStatus::Available {
+            return None;
+        }
+        let rows = payload.matrix.as_ref()?;
+        let nrows = rows.len();
+        let ncols = rows.first().map(Vec::len).unwrap_or(0);
+        if nrows == 0 || ncols == 0 || rows.iter().any(|row| row.len() != ncols) || nrows != ncols {
+            return None;
+        }
+        let values = rows.iter().flatten().copied().collect::<Vec<_>>();
+        values
+            .iter()
+            .all(|value| value.is_finite())
+            .then(|| DMatrix::from_row_slice(nrows, ncols, &values))
+    }
+
     pub(super) fn record_invalid_agq_diagnostic(&mut self, n_agq: usize, reason: &str) {
         self.lmm
             .compiler_artifact
@@ -249,7 +320,7 @@ impl GeneralizedLinearMixedModel {
             glmm_inference_availability_for_table(&metadata, &inference_artifacts.table);
         let covariance = inference_artifacts
             .covariance
-            .unwrap_or_else(|| self.lmm.glmm_fixed_effect_covariance_matrix());
+            .unwrap_or_else(|| self.profiled_glmm_fixed_effect_covariance_matrix());
         self.lmm
             .compiler_artifact
             .model_boundary
