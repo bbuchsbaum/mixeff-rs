@@ -180,73 +180,29 @@ impl LinearMixedModel {
             .and_then(|_| candidate.fit_with_forced_optimizer(self.optsum.reml, optimizer));
 
         match result {
-            Ok(()) => {
-                let objective_value = candidate
+            Ok(()) => build_verification_run(
+                label,
+                Some(optimizer_name(optimizer).to_string()),
+                Some(candidate.optsum.return_value.clone()),
+                candidate
                     .optsum
                     .fmin
                     .is_finite()
-                    .then_some(candidate.optsum.fmin);
-                let theta = candidate.theta();
-                let beta = candidate.beta().iter().copied().collect::<Vec<_>>();
-                let effective_ranks = candidate
+                    .then_some(candidate.optsum.fmin),
+                candidate.theta(),
+                candidate.beta().iter().copied().collect::<Vec<_>>(),
+                candidate
                     .compiler_artifact
                     .effective_covariance
                     .iter()
                     .map(|summary| summary.supported_rank)
-                    .collect::<Vec<_>>();
-                let objective_delta = objective_value
-                    .zip(reference_objective)
-                    .map(|(value, reference)| (value - reference).abs());
-                let max_abs_theta_delta = max_abs_delta(&theta, reference_theta);
-                let max_abs_beta_delta = max_abs_delta(&beta, reference_beta);
-                let ranks_agree = effective_ranks == reference_effective_ranks;
-                let mut diagnostics = Vec::new();
-                if objective_delta
-                    .map(|delta| delta > options.objective_tolerance)
-                    .unwrap_or(true)
-                {
-                    diagnostics.push("objective changed beyond tolerance".to_string());
-                }
-                if max_abs_theta_delta
-                    .map(|delta| delta > options.theta_tolerance)
-                    .unwrap_or(true)
-                {
-                    diagnostics.push("theta parameterization changed beyond tolerance".to_string());
-                }
-                if max_abs_beta_delta
-                    .map(|delta| delta > options.beta_tolerance)
-                    .unwrap_or(true)
-                {
-                    diagnostics.push("fixed-effect estimates changed beyond tolerance".to_string());
-                }
-                if !ranks_agree {
-                    diagnostics
-                        .push("effective covariance ranks changed during verification".to_string());
-                }
-                let agrees = objective_delta
-                    .map(|delta| delta <= options.objective_tolerance)
-                    .unwrap_or(false)
-                    && max_abs_theta_delta
-                        .map(|delta| delta <= options.theta_tolerance)
-                        .unwrap_or(false)
-                    && max_abs_beta_delta
-                        .map(|delta| delta <= options.beta_tolerance)
-                        .unwrap_or(false)
-                    && ranks_agree;
-
-                ConvergenceVerificationRun {
-                    label: label.to_string(),
-                    optimizer_name: Some(optimizer_name(optimizer).to_string()),
-                    return_code: Some(candidate.optsum.return_value.clone()),
-                    objective_value,
-                    objective_delta,
-                    max_abs_theta_delta,
-                    max_abs_beta_delta,
-                    effective_ranks,
-                    agrees,
-                    diagnostics,
-                }
-            }
+                    .collect::<Vec<_>>(),
+                reference_theta,
+                reference_beta,
+                reference_objective,
+                reference_effective_ranks,
+                options,
+            ),
             Err(error) => ConvergenceVerificationRun {
                 label: label.to_string(),
                 optimizer_name: Some(optimizer_name(optimizer).to_string()),
@@ -3932,7 +3888,7 @@ pub(super) fn finite_difference_deviance_varpar_2d(
     })
 }
 
-fn jittered_theta(
+pub(in crate::model) fn jittered_theta(
     theta: &[f64],
     lower_bounds: &[f64],
     jitter_scale: f64,
@@ -4173,7 +4129,78 @@ impl TrustBqCertificateStopState {
     }
 }
 
-fn verification_status(
+/// Score one verification refit against the recorded optimum. Shared by the
+/// LMM and GLMM verification routes so the agreement criteria and diagnostic
+/// wording cannot drift apart.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::model) fn build_verification_run(
+    label: &str,
+    optimizer_name: Option<String>,
+    return_code: Option<String>,
+    objective_value: Option<f64>,
+    theta: Vec<f64>,
+    beta: Vec<f64>,
+    effective_ranks: Vec<usize>,
+    reference_theta: &[f64],
+    reference_beta: &[f64],
+    reference_objective: Option<f64>,
+    reference_effective_ranks: &[usize],
+    options: &ConvergenceVerificationOptions,
+) -> ConvergenceVerificationRun {
+    let objective_delta = objective_value
+        .zip(reference_objective)
+        .map(|(value, reference)| (value - reference).abs());
+    let max_abs_theta_delta = crate::model::linear::max_abs_delta(&theta, reference_theta);
+    let max_abs_beta_delta = crate::model::linear::max_abs_delta(&beta, reference_beta);
+    let ranks_agree = effective_ranks == reference_effective_ranks;
+    let mut diagnostics = Vec::new();
+    if objective_delta
+        .map(|delta| delta > options.objective_tolerance)
+        .unwrap_or(true)
+    {
+        diagnostics.push("objective changed beyond tolerance".to_string());
+    }
+    if max_abs_theta_delta
+        .map(|delta| delta > options.theta_tolerance)
+        .unwrap_or(true)
+    {
+        diagnostics.push("theta parameterization changed beyond tolerance".to_string());
+    }
+    if max_abs_beta_delta
+        .map(|delta| delta > options.beta_tolerance)
+        .unwrap_or(true)
+    {
+        diagnostics.push("fixed-effect estimates changed beyond tolerance".to_string());
+    }
+    if !ranks_agree {
+        diagnostics.push("effective covariance ranks changed during verification".to_string());
+    }
+    let agrees = objective_delta
+        .map(|delta| delta <= options.objective_tolerance)
+        .unwrap_or(false)
+        && max_abs_theta_delta
+            .map(|delta| delta <= options.theta_tolerance)
+            .unwrap_or(false)
+        && max_abs_beta_delta
+            .map(|delta| delta <= options.beta_tolerance)
+            .unwrap_or(false)
+        && ranks_agree;
+
+    ConvergenceVerificationRun {
+        label: label.to_string(),
+        optimizer_name,
+        return_code,
+        objective_value,
+        objective_delta,
+        max_abs_theta_delta,
+        max_abs_beta_delta,
+        effective_ranks,
+        agrees,
+        diagnostics,
+    }
+}
+
+pub(in crate::model) fn verification_status(
     runs: &[ConvergenceVerificationRun],
     options: &ConvergenceVerificationOptions,
 ) -> ConvergenceVerificationStatus {
@@ -4219,7 +4246,7 @@ fn core_verification_failed(
     objective_failed || beta_failed || rank_failed
 }
 
-fn verification_message(
+pub(in crate::model) fn verification_message(
     status: ConvergenceVerificationStatus,
     runs: &[ConvergenceVerificationRun],
 ) -> String {

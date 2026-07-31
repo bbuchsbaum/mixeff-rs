@@ -49,6 +49,7 @@ mod metadata;
 mod optimizer;
 mod pirls;
 mod predictive;
+mod verify;
 pub(crate) use certify::*;
 pub(crate) use joint::*;
 pub(crate) use optimizer::*;
@@ -1397,6 +1398,7 @@ impl GeneralizedLinearMixedModel {
 
         Ok(PirlsProfiledOptimumCertificate {
             gradient_max_abs,
+            gradient: certification.gradient.clone(),
             min_eigenvalue: curvature.min_eigenvalue,
             condition_number: curvature.condition_number,
             escalated_theta_indices: certification

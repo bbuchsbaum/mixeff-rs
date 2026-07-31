@@ -445,8 +445,29 @@ pub(crate) fn uncertified_joint_fallback(
         .compiler_artifact
         .diagnostics
         .push(diagnostic.clone());
+    let requested_method = if joint_return_code.starts_with("JOINT_AGQ") {
+        "joint_agq"
+    } else {
+        "joint_laplace"
+    };
+    // Every fast-PIRLS fit driver installs a certificate before recording
+    // metadata, so the substitution record always has a home; a missing
+    // certificate here would silently drop the machine-readable substitution.
+    debug_assert!(
+        fallback.lmm.compiler_artifact.optimizer_certificate.is_some(),
+        "fast-PIRLS fallback fit is missing its optimizer certificate; the estimator substitution record would be dropped"
+    );
     if let Some(certificate) = &mut fallback.lmm.compiler_artifact.optimizer_certificate {
         certificate.diagnostics.push(diagnostic);
+        certificate.estimator_substitution = Some(crate::compiler::EstimatorSubstitution {
+            requested_method: requested_method.to_string(),
+            effective_method: "fast_pirls_profiled".to_string(),
+            requested_fit_status: joint_certificate.status,
+            requested_return_code: Some(joint_return_code.clone()),
+            requested_free_gradient_norm: joint_certificate.free_gradient_norm,
+            reason: "joint GLMM did not certify; returning labelled fast-PIRLS fallback"
+                .to_string(),
+        });
     }
     fallback.record_glmm_fit_metadata();
     Some(fallback)
@@ -636,6 +657,9 @@ impl JointLaplaceCertificationGradient {
 pub(crate) struct PirlsProfiledOptimumCertificate {
     /// Largest assessed absolute gradient component over theta.
     pub(crate) gradient_max_abs: f64,
+    /// Assessed theta gradient of the profiled objective (interior components
+    /// central-difference, boundary components one-sided).
+    pub(crate) gradient: Vec<f64>,
     /// Smallest eigenvalue of the interior-theta profiled Hessian.
     pub(crate) min_eigenvalue: f64,
     /// Condition number of the interior-theta profiled Hessian.

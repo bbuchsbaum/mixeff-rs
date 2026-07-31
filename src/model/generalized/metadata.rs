@@ -61,7 +61,13 @@ impl GeneralizedLinearMixedModel {
             .compiler_artifact
             .fixed_effect_covariance_matrix
             .as_ref()?;
-        if payload.status != FixedEffectCovarianceStatus::Available {
+        // Noninferential payloads stay usable as covariance geometry for
+        // vcov()/prediction; only Unavailable refuses the matrix outright.
+        if !matches!(
+            payload.status,
+            FixedEffectCovarianceStatus::Available
+                | FixedEffectCovarianceStatus::AvailableNoninferential
+        ) {
             return None;
         }
         let rows = payload.matrix.as_ref()?;
@@ -348,6 +354,47 @@ impl GeneralizedLinearMixedModel {
             return;
         }
         let outcome = self.certify_pirls_profiled_optimum();
+
+        // Reflect the certificate outcome into the optimizer certificate's
+        // first-order evidence: a passing profiled-optimum certificate is the
+        // recorded gradient evidence for this estimator's own objective, and a
+        // skipped/failed one leaves an explicit not-assessed reason instead of
+        // a silently absent free_gradient_norm.
+        if let Some(optimizer_certificate) = &mut self.lmm.compiler_artifact.optimizer_certificate {
+            match &outcome {
+                Ok(certificate) => {
+                    let boundary_indices = certificate
+                        .boundary_theta_indices
+                        .iter()
+                        .map(|index| index - 1)
+                        .collect::<Vec<_>>();
+                    let interior_rank = certificate
+                        .gradient
+                        .len()
+                        .saturating_sub(boundary_indices.len());
+                    let applied = optimizer_certificate.apply_pirls_profiled_optimum_evidence(
+                        &certificate.gradient,
+                        &boundary_indices,
+                        certificate.min_eigenvalue,
+                        certificate.condition_number,
+                        interior_rank,
+                        PIRLS_PROFILED_CERTIFICATE_GRADIENT_TOLERANCE,
+                    );
+                    if !applied {
+                        optimizer_certificate.mark_derivative_checks_not_assessed(
+                            "profiled-optimum certificate passed its gradient/curvature gates, \
+                             but the optimizer stop was not acceptable, so first-order evidence \
+                             is not recorded on the certificate",
+                        );
+                    }
+                }
+                Err(reason) => {
+                    optimizer_certificate.mark_derivative_checks_not_assessed(format!(
+                        "profiled-optimum certificate not issued: {reason}"
+                    ));
+                }
+            }
+        }
 
         let mut diagnostic = Diagnostic::new(
             DiagnosticCode::SupportNote,

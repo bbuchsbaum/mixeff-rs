@@ -350,10 +350,21 @@ fn native_glmm_artifact_records_support_contract_metadata() {
         .fixed_effect_covariance_matrix
         .as_ref()
         .expect("fitted GLMM artifact should carry fixed-effect covariance geometry");
-    assert_eq!(covariance.status, FixedEffectCovarianceStatus::Available);
+    assert_eq!(
+        covariance.status,
+        FixedEffectCovarianceStatus::AvailableNoninferential,
+        "working-Hessian covariance must not claim inferential availability while the inference table refuses"
+    );
     assert_eq!(
         covariance.method,
         FixedEffectCovarianceMethod::PirlsLaplaceWorkingHessian
+    );
+    assert!(
+        covariance
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("not certified for Wald inference")),
+        "noninferential covariance payload must say why it is not the inference surface"
     );
     assert_eq!(covariance.reliability, ReliabilityGrade::Moderate);
     assert_eq!(
@@ -404,6 +415,10 @@ fn native_glmm_artifact_records_support_contract_metadata() {
     assert_eq!(
         value["fixed_effect_covariance_matrix"]["method"],
         "pirls_laplace_working_hessian"
+    );
+    assert_eq!(
+        value["fixed_effect_covariance_matrix"]["status"],
+        "available_noninferential"
     );
     assert_eq!(
         value["fixed_effect_inference_table"]["rows"][0]["method"],

@@ -47,12 +47,13 @@ pub use audit::{
     audit_design, BasisAudit, CertificateCheck, ConvergenceEvidence, ConvergenceVerification,
     ConvergenceVerificationRun, ConvergenceVerificationStatus, CovarianceKernelAudit,
     CovarianceKernelGraphAudit, DependencePathAudit, DependencePathKind, DesignAudit,
-    EmptyCellAudit, EvidenceMethod, EvidenceQuality, FitAudit, FixedEffectAudit,
-    FixedEffectColumnAudit, FixedEffectColumnKind, FixedEffectTermAudit, FixedEffectTermStatus,
-    GradientEvidence, GroupingAudit, HessianEvidence, InformationBudgetStatus,
-    MissingDependencePathAudit, OptimizerCertificate, OptimizerDerivativeEvidence,
-    OptimizerStopEvidence, ParameterSpaceEvidence, RandomEffectEffectiveNReport,
-    RandomEffectInformationBudget, RandomTermAudit, RankAssessment, RankStatus, SampleSizeContext,
+    EmptyCellAudit, EstimatorSubstitution, EvidenceMethod, EvidenceQuality, FitAudit,
+    FixedEffectAudit, FixedEffectColumnAudit, FixedEffectColumnKind, FixedEffectTermAudit,
+    FixedEffectTermStatus, GradientEvidence, GroupingAudit, HessianEvidence,
+    InformationBudgetStatus, MissingDependencePathAudit, OptimizerCertificate,
+    OptimizerDerivativeEvidence, OptimizerStopEvidence, ParameterSpaceEvidence,
+    RandomEffectEffectiveNReport, RandomEffectInformationBudget, RandomTermAudit, RankAssessment,
+    RankStatus, SampleSizeContext,
 };
 pub use diagnostics::{Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticStage, FitStatus};
 pub use estimability::{

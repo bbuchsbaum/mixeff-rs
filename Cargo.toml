@@ -152,6 +152,14 @@ name = "probe_aphantasia_combined"
 required-features = ["unstable-internals"]
 
 [[example]]
+name = "probe_aphantasia_sensitivity"
+required-features = ["unstable-internals"]
+
+[[example]]
+name = "probe_aphantasia_profiled_vcov"
+required-features = ["unstable-internals"]
+
+[[example]]
 name = "probe_tungara_glmm"
 required-features = ["unstable-internals"]
 

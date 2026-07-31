@@ -3924,6 +3924,14 @@ pub struct OptimizerCertificate {
     #[serde(default, skip_serializing_if = "OptimizerControlEvidence::is_default")]
     pub optimizer_control: OptimizerControlEvidence,
     pub verification: Option<ConvergenceVerification>,
+    /// Present when the fit this certificate describes was produced by a
+    /// different estimator than the caller requested (e.g. a failed
+    /// joint-Laplace certification returning the fast-PIRLS fallback).
+    /// `status` and the evidence fields always describe the effective
+    /// estimator's own objective; consumers that key on `status` must treat a
+    /// populated substitution as "the requested estimator did not certify".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimator_substitution: Option<EstimatorSubstitution>,
     pub free_gradient_norm: Option<f64>,
     pub projected_gradient_norm: Option<f64>,
     pub hessian_eigen_min: Option<f64>,
@@ -4048,6 +4056,26 @@ pub enum EvidenceQuality {
     Failed { reason: String },
 }
 
+/// Machine-readable record of an estimator substitution: the requested
+/// estimator failed certification and the returned fit was produced by a
+/// different (labelled) estimator. Free-text diagnostics carry the narrative;
+/// this struct is the field-level contract downstream consumers key on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EstimatorSubstitution {
+    /// Estimator the caller asked for (e.g. `joint_laplace`, `joint_agq`).
+    pub requested_method: String,
+    /// Estimator that produced the returned fit (e.g. `fast_pirls_profiled`).
+    pub effective_method: String,
+    /// Certificate status of the requested estimator's failed attempt.
+    pub requested_fit_status: FitStatus,
+    /// Optimizer return code of the requested estimator's failed attempt.
+    pub requested_return_code: Option<String>,
+    /// Free-gradient norm recorded for the failed attempt, when assessed.
+    pub requested_free_gradient_norm: Option<f64>,
+    /// Why the substitution happened.
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConvergenceVerification {
     pub status: ConvergenceVerificationStatus,
@@ -4130,6 +4158,7 @@ impl OptimizerCertificate {
             evidence: ConvergenceEvidence::not_assessed(),
             optimizer_control: OptimizerControlEvidence::default(),
             verification: None,
+            estimator_substitution: None,
             free_gradient_norm: None,
             projected_gradient_norm: None,
             hessian_eigen_min: None,
@@ -4177,6 +4206,7 @@ impl OptimizerCertificate {
                 evidence,
                 optimizer_control: OptimizerControlEvidence::from_opt_summary(optsum),
                 verification: None,
+                estimator_substitution: None,
                 free_gradient_norm: None,
                 projected_gradient_norm: None,
                 hessian_eigen_min: None,
@@ -4375,6 +4405,7 @@ impl OptimizerCertificate {
             evidence,
             optimizer_control: OptimizerControlEvidence::from_opt_summary(optsum),
             verification: None,
+            estimator_substitution: None,
             free_gradient_norm: None,
             projected_gradient_norm: None,
             hessian_eigen_min: None,
@@ -4692,6 +4723,86 @@ impl OptimizerCertificate {
                 ),
             };
         }
+    }
+
+    /// Populate gradient and curvature evidence from a passing profiled
+    /// fast-PIRLS optimum certificate. The profiled objective minimizes beta
+    /// exactly at every theta, so the theta-space gradient is complete
+    /// first-order evidence for this estimator's own objective; the curvature
+    /// evidence covers the interior-theta subspace, with boundary coordinates
+    /// certified one-sided by the gradient check.
+    ///
+    /// Returns `false` (recording nothing) when the optimizer stop is not
+    /// acceptable: a stationarity probe cannot promote a rejected stop, and
+    /// the caller must record an explicit not-assessed reason instead.
+    #[must_use]
+    pub(crate) fn apply_pirls_profiled_optimum_evidence(
+        &mut self,
+        gradient: &[f64],
+        boundary_indices: &[usize],
+        min_eigenvalue: f64,
+        condition_number: f64,
+        interior_rank: usize,
+        gradient_tolerance: f64,
+    ) -> bool {
+        if !self.evidence.optimizer_stop.acceptable_stop {
+            return false;
+        }
+        remove_derivative_not_assessed_checks(&mut self.checks);
+        let at_boundary = |index: usize| boundary_indices.contains(&index);
+        let raw_gradient_norm = max_abs_norm(gradient);
+        let free_gradient_norm = gradient
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value)| (!at_boundary(index)).then_some(value.abs()))
+            .fold(0.0, f64::max);
+        let boundary_violation_max = gradient
+            .iter()
+            .enumerate()
+            .filter_map(|(index, value)| at_boundary(index).then_some((-*value).max(0.0)))
+            .fold(0.0, f64::max);
+        let projected_gradient_norm = free_gradient_norm.max(boundary_violation_max);
+        let objective_scale = self.objective_value.unwrap_or(1.0).abs().max(1.0);
+
+        self.free_gradient_norm = Some(free_gradient_norm);
+        self.projected_gradient_norm = Some(projected_gradient_norm);
+        self.evidence.gradient = GradientEvidence {
+            method: EvidenceMethod::FiniteDifference,
+            raw_gradient_norm: Some(raw_gradient_norm),
+            scaled_gradient_norm: Some(raw_gradient_norm / objective_scale),
+            free_gradient_norm: Some(free_gradient_norm),
+            projected_gradient_norm: Some(projected_gradient_norm),
+            kkt_boundary_gradient_max: Some(boundary_violation_max),
+        };
+        self.checks.push(CertificateCheck::FreeGradientOk {
+            tolerance: gradient_tolerance,
+            value: free_gradient_norm,
+        });
+        self.checks.push(CertificateCheck::BoundaryGradientOk {
+            tolerance: gradient_tolerance,
+            value: boundary_violation_max,
+        });
+
+        self.hessian_eigen_min = Some(min_eigenvalue);
+        self.hessian_rank = Some(interior_rank);
+        self.information_rank = Some(interior_rank);
+        self.evidence.hessian = HessianEvidence {
+            method: EvidenceMethod::FiniteDifference,
+            quality: EvidenceQuality::Approximate {
+                reason: "finite-difference interior-theta profiled Hessian is positive definite"
+                    .to_string(),
+            },
+            min_eigenvalue: Some(min_eigenvalue),
+            condition_number: Some(condition_number),
+            rank: Some(interior_rank),
+        };
+        self.checks
+            .push(CertificateCheck::HessianPsdOnActiveSubspace { min_eigenvalue });
+        self.evidence.certification_quality = EvidenceQuality::Approximate {
+            reason: "profiled fast-PIRLS optimum certificate passed stationarity and interior-theta curvature gates"
+                .to_string(),
+        };
+        true
     }
 }
 

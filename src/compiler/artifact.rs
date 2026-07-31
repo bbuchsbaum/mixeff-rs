@@ -27,7 +27,9 @@ pub const FIXED_EFFECT_INFERENCE_TABLE_SCHEMA_VERSION: &str = "1.0.0";
 pub const FIXED_EFFECT_INFERENCE_TABLE_NAME: &str = "fixed_effect_inference";
 pub const FIXED_EFFECT_COVARIANCE_MATRIX_SCHEMA: &str =
     "mixedmodels.fixed_effect_covariance_matrix";
-pub const FIXED_EFFECT_COVARIANCE_MATRIX_SCHEMA_VERSION: &str = "1.0.0";
+// 1.1.0: added the `available_noninferential` covariance status for
+// working-Hessian payloads whose Wald inference is not certified.
+pub const FIXED_EFFECT_COVARIANCE_MATRIX_SCHEMA_VERSION: &str = "1.1.0";
 pub const FIXED_EFFECT_COVARIANCE_MATRIX_NAME: &str = "fixed_effect_covariance_matrix";
 
 /// Threshold above which a single basis column is treated as carrying the
@@ -169,6 +171,14 @@ impl ModelBoundary {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GlmmFitMetadata {
     pub estimation_method: String,
+    /// Estimator the caller asked for. Differs from `effective_method` only
+    /// when a failed joint certification substituted the fast-PIRLS fallback
+    /// (`estimation_method == "fallback_fast_pirls"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_method: Option<String>,
+    /// Estimator that actually produced the returned fit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_method: Option<String>,
     pub objective_definition: String,
     pub response_constants: String,
     pub n_agq: usize,
@@ -231,9 +241,21 @@ impl GlmmFitMetadata {
                     None,
                 )
             };
+        let (requested_method, effective_method) = if is_fallback {
+            let requested = if status.starts_with("JOINT_AGQ_FALLBACK_FAST_PIRLS") {
+                "joint_agq"
+            } else {
+                "joint_laplace"
+            };
+            (requested, "fast_pirls_profiled")
+        } else {
+            (estimation_method, estimation_method)
+        };
 
         Self {
             estimation_method: estimation_method.to_string(),
+            requested_method: Some(requested_method.to_string()),
+            effective_method: Some(effective_method.to_string()),
             objective_definition: objective_definition.to_string(),
             response_constants: response_constants.to_string(),
             n_agq: opt.n_agq,
@@ -399,14 +421,22 @@ impl FixedEffectCovarianceMatrix {
         details: FixedEffectCovarianceDetails,
         notes: Vec<String>,
     ) -> Self {
-        Self::available_with_method(
+        let mut payload = Self::available_with_method(
             coef_names,
             matrix,
             FixedEffectCovarianceMethod::PirlsLaplaceWorkingHessian,
             ReliabilityGrade::Moderate,
             details,
             notes,
-        )
+        );
+        payload.status = FixedEffectCovarianceStatus::AvailableNoninferential;
+        payload.reason = Some(
+            "working-Hessian covariance is recorded for covariance geometry \
+             (vcov/prediction/diagnostics), not certified for Wald inference; \
+             the fixed_effect_inference_table is the inference arbiter"
+                .to_string(),
+        );
+        payload
     }
 
     pub fn joint_laplace_active_hessian(
@@ -459,7 +489,14 @@ pub enum FixedEffectCovarianceMethod {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FixedEffectCovarianceStatus {
+    /// Recorded and certified for the inference backend named on the
+    /// matching `fixed_effect_inference_table` rows.
     Available,
+    /// Recorded as usable covariance geometry (vcov/prediction/diagnostics)
+    /// for an estimator whose Wald inference is not certified; consumers must
+    /// not derive SE/z/p from this payload. Keeps the payload consistent with
+    /// a refusing `fixed_effect_inference_table`.
+    AvailableNoninferential,
     Unavailable,
 }
 

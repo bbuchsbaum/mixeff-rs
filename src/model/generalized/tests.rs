@@ -32,7 +32,6 @@ fn agq_poisson_fixture() -> GeneralizedLinearMixedModel {
     model
 }
 
-#[cfg(feature = "nlopt")]
 fn small_joint_poisson_fixture() -> GeneralizedLinearMixedModel {
     let mut data = DataFrame::new();
     let mut y = Vec::new();
@@ -413,6 +412,58 @@ fn joint_glmm_nonfinite_objective_stop_is_not_converged_interior() {
             .starts_with("JOINT_LAPLACE_FALLBACK_FAST_PIRLS"),
         "non-finite joint objective should return the labelled fallback result"
     );
+    let metadata = recovered
+        .compiler_artifact()
+        .glmm_fit_metadata
+        .as_ref()
+        .expect("fallback fit must record GLMM fit metadata");
+    assert_eq!(metadata.estimation_method, "fallback_fast_pirls");
+    assert_eq!(metadata.requested_method.as_deref(), Some("joint_laplace"));
+    assert_eq!(
+        metadata.effective_method.as_deref(),
+        Some("fast_pirls_profiled")
+    );
+}
+
+#[test]
+fn glmm_fit_metadata_records_requested_and_effective_methods() {
+    let mut optsum = OptSummary::new(vec![0.5]);
+    optsum.return_value =
+        "JOINT_LAPLACE_FALLBACK_FAST_PIRLS(joint=JOINT_LAPLACE_FAILED:XTOL_REACHED; fast=FTOL_REACHED)"
+            .to_string();
+    let fallback = crate::compiler::GlmmFitMetadata::from_opt_summary(&optsum);
+    assert_eq!(fallback.estimation_method, "fallback_fast_pirls");
+    assert_eq!(fallback.requested_method.as_deref(), Some("joint_laplace"));
+    assert_eq!(
+        fallback.effective_method.as_deref(),
+        Some("fast_pirls_profiled")
+    );
+
+    optsum.return_value =
+        "JOINT_AGQ_FALLBACK_FAST_PIRLS(joint=JOINT_AGQ_FAILED:XTOL_REACHED; fast=FTOL_REACHED)"
+            .to_string();
+    let agq_fallback = crate::compiler::GlmmFitMetadata::from_opt_summary(&optsum);
+    assert_eq!(agq_fallback.requested_method.as_deref(), Some("joint_agq"));
+    assert_eq!(
+        agq_fallback.effective_method.as_deref(),
+        Some("fast_pirls_profiled")
+    );
+
+    optsum.return_value = "JOINT_LAPLACE:FTOL_REACHED".to_string();
+    let joint = crate::compiler::GlmmFitMetadata::from_opt_summary(&optsum);
+    assert_eq!(joint.requested_method.as_deref(), Some("joint_laplace"));
+    assert_eq!(joint.effective_method.as_deref(), Some("joint_laplace"));
+
+    optsum.return_value = "FTOL_REACHED".to_string();
+    let profiled = crate::compiler::GlmmFitMetadata::from_opt_summary(&optsum);
+    assert_eq!(
+        profiled.requested_method.as_deref(),
+        Some("fast_pirls_profiled")
+    );
+    assert_eq!(
+        profiled.effective_method.as_deref(),
+        Some("fast_pirls_profiled")
+    );
 }
 
 #[test]
@@ -562,6 +613,70 @@ fn experimental_joint_failed_stop_returns_labelled_fast_pirls_fallback() {
         }),
         "fallback artifact must record the documented-divergence fallback path"
     );
+    let substitution = certificate
+        .estimator_substitution
+        .as_ref()
+        .expect("fallback certificate must carry a machine-readable substitution record");
+    assert_eq!(substitution.requested_method, "joint_laplace");
+    assert_eq!(substitution.effective_method, "fast_pirls_profiled");
+    assert!(
+        substitution
+            .requested_return_code
+            .as_deref()
+            .is_some_and(|code| code.starts_with("JOINT_LAPLACE")),
+        "substitution must record the failed joint attempt's return code, got {:?}",
+        substitution.requested_return_code
+    );
+    let metadata = model
+        .compiler_artifact()
+        .glmm_fit_metadata
+        .as_ref()
+        .expect("fallback fit must record GLMM fit metadata");
+    assert_eq!(metadata.requested_method.as_deref(), Some("joint_laplace"));
+    assert_eq!(
+        metadata.effective_method.as_deref(),
+        Some("fast_pirls_profiled")
+    );
+}
+
+#[test]
+fn profiled_glmm_certificate_records_first_order_evidence_or_explicit_skip() {
+    let mut model = small_joint_poisson_fixture();
+    model.fit_with_options_impl(1, false).unwrap();
+
+    let artifact = model.compiler_artifact();
+    let certificate = artifact
+        .optimizer_certificate
+        .as_ref()
+        .expect("profiled fast-PIRLS fit must carry an optimizer certificate");
+    let issued = artifact.diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .payload
+            .get("glmm_pirls_profiled_optimum_certificate")
+            == Some(&serde_json::json!("issued"))
+    });
+    if issued {
+        assert!(
+            certificate.free_gradient_norm.is_some(),
+            "an issued profiled-optimum certificate must populate free_gradient_norm"
+        );
+        assert!(
+            certificate.checks.iter().any(|check| matches!(
+                check,
+                crate::compiler::CertificateCheck::FreeGradientOk { .. }
+            )),
+            "an issued profiled-optimum certificate must record the free-gradient check"
+        );
+    } else {
+        assert!(
+            certificate.checks.iter().any(|check| matches!(
+                check,
+                crate::compiler::CertificateCheck::NotAssessed { reason }
+                    if reason.contains("profiled-optimum certificate not issued")
+            )),
+            "a skipped profiled-optimum certificate must leave an explicit not-assessed reason"
+        );
+    }
 }
 
 #[test]
@@ -3657,4 +3772,215 @@ fn joint_trust_bq_propagates_host_interrupt_callback_error() {
 
     assert_eq!(error.code(), "interrupted");
     assert_eq!(events.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn glmm_verify_convergence_is_not_run_before_fit() {
+    let mut model = small_joint_poisson_fixture();
+    let verification = model.verify_convergence().unwrap();
+    assert_eq!(
+        verification.status,
+        crate::compiler::ConvergenceVerificationStatus::NotRun
+    );
+    assert!(verification.runs.is_empty());
+    assert_eq!(verification.message, "model has not been fitted");
+}
+
+#[test]
+fn glmm_verify_convergence_profiled_restarts_agree() {
+    let mut model = small_joint_poisson_fixture();
+    model.fit_with_options(true, 1, false).unwrap();
+    let reference_objective = model.opt_summary().fmin;
+    let reference_theta = model.theta.clone();
+
+    let verification = model.verify_convergence().unwrap();
+
+    assert_eq!(
+        verification.status,
+        crate::compiler::ConvergenceVerificationStatus::RestartAgrees,
+        "profiled restarts should reproduce the recorded optimum: {}",
+        verification.message
+    );
+    assert_eq!(verification.runs.len(), 2, "restart + one jitter run");
+    assert!(verification
+        .runs
+        .iter()
+        .any(|run| run.label == "restart_from_optimum"));
+    assert!(verification
+        .runs
+        .iter()
+        .any(|run| run.label == "jitter_restart_1"));
+    for run in &verification.runs {
+        assert!(
+            run.agrees,
+            "run {} disagreed: {:?}",
+            run.label, run.diagnostics
+        );
+    }
+    assert_eq!(verification.reference_objective, Some(reference_objective));
+    assert_eq!(verification.reference_theta, reference_theta);
+
+    // The verify pass must not perturb the fitted model itself.
+    assert_eq!(model.opt_summary().fmin, reference_objective);
+    assert_eq!(model.theta, reference_theta);
+
+    let certificate = model
+        .compiler_artifact()
+        .optimizer_certificate
+        .as_ref()
+        .expect("fitted GLMM carries an optimizer certificate");
+    assert_eq!(
+        certificate.verification.as_ref().map(|v| v.status),
+        Some(crate::compiler::ConvergenceVerificationStatus::RestartAgrees),
+        "verification verdict must be attached to the optimizer certificate"
+    );
+}
+
+#[cfg(feature = "nlopt")]
+#[test]
+fn glmm_verify_convergence_joint_restarts_agree() {
+    let mut model = small_joint_poisson_fixture();
+    model.fit_with_options(false, 1, false).unwrap();
+    let joint_fit = model
+        .opt_summary()
+        .return_value
+        .starts_with("JOINT_LAPLACE:");
+
+    let verification = model.verify_convergence().unwrap();
+
+    assert_eq!(verification.runs.len(), 2, "restart + one jitter run");
+    if joint_fit {
+        // A certified joint fit should reproduce its own optimum; a labelled
+        // fallback is verified against the profiled objective instead and is
+        // covered by the profiled test above.
+        assert_eq!(
+            verification.status,
+            crate::compiler::ConvergenceVerificationStatus::RestartAgrees,
+            "joint restarts should reproduce the recorded optimum: {}",
+            verification.message
+        );
+    }
+}
+
+#[test]
+#[cfg(not(feature = "nlopt"))]
+fn glmm_verify_convergence_joint_restarts_agree_native() {
+    // The native (no-nlopt) joint route uses TrustBQ for the joint stage; the
+    // verification refit must reselect the profiled prefit optimizer instead
+    // of inheriting the fitted clone's joint-stage backend (which the profiled
+    // dispatch rejects with an Unsupported error).
+    let mut model = small_joint_poisson_fixture();
+    model.fit_with_options(false, 1, false).unwrap();
+
+    let verification = model.verify_convergence().unwrap();
+
+    for run in &verification.runs {
+        assert!(
+            run.return_code.is_some(),
+            "verification run {} never refitted: {:?}",
+            run.label,
+            run.diagnostics
+        );
+    }
+    if model
+        .opt_summary()
+        .return_value
+        .starts_with("JOINT_LAPLACE:")
+    {
+        assert_eq!(
+            verification.status,
+            crate::compiler::ConvergenceVerificationStatus::RestartAgrees,
+            "native joint restarts should reproduce the recorded optimum: {}",
+            verification.message
+        );
+    }
+}
+
+#[cfg(feature = "nlopt")]
+#[test]
+fn glmm_verify_convergence_reports_estimator_substitution_not_objective_drift() {
+    // Squeezing the verification budget makes the joint refit fail its own
+    // certification and return the labelled fast-PIRLS fallback. That run
+    // must be reported as an estimator substitution (incomparable
+    // objectives), not as an objective that moved 60+ deviance units.
+    let mut model = small_joint_poisson_fixture();
+    model.fit_with_options(false, 1, false).unwrap();
+    if !model
+        .opt_summary()
+        .return_value
+        .starts_with("JOINT_LAPLACE:")
+    {
+        return; // fixture fell back at fit time; nothing to squeeze
+    }
+
+    let mut options = crate::model::linear::ConvergenceVerificationOptions::glmm_defaults();
+    options.max_function_evaluations = 25;
+    options.jitter_starts = 0;
+    let verification = model.verify_convergence_with_options(options).unwrap();
+
+    let run = verification
+        .runs
+        .iter()
+        .find(|run| run.label == "restart_from_optimum")
+        .expect("restart run present");
+    if run
+        .return_code
+        .as_deref()
+        .is_some_and(|code| code.contains("FALLBACK_FAST_PIRLS"))
+    {
+        assert!(!run.agrees);
+        assert_eq!(
+            run.objective_delta, None,
+            "cross-estimator objectives must not be scored as a delta"
+        );
+        assert!(
+            run.diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.contains("different estimator")),
+            "substitution must be named in the run diagnostics: {:?}",
+            run.diagnostics
+        );
+    }
+}
+
+#[test]
+#[cfg(not(feature = "nlopt"))]
+fn glmm_native_uncertified_profiled_optimum_leaves_explicit_skip_reason() {
+    let (model, _) = glmm_certified_pirls_poisson_fixture();
+    assert!(matches!(
+        model.pirls_profiled_optimum_certificate,
+        Some(Err(_))
+    ));
+    let certificate = model
+        .compiler_artifact()
+        .optimizer_certificate
+        .as_ref()
+        .expect("fitted GLMM carries an optimizer certificate");
+    assert!(certificate.free_gradient_norm.is_none());
+    assert!(
+        certificate.checks.iter().any(|check| matches!(
+            check,
+            crate::compiler::CertificateCheck::NotAssessed { reason }
+                if reason.contains("profiled-optimum certificate not issued")
+        )),
+        "uncertified profiled optimum must leave an explicit not-assessed reason"
+    );
+}
+
+#[test]
+fn glmm_fit_metadata_deserializes_legacy_json_without_method_fields() {
+    let legacy = serde_json::json!({
+        "estimation_method": "fast_pirls_profiled",
+        "objective_definition": "profiled_glmm_deviance",
+        "response_constants": "dropped",
+        "n_agq": 1,
+        "optimizer_backend": "native",
+        "optimizer": "cobyla",
+        "optimizer_status": "FTOL_REACHED",
+        "optimizer_convergence_status": "converged"
+    });
+    let metadata: crate::compiler::GlmmFitMetadata = serde_json::from_value(legacy).unwrap();
+    assert_eq!(metadata.requested_method, None);
+    assert_eq!(metadata.effective_method, None);
+    assert_eq!(metadata.fallback_status, None);
 }
