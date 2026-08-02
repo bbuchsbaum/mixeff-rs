@@ -23,7 +23,13 @@ pub const COMPILED_ARTIFACT_SCHEMA_VERSION: u32 = 1;
 pub const MODEL_STATE_SUMMARY_SCHEMA: &str = "mixedmodels.model_state_summary";
 pub const MODEL_STATE_SUMMARY_SCHEMA_VERSION: u32 = 1;
 pub const FIXED_EFFECT_INFERENCE_TABLE_SCHEMA: &str = "mixedmodels.fixed_effect_inference_table";
-pub const FIXED_EFFECT_INFERENCE_TABLE_SCHEMA_VERSION: &str = "1.0.0";
+// 1.1.0: `type_iii` term rows now carry the marginal (SAS/car/lmerTest)
+// hypothesis rather than the raw coefficient block; the coefficient block is
+// available under the new additive `coefficient_block` term-test type (note
+// value `fixed-effect term test type: coefficient_block`); `type_i` rows
+// sequence terms by interaction order (R `terms()` convention) instead of
+// literal formula-expansion order.
+pub const FIXED_EFFECT_INFERENCE_TABLE_SCHEMA_VERSION: &str = "1.1.0";
 pub const FIXED_EFFECT_INFERENCE_TABLE_NAME: &str = "fixed_effect_inference";
 pub const FIXED_EFFECT_COVARIANCE_MATRIX_SCHEMA: &str =
     "mixedmodels.fixed_effect_covariance_matrix";

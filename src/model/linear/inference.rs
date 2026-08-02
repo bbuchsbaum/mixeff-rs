@@ -700,10 +700,18 @@ impl LinearMixedModel {
 
     /// Build fixed-effect term hypotheses with explicit ANOVA-style term semantics.
     ///
-    /// Type III preserves the existing coefficient-block hypothesis for each
-    /// term. Type I and Type II use the fitted model matrix cross-product to
-    /// build sequential and marginal contrast bases, respectively, following
-    /// the Doolittle contrast construction used by lmerTest.
+    /// Type III constructs the marginal (SAS/`car`/`lmerTest`) hypothesis for
+    /// each term: the term's own contrast rows are extended into every
+    /// strictly containing term with equal-weight averages over the extra
+    /// factors' levels, so main-effect tests under an interaction are
+    /// invariant to the choice of reference level. `CoefficientBlock`
+    /// preserves the raw identity block on the term's own coefficients (the
+    /// pre-marginal behavior: simple effects at the other factors' reference
+    /// levels under treatment coding). Type I sequences terms by interaction
+    /// order (R `terms()` convention: main effects before two-way
+    /// interactions before three-way, stable within an order class) and Type
+    /// II uses the fitted model matrix cross-product, both following the
+    /// Doolittle contrast construction used by lmerTest.
     pub fn fixed_effect_term_hypotheses_for_type(
         &self,
         term_test_type: FixedEffectTermTestType,
@@ -719,7 +727,10 @@ impl LinearMixedModel {
             FixedEffectTermTestType::TypeII => {
                 self.fixed_effect_type_ii_term_hypotheses(&term_indices)
             }
-            FixedEffectTermTestType::TypeIII => term_indices
+            FixedEffectTermTestType::TypeIII => {
+                self.fixed_effect_type_iii_term_hypotheses(&term_indices)
+            }
+            FixedEffectTermTestType::CoefficientBlock => term_indices
                 .iter()
                 .filter_map(|(term, indices)| {
                     fixed_effect_identity_hypothesis(term, indices, self.coef_names().len())
@@ -753,6 +764,12 @@ impl LinearMixedModel {
             .collect()
     }
 
+    /// Type I (sequential) hypotheses. Terms are sequenced by interaction
+    /// order — the R `terms()` convention: the intercept, then all order-1
+    /// terms (main effects and covariates), then two-way interactions, and so
+    /// on — stable within an order class by first appearance in the formula.
+    /// This matches lmerTest/`anova.lm`, where `y ~ A*B + x` sequences
+    /// `A, B, x, A:B` even though the formula expands `A:B` before `x`.
     fn fixed_effect_type_i_term_hypotheses(
         &self,
         term_indices: &[(String, Vec<usize>)],
@@ -761,11 +778,197 @@ impl LinearMixedModel {
         if self.feterm.x.ncols() != p || p == 0 {
             return Vec::new();
         }
-        let basis = doolittle_contrast_basis(&self.feterm.x);
+        let mut sequence: Vec<usize> = (0..term_indices.len()).collect();
+        // `sort_by_key` is stable, so equal-order terms keep formula order.
+        sequence.sort_by_key(|&position| fixed_effect_term_parts(&term_indices[position].0).len());
+        let mut permutation = Vec::with_capacity(p);
+        for &position in &sequence {
+            permutation.extend(term_indices[position].1.iter().copied());
+        }
+        // Columns not claimed by any audited term (there should be none)
+        // keep their original relative order at the end so the Doolittle
+        // basis still spans the fitted column space.
+        for column in 0..p {
+            if !permutation.contains(&column) {
+                permutation.push(column);
+            }
+        }
+        let x_new = select_matrix_columns(&self.feterm.x, &permutation);
+        let basis_new = doolittle_contrast_basis(&x_new);
+        sequence
+            .iter()
+            .filter_map(|&position| {
+                let (term, indices) = &term_indices[position];
+                if indices.is_empty() {
+                    return None;
+                }
+                let mut l = DMatrix::zeros(indices.len(), p);
+                for (out_row, &original) in indices.iter().enumerate() {
+                    let source_row = permutation.iter().position(|&col| col == original)?;
+                    for (new_col, &original_col) in permutation.iter().enumerate() {
+                        l[(out_row, original_col)] = basis_new[(source_row, new_col)];
+                    }
+                }
+                Some(FixedEffectHypothesis::zero_rhs(
+                    term.clone(),
+                    crate::compiler::ContrastMatrix::new(l).ok()?,
+                ))
+            })
+            .collect()
+    }
+
+    /// Marginal (SAS/`car`/`lmerTest`) Type III hypotheses.
+    ///
+    /// For term `T`, each of `T`'s contrast columns yields one hypothesis
+    /// row: coefficient 1 on that column, plus, for every term `U` that
+    /// strictly contains `T` (same numeric variables, strict factor
+    /// superset — the SAS containment rule), the columns of `U` that agree
+    /// with the `T` column on `T`'s variables, each weighted by the product
+    /// over `U`'s extra factors of the equally-weighted level average of
+    /// that factor's contrast column. Under default treatment coding the
+    /// level average of each dummy column is `1/m` for an `m`-level factor,
+    /// which recovers the textbook construction (e.g. for `A(2) x B(3)` the
+    /// `A` row is `beta_A2 + (1/3) beta_A2:B2 + (1/3) beta_A2:B3`, the
+    /// implicit `A2:B1` reference cell contributing zero); under
+    /// sum-to-zero contrasts the averages vanish and the hypothesis reduces
+    /// to the coefficient block, so the construction is coding-independent.
+    fn fixed_effect_type_iii_term_hypotheses(
+        &self,
+        term_indices: &[(String, Vec<usize>)],
+    ) -> Vec<FixedEffectHypothesis> {
+        let names = self.coef_names();
+        let p = names.len();
         term_indices
             .iter()
-            .filter_map(|(term, indices)| fixed_effect_basis_hypothesis(term, indices, &basis))
+            .filter_map(|(term, indices)| {
+                // Fall back to the identity block when the marginal
+                // construction cannot be built (intercept, missing design
+                // metadata, or column names the enumeration cannot
+                // reproduce). For terms with no containing term the two
+                // constructions coincide, so this is only a true fallback
+                // on degenerate metadata.
+                self.fixed_effect_marginal_hypothesis(term, indices, term_indices, &names)
+                    .or_else(|| fixed_effect_identity_hypothesis(term, indices, p))
+            })
             .collect()
+    }
+
+    fn fixed_effect_marginal_hypothesis(
+        &self,
+        term: &str,
+        indices: &[usize],
+        term_indices: &[(String, Vec<usize>)],
+        names: &[String],
+    ) -> Option<FixedEffectHypothesis> {
+        let p = names.len();
+        if p == 0 || indices.is_empty() {
+            return None;
+        }
+        let parts = fixed_effect_term_parts(term);
+        if parts.is_empty() {
+            // Intercept: keep the identity block.
+            return None;
+        }
+        let audit = self.compiler_artifact.design_audit.as_ref()?;
+        let bases = &audit.fixed_effects.contrast_bases;
+        let containers = fixed_effect_marginal_containers(term, term_indices, bases);
+        let own_encodings: Vec<Vec<MarginalComponentColumn>> = parts
+            .iter()
+            .map(|variable| marginal_component_columns(variable, bases))
+            .collect();
+        let own_counts: Vec<usize> = own_encodings.iter().map(Vec::len).collect();
+
+        let mut rows: Vec<(usize, Vec<f64>)> = Vec::new();
+        for own_combo in cartesian_index_combinations(&own_counts) {
+            let chosen: Vec<&MarginalComponentColumn> = own_combo
+                .iter()
+                .zip(&own_encodings)
+                .map(|(&index, columns)| &columns[index])
+                .collect();
+            let own_name = chosen
+                .iter()
+                .map(|column| column.design_name.as_str())
+                .collect::<Vec<_>>()
+                .join(":");
+            let Some(own_index) = names.iter().position(|name| name == &own_name) else {
+                // A design column of this term is absent from the fit; the
+                // enumeration no longer matches the fitted columns, so let
+                // the caller fall back to the identity block.
+                return None;
+            };
+            let mut row = vec![0.0; p];
+            row[own_index] = 1.0;
+            for container in &containers {
+                let container_parts = fixed_effect_term_parts(container);
+                let container_encodings: Vec<(bool, Vec<MarginalComponentColumn>)> =
+                    container_parts
+                        .iter()
+                        .map(|variable| {
+                            match parts.iter().position(|own| own == variable) {
+                                // Shared variable: fixed to the T column's
+                                // own component for this row.
+                                Some(own_position) => (false, vec![chosen[own_position].clone()]),
+                                // Extra factor: ranges over its contrast
+                                // columns with level-average weights.
+                                None => (true, marginal_component_columns(variable, bases)),
+                            }
+                        })
+                        .collect();
+                let container_counts: Vec<usize> = container_encodings
+                    .iter()
+                    .map(|(_, columns)| columns.len())
+                    .collect();
+                for container_combo in cartesian_index_combinations(&container_counts) {
+                    let mut weight = 1.0;
+                    let mut component_names = Vec::with_capacity(container_combo.len());
+                    for (&index, (is_extra, columns)) in
+                        container_combo.iter().zip(&container_encodings)
+                    {
+                        let column = &columns[index];
+                        if *is_extra {
+                            weight *= column.level_average;
+                        }
+                        component_names.push(column.design_name.as_str());
+                    }
+                    if weight == 0.0 {
+                        continue;
+                    }
+                    let container_name = component_names.join(":");
+                    // Containing-term columns dropped from the fit (aliased
+                    // or empty cells) are skipped here; the downstream
+                    // estimability/restriction-rank machinery grades the
+                    // resulting rows.
+                    if let Some(container_index) =
+                        names.iter().position(|name| name == &container_name)
+                    {
+                        row[container_index] += weight;
+                    }
+                }
+            }
+            rows.push((own_index, row));
+        }
+
+        // The enumeration must reproduce exactly the fitted columns the
+        // design audit assigned to this term; otherwise the construction is
+        // not trustworthy and the caller falls back to the identity block.
+        let mut enumerated: Vec<usize> = rows.iter().map(|(index, _)| *index).collect();
+        enumerated.sort_unstable();
+        let mut expected = indices.to_vec();
+        expected.sort_unstable();
+        if enumerated != expected {
+            return None;
+        }
+
+        let mut l = DMatrix::zeros(rows.len(), p);
+        for (out_row, (_, row)) in rows.iter().enumerate() {
+            for (column, &value) in row.iter().enumerate() {
+                l[(out_row, column)] = value;
+            }
+        }
+        Some(FixedEffectHypothesis::zero_rhs(
+            term.to_string(),
+            crate::compiler::ContrastMatrix::new(l).ok()?,
+        ))
     }
 
     fn fixed_effect_type_ii_term_hypotheses(
@@ -2242,6 +2445,7 @@ fn fixed_effect_term_test_type_label(term_test_type: FixedEffectTermTestType) ->
         FixedEffectTermTestType::TypeI => "type_i",
         FixedEffectTermTestType::TypeII => "type_ii",
         FixedEffectTermTestType::TypeIII => "type_iii",
+        FixedEffectTermTestType::CoefficientBlock => "coefficient_block",
     }
 }
 
@@ -2266,27 +2470,117 @@ fn fixed_effect_identity_hypothesis(
     ))
 }
 
-fn fixed_effect_basis_hypothesis(
+/// One encoded design column of a single model variable, as used by the
+/// marginal Type III construction: the design-matrix name fragment the
+/// column contributes to (interaction columns join fragments with `:`), and
+/// the equally-weighted average of the variable's contrast column over its
+/// levels (`1/m` for the default treatment dummies of an `m`-level factor,
+/// `0` for sum-to-zero contrasts, `1` for numeric variables).
+#[derive(Debug, Clone)]
+struct MarginalComponentColumn {
+    design_name: String,
+    level_average: f64,
+}
+
+fn marginal_component_columns(
+    variable: &str,
+    bases: &[CategoricalContrastAudit],
+) -> Vec<MarginalComponentColumn> {
+    let Some(base) = bases.iter().find(|base| base.variable == variable) else {
+        // Numeric variable: a single design column named after the variable.
+        return vec![MarginalComponentColumn {
+            design_name: variable.to_string(),
+            level_average: 1.0,
+        }];
+    };
+    let n_levels = base.contrast_matrix.len();
+    (0..base.column_names.len())
+        .map(|column| {
+            // Default treatment audits already record design names
+            // (`"variable: level"`); explicit contrast audits record the raw
+            // contrast column names, which the design prefixes with the
+            // variable (`data.rs::encoded_columns`).
+            let design_name = if base.explicit {
+                format!("{variable}: {}", base.column_names[column])
+            } else {
+                base.column_names[column].clone()
+            };
+            let level_average = if n_levels == 0 {
+                0.0
+            } else {
+                base.contrast_matrix
+                    .iter()
+                    .map(|row| row.get(column).copied().unwrap_or(0.0))
+                    .sum::<f64>()
+                    / n_levels as f64
+            };
+            MarginalComponentColumn {
+                design_name,
+                level_average,
+            }
+        })
+        .collect()
+}
+
+/// Terms that strictly contain `term` under the SAS containment rule used
+/// by `car`/`lmerTest` Type III: the candidate must involve exactly the
+/// same numeric variables and a strict superset of the factors. (`A:B`
+/// contains `A`; `x:A` contains `x`; `x:A` does *not* contain `A` because
+/// the numeric variables differ.)
+fn fixed_effect_marginal_containers(
     term: &str,
-    row_indices: &[usize],
-    basis: &DMatrix<f64>,
-) -> Option<FixedEffectHypothesis> {
-    if row_indices.is_empty() || basis.ncols() == 0 {
-        return None;
+    term_indices: &[(String, Vec<usize>)],
+    bases: &[CategoricalContrastAudit],
+) -> Vec<String> {
+    let is_factor = |variable: &str| bases.iter().any(|base| base.variable == variable);
+    let parts = fixed_effect_term_parts(term);
+    if parts.is_empty() {
+        return Vec::new();
     }
-    let mut l = DMatrix::zeros(row_indices.len(), basis.ncols());
-    for (row, &source_row) in row_indices.iter().enumerate() {
-        if source_row >= basis.nrows() {
-            return None;
-        }
-        for col in 0..basis.ncols() {
-            l[(row, col)] = basis[(source_row, col)];
-        }
+    let (term_factors, term_numeric): (Vec<&str>, Vec<&str>) =
+        parts.iter().partition(|part| is_factor(part));
+    term_indices
+        .iter()
+        .filter_map(|(candidate, _)| {
+            if candidate == term {
+                return None;
+            }
+            let candidate_parts = fixed_effect_term_parts(candidate);
+            let (candidate_factors, candidate_numeric): (Vec<&str>, Vec<&str>) =
+                candidate_parts.iter().partition(|part| is_factor(part));
+            let numeric_match = candidate_numeric.len() == term_numeric.len()
+                && term_numeric
+                    .iter()
+                    .all(|part| candidate_numeric.contains(part));
+            let factors_strict_superset = candidate_factors.len() > term_factors.len()
+                && term_factors
+                    .iter()
+                    .all(|part| candidate_factors.contains(part));
+            (numeric_match && factors_strict_superset).then(|| candidate.clone())
+        })
+        .collect()
+}
+
+/// All index combinations over per-position counts, first position
+/// outermost — the same nesting order `append_interaction_products` uses to
+/// build interaction design columns.
+fn cartesian_index_combinations(counts: &[usize]) -> Vec<Vec<usize>> {
+    if counts.contains(&0) {
+        return Vec::new();
     }
-    Some(FixedEffectHypothesis::zero_rhs(
-        term.to_string(),
-        crate::compiler::ContrastMatrix::new(l).ok()?,
-    ))
+    let mut combinations = vec![Vec::new()];
+    for &count in counts {
+        let mut next = Vec::with_capacity(combinations.len() * count);
+        for prefix in &combinations {
+            for index in 0..count {
+                let mut combination = prefix.clone();
+                combination.push(index);
+                next.push(combination);
+            }
+        }
+        combinations = next;
+    }
+    combinations
 }
 
 fn fixed_effect_type_ii_hypothesis(

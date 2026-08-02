@@ -6727,3 +6727,309 @@ fn trust_bq_propagates_host_interrupt_callback_error() {
     assert_eq!(error.code(), "interrupted");
     assert_eq!(events.load(Ordering::SeqCst), 1);
 }
+
+// ---------------------------------------------------------------------------
+// Marginal Type III / coefficient-block / terms()-order Type I semantics
+// (bd-01KZ1551AEJ4BSQBWVQEK7E95X, bd-01KZ15535G2301EECXW0ZB33DX)
+// ---------------------------------------------------------------------------
+
+/// Deterministic unbalanced A(2) x B(3) + covariate + (1 | g) fixture with
+/// cell sizes 8/14/11/5/13/9 (60 observations). All values come from a
+/// hardcoded LCG so the data are identical on every platform and no RNG
+/// crate is involved. `b_level_order` sets B's canonical level order (its
+/// first entry is the treatment-coding reference level) without changing a
+/// single observation, so refits under different orders are pure
+/// reparameterizations of the same data.
+fn unbalanced_two_by_three_fixture(b_level_order: [&str; 3]) -> DataFrame {
+    let a_levels = ["a1", "a2"];
+    let cells: [(usize, usize, usize); 6] = [
+        (0, 0, 8),
+        (0, 1, 14),
+        (0, 2, 11),
+        (1, 0, 5),
+        (1, 1, 13),
+        (1, 2, 9),
+    ];
+    let b_levels = ["b1", "b2", "b3"];
+    let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+    let mut unit = move || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        // uniform in (-1, 1), deterministic integer arithmetic only
+        ((state >> 33) as f64) / f64::from(1u32 << 30) - 2.0
+    };
+
+    let mut y = Vec::new();
+    let mut x = Vec::new();
+    let mut a = Vec::new();
+    let mut b = Vec::new();
+    let mut g = Vec::new();
+    let cell_effect = [[0.0, 1.4, -0.8], [2.1, -0.6, 0.9]];
+    let group_effect = [0.5, -0.3, 0.9, -0.7, 0.2, -0.6];
+    let mut counter = 0usize;
+    for &(ai, bi, n) in &cells {
+        for _ in 0..n {
+            let group = counter % 6;
+            let xv = unit() * 1.5;
+            let noise = unit() * 0.4;
+            y.push(3.0 + cell_effect[ai][bi] + 0.7 * xv + group_effect[group] + noise);
+            x.push(xv);
+            a.push(a_levels[ai].to_string());
+            b.push(b_levels[bi].to_string());
+            g.push(format!("g{group}"));
+            counter += 1;
+        }
+    }
+
+    let mut data = DataFrame::new();
+    data.add_numeric("y", y).unwrap();
+    data.add_numeric("x", x).unwrap();
+    data.add_categorical_with_levels("A", a, a_levels.iter().map(|s| s.to_string()).collect())
+        .unwrap();
+    data.add_categorical_with_levels(
+        "B",
+        b,
+        b_level_order.iter().map(|s| s.to_string()).collect(),
+    )
+    .unwrap();
+    data.add_categorical("g", g).unwrap();
+    data
+}
+
+fn hypothesis_row_weights(
+    hypothesis: &FixedEffectHypothesis,
+    row: usize,
+    names: &[String],
+) -> std::collections::BTreeMap<String, f64> {
+    let mut weights = std::collections::BTreeMap::new();
+    for (column, name) in names.iter().enumerate() {
+        let value = hypothesis.l.values[(row, column)];
+        if value.abs() > 1.0e-12 {
+            weights.insert(name.clone(), value);
+        }
+    }
+    weights
+}
+
+fn term_hypothesis<'a>(
+    hypotheses: &'a [FixedEffectHypothesis],
+    label: &str,
+) -> &'a FixedEffectHypothesis {
+    hypotheses
+        .iter()
+        .find(|hypothesis| hypothesis.label == label)
+        .unwrap_or_else(|| panic!("missing term hypothesis {label}"))
+}
+
+#[test]
+fn type_iii_marginal_weights_on_unbalanced_interaction_worked_example() {
+    // Worked example from the Type III bead: unbalanced A(2) x B(3) with a
+    // covariate under treatment coding. The marginal A hypothesis is
+    //   beta_A2 + mean over B levels k of beta_{A2:Bk}
+    // and the A2:B1 cell is the implicit zero reference, so the mean over
+    // B's 3 levels is (0 + beta_{A2:B2} + beta_{A2:B3}) / 3 — weight 1/3 on
+    // each of the two explicit interaction columns.
+    let data = unbalanced_two_by_three_fixture(["b1", "b2", "b3"]);
+    let formula = parse_formula("y ~ 1 + x + A + B + A:B + (1 | g)").unwrap();
+    let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+    model.fit(false).unwrap();
+    let names = model.coef_names();
+
+    let type_iii = model.fixed_effect_term_hypotheses_for_type(FixedEffectTermTestType::TypeIII);
+
+    let a_row = term_hypothesis(&type_iii, "A");
+    assert_eq!(a_row.l.values.nrows(), 1);
+    let weights = hypothesis_row_weights(a_row, 0, &names);
+    assert_eq!(weights.len(), 3);
+    assert_relative_eq!(weights["A: a2"], 1.0, epsilon = 1.0e-12);
+    assert_relative_eq!(weights["A: a2:B: b2"], 1.0 / 3.0, epsilon = 1.0e-12);
+    assert_relative_eq!(weights["A: a2:B: b3"], 1.0 / 3.0, epsilon = 1.0e-12);
+
+    // B rows: each contrast column of B extends into the interaction column
+    // that agrees with it on B, averaged over A's 2 levels (A2:Bk explicit,
+    // A1:Bk the implicit reference) — weight 1/2.
+    let b_rows = term_hypothesis(&type_iii, "B");
+    assert_eq!(b_rows.l.values.nrows(), 2);
+    for (b_name, ab_name) in [("B: b2", "A: a2:B: b2"), ("B: b3", "A: a2:B: b3")] {
+        let row = (0..2)
+            .find(|&row| {
+                let weights = hypothesis_row_weights(b_rows, row, &names);
+                weights.get(b_name).copied().unwrap_or(0.0) == 1.0
+            })
+            .unwrap_or_else(|| panic!("no B row for {b_name}"));
+        let weights = hypothesis_row_weights(b_rows, row, &names);
+        assert_eq!(weights.len(), 2);
+        assert_relative_eq!(weights[ab_name], 0.5, epsilon = 1.0e-12);
+    }
+
+    // Nothing contains x or A:B here, and the intercept keeps its identity
+    // row, so those hypotheses stay pure coefficient blocks.
+    for label in ["x", "A:B", "1"] {
+        let hypothesis = term_hypothesis(&type_iii, label);
+        for row in 0..hypothesis.l.values.nrows() {
+            let weights = hypothesis_row_weights(hypothesis, row, &names);
+            assert_eq!(weights.len(), 1, "{label} row {row} should be identity");
+            assert!(weights.values().all(|&v| v == 1.0));
+        }
+    }
+
+    // CoefficientBlock reproduces the old identity-block Type III rows.
+    let blocks =
+        model.fixed_effect_term_hypotheses_for_type(FixedEffectTermTestType::CoefficientBlock);
+    let a_block = term_hypothesis(&blocks, "A");
+    assert_eq!(a_block.l.values.nrows(), 1);
+    let block_weights = hypothesis_row_weights(a_block, 0, &names);
+    assert_eq!(block_weights.len(), 1);
+    assert_relative_eq!(block_weights["A: a2"], 1.0, epsilon = 1.0e-12);
+
+    // The typed inference table labels the block hypothesis honestly.
+    let table = model.fixed_effect_term_inference_table_for_type(
+        FixedEffectTestMethod::Satterthwaite,
+        FixedEffectTermTestType::CoefficientBlock,
+    );
+    assert!(table.rows.iter().all(|row| row
+        .notes
+        .iter()
+        .any(|note| note.contains("fixed-effect term test type: coefficient_block"))));
+}
+
+#[test]
+fn type_iii_marginal_covariate_slope_averages_over_interacting_factor() {
+    // Cell-slope algebra for x with x:A in the model (treatment coding,
+    // A has 2 levels): slope(A = a1) = beta_x (a1 is the reference, its
+    // interaction column is implicit and zero); slope(A = a2) =
+    // beta_x + beta_{x:A2}. The equally-weighted mean slope over A's levels
+    // is beta_x + (1/2) beta_{x:A2}, so the marginal x row carries 1 on `x`
+    // and 1/2 on the explicit x:A column.
+    let data = unbalanced_two_by_three_fixture(["b1", "b2", "b3"]);
+    let formula = parse_formula("y ~ 1 + x + A + x:A + (1 | g)").unwrap();
+    let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+    model.fit(false).unwrap();
+    let names = model.coef_names();
+
+    let type_iii = model.fixed_effect_term_hypotheses_for_type(FixedEffectTermTestType::TypeIII);
+
+    let x_row = term_hypothesis(&type_iii, "x");
+    assert_eq!(x_row.l.values.nrows(), 1);
+    let weights = hypothesis_row_weights(x_row, 0, &names);
+    assert_eq!(weights.len(), 2);
+    assert_relative_eq!(weights["x"], 1.0, epsilon = 1.0e-12);
+    assert_relative_eq!(weights["x:A: a2"], 0.5, epsilon = 1.0e-12);
+
+    // SAS containment: x:A does NOT contain A (the numeric variables
+    // differ), so the A hypothesis stays the coefficient block — the same
+    // convention lmerTest follows for unequal-slope models.
+    let a_row = term_hypothesis(&type_iii, "A");
+    let a_weights = hypothesis_row_weights(a_row, 0, &names);
+    assert_eq!(a_weights.len(), 1);
+    assert_relative_eq!(a_weights["A: a2"], 1.0, epsilon = 1.0e-12);
+}
+
+#[test]
+fn type_iii_f_is_invariant_to_reference_level_relabeling() {
+    // The defining property of the marginal hypothesis: relabeling which
+    // level of B is the reference must not change the Type III F for A,
+    // while the coefficient-block F for A (the simple A effect at B's
+    // reference level) does change on this unbalanced design. Note the
+    // relabeling has to touch the OTHER factor: for a 2-level A, swapping
+    // A's own reference only flips the sign of every A contrast, which
+    // leaves even the block F unchanged.
+    let f_for = |b_level_order: [&str; 3], test_type: FixedEffectTermTestType| -> f64 {
+        let data = unbalanced_two_by_three_fixture(b_level_order);
+        let formula = parse_formula("y ~ 1 + x + A + B + A:B + (1 | g)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+        let table = model.fixed_effect_term_inference_table_for_type(
+            FixedEffectTestMethod::Satterthwaite,
+            test_type,
+        );
+        let row = table
+            .rows
+            .iter()
+            .find(|row| row.label == "A")
+            .expect("A term row");
+        row.statistic.expect("A term F statistic")
+    };
+
+    let marginal_reference_b1 = f_for(["b1", "b2", "b3"], FixedEffectTermTestType::TypeIII);
+    let marginal_reference_b3 = f_for(["b3", "b1", "b2"], FixedEffectTermTestType::TypeIII);
+    assert_relative_eq!(
+        marginal_reference_b1,
+        marginal_reference_b3,
+        max_relative = 1.0e-6
+    );
+
+    let block_reference_b1 = f_for(
+        ["b1", "b2", "b3"],
+        FixedEffectTermTestType::CoefficientBlock,
+    );
+    let block_reference_b3 = f_for(
+        ["b3", "b1", "b2"],
+        FixedEffectTermTestType::CoefficientBlock,
+    );
+    assert!(
+        (block_reference_b1 - block_reference_b3).abs()
+            > 1.0e-2 * block_reference_b1.abs().max(1.0),
+        "coefficient-block A-row F should move when B's reference level changes \
+         (got {block_reference_b1} vs {block_reference_b3})"
+    );
+
+    // And the marginal F must differ from the block F on this unbalanced
+    // design — the divergence the wrapper observed against lmerTest.
+    assert!(
+        (marginal_reference_b1 - block_reference_b1).abs()
+            > 1.0e-2 * marginal_reference_b1.abs().max(1.0),
+        "marginal and block A-row F should differ on the unbalanced fixture \
+         (got {marginal_reference_b1} vs {block_reference_b1})"
+    );
+}
+
+#[test]
+fn type_i_sequences_terms_by_interaction_order() {
+    // R terms()/lmerTest convention: main effects and covariates before
+    // two-way interactions, stable within an order class by formula
+    // appearance. `y ~ A*B + x` therefore sequences A, B, x, A:B even
+    // though the formula expands A:B before x.
+    let data = unbalanced_two_by_three_fixture(["b1", "b2", "b3"]);
+    let formula = parse_formula("y ~ 1 + A + B + A:B + x + (1 | g)").unwrap();
+    let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+    model.fit(false).unwrap();
+    let names = model.coef_names();
+
+    let type_i = model.fixed_effect_term_hypotheses_for_type(FixedEffectTermTestType::TypeI);
+    let labels: Vec<&str> = type_i
+        .iter()
+        .map(|hypothesis| hypothesis.label.as_str())
+        .collect();
+    assert_eq!(labels, vec!["1", "A", "B", "x", "A:B"]);
+
+    // Literal formula order within an order class no longer matters across
+    // classes: writing x before the interaction produces numerically
+    // identical Type I hypotheses (compared coefficient-by-name because the
+    // two fits order their design columns differently).
+    let formula_reordered = parse_formula("y ~ 1 + A + B + x + A:B + (1 | g)").unwrap();
+    let mut model_reordered = LinearMixedModel::new(formula_reordered, &data, None).unwrap();
+    model_reordered.fit(false).unwrap();
+    let names_reordered = model_reordered.coef_names();
+    let type_i_reordered =
+        model_reordered.fixed_effect_term_hypotheses_for_type(FixedEffectTermTestType::TypeI);
+
+    for hypothesis in &type_i {
+        let other = term_hypothesis(&type_i_reordered, &hypothesis.label);
+        assert_eq!(hypothesis.l.values.nrows(), other.l.values.nrows());
+        for row in 0..hypothesis.l.values.nrows() {
+            for (column, name) in names.iter().enumerate() {
+                let other_column = names_reordered
+                    .iter()
+                    .position(|other_name| other_name == name)
+                    .unwrap();
+                assert_relative_eq!(
+                    hypothesis.l.values[(row, column)],
+                    other.l.values[(row, other_column)],
+                    epsilon = 1.0e-9
+                );
+            }
+        }
+    }
+}

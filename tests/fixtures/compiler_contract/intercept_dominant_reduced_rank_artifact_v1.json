@@ -23,7 +23,7 @@
   },
   "fixed_effect_inference_table": {
     "schema_name": "mixedmodels.fixed_effect_inference_table",
-    "schema_version": "1.0.0",
+    "schema_version": "1.1.0",
     "crate_version": "1.0.0-rc.1",
     "rows": [
       {

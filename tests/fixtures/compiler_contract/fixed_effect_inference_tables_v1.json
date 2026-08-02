@@ -33,7 +33,7 @@
       }
     ],
     "schema_name": "mixedmodels.fixed_effect_inference_table",
-    "schema_version": "1.0.0"
+    "schema_version": "1.1.0"
   },
   "penicillin_confirmatory": {
     "crate_version": "1.0.0-rc.1",
@@ -69,7 +69,7 @@
       }
     ],
     "schema_name": "mixedmodels.fixed_effect_inference_table",
-    "schema_version": "1.0.0"
+    "schema_version": "1.1.0"
   },
   "rank_deficient_fixed_effect": {
     "crate_version": "1.0.0-rc.1",
@@ -160,7 +160,7 @@
       }
     ],
     "schema_name": "mixedmodels.fixed_effect_inference_table",
-    "schema_version": "1.0.0"
+    "schema_version": "1.1.0"
   },
   "rank_mixture_reduced_rank": {
     "crate_version": "1.0.0-rc.1",
@@ -225,7 +225,7 @@
       }
     ],
     "schema_name": "mixedmodels.fixed_effect_inference_table",
-    "schema_version": "1.0.0"
+    "schema_version": "1.1.0"
   },
   "regularized_fit_intent": {
     "crate_version": "1.0.0-rc.1",
@@ -284,7 +284,7 @@
       }
     ],
     "schema_name": "mixedmodels.fixed_effect_inference_table",
-    "schema_version": "1.0.0"
+    "schema_version": "1.1.0"
   },
   "selection_time_reduction": {
     "crate_version": "1.0.0-rc.1",
@@ -343,7 +343,7 @@
       }
     ],
     "schema_name": "mixedmodels.fixed_effect_inference_table",
-    "schema_version": "1.0.0"
+    "schema_version": "1.1.0"
   },
   "sleepstudy_confirmatory": {
     "crate_version": "1.0.0-rc.1",
@@ -408,7 +408,7 @@
       }
     ],
     "schema_name": "mixedmodels.fixed_effect_inference_table",
-    "schema_version": "1.0.0"
+    "schema_version": "1.1.0"
   },
   "unavailable_standard_error": {
     "crate_version": "1.0.0-rc.1",
@@ -444,6 +444,6 @@
       }
     ],
     "schema_name": "mixedmodels.fixed_effect_inference_table",
-    "schema_version": "1.0.0"
+    "schema_version": "1.1.0"
   }
 }

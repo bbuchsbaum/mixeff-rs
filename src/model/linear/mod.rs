@@ -21,12 +21,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::compiler::{
-    compile_formula_ir, BasisLoading, BootstrapInferenceDetails, CertificateCheck,
-    CompiledModelArtifact, CompilerPolicy, ContrastFamilyDetails, ConvergenceVerification,
-    ConvergenceVerificationRun, ConvergenceVerificationStatus, CovarianceFamily,
-    CovarianceFamilyTransition, DesignAudit, Diagnostic, DiagnosticCode, DiagnosticSeverity,
-    DiagnosticStage, DominantLoading, EffectiveCovarianceSummary, EffectiveRankStatus,
-    EstimabilityAssessment, EstimabilityStatus, EvidenceMethod, FitStatus,
+    compile_formula_ir, BasisLoading, BootstrapInferenceDetails, CategoricalContrastAudit,
+    CertificateCheck, CompiledModelArtifact, CompilerPolicy, ContrastFamilyDetails,
+    ConvergenceVerification, ConvergenceVerificationRun, ConvergenceVerificationStatus,
+    CovarianceFamily, CovarianceFamilyTransition, DesignAudit, Diagnostic, DiagnosticCode,
+    DiagnosticSeverity, DiagnosticStage, DominantLoading, EffectiveCovarianceSummary,
+    EffectiveRankStatus, EstimabilityAssessment, EstimabilityStatus, EvidenceMethod, FitStatus,
     FixedContrastEstimability, FixedEffectCovarianceDetails, FixedEffectCovarianceMatrix,
     FixedEffectCovarianceMethod, FixedEffectHypothesis, FixedEffectInferenceDetails,
     FixedEffectInferenceMethod, FixedEffectInferenceRow, FixedEffectInferenceRowKind,

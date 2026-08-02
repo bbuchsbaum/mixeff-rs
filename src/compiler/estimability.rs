@@ -424,7 +424,19 @@ pub enum FixedEffectTestMethod {
 pub enum FixedEffectTermTestType {
     TypeI,
     TypeII,
+    /// Marginal (SAS/`car`/`lmerTest`) Type III term hypotheses. Each term's
+    /// contrast rows are extended into every strictly containing term
+    /// (equal numeric variables, strict factor superset) with equal-weight
+    /// averages over the extra factors' levels, so the hypothesis is the
+    /// marginal effect averaged over the containing interactions and is
+    /// invariant to which factor level is chosen as the reference.
     TypeIII,
+    /// The raw identity block on the term's own coefficients. Under
+    /// treatment coding with an interaction present this tests the term's
+    /// simple effect at the other factors' reference levels — a legitimate
+    /// quantity, but not the marginal Type III hypothesis. This is the
+    /// behavior `TypeIII` had before marginal construction landed.
+    CoefficientBlock,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
