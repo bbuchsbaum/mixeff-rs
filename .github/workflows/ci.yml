@@ -138,12 +138,12 @@ jobs:
         with:
           version: "1"
       - name: Install Julia parity dependencies
-        run: julia -e 'using Pkg; Pkg.add(["MixedModels", "DataFrames", "JSON3"])'
+        run: julia -e 'using Pkg; Pkg.add(["MixedModels", "DataFrames", "JSON3", "CategoricalArrays"])'
       - name: Check Julia parity fixtures
         run: bash scripts/check_julia_parity_fixtures.sh
       - name: Record engine provenance
         if: always()
-        run: julia -e 'using Pkg; Pkg.status(["MixedModels", "DataFrames", "JSON3"])'
+        run: julia -e 'using Pkg; Pkg.status(["MixedModels", "DataFrames", "JSON3", "CategoricalArrays"])'
 
   lme4-parity:
     name: lme4 comparison refresh (scheduled)

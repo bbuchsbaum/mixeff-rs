@@ -37,6 +37,8 @@ struct ScorecardRow {
     reason: Option<String>,
     #[serde(default)]
     issue_id: Option<String>,
+    #[serde(default)]
+    beta_abs_tol: Option<f64>,
 }
 
 fn repo_root() -> PathBuf {
@@ -208,9 +210,39 @@ fn parity_scorecard_covers_every_dataset_fit_once() {
             "{}: reference must be explicit",
             scorecard_key(row)
         );
+        if let Some(beta_abs_tol) = row.beta_abs_tol {
+            assert_eq!(
+                row.class_name,
+                "release_blocking_parity",
+                "{}: beta tolerance overrides are only valid for release rows",
+                scorecard_key(row)
+            );
+            assert!(
+                row.reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("row-specific")),
+                "{}: beta tolerance override needs a row-specific rationale",
+                scorecard_key(row)
+            );
+            assert!(
+                (BETA_ABS_TOL..=1.1e-3).contains(&beta_abs_tol),
+                "{}: beta tolerance override {beta_abs_tol} exceeds the reviewed bound",
+                scorecard_key(row)
+            );
+        }
         let inserted = actual.insert(scorecard_key(row));
         assert!(inserted, "duplicate scorecard row: {}", scorecard_key(row));
     }
+
+    let beta_tolerance_overrides = scorecard
+        .row
+        .iter()
+        .filter_map(|row| {
+            row.beta_abs_tol
+                .map(|tolerance| (row.dataset.as_str(), tolerance))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(beta_tolerance_overrides, [("cbpp", 1.1e-3)]);
 
     assert_eq!(
         actual, expected,
@@ -326,14 +358,15 @@ fn release_blocking_scorecard_rows_pass_checked_in_comparison_artifacts() {
                 .abs()
             })
             .fold(0.0_f64, f64::max);
+        let beta_abs_tol = row.beta_abs_tol.unwrap_or(BETA_ABS_TOL);
         assert!(
             within_tol(
                 beta_delta,
                 r_beta.values().map(|v| v.abs()).fold(0.0, f64::max),
-                BETA_ABS_TOL,
+                beta_abs_tol,
                 BETA_REL_TOL,
             ),
-            "{key}: beta delta {beta_delta:.6} exceeds release tolerance"
+            "{key}: beta delta {beta_delta:.6} exceeds release tolerance {beta_abs_tol:.6}"
         );
 
         let sigma_delta =

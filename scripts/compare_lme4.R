@@ -300,6 +300,7 @@ out <- list(
 )
 out_path <- file.path(repo_root, "comparison", "lme4_results.json")
 dir.create(dirname(out_path), showWarnings = FALSE, recursive = TRUE)
-writeLines(jsonlite::toJSON(out, auto_unbox = TRUE, pretty = TRUE, na = "null", null = "null"),
+writeLines(jsonlite::toJSON(out, auto_unbox = TRUE, pretty = TRUE, digits = 17,
+                           na = "null", null = "null"),
            con = out_path)
 cat(sprintf("\nwrote %d results to %s\n", n, out_path))

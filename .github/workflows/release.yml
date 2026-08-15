@@ -89,7 +89,7 @@ jobs:
         with:
           version: "1"
       - name: Install Julia parity dependencies
-        run: julia -e 'using Pkg; Pkg.add(["MixedModels", "DataFrames", "JSON3"])'
+        run: julia -e 'using Pkg; Pkg.add(["MixedModels", "DataFrames", "JSON3", "CategoricalArrays"])'
       - name: Check Julia parity fixtures
         run: bash scripts/check_julia_parity_fixtures.sh
 
