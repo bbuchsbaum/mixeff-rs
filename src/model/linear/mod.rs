@@ -1676,9 +1676,9 @@ impl LinearMixedModel {
         // Update wtz for every RE term: wtz[s, obs] = sqrtwts[obs] * z[s, obs]
         for rt in &mut self.reterms {
             let vsize = rt.vsize;
-            for obs in 0..n {
+            for (obs, &sw) in sqrtwts.iter().enumerate() {
                 for s in 0..vsize {
-                    rt.wtz[(s, obs)] = sqrtwts[obs] * rt.z[(s, obs)];
+                    rt.wtz[(s, obs)] = sw * rt.z[(s, obs)];
                 }
             }
         }
@@ -2986,6 +2986,10 @@ impl LinearMixedModel {
     ///   - `L` is the blocked Cholesky factor stored in `self.l_blocks`
     ///
     /// Returns one matrix per RE term with shape `vsize × n_levels`.
+    #[allow(
+        clippy::needless_range_loop,
+        reason = "the random-effect calculation mirrors block forward/back substitution and preserves the Julia accumulation order"
+    )]
     pub fn ranef_u(&self) -> Vec<DMatrix<f64>> {
         let k = self.reterms.len();
         let p = self.dims.p;
@@ -2995,12 +2999,12 @@ impl LinearMixedModel {
 
         // Step 1: weighted residuals wr[obs] = wy[obs] - wX[obs,:]*beta
         let mut wr = vec![0.0f64; n];
-        for obs in 0..n {
+        for (obs, wr_obs) in wr.iter_mut().enumerate() {
             let mut val = wtxy[(obs, p)]; // weighted y (last column)
             for q in 0..p {
                 val -= wtxy[(obs, q)] * beta[q];
             }
-            wr[obs] = val;
+            *wr_obs = val;
         }
 
         // Step 2: c_j = Λ_j' Z_j' wr  for each RE term j
@@ -3425,15 +3429,15 @@ impl LinearMixedModel {
         }
 
         let p = self.feterm.rank;
-        for obs in 0..self.dims.n {
+        for (obs, &new_response) in new_y.iter().enumerate() {
             let sw = if self.sqrtwts.is_empty() {
                 1.0
             } else {
                 self.sqrtwts[obs]
             };
-            self.y[obs] = new_y[obs];
-            self.xy_mat.xy[(obs, p)] = new_y[obs];
-            self.xy_mat.wtxy[(obs, p)] = sw * new_y[obs];
+            self.y[obs] = new_response;
+            self.xy_mat.xy[(obs, p)] = new_response;
+            self.xy_mat.wtxy[(obs, p)] = sw * new_response;
         }
 
         self.recompute_a_blocks()?;
@@ -3456,6 +3460,10 @@ impl LinearMixedModel {
     /// model degrees of freedom (rank of X + RE θ parameters).
     ///
     /// Mirrors `leverage(fm)` in Julia's MixedModels.jl.
+    #[allow(
+        clippy::needless_range_loop,
+        reason = "the leverage solve indexes packed random-effect and fixed-effect blocks through shared offsets"
+    )]
     pub fn leverage(&self) -> DVector<f64> {
         let k = self.reterms.len();
         let p = self.dims.p;
@@ -3465,8 +3473,8 @@ impl LinearMixedModel {
 
         // Cumulative column offsets into the stacked RE vector
         let mut offsets = vec![0usize; k + 1];
-        for j in 0..k {
-            offsets[j + 1] = offsets[j] + self.reterms[j].n_ranef();
+        for (j, reterm) in self.reterms.iter().enumerate() {
+            offsets[j + 1] = offsets[j] + reterm.n_ranef();
         }
         let nranef_total = offsets[k];
 
@@ -3561,6 +3569,10 @@ impl LinearMixedModel {
     /// factor.  The matrices are the diagonal blocks of `σ² Λ(Λ'Z'ZΛ+I)⁻¹Λ'`.
     ///
     /// Mirrors `condVar(m)` in Julia's MixedModels.jl.
+    #[allow(
+        clippy::needless_range_loop,
+        reason = "conditional variance follows ordered sub-block forward solves with shared packed-block offsets"
+    )]
     pub fn cond_var(&self) -> Vec<Vec<DMatrix<f64>>> {
         let k = self.reterms.len();
         let sigma = self.sigma();

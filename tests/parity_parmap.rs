@@ -1,7 +1,3 @@
-// Same rationale as the crate-level policy in src/lib.rs: the parmap parity
-// check indexes parallel arrays by a shared counter to mirror the reference.
-#![allow(clippy::needless_range_loop)]
-
 use serde::Deserialize;
 
 use mixeff_rs::formula::parse_formula;
@@ -41,11 +37,11 @@ fn parmap_vsize3_data() -> DataFrame {
     let mut z = Vec::with_capacity(20);
     let mut subj = Vec::with_capacity(20);
 
-    for subject in 0..4 {
+    for (subject, subject_effect) in subj_effects.iter().copied().enumerate() {
         for obs in 0..5 {
             let xv = obs as f64 - 2.0;
             let zv = (obs % 3) as f64 - 1.0 + subject as f64 * 0.1;
-            y.push(3.0 + 0.5 * xv - 0.2 * zv + subj_effects[subject]);
+            y.push(3.0 + 0.5 * xv - 0.2 * zv + subject_effect);
             x.push(xv);
             z.push(zv);
             subj.push(format!("S{}", subject + 1));

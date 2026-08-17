@@ -444,8 +444,8 @@ pub fn generate(spec: &GeneratorSpec) -> ModelResult<GeneratorOutput> {
             eta += u_g[re_pos];
             re_pos += 1;
         }
-        for j in 0..spec.n_re_slopes {
-            eta += u_g[re_pos] * x[j];
+        for &x_j in &x[..spec.n_re_slopes] {
+            eta += u_g[re_pos] * x_j;
             re_pos += 1;
         }
 

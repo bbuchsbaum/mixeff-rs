@@ -1086,13 +1086,13 @@ fn append_streamed_interaction_products(
                 .join(":"),
         );
 
-        for row in 0..rows.len() {
+        for (row, row_entries) in rows.iter_mut().enumerate() {
             let value = current
                 .iter()
                 .map(|factor| factor.values[row])
                 .product::<f64>();
             if value != 0.0 {
-                rows[row].push((column, value));
+                row_entries.push((column, value));
             }
         }
         return;

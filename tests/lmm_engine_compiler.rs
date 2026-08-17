@@ -482,10 +482,55 @@ fn test_objective_at_reuses_work_blocks_without_drift() {
     let theta_b = [0.7, 0.25, 1.4];
 
     let obj_a1 = model.objective_at(&theta_a).unwrap();
+    let pwrss_a1 = model.pwrss();
+    let logdet_re_a1 = model.logdet_re();
     let _obj_b = model.objective_at(&theta_b).unwrap();
     let obj_a2 = model.objective_at(&theta_a).unwrap();
+    let pwrss_a2 = model.pwrss();
+    let logdet_re_a2 = model.logdet_re();
 
     assert_relative_eq!(obj_a1, obj_a2, epsilon = 1e-10, max_relative = 1e-10);
+    assert_relative_eq!(pwrss_a1, pwrss_a2, epsilon = 1e-10, max_relative = 1e-10);
+    assert_relative_eq!(
+        logdet_re_a1,
+        logdet_re_a2,
+        epsilon = 1e-12,
+        max_relative = 1e-12
+    );
+}
+
+#[test]
+fn test_fixed_theta_algebra_is_row_permutation_invariant() {
+    let data = shared_julia_parity_fixture();
+    let reverse_order = (0..data.nrow()).rev().collect::<Vec<_>>();
+    let permuted = permute_rows(&data, &reverse_order);
+    let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+    let theta = [0.6565437822843008, -0.019160976185379253, 0.0];
+
+    let mut original_model = LinearMixedModel::new(formula.clone(), &data, None).unwrap();
+    let mut permuted_model = LinearMixedModel::new(formula, &permuted, None).unwrap();
+
+    let original_objective = original_model.objective_at(&theta).unwrap();
+    let permuted_objective = permuted_model.objective_at(&theta).unwrap();
+
+    assert_relative_eq!(
+        original_objective,
+        permuted_objective,
+        epsilon = 1e-8,
+        max_relative = 1e-10
+    );
+    assert_relative_eq!(
+        original_model.pwrss(),
+        permuted_model.pwrss(),
+        epsilon = 1e-8,
+        max_relative = 1e-10
+    );
+    assert_relative_eq!(
+        original_model.logdet_re(),
+        permuted_model.logdet_re(),
+        epsilon = 1e-10,
+        max_relative = 1e-10
+    );
 }
 
 #[test]

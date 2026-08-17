@@ -43,11 +43,10 @@ fn test_builtin_sum_contrast_fit_matches_treatment_fit_and_names_columns() {
     let mut subj = Vec::new();
     let mut i = 0usize;
     for _rep in 0..2 {
-        #[allow(clippy::needless_range_loop)]
-        for s in 0..3 {
+        for (s, subject_effect) in subj_effect.iter().copied().enumerate() {
             for c in conds {
                 let noise = ((i as f64 * 12.9898).sin() * 43758.547).fract() - 0.5;
-                y.push(10.0 + cond_effect(c) + subj_effect[s] + noise);
+                y.push(10.0 + cond_effect(c) + subject_effect + noise);
                 cond.push(c.to_string());
                 subj.push(format!("s{s}"));
                 i += 1;

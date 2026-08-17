@@ -30,10 +30,10 @@ impl BlockDescription {
         let mut block_rows = Vec::with_capacity(k);
         let mut al_types = vec![vec![String::new(); k]; k];
 
-        for i in 0..k {
+        for (i, row_types) in al_types.iter_mut().enumerate() {
             block_rows.push(model.a_blocks[block_index(i, i)].nrows());
-            for j in 0..=i {
-                al_types[i][j] = short_type(
+            for (j, block_type) in row_types.iter_mut().enumerate().take(i + 1) {
+                *block_type = short_type(
                     &model.a_blocks[block_index(i, j)],
                     &model.l_blocks[block_index(i, j)],
                 )

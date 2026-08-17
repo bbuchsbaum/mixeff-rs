@@ -1,8 +1,3 @@
-// Same rationale as the crate-level policy in src/lib.rs: the rank-deficient
-// design construction indexes parallel arrays by a shared counter to mirror the
-// Julia reference; an iterator rewrite would obscure the index algebra.
-#![allow(clippy::needless_range_loop)]
-
 use approx::assert_relative_eq;
 use rand::SeedableRng;
 use rand_distr::{Distribution, StandardNormal};
@@ -53,9 +48,9 @@ fn rank_deficient_data() -> DataFrame {
     let group_effects = [-1.2, 0.8, 0.3, -0.4, 1.1, -0.6];
     let mut y = Vec::with_capacity(n);
     let mut g = Vec::with_capacity(n);
-    for i in 0..n {
+    for (i, &x_i) in x.iter().enumerate() {
         let group = i / 4;
-        y.push(10.0 + 1.5 * x[i] + group_effects[group] + ((i + 1) % 5) as f64 * 0.07 - 0.14);
+        y.push(10.0 + 1.5 * x_i + group_effects[group] + ((i + 1) % 5) as f64 * 0.07 - 0.14);
         g.push(format!("g{}", group + 1));
     }
 
@@ -80,10 +75,10 @@ fn issue_809_wide_fixed_effect_data(n: usize, p: usize) -> DataFrame {
         let group_index = row % group_means.len();
         let group_mean = group_means[group_index];
         let mut eta = -group_mean;
-        for col in 0..p {
+        for (col, x_col) in x_cols.iter_mut().enumerate() {
             let draw: f64 = StandardNormal.sample(&mut rng);
             let value = group_mean + draw;
-            x_cols[col].push(value);
+            x_col.push(value);
             eta += if col % 2 == 0 {
                 0.3 * value
             } else {

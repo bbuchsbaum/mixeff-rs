@@ -1134,11 +1134,11 @@ fn fixed_beta_profile_components(
             )
         })?;
         let mut free_col = 0;
-        for col in 0..p {
+        for (col, beta_col) in beta.iter_mut().enumerate() {
             if col == fixed_index {
                 continue;
             }
-            beta[col] = beta_free[(free_col, 0)];
+            *beta_col = beta_free[(free_col, 0)];
             free_col += 1;
         }
         adjusted - x_free * beta_free.column(0)

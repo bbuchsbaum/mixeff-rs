@@ -76,13 +76,11 @@
 // Clippy allowlist policy (v1.0 — see docs/v1_0_release_roadmap.md Phase D #18).
 //
 // This crate is a numerically-faithful implementation of the MixedModels.jl
-// algorithms. A small, deliberately narrow set of style lints is allowed
-// crate-wide because fixing them would obscure the reference algorithms or
-// change numeric semantics:
+// algorithms. Style-lint exceptions that protect reference-algorithm structure
+// are kept next to the affected kernel, with a reason naming the index or
+// accumulation invariant. The remaining crate-wide exceptions cover API and
+// boundary contracts that genuinely span modules:
 //
-// - `needless_range_loop`: blocked-Cholesky / Z'Z / Λθ kernels index several
-//   parallel arrays by the same counter to mirror the Julia/BLAS loop algebra;
-//   iterator rewrites hide the index relationships and invite parity drift.
 // - `too_many_arguments`: solver/optimizer entry points mirror the reference
 //   API surface (θ, β, weights, blocks, …) and the inference contract docs;
 //   bundling into ad-hoc structs would diverge from that contract.
@@ -92,7 +90,6 @@
 //   boundary logic compare against exact values (e.g. θ exactly at the lower
 //   bound `0.0`) and use partial-order comparisons deliberately; an `abs()`
 //   tolerance or total-order wrapper would change boundary/sentinel semantics.
-#![allow(clippy::needless_range_loop)]
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::type_complexity)]
 #![allow(clippy::float_equality_without_abs)]

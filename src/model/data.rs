@@ -742,9 +742,9 @@ mod tests {
             [0.0, 2.0, -1.0],
             [0.0, 0.0, 3.0],
         ];
-        for i in 0..4 {
-            for j in 0..3 {
-                assert_eq!(c.matrix[(i, j)], expected[i][j], "({i},{j})");
+        for (i, expected_row) in expected.iter().enumerate() {
+            for (j, &expected_value) in expected_row.iter().enumerate() {
+                assert_eq!(c.matrix[(i, j)], expected_value, "({i},{j})");
             }
         }
     }

@@ -634,10 +634,9 @@ fn test_predict_new_unknown_level_missing() {
     let result = model.predict_new(&newdata, NewReLevels::Missing).unwrap();
     let n_missing = result.iter().filter(|v| v.is_none()).count();
     assert_eq!(n_missing, 10, "first 10 obs (new subject) should be None");
-    #[allow(clippy::needless_range_loop)]
-    for i in 10..20 {
+    for (i, prediction) in result.iter().enumerate().take(20).skip(10) {
         assert!(
-            result[i].is_some(),
+            prediction.is_some(),
             "obs {} (known subject) should be Some",
             i
         );

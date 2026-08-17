@@ -1094,10 +1094,10 @@ fn gamma_dispersion_fixture() -> DataFrame {
     let mut x = Vec::new();
     let mut group = Vec::new();
     let group_effects = [-0.25, 0.1, 0.3, -0.15];
-    for g in 0..4 {
+    for (g, &group_effect) in group_effects.iter().enumerate() {
         for obs in 0..5 {
             let xv = obs as f64 - 2.0;
-            let eta = 1.2 + 0.25 * xv + group_effects[g];
+            let eta = 1.2 + 0.25 * xv + group_effect;
             let wiggle = 1.0 + 0.06 * ((g + obs) % 3) as f64;
             y.push(eta.exp() * wiggle);
             x.push(xv);
@@ -1117,10 +1117,10 @@ fn negative_binomial_fixture() -> DataFrame {
     let mut x = Vec::new();
     let mut group = Vec::new();
     let group_effects = [-0.35, 0.1, 0.25, -0.05];
-    for g in 0..4 {
+    for (g, &group_effect) in group_effects.iter().enumerate() {
         for obs in 0..6 {
             let xv = obs as f64 - 2.5;
-            let eta = 1.0 + 0.18 * xv + group_effects[g];
+            let eta = 1.0 + 0.18 * xv + group_effect;
             let base = eta.exp();
             let overdispersion_bump = if (g + obs) % 3 == 0 { 2.0 } else { 0.0 };
             y.push((base + overdispersion_bump).round().max(0.0));

@@ -734,6 +734,11 @@ impl GeneralizedLinearMixedModel {
         // only an acceptance bound for the first step-halving loop; convergence
         // is compared with the uninflated accepted objective.
         let mut u_prev: Vec<DMatrix<f64>> = self.u.clone();
+        assert_eq!(
+            self.u.len(),
+            u_prev.len(),
+            "PIRLS current and previous random-effect blocks must stay aligned"
+        );
         let mut beta_prev = self.beta.clone();
         let mut obj0 = self.laplace_objective();
         let mut halving_bound = obj0 * 1.0001;
@@ -813,8 +818,8 @@ impl GeneralizedLinearMixedModel {
             let mut nhalf = 0;
             while (!obj.is_finite() || obj > halving_bound) && nhalf < max_halvings {
                 nhalf += 1;
-                for i in 0..self.u.len() {
-                    self.u[i] = 0.5 * (&self.u[i] + &u_prev[i]);
+                for (u, previous_u) in self.u.iter_mut().zip(&u_prev) {
+                    *u = 0.5 * (&*u + previous_u);
                 }
                 if vary_beta {
                     self.beta = 0.5 * (&self.beta + &beta_prev);
@@ -836,8 +841,8 @@ impl GeneralizedLinearMixedModel {
             }
 
             // Accept iterate as the new previous state.
-            for i in 0..self.u.len() {
-                u_prev[i].copy_from(&self.u[i]);
+            for (previous_u, u) in u_prev.iter_mut().zip(&self.u) {
+                previous_u.copy_from(u);
             }
             beta_prev = self.beta.clone();
             obj0 = obj;
@@ -856,6 +861,10 @@ impl GeneralizedLinearMixedModel {
     /// `nAGQ > 0` surface where the candidate β is part of the outer parameter
     /// vector, so the inner PIRLS step must solve only for `u` conditional on
     /// that β.
+    #[allow(
+        clippy::needless_range_loop,
+        reason = "the conditional random-effect solve mirrors block forward/back substitution and preserves its accumulation order"
+    )]
     fn ranef_u_given_beta(&self, beta: &DVector<f64>) -> Vec<DMatrix<f64>> {
         let k = self.lmm.reterms.len();
         let p = self.lmm.feterm.rank;
@@ -1148,8 +1157,8 @@ impl GeneralizedLinearMixedModel {
             }
             if z == 0.0 {
                 // devc == devc0, exp(0) * w simplifies to w
-                for g in 0..n_levels {
-                    mult[g] += w;
+                for multiplier in &mut mult {
+                    *multiplier += w;
                 }
                 continue;
             }
@@ -1159,9 +1168,9 @@ impl GeneralizedLinearMixedModel {
             }
             work.update_eta();
             // devc[g] = u[g]² + Σ devresid_i (per group)
-            for g in 0..n_levels {
+            for (g, devc_g) in devc.iter_mut().enumerate() {
                 let uv = work.u[0][(0, g)];
-                devc[g] = uv * uv;
+                *devc_g = uv * uv;
             }
             for i in 0..n_obs {
                 devc[refs[i] as usize] +=

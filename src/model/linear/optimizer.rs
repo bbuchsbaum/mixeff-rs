@@ -1781,8 +1781,8 @@ impl LinearMixedModel {
                 l_last[(2, 1)] -= z2 * z1;
                 l_last[(2, 2)] -= z2 * z2;
             } else {
-                for row in 0..pp1 {
-                    solved_by_row[row] = solve_scaled_vsize1_row(a10, row, level, lambda, l00);
+                for (row, solved) in solved_by_row.iter_mut().enumerate() {
+                    *solved = solve_scaled_vsize1_row(a10, row, level, lambda, l00);
                 }
                 for row in 0..pp1 {
                     for col in 0..=row {

@@ -206,6 +206,10 @@ pub(super) fn solve_scaled_vsize1_row(
     }
 }
 
+#[allow(
+    clippy::needless_range_loop,
+    reason = "blocked Cholesky indexes packed A/L blocks and covariance terms with the same Julia-compatible block coordinates"
+)]
 pub(crate) fn update_l_from_parts(
     a_blocks: &[MatrixBlock],
     l_blocks: &mut [MatrixBlock],
@@ -358,8 +362,8 @@ pub(super) fn create_al(
     }
 
     // FE × RE blocks: [X|y]' Z_j
-    for j in 0..k {
-        let block = compute_fe_re_cross_product(xy, &reterms[j]);
+    for reterm in reterms {
+        let block = compute_fe_re_cross_product(xy, reterm);
         a.push(block.clone());
         l.push(block);
     }
@@ -617,8 +621,8 @@ pub(crate) fn create_structural_al(
         }
     }
 
-    for j in 0..k {
-        let block = compute_x_re_cross_product(x, &reterms[j]);
+    for reterm in reterms {
+        let block = compute_x_re_cross_product(x, reterm);
         a.push(block.clone());
         l.push(block);
     }
@@ -907,12 +911,12 @@ pub(super) fn apply_lambda_transpose_to_rhs(rhs: &mut DMatrix<f64>, re: &ReMat) 
         let offset = level * s;
         let mut temp = vec![0.0; s];
         for col in 0..q {
-            for row in 0..s {
+            for (row, temp_row) in temp.iter_mut().enumerate() {
                 let mut sum = 0.0;
                 for inner in row..s {
                     sum += re.lambda[(inner, row)] * rhs[(offset + inner, col)];
                 }
-                temp[row] = sum;
+                *temp_row = sum;
             }
             for row in 0..s {
                 rhs[(offset + row, col)] = temp[row];

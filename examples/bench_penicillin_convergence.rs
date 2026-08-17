@@ -15,11 +15,6 @@
 //! - `PENICILLIN_BENCH_RESPONSE_SCALE=10.0`
 //! - `PENICILLIN_BENCH_OUTDIR=/tmp/penicillin_convergence`
 
-// Same rationale as the crate-level policy in src/lib.rs: the crossed-grid
-// fixture builder indexes parallel arrays (plate/sample refs) by a shared
-// counter to mirror the reference layout; iterator rewrites obscure it.
-#![allow(clippy::needless_range_loop)]
-
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -153,10 +148,13 @@ fn load_penicillin_grid() -> Result<PenicillinGrid, Box<dyn std::error::Error>> 
     let n_sample = sample.n_levels();
 
     let mut values = vec![vec![f64::NAN; n_sample]; n_plate];
-    for row in 0..df.nrow() {
+    assert_eq!(diameter.len(), df.nrow(), "diameter column length");
+    assert_eq!(plate.refs.len(), df.nrow(), "plate column length");
+    assert_eq!(sample.refs.len(), df.nrow(), "sample column length");
+    for (row, &diameter_value) in diameter.iter().enumerate() {
         let p = plate.refs[row] as usize;
         let s = sample.refs[row] as usize;
-        values[p][s] = diameter[row];
+        values[p][s] = diameter_value;
     }
 
     let mean = diameter.iter().sum::<f64>() / diameter.len() as f64;
@@ -190,19 +188,15 @@ fn simulate_penicillin_like(
     let mut plate = Vec::with_capacity(n_obs);
     let mut sample = Vec::with_capacity(n_obs);
 
-    for p in 0..scenario.n_plate {
+    for (p, &plate_offset) in plate_offsets.iter().enumerate() {
         let p_label = format!("P{:04}", p + 1);
-        for s in 0..scenario.n_sample {
+        for (s, &sample_offset) in sample_offsets.iter().enumerate() {
             let s_label = format!("S{:04}", s + 1);
             let base = grid.values[p % grid.n_plate][s % grid.n_sample];
             let centered = grid.mean + (base - grid.mean) * response_scale;
             for _ in 0..scenario.repeats_per_cell {
-                diameter.push(
-                    centered
-                        + plate_offsets[p]
-                        + sample_offsets[s]
-                        + residual_dist.sample(&mut rng),
-                );
+                diameter
+                    .push(centered + plate_offset + sample_offset + residual_dist.sample(&mut rng));
                 plate.push(p_label.clone());
                 sample.push(s_label.clone());
             }

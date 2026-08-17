@@ -78,9 +78,10 @@ API framing, the inference surface, and release infrastructure.
   `unstable-internals` leg on every push so that surface stays tested.
 - MSRV declared honestly as Rust 1.85, matching the current dependency graph's
   Rust 2024 edition requirement.
-- Documented, deliberately narrow crate-level Clippy `#[allow]` policy for
-  lints that would obscure the reference algorithms or change numeric
-  semantics (see `src/lib.rs`).
+- Documented Clippy policy: numerical-loop exceptions are locally scoped with
+  an explicit algebra or accumulation-order reason, while genuinely
+  cross-cutting API and boundary exceptions remain crate-wide (see
+  `src/lib.rs`).
 
 ### Notes
 

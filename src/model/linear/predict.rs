@@ -483,6 +483,10 @@ impl LinearMixedModel {
         offsets
     }
 
+    #[allow(
+        clippy::needless_range_loop,
+        reason = "the lower-triangular Lambda transpose product keeps matrix row indices explicit and accumulates in reference order"
+    )]
     fn prediction_variance_components_for_obs(
         &self,
         obs: usize,

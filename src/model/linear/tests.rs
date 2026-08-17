@@ -320,14 +320,14 @@ fn simulate_large_theta_crossed(seed: u64) -> DataFrame {
     let mut item_labels = Vec::with_capacity(total_n);
     let mut site_labels = Vec::with_capacity(total_n);
 
-    for s in 0..n_subjects {
-        for i in 0..n_items {
+    for (s, subject_effect) in subj_effects.iter().enumerate() {
+        for (i, item_effect) in item_effects.iter().enumerate() {
             for r in 0..n_rep {
                 let site = (s * 5 + i * 3 + r) % n_sites;
                 let x = r as f64 + (i % 4) as f64 * 0.35;
                 let mut mu = beta[0] + beta[1] * x;
-                mu += subj_effects[s][0] + subj_effects[s][1] * x;
-                mu += item_effects[i][0] + item_effects[i][1] * x;
+                mu += subject_effect[0] + subject_effect[1] * x;
+                mu += item_effect[0] + item_effect[1] * x;
                 mu += site_effects[site][0] + site_effects[site][1] * x;
                 let y = mu + sigma * normal.sample(&mut rng);
 
@@ -5333,19 +5333,19 @@ fn manual_one_term_ranef_u_via_block_solver(model: &LinearMixedModel) -> DMatrix
     let wtxy = &model.xy_mat.wtxy;
 
     let mut wr = vec![0.0f64; n];
-    for obs in 0..n {
+    for (obs, wr_obs) in wr.iter_mut().enumerate() {
         let mut val = wtxy[(obs, p)];
         for q in 0..p {
             val -= wtxy[(obs, q)] * beta[q];
         }
-        wr[obs] = val;
+        *wr_obs = val;
     }
 
     let mut c = vec![0.0f64; nranef];
-    for obs in 0..n {
+    for (obs, &wr_obs) in wr.iter().enumerate() {
         let r = re.refs[obs] as usize;
         for s in 0..vs {
-            c[r * vs + s] += re.wtz[(s, obs)] * wr[obs];
+            c[r * vs + s] += re.wtz[(s, obs)] * wr_obs;
         }
     }
 

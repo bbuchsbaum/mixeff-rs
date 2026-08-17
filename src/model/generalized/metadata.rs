@@ -248,16 +248,16 @@ impl GeneralizedLinearMixedModel {
             }
 
             let p = self.lmm.feterm.rank;
-            for obs in 0..self.y.len() {
+            for (obs, &new_response) in new_y.iter().enumerate() {
                 let sw = if self.lmm.sqrtwts.is_empty() {
                     1.0
                 } else {
                     self.lmm.sqrtwts[obs]
                 };
-                self.y[obs] = new_y[obs];
-                self.lmm.y[obs] = new_y[obs];
-                self.lmm.xy_mat.xy[(obs, p)] = new_y[obs];
-                self.lmm.xy_mat.wtxy[(obs, p)] = sw * new_y[obs];
+                self.y[obs] = new_response;
+                self.lmm.y[obs] = new_response;
+                self.lmm.xy_mat.xy[(obs, p)] = new_response;
+                self.lmm.xy_mat.wtxy[(obs, p)] = sw * new_response;
             }
             self.lmm.recompute_a_blocks()?;
         }

@@ -42,6 +42,10 @@ pub fn pivoted_qr(a: &DMatrix<f64>) -> (usize, Vec<usize>, DMatrix<f64>) {
 }
 
 /// Same as [`pivoted_qr`] but with a custom tolerance.
+#[allow(
+    clippy::needless_range_loop,
+    reason = "the Businger-Golub pivot step must keep column indices aligned across work, piv, vn1, vn2, and the partial R factor"
+)]
 pub fn pivoted_qr_with_tol(a: &DMatrix<f64>, ranktol: f64) -> (usize, Vec<usize>, DMatrix<f64>) {
     let (m, n) = (a.nrows(), a.ncols());
 
@@ -251,6 +255,10 @@ pub const GRAM_CERTIFICATE_SAFETY_FACTOR: f64 = 1e4;
 /// caller must use the dense [`stats_rank`] path. A certified result
 /// implies the [`stats_rank`] full-rank early return `(p, 0..p)`, so
 /// Householder pivot parity is preserved by construction.
+#[allow(
+    clippy::needless_range_loop,
+    reason = "the packed Gram elimination follows a pivot order whose slot and matrix-column indices must remain explicit"
+)]
 pub fn gram_full_rank_certificate(
     gram: &DMatrix<f64>,
     ranktol: f64,

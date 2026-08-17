@@ -484,13 +484,13 @@ fn summarise_crossing(
         }
     }
     let mut roots = std::collections::BTreeSet::new();
-    for k in 0..n_primary {
-        if primary_present[k] {
+    for (k, &present) in primary_present[..n_primary].iter().enumerate() {
+        if present {
             roots.insert(find(&mut parent, k));
         }
     }
-    for k in 0..n_secondary {
-        if secondary_present[k] {
+    for (k, &present) in secondary_present[..n_secondary].iter().enumerate() {
+        if present {
             roots.insert(find(&mut parent, n_primary + k));
         }
     }
