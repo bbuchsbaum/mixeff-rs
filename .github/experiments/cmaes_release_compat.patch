@@ -1,14 +1,20 @@
-diff --git a/examples/cmaes_optimizer_probe.rs b/examples/cmaes_optimizer_probe.rs
-index 1d53d0e..c9d35e1 100644
 --- a/examples/cmaes_optimizer_probe.rs
 +++ b/examples/cmaes_optimizer_probe.rs
-@@ -191,6 +191,21 @@ fn run_cmaes(
-         .collect::<Vec<_>>();
-     let upper = vec![5.0; initial.len()];
+@@ -1,13 +1,23 @@
+     let initial = model.theta();
+     let native_lower = model.lower_bounds();
+     // These deterministic benchmark optima are all inside this generous box.
+-    // Finite bounds keep CMA-ES's rejection sampler well-defined while still
+-    // allowing correlations/off-diagonal Cholesky elements to change sign.
 +    // cmaes 0.2.2 does not expose the bounds builder present on its current
 +    // development branch. Search in unconstrained coordinates and map them
 +    // smoothly into the native Cholesky-parameter box instead. This also avoids
 +    // rejection-sampling bias near variance-component boundaries.
+     let lower = native_lower
+         .iter()
+         .map(|bound| if bound.is_finite() { *bound } else { -5.0 })
+         .collect::<Vec<_>>();
+     let upper = vec![5.0; initial.len()];
 +    let initial_search = initial
 +        .iter()
 +        .zip(lower.iter().zip(upper.iter()))
@@ -19,7 +25,8 @@ index 1d53d0e..c9d35e1 100644
 +        .collect::<Vec<_>>();
      let objective_tolerance = 1e-6 * (1.0 + scenario.reference.abs());
      let target = scenario.reference + objective_tolerance;
-@@ -204,16 +219,31 @@ fn run_cmaes(
+ 
+@@ -21,16 +31,29 @@
      let best_value = Rc::clone(&best_seen);
      let best_point = Rc::clone(&best_theta);
      let objective = move |point: &DVector<f64>| {
@@ -50,7 +57,8 @@ index 1d53d0e..c9d35e1 100644
 +            *best_point.borrow_mut() = theta;
          }
          if value <= target && target_counter.get().is_none() {
-@@ -224,9 +254,7 @@ fn run_cmaes(
+             target_counter.set(Some(n));
+@@ -39,9 +62,7 @@
      };
  
      let start = Instant::now();
