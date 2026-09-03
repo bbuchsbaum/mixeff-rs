@@ -1,0 +1,141 @@
+name: TrustBQ production-start proof
+
+on:
+  push:
+    branches: ["experiment/trustbq-optimizer-gpt56"]
+    paths:
+      - ".github/workflows/trustbq-default-start-proof.yml"
+      - ".github/experiments/trustbq_model_reuse.patch"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  paired-default-start:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Build unmodified baseline
+        run: |
+          cargo build --release --no-default-features --example optimizer_bench_harness
+          cp target/release/examples/optimizer_bench_harness "$RUNNER_TEMP/optimizer-baseline"
+      - name: Apply candidate and test
+        run: |
+          git apply .github/experiments/trustbq_model_reuse.patch
+          cargo fmt --all
+          git diff --check
+          cargo test --no-default-features
+          cargo build --release --no-default-features --example optimizer_bench_harness
+          cp target/release/examples/optimizer_bench_harness "$RUNNER_TEMP/optimizer-candidate"
+      - name: Five paired rounds with standard start policy
+        env:
+          MIXEFF_BENCH_TRUST_BQ_SAMPLE_REUSE: disabled
+        run: |
+          set -euo pipefail
+          mkdir -p ab-results
+          for round in 1 2 3 4 5; do
+            if (( round % 2 == 1 )); then
+              "$RUNNER_TEMP/optimizer-baseline" > "ab-results/baseline-${round}.csv"
+              "$RUNNER_TEMP/optimizer-candidate" > "ab-results/candidate-${round}.csv"
+            else
+              "$RUNNER_TEMP/optimizer-candidate" > "ab-results/candidate-${round}.csv"
+              "$RUNNER_TEMP/optimizer-baseline" > "ab-results/baseline-${round}.csv"
+            fi
+          done
+      - name: Fail-closed paired analysis
+        run: |
+          cp /dev/stdin ab-results/analyze.py <<'PY'
+          import csv, glob, json, math, statistics, sys
+          from pathlib import Path
+
+          root = Path('ab-results')
+          baseline_files = sorted(root.glob('baseline-*.csv'))
+          candidate_files = sorted(root.glob('candidate-*.csv'))
+          if len(baseline_files) != 5 or len(candidate_files) != 5:
+              raise SystemExit('expected five paired rounds')
+
+          wanted = {'vector', 'crossed'}
+          by_scenario = {}
+          pair_speedups = []
+          failures = []
+
+          def load(path):
+              with path.open(newline='') as fh:
+                  return {r['scenario']: r for r in csv.DictReader(fh) if r['family'] in wanted}
+
+          for bf, cf in zip(baseline_files, candidate_files):
+              b, c = load(bf), load(cf)
+              if set(b) != set(c) or len(b) != 8:
+                  failures.append(f'scenario mismatch: {bf} {cf}')
+                  continue
+              for name in sorted(b):
+                  br, cr = b[name], c[name]
+                  bref = float(br['reference_objective'])
+                  tol = 1e-6 * (1.0 + abs(bref))
+                  bo, co = float(br['objective']), float(cr['objective'])
+                  bms, cms = float(br['median_ms']), float(cr['median_ms'])
+                  be, ce = float(br['feval_median']), float(cr['feval_median'])
+                  if br['objective_pass'].lower() != 'true' or cr['objective_pass'].lower() != 'true':
+                      failures.append(f'{name}: external objective gate failed')
+                  if abs(co-bo) > tol:
+                      failures.append(f'{name}: paired objective gap {co-bo} > {tol}')
+                  if ce > be:
+                      failures.append(f'{name}: evaluation regression {be} -> {ce}')
+                  pair_speedups.append(bms/cms)
+                  d = by_scenario.setdefault(name, {'bms':[], 'cms':[], 'be':[], 'ce':[], 'bo':[], 'co':[]})
+                  for key, value in [('bms',bms),('cms',cms),('be',be),('ce',ce),('bo',bo),('co',co)]:
+                      d[key].append(value)
+
+          rows = []
+          for name, d in sorted(by_scenario.items()):
+              bm = statistics.median(d['bms']); cm = statistics.median(d['cms'])
+              be = statistics.median(d['be']); ce = statistics.median(d['ce'])
+              speed = bm/cm
+              reduction = (be-ce)/be
+              obj_delta = statistics.median(d['co'])-statistics.median(d['bo'])
+              rows.append((name, bm, cm, speed, be, ce, reduction, obj_delta))
+              if speed < 0.95:
+                  failures.append(f'{name}: scenario median wall regression {speed:.3f}x')
+
+          aggregate_speed = statistics.median([r[3] for r in rows])
+          aggregate_reduction = (sum(r[4] for r in rows)-sum(r[5] for r in rows))/sum(r[4] for r in rows)
+          improved = sum(r[6] >= 0.08 for r in rows)
+          if aggregate_speed < 1.10:
+              failures.append(f'aggregate median speedup {aggregate_speed:.3f}x < 1.10x')
+          if improved < 3:
+              failures.append(f'only {improved} scenarios reduced evals by >=8%')
+
+          with (root/'summary.csv').open('w', newline='') as fh:
+              w=csv.writer(fh)
+              w.writerow(['scenario','baseline_ms','candidate_ms','speedup','baseline_fevals','candidate_fevals','feval_reduction_pct','objective_delta'])
+              for name,bm,cm,speed,be,ce,reduction,obj_delta in rows:
+                  w.writerow([name,f'{bm:.9f}',f'{cm:.9f}',f'{speed:.6f}',f'{be:.1f}',f'{ce:.1f}',f'{100*reduction:.4f}',f'{obj_delta:.12g}'])
+
+          report = {
+              'passed': not failures,
+              'rows': len(rows),
+              'paired_comparisons': len(pair_speedups),
+              'candidate_faster_pairs': sum(x > 1.0 for x in pair_speedups),
+              'aggregate_median_wall_speedup': aggregate_speed,
+              'aggregate_weighted_feval_reduction': aggregate_reduction,
+              'improved_rows_ge_8pct': improved,
+              'worst_scenario_median_speedup': min(r[3] for r in rows),
+              'max_abs_objective_delta': max(abs(r[7]) for r in rows),
+              'failures': failures,
+          }
+          (root/'proof.json').write_text(json.dumps(report, indent=2)+'\n')
+          print(json.dumps(report, indent=2))
+          if failures:
+              sys.exit(1)
+          PY
+          python ab-results/analyze.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trustbq-default-start-proof
+          path: ab-results/
+          if-no-files-found: error
