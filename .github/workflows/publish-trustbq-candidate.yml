@@ -1,0 +1,44 @@
+name: Publish TrustBQ candidate
+
+on:
+  push:
+    branches: ["experiment/trustbq-optimizer-gpt56"]
+    paths:
+      - ".github/workflows/publish-trustbq-candidate.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: experiment/trustbq-optimizer-gpt56
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Apply candidate to a clean main checkout
+        run: |
+          cp .github/experiments/trustbq_model_reuse.patch "$RUNNER_TEMP/trustbq_model_reuse.patch"
+          cp audit/trustbq-model-reuse-proof.md "$RUNNER_TEMP/trustbq-model-reuse-proof.md"
+          git fetch origin main
+          git checkout -B perf/trustbq-model-reuse origin/main
+          git apply "$RUNNER_TEMP/trustbq_model_reuse.patch"
+          cp "$RUNNER_TEMP/trustbq-model-reuse-proof.md" audit/trustbq-model-reuse-proof.md
+          cargo fmt --all
+      - name: Candidate dependency-light test suite
+        run: cargo test --no-default-features
+      - name: Commit and publish clean candidate branch
+        run: |
+          git config user.name "OpenAI Assistant"
+          git config user.email "assistant@openai.com"
+          git add src/optimizer/trust_bq.rs \
+                  src/model/linear/optimizer.rs \
+                  src/model/linear/active_face.rs \
+                  src/model/generalized/joint.rs \
+                  audit/trustbq-model-reuse-proof.md
+          git commit -m "Reuse TrustBQ local models conservatively"
+          git push origin HEAD:perf/trustbq-model-reuse
