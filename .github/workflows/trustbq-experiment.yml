@@ -1,99 +1,13 @@
 name: TrustBQ optimizer experiment
 
 on:
-  push:
-    branches:
-      - "experiment/trustbq-optimizer-gpt56"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  source-snapshot:
+  archived-note:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Pack source tree
-        run: tar --exclude=.git --exclude=target -czf /tmp/mixeff-rs-source.tgz .
-      - uses: actions/upload-artifact@v4
-        with:
-          name: mixeff-rs-source
-          path: /tmp/mixeff-rs-source.tgz
-          retention-days: 3
-
-  baseline-native:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Record runner
-        run: |
-          rustc --version | tee runner-native.txt
-          cargo --version | tee -a runner-native.txt
-          lscpu | tee -a runner-native.txt
-      - name: Native optimizer tests
-        run: cargo test --no-default-features trust_bq
-      - name: Native benchmark matrix
-        run: cargo run --release --no-default-features --example optimizer_bench_harness | tee baseline-native.csv
-      - uses: actions/upload-artifact@v4
-        with:
-          name: trustbq-baseline-native
-          path: |
-            baseline-native.csv
-            runner-native.txt
-          retention-days: 14
-
-  candidate-native:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt,clippy
-      - name: Apply model-maintenance candidate
-        run: git apply .github/experiments/trustbq-model-maintenance.patch
-      - name: Format candidate
-        run: cargo fmt --all
-      - name: Candidate diff
-        run: git --no-pager diff --stat && git --no-pager diff --check
-      - name: Candidate native optimizer tests
-        run: cargo test --no-default-features trust_bq
-      - name: Candidate clippy
-        # Rust 1.98 newly flags an unrelated, pre-existing nested format! in
-        # src/types/opt_summary.rs. Keep every other warning fatal so this
-        # experiment still checks the new optimizer code strictly.
-        run: cargo clippy --no-default-features --lib -- -D warnings -A clippy::format_in_format_args
-      - name: Candidate native benchmark matrix
-        run: cargo run --release --no-default-features --example optimizer_bench_harness | tee candidate-native.csv
-      - name: Save formatted candidate patch
-        run: git diff -- src/optimizer/trust_bq.rs src/model/linear/optimizer.rs > candidate-formatted.patch
-      - uses: actions/upload-artifact@v4
-        with:
-          name: trustbq-candidate-native
-          path: |
-            candidate-native.csv
-            candidate-formatted.patch
-          retention-days: 14
-
-  baseline-nlopt:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install NLopt build prerequisites
-        run: sudo apt-get update && sudo apt-get install -y cmake g++
-      - name: Record runner
-        run: |
-          rustc --version | tee runner-nlopt.txt
-          cargo --version | tee -a runner-nlopt.txt
-          lscpu | tee -a runner-nlopt.txt
-      - name: NLopt benchmark matrix
-        run: cargo run --release --example optimizer_bench_harness | tee baseline-nlopt.csv
-      - uses: actions/upload-artifact@v4
-        with:
-          name: trustbq-baseline-nlopt
-          path: |
-            baseline-nlopt.csv
-            runner-nlopt.txt
-          retention-days: 14
+      - run: echo "Superseded by trustbq-proof.yml; retained for reproducibility."
