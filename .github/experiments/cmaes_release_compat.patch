@@ -1,0 +1,63 @@
+diff --git a/examples/cmaes_optimizer_probe.rs b/examples/cmaes_optimizer_probe.rs
+index 1d53d0e..c9d35e1 100644
+--- a/examples/cmaes_optimizer_probe.rs
++++ b/examples/cmaes_optimizer_probe.rs
+@@ -191,6 +191,21 @@ fn run_cmaes(
+         .collect::<Vec<_>>();
+     let upper = vec![5.0; initial.len()];
++    // cmaes 0.2.2 does not expose the bounds builder present on its current
++    // development branch. Search in unconstrained coordinates and map them
++    // smoothly into the native Cholesky-parameter box instead. This also avoids
++    // rejection-sampling bias near variance-component boundaries.
++    let initial_search = initial
++        .iter()
++        .zip(lower.iter().zip(upper.iter()))
++        .map(|(value, (lo, hi))| {
++            let probability = ((value - lo) / (hi - lo)).clamp(1.0e-9, 1.0 - 1.0e-9);
++            (probability / (1.0 - probability)).ln()
++        })
++        .collect::<Vec<_>>();
+     let objective_tolerance = 1e-6 * (1.0 + scenario.reference.abs());
+     let target = scenario.reference + objective_tolerance;
+@@ -204,16 +219,31 @@ fn run_cmaes(
+     let best_value = Rc::clone(&best_seen);
+     let best_point = Rc::clone(&best_theta);
+     let objective = move |point: &DVector<f64>| {
++        let theta = point
++            .iter()
++            .zip(lower.iter().zip(upper.iter()))
++            .map(|(search_value, (lo, hi))| {
++                let probability = if *search_value >= 0.0 {
++                    1.0 / (1.0 + (-search_value).exp())
++                } else {
++                    let exp_value = search_value.exp();
++                    exp_value / (1.0 + exp_value)
++                };
++                lo + (hi - lo) * probability
++            })
++            .collect::<Vec<_>>();
+         let n = eval_counter.get() + 1;
+         eval_counter.set(n);
+         let value = model
+-            .objective_at(point.as_slice())
++            .objective_at(&theta)
+             .ok()
+             .filter(|value| value.is_finite())
+             .unwrap_or(1.0e300);
+         if value < best_value.get() {
+             best_value.set(value);
+-            *best_point.borrow_mut() = point.as_slice().to_vec();
++            *best_point.borrow_mut() = theta;
+         }
+         if value <= target && target_counter.get().is_none() {
+@@ -224,9 +254,7 @@ fn run_cmaes(
+     };
+ 
+     let start = Instant::now();
+-    let mut state = CMAESOptions::new(initial, sigma)
+-        .bounds(lower, upper)
+-        .max_resamples(Some(1000))
++    let mut state = CMAESOptions::new(initial_search, sigma)
+         .max_function_evals(budget)
+         .tol_fun(1e-10)
+         .tol_fun_hist(1e-10)
