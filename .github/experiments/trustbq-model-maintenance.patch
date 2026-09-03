@@ -1,0 +1,262 @@
+diff --git a/src/model/linear/optimizer.rs b/src/model/linear/optimizer.rs
+index 1cebfad..187c527 100644
+--- a/src/model/linear/optimizer.rs
++++ b/src/model/linear/optimizer.rs
+@@ -2731,6 +2731,8 @@ impl LinearMixedModel {
+                                 0
+                             },
+                             reuse_samples: resolve_reuse_samples(diagonal_indices.len() >= 7),
++                            max_rejected_model_reuses: 1,
++                            max_accepted_model_reuses: if diagonal_indices.len() <= 3 { 1 } else { 0 },
+                             stall_iterations: 3,
+                             stall_ftol_rel: 1e-6,
+                             stall_ftol_abs: 1e-8,
+@@ -2817,6 +2819,8 @@ impl LinearMixedModel {
+                 ftol_requires_local_radius: true,
+                 max_cross_terms: policy.max_cross_terms,
+                 reuse_samples: resolve_reuse_samples(policy.reuse_samples),
++                max_rejected_model_reuses: policy.max_rejected_model_reuses,
++                max_accepted_model_reuses: policy.max_accepted_model_reuses,
+                 stall_iterations: policy.stall_iterations,
+                 stall_ftol_rel: policy.stall_ftol_rel,
+                 stall_ftol_abs: policy.stall_ftol_abs,
+@@ -3961,6 +3965,8 @@ pub(super) struct TrustBqModelFamilyPolicy {
+     pub(super) ftol_rel: f64,
+     pub(super) max_cross_terms: usize,
+     pub(super) reuse_samples: bool,
++    pub(super) max_rejected_model_reuses: usize,
++    pub(super) max_accepted_model_reuses: usize,
+     pub(super) stall_iterations: usize,
+     pub(super) stall_ftol_rel: f64,
+     pub(super) stall_ftol_abs: f64,
+@@ -4057,6 +4063,12 @@ pub(super) fn trust_bq_model_family_policy(
+             0
+         },
+         reuse_samples: family == TrustBqModelFamily::CrossedLarge,
++        // Maintain a rejected model for one contraction in every family. For
++        // compact full-quadratic models, also translate one high-quality
++        // accepted step before rebuilding; diagonal large-theta models are
++        // deliberately refreshed after every accepted move.
++        max_rejected_model_reuses: 1,
++        max_accepted_model_reuses: usize::from(family == TrustBqModelFamily::Small),
+         stall_iterations,
+         stall_ftol_rel,
+         stall_ftol_abs,
+diff --git a/src/optimizer/trust_bq.rs b/src/optimizer/trust_bq.rs
+index 6fd9914..e69d08f 100644
+--- a/src/optimizer/trust_bq.rs
++++ b/src/optimizer/trust_bq.rs
+@@ -55,6 +55,23 @@ pub(crate) struct TrustBqOptions {
+     /// Default `false` keeps the evaluation count byte-identical to the
+     /// previous behavior for callers that do not opt in.
+     pub(crate) reuse_samples: bool,
++    /// Reuse the current quadratic model for this many consecutive rejected
++    /// trial steps while contracting the trust region around the unchanged
++    /// centre. A classical trust-region method does not discard a model merely
++    /// because a trial step was rejected; rebuilding here is both expensive and
++    /// unnecessary until the model has demonstrated repeated poor agreement.
++    /// Zero preserves the historical rebuild-every-iteration behaviour.
++    pub(crate) max_rejected_model_reuses: usize,
++    /// Reuse a translated quadratic model for this many consecutive accepted
++    /// high-quality steps. For q(s)=g's+1/2 s'Hs, moving the centre by d gives
++    /// the exact translated gradient g+Hd while retaining H. We anchor the
++    /// model at the newly evaluated objective and only retain it when the
++    /// actual/predicted reduction ratio exceeds `accepted_model_reuse_ratio`.
++    /// Zero preserves the historical behaviour.
++    pub(crate) max_accepted_model_reuses: usize,
++    /// Minimum actual/predicted reduction ratio required before translating a
++    /// model across an accepted step. Must lie in [eta_accept, 1].
++    pub(crate) accepted_model_reuse_ratio: f64,
+ }
+ 
+ impl Default for TrustBqOptions {
+@@ -76,6 +93,9 @@ impl Default for TrustBqOptions {
+             stall_ftol_abs: -1.0,
+             stall_requires_stable_x: true,
+             reuse_samples: false,
++            max_rejected_model_reuses: 0,
++            max_accepted_model_reuses: 0,
++            accepted_model_reuse_ratio: 0.75,
+         }
+     }
+ }
+@@ -186,6 +206,20 @@ impl QuadraticInterpolationModel {
+         let quadratic = 0.5 * s.dot(&(&self.hessian * &s));
+         -(linear + quadratic)
+     }
++
++    /// Express this quadratic around a centre displaced by `step`.
++    ///
++    /// If q(s) = g's + 1/2 s'Hs around x, then around x+d the same
++    /// quadratic has gradient g + Hd and Hessian H. The constant term is not
++    /// represented here; callers anchor it to the newly evaluated objective.
++    fn translated(&self, step: &[f64]) -> Self {
++        let displacement = DVector::from_column_slice(step);
++        Self {
++            gradient: &self.gradient + &self.hessian * displacement,
++            hessian: self.hessian.clone(),
++            sample_count: self.sample_count,
++        }
++    }
+ }
+ 
+ #[cfg(test)]
+@@ -243,6 +277,13 @@ where
+     let mut stalled = 0usize;
+     let mut stall_best_f = best_f;
+     let mut stall_best_x = best_x.clone();
++    // A model may survive a small number of trust-region contractions around
++    // the same centre, or a high-quality accepted step after exact quadratic
++    // translation. This turns TrustBQ into a genuine model-maintaining trust
++    // region method instead of rebuilding every finite-difference stencil.
++    let mut retained_model: Option<QuadraticInterpolationModel> = None;
++    let mut rejected_model_reuses = 0usize;
++    let mut accepted_model_reuses = 0usize;
+     // Stagnation tolerances default to the optimizer's `ftol_*` (preserving
+     // prior behavior for callers/tests that do not opt in) but can be set
+     // looser by callers whose convergence band is statistical rather than
+@@ -359,19 +400,25 @@ where
+         }
+ 
+         iterations += 1;
+-        let model = build_quadratic_model(
+-            &x,
+-            f,
+-            lower_bounds,
+-            upper_bounds,
+-            radius,
+-            options.max_evaluations,
+-            options.max_cross_terms,
+-            &mut fevals,
+-            &mut objective,
+-            &mut cache,
+-            reuse,
+-        )?;
++        let model = if let Some(model) = retained_model.take() {
++            model
++        } else {
++            rejected_model_reuses = 0;
++            accepted_model_reuses = 0;
++            build_quadratic_model(
++                &x,
++                f,
++                lower_bounds,
++                upper_bounds,
++                radius,
++                options.max_evaluations,
++                options.max_cross_terms,
++                &mut fevals,
++                &mut objective,
++                &mut cache,
++                reuse,
++            )?
++        };
+         last_model_sample_count = model.sample_count;
+         if fevals >= options.max_evaluations {
+             return Ok(TrustBqResult {
+@@ -430,6 +477,11 @@ where
+         let ratio = actual_reduction / predicted_reduction;
+         if ratio >= options.eta_accept && actual_reduction > 0.0 {
+             let old_f = f;
++            let accepted_step = x
++                .iter()
++                .zip(trial.iter())
++                .map(|(old, new)| new - old)
++                .collect::<Vec<_>>();
+             x = trial;
+             f = trial_f;
+ 
+@@ -437,6 +489,22 @@ where
+                 radius *= options.expand_factor;
+             }
+ 
++            // A high agreement ratio is direct evidence that the local model
++            // remains useful. Translate it to the accepted centre and spend
++            // the next evaluation on a trial point rather than rebuilding an
++            // O(d^2) finite-difference stencil. The reuse cap guarantees a
++            // periodic fresh model even along a sequence of excellent steps.
++            if ratio >= options.accepted_model_reuse_ratio
++                && accepted_model_reuses < options.max_accepted_model_reuses
++            {
++                retained_model = Some(model.translated(&accepted_step));
++                accepted_model_reuses += 1;
++                rejected_model_reuses = 0;
++            } else {
++                accepted_model_reuses = 0;
++                rejected_model_reuses = 0;
++            }
++
+             let objective_tol = options.ftol_abs + options.ftol_rel * old_f.abs().max(1.0);
+             // A tiny accepted reduction is only meaningful once the
+             // interpolation radius is local. At a coarse radius the
+@@ -462,6 +530,17 @@ where
+             }
+         } else {
+             radius *= options.shrink_factor;
++            // The centre has not changed, so the model is still expressed in
++            // the correct coordinates. Reuse it over the smaller trust region
++            // before paying for another full finite-difference stencil.
++            if rejected_model_reuses < options.max_rejected_model_reuses {
++                retained_model = Some(model);
++                rejected_model_reuses += 1;
++                accepted_model_reuses = 0;
++            } else {
++                rejected_model_reuses = 0;
++                accepted_model_reuses = 0;
++            }
+         }
+     }
+ }
+@@ -508,6 +587,8 @@ fn validate_problem(
+         || !(0.0..1.0).contains(&options.shrink_factor)
+         || options.expand_factor <= 1.0
+         || !options.expand_factor.is_finite()
++        || !options.accepted_model_reuse_ratio.is_finite()
++        || !(options.eta_accept..=1.0).contains(&options.accepted_model_reuse_ratio)
+     {
+         return Err(MixedModelError::Optimization(
+             "TrustBQ trust-region constants are invalid".to_string(),
+@@ -1180,4 +1261,43 @@ mod tests {
+             fresh.fevals
+         );
+     }
++    #[test]
++    fn trust_bq_model_maintenance_reduces_evaluations_without_moving_the_solution() {
++        // The sinusoidal term vanishes at the initial finite-difference
++        // stencil but bends the objective between stencil points. This causes
++        // a rejected interior trial and exercises contraction-time model reuse.
++        fn curved(x: &[f64]) -> Result<f64> {
++            let base = 2.0 * x[0] * x[0] - x[0];
++            Ok(base + (std::f64::consts::PI * x[0]).sin().powi(2))
++        }
++
++        let options = |maintain| TrustBqOptions {
++            initial_radius: 1.0,
++            final_radius: 1e-7,
++            max_evaluations: 2000,
++            ftol_abs: 1e-12,
++            ftol_rel: 1e-12,
++            max_rejected_model_reuses: usize::from(maintain),
++            max_accepted_model_reuses: usize::from(maintain),
++            ..TrustBqOptions::default()
++        };
++        let rebuilt = minimize(&[0.0], &[-2.0], &[2.0], options(false), curved).unwrap();
++        let maintained = minimize(&[0.0], &[-2.0], &[2.0], options(true), curved).unwrap();
++
++        assert!(rebuilt.stop_reason.is_acceptable_convergence(), "{rebuilt:?}");
++        assert!(maintained.stop_reason.is_acceptable_convergence(), "{maintained:?}");
++        assert!(
++            (maintained.fmin - rebuilt.fmin).abs() < 1e-8,
++            "objective drift: {rebuilt:?} vs {maintained:?}"
++        );
++        assert!(
++            (maintained.x[0] - rebuilt.x[0]).abs() < 1e-4,
++            "solution drift: {rebuilt:?} vs {maintained:?}"
++        );
++        assert!(
++            maintained.fevals < rebuilt.fevals,
++            "model maintenance did not save evaluations: {rebuilt:?} vs {maintained:?}"
++        );
++    }
++
+ }
