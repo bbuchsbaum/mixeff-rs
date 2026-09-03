@@ -44,14 +44,16 @@ The largest observed baseline/candidate parameter differences across the paired 
 
 ## CMA-ES comparison
 
-The external probe used released crate `cmaes 0.2.2`, 15 deterministic configurations per scenario (five seeds crossed with initial sigmas 0.15, 0.35, and 0.75), and a 600-evaluation CMA-ES budget. Cholesky parameters were mapped smoothly from unconstrained CMA coordinates into a generous finite box. A hybrid variant then spent up to another 1,000 evaluations polishing the CMA solution with the candidate TrustBQ.
+The external probe used released crate `cmaes 0.2.2` and 15 deterministic configurations per scenario: five seeds crossed with initial sigmas 0.25, 0.50, and 1.00. The CMA-ES budget was 600 evaluations for `vector_1000` and 1,200 for `crossed_small`. Cholesky parameters were mapped smoothly from unconstrained CMA coordinates into a generous finite box. A hybrid variant then requested a 500-evaluation candidate-TrustBQ polish from the best CMA solution.
 
-| Scenario | Direct CMA success | Median first-target eval among successes | Hybrid success | Median hybrid eval among successes | Candidate TrustBQ eval |
-|---|---:|---:|---:|---:|---:|
-| vector_1000 | 15/15 | 263 | 15/15 | 1,557 | 223 |
-| crossed_small | 2/15 | 1,011.5 | 11/15 | 1,405 | 478 |
+| Scenario | Direct CMA success | Median CMA evals | Median first-target eval among successes | Median CMA wall ms | Hybrid success | Median hybrid total evals | Median hybrid wall ms | Conservative TrustBQ reference used by probe |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| vector_1000 | 15/15 | 602 | 263 | 3.422 | 15/15 | 653 | 4.040 | 223 evals / 1.887 ms |
+| crossed_small | 2/15 | 1,200 | 1,011.5 | 20.572 | 11/15 | 1,405 | 27.928 | 478 evals / 13.600 ms |
 
-Direct CMA-ES therefore used more evaluations even on the easy vector case. It was unreliable on the crossed case. Hybrid CMA-ES plus TrustBQ improved robustness but was still slower, much more evaluation-intensive, and not fully reliable. The probe's decision was `do_not_promote`.
+The TrustBQ comparison values embedded in this probe came from an earlier conservative paired run; the proof table above subsequently recorded 145 and 460 evaluations for the same two scenarios. Thus the updated evidence strengthens rather than weakens the conclusion.
+
+Direct CMA-ES used more evaluations and more wall time even on the easy vector case. It was unreliable on the crossed case. Hybrid CMA-ES plus TrustBQ improved robustness but remained slower, much more evaluation-intensive, and not fully reliable. The probe's decision was `do_not_promote`.
 
 This does not imply that CMA-ES has no role in mixed models. It remains plausible as an explicitly opt-in global restart for genuinely noisy, discontinuous, or multimodal custom objectives. It is not competitive as the standard optimizer for this smooth deterministic profiled (RE)ML objective.
 
