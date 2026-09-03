@@ -44,6 +44,35 @@ jobs:
             runner-native.txt
           retention-days: 14
 
+  candidate-native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - name: Apply model-maintenance candidate
+        run: git apply .github/experiments/trustbq-model-maintenance.patch
+      - name: Format candidate
+        run: cargo fmt --all
+      - name: Candidate diff
+        run: git --no-pager diff --stat && git --no-pager diff --check
+      - name: Candidate native optimizer tests
+        run: cargo test --no-default-features trust_bq
+      - name: Candidate clippy
+        run: cargo clippy --no-default-features --lib -- -D warnings
+      - name: Candidate native benchmark matrix
+        run: cargo run --release --no-default-features --example optimizer_bench_harness | tee candidate-native.csv
+      - name: Save formatted candidate patch
+        run: git diff -- src/optimizer/trust_bq.rs src/model/linear/optimizer.rs > candidate-formatted.patch
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trustbq-candidate-native
+          path: |
+            candidate-native.csv
+            candidate-formatted.patch
+          retention-days: 14
+
   baseline-nlopt:
     runs-on: ubuntu-latest
     steps:
