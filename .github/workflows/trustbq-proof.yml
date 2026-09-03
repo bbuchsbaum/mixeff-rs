@@ -83,6 +83,7 @@ jobs:
       - name: Install isolated CMA-ES probe
         run: |
           cp .github/experiments/cmaes_probe.rs examples/cmaes_optimizer_probe.rs
+          git apply .github/experiments/cmaes_release_compat.patch
           python - <<'PY'
           from pathlib import Path
           path = Path("Cargo.toml")
@@ -96,14 +97,19 @@ jobs:
           path.write_text(text)
           PY
       - name: Run deterministic CMA-ES grid and TrustBQ polish
+        shell: bash
         run: |
+          set -euo pipefail
           cargo run --release --no-default-features --features unstable-internals --example cmaes_optimizer_probe \
             | tee cmaes-probe.csv
+          test -s cmaes-probe.csv
       - name: Summarize CMA-ES success and evaluation cost
         run: |
           python - <<'PY' | tee cmaes-summary.json
           import csv, json, statistics
           rows = list(csv.DictReader(open("cmaes-probe.csv", newline="")))
+          if not rows:
+              raise SystemExit("CMA-ES probe produced no result rows")
           out = {}
           for scenario in sorted({r["scenario"] for r in rows}):
               sr = [r for r in rows if r["scenario"] == scenario]
@@ -121,6 +127,8 @@ jobs:
                   "best_hybrid_objective": min(float(r["hybrid_objective"]) for r in sr),
                   "median_hybrid_total_evals": statistics.median(int(r["hybrid_total_evals"]) for r in hybrid) if hybrid else None,
               }
+          if len(out) != 2:
+              raise SystemExit(f"expected two CMA-ES scenarios, got {sorted(out)}")
           print(json.dumps(out, indent=2))
           PY
       - uses: actions/upload-artifact@v4
