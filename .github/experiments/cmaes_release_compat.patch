@@ -1,9 +1,10 @@
 --- a/examples/cmaes_optimizer_probe.rs
 +++ b/examples/cmaes_optimizer_probe.rs
-@@ -1,13 +1,23 @@
+@@ -195,14 +195,23 @@
+ 
      let initial = model.theta();
      let native_lower = model.lower_bounds();
-     // These deterministic benchmark optima are all inside this generous box.
+-    // These deterministic benchmark optima are all inside this generous box.
 -    // Finite bounds keep CMA-ES's rejection sampler well-defined while still
 -    // allowing correlations/off-diagonal Cholesky elements to change sign.
 +    // cmaes 0.2.2 does not expose the bounds builder present on its current
@@ -26,7 +27,7 @@
      let objective_tolerance = 1e-6 * (1.0 + scenario.reference.abs());
      let target = scenario.reference + objective_tolerance;
  
-@@ -21,16 +31,29 @@
+@@ -216,16 +225,29 @@
      let best_value = Rc::clone(&best_seen);
      let best_point = Rc::clone(&best_theta);
      let objective = move |point: &DVector<f64>| {
@@ -58,7 +59,7 @@
          }
          if value <= target && target_counter.get().is_none() {
              target_counter.set(Some(n));
-@@ -39,9 +62,7 @@
+@@ -234,9 +256,7 @@
      };
  
      let start = Instant::now();
