@@ -5,7 +5,7 @@ on:
     branches: ["experiment/trustbq-optimizer-gpt56"]
     paths:
       - ".github/workflows/trustbq-default-start-proof.yml"
-      - ".github/experiments/trustbq_model_reuse.patch"
+      - ".github/experiments/trustbq-model-maintenance.patch"
   workflow_dispatch:
 
 permissions:
@@ -23,20 +23,18 @@ jobs:
           components: rustfmt
       - name: Prepare clean main baseline
         run: |
-          cp .github/experiments/trustbq_model_reuse.patch "$RUNNER_TEMP/trustbq_model_reuse.patch"
+          cp .github/experiments/trustbq-model-maintenance.patch "$RUNNER_TEMP/trustbq-model-maintenance.patch"
           git fetch origin main
           git checkout --detach origin/main
           cargo build --release --no-default-features --example optimizer_bench_harness
           cp target/release/examples/optimizer_bench_harness "$RUNNER_TEMP/optimizer-baseline"
       - name: Apply candidate and test
         run: |
-          git apply "$RUNNER_TEMP/trustbq_model_reuse.patch"
+          git apply "$RUNNER_TEMP/trustbq-model-maintenance.patch"
           cargo fmt --all
           git diff --check -- \
             src/optimizer/trust_bq.rs \
-            src/model/linear/optimizer.rs \
-            src/model/linear/active_face.rs \
-            src/model/generalized/joint.rs
+            src/model/linear/optimizer.rs
           cargo test --no-default-features
           cargo build --release --no-default-features --example optimizer_bench_harness
           cp target/release/examples/optimizer_bench_harness "$RUNNER_TEMP/optimizer-candidate"
