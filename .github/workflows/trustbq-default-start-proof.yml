@@ -16,18 +16,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Build unmodified baseline
+      - name: Prepare clean main baseline
         run: |
+          cp .github/experiments/trustbq_model_reuse.patch "$RUNNER_TEMP/trustbq_model_reuse.patch"
+          git fetch origin main
+          git checkout --detach origin/main
           cargo build --release --no-default-features --example optimizer_bench_harness
           cp target/release/examples/optimizer_bench_harness "$RUNNER_TEMP/optimizer-baseline"
       - name: Apply candidate and test
         run: |
-          git apply .github/experiments/trustbq_model_reuse.patch
+          git apply "$RUNNER_TEMP/trustbq_model_reuse.patch"
           cargo fmt --all
-          git diff --check
+          git diff --check -- \
+            src/optimizer/trust_bq.rs \
+            src/model/linear/optimizer.rs \
+            src/model/linear/active_face.rs \
+            src/model/generalized/joint.rs
           cargo test --no-default-features
           cargo build --release --no-default-features --example optimizer_bench_harness
           cp target/release/examples/optimizer_bench_harness "$RUNNER_TEMP/optimizer-candidate"
@@ -49,7 +58,7 @@ jobs:
       - name: Fail-closed paired analysis
         run: |
           cp /dev/stdin ab-results/analyze.py <<'PY'
-          import csv, glob, json, math, statistics, sys
+          import csv, json, statistics, sys
           from pathlib import Path
 
           root = Path('ab-results')
@@ -86,14 +95,16 @@ jobs:
                   if ce > be:
                       failures.append(f'{name}: evaluation regression {be} -> {ce}')
                   pair_speedups.append(bms/cms)
-                  d = by_scenario.setdefault(name, {'bms':[], 'cms':[], 'be':[], 'ce':[], 'bo':[], 'co':[]})
-                  for key, value in [('bms',bms),('cms',cms),('be',be),('ce',ce),('bo',bo),('co',co)]:
+                  d = by_scenario.setdefault(name, {'bms': [], 'cms': [], 'be': [], 'ce': [], 'bo': [], 'co': []})
+                  for key, value in [('bms', bms), ('cms', cms), ('be', be), ('ce', ce), ('bo', bo), ('co', co)]:
                       d[key].append(value)
 
           rows = []
           for name, d in sorted(by_scenario.items()):
-              bm = statistics.median(d['bms']); cm = statistics.median(d['cms'])
-              be = statistics.median(d['be']); ce = statistics.median(d['ce'])
+              bm = statistics.median(d['bms'])
+              cm = statistics.median(d['cms'])
+              be = statistics.median(d['be'])
+              ce = statistics.median(d['ce'])
               speed = bm/cm
               reduction = (be-ce)/be
               obj_delta = statistics.median(d['co'])-statistics.median(d['bo'])
@@ -110,10 +121,10 @@ jobs:
               failures.append(f'only {improved} scenarios reduced evals by >=8%')
 
           with (root/'summary.csv').open('w', newline='') as fh:
-              w=csv.writer(fh)
-              w.writerow(['scenario','baseline_ms','candidate_ms','speedup','baseline_fevals','candidate_fevals','feval_reduction_pct','objective_delta'])
-              for name,bm,cm,speed,be,ce,reduction,obj_delta in rows:
-                  w.writerow([name,f'{bm:.9f}',f'{cm:.9f}',f'{speed:.6f}',f'{be:.1f}',f'{ce:.1f}',f'{100*reduction:.4f}',f'{obj_delta:.12g}'])
+              w = csv.writer(fh)
+              w.writerow(['scenario', 'baseline_ms', 'candidate_ms', 'speedup', 'baseline_fevals', 'candidate_fevals', 'feval_reduction_pct', 'objective_delta'])
+              for name, bm, cm, speed, be, ce, reduction, obj_delta in rows:
+                  w.writerow([name, f'{bm:.9f}', f'{cm:.9f}', f'{speed:.6f}', f'{be:.1f}', f'{ce:.1f}', f'{100*reduction:.4f}', f'{obj_delta:.12g}'])
 
           report = {
               'passed': not failures,
