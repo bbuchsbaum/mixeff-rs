@@ -1,0 +1,196 @@
+name: TrustBQ optimizer proof
+
+on:
+  push:
+    branches:
+      - "experiment/trustbq-optimizer-gpt56"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  paired-native-ab:
+    name: paired native A/B proof
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt,clippy
+      - name: Record runner
+        run: |
+          rustc --version | tee runner.txt
+          cargo --version | tee -a runner.txt
+          lscpu | tee -a runner.txt
+      - name: Build baseline binary
+        run: CARGO_TARGET_DIR="$RUNNER_TEMP/target-baseline" cargo build --release --no-default-features --example optimizer_bench_harness
+      - name: Apply model-maintenance candidate
+        run: git apply .github/experiments/trustbq-model-maintenance.patch
+      - name: Candidate quality gates
+        run: |
+          cargo fmt --all
+          git diff --check
+          cargo test --no-default-features trust_bq
+          cargo clippy --no-default-features --lib -- -D warnings -A clippy::format_in_format_args
+      - name: Build candidate binary
+        run: CARGO_TARGET_DIR="$RUNNER_TEMP/target-candidate" cargo build --release --no-default-features --example optimizer_bench_harness
+      - name: Run paired, order-balanced benchmark rounds
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ab-results
+          BASE="$RUNNER_TEMP/target-baseline/release/examples/optimizer_bench_harness"
+          CAND="$RUNNER_TEMP/target-candidate/release/examples/optimizer_bench_harness"
+          for round in 1 2 3 4 5; do
+            if (( round % 2 == 1 )); then
+              "$BASE" > "ab-results/baseline-${round}.csv"
+              "$CAND" > "ab-results/candidate-${round}.csv"
+            else
+              "$CAND" > "ab-results/candidate-${round}.csv"
+              "$BASE" > "ab-results/baseline-${round}.csv"
+            fi
+          done
+      - name: Analyze and assert proof criteria
+        run: python .github/experiments/analyze_trustbq_ab.py ab-results | tee ab-results/proof.txt
+      - name: Save formatted production patch
+        run: git diff -- src/optimizer/trust_bq.rs src/model/linear/optimizer.rs > ab-results/candidate-formatted.patch
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trustbq-paired-proof
+          path: |
+            ab-results/
+            runner.txt
+          retention-days: 30
+
+  full-native-tests:
+    name: full native test suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Apply candidate
+        run: git apply .github/experiments/trustbq-model-maintenance.patch
+      - name: Full dependency-light suite
+        run: cargo test --no-default-features
+
+  cmaes-probe:
+    name: direct CMA-ES and hybrid probe
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install isolated CMA-ES probe
+        run: |
+          cp .github/experiments/cmaes_probe.rs examples/cmaes_optimizer_probe.rs
+          python - <<'PY'
+          from pathlib import Path
+          path = Path("Cargo.toml")
+          text = path.read_text()
+          marker = 'criterion = { version = "0.5", default-features = false }\n'
+          dep = 'cmaes = { version = "0.2.2", default-features = false }\n'
+          if dep not in text:
+              if marker not in text:
+                  raise SystemExit("could not locate dev-dependencies insertion point")
+              text = text.replace(marker, marker + dep)
+          path.write_text(text)
+          PY
+      - name: Run deterministic CMA-ES grid and TrustBQ polish
+        run: |
+          cargo run --release --no-default-features --features unstable-internals --example cmaes_optimizer_probe \
+            | tee cmaes-probe.csv
+      - name: Summarize CMA-ES success and evaluation cost
+        run: |
+          python - <<'PY' | tee cmaes-summary.json
+          import csv, json, statistics
+          rows = list(csv.DictReader(open("cmaes-probe.csv", newline="")))
+          out = {}
+          for scenario in sorted({r["scenario"] for r in rows}):
+              sr = [r for r in rows if r["scenario"] == scenario]
+              direct = [r for r in sr if r["cma_target_pass"] == "true"]
+              hybrid = [r for r in sr if r["hybrid_target_pass"] == "true"]
+              first = [int(r["cma_first_target_eval"]) for r in direct if r["cma_first_target_eval"]]
+              out[scenario] = {
+                  "runs": len(sr),
+                  "direct_successes": len(direct),
+                  "direct_success_rate": len(direct) / len(sr),
+                  "best_direct_objective": min(float(r["cma_objective"]) for r in sr),
+                  "median_first_target_eval_when_successful": statistics.median(first) if first else None,
+                  "hybrid_successes": len(hybrid),
+                  "hybrid_success_rate": len(hybrid) / len(sr),
+                  "best_hybrid_objective": min(float(r["hybrid_objective"]) for r in sr),
+                  "median_hybrid_total_evals": statistics.median(int(r["hybrid_total_evals"]) for r in hybrid) if hybrid else None,
+              }
+          print(json.dumps(out, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trustbq-cmaes-probe
+          path: |
+            cmaes-probe.csv
+            cmaes-summary.json
+          retention-days: 30
+
+  prima-vs-nlopt:
+    name: PRIMA BOBYQA versus NLopt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install NLopt and PRIMA prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ gfortran
+          git clone --depth 1 --branch v0.7.2 https://github.com/libprima/prima.git "$RUNNER_TEMP/prima"
+          cmake -S "$RUNNER_TEMP/prima" -B "$RUNNER_TEMP/prima-build" -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/prima-install"
+          cmake --build "$RUNNER_TEMP/prima-build" --target install --parallel
+          echo "PRIMA_DIR=$RUNNER_TEMP/prima-install" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/prima-install/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
+      - name: Add explicit backend selector to benchmark harness
+        run: git apply .github/experiments/optimizer_backend_harness.patch
+      - name: Build both backends
+        run: |
+          CARGO_TARGET_DIR="$RUNNER_TEMP/target-nlopt" cargo build --release --example optimizer_bench_harness
+          CARGO_TARGET_DIR="$RUNNER_TEMP/target-prima" cargo build --release --no-default-features --features prima --example optimizer_bench_harness
+      - name: Run on the same runner
+        run: |
+          "$RUNNER_TEMP/target-nlopt/release/examples/optimizer_bench_harness" > nlopt.csv
+          MIXEFF_BENCH_FORCE_OPTIMIZER=prima_bobyqa \
+            "$RUNNER_TEMP/target-prima/release/examples/optimizer_bench_harness" > prima.csv
+      - name: Compare objective and evaluation counts
+        run: |
+          python - <<'PY' | tee prima-vs-nlopt.json
+          import csv, json
+          nlopt = {r["scenario"]: r for r in csv.DictReader(open("nlopt.csv", newline=""))}
+          prima = {r["scenario"]: r for r in csv.DictReader(open("prima.csv", newline=""))}
+          rows = []
+          for name in sorted(nlopt):
+              n, p = nlopt[name], prima[name]
+              tol = max(float(n["objective_tolerance"]), float(p["objective_tolerance"]))
+              objective_delta = float(p["objective"]) - float(n["objective"])
+              if not (n["objective_pass"] == "true" and p["objective_pass"] == "true"):
+                  raise SystemExit(f"reference objective failure for {name}")
+              if abs(objective_delta) > tol:
+                  raise SystemExit(f"backend objective disagreement for {name}: {objective_delta} > {tol}")
+              rows.append({
+                  "scenario": name,
+                  "nlopt_optimizer": n["optimizer"],
+                  "prima_optimizer": p["optimizer"],
+                  "nlopt_fevals": float(n["feval_median"]),
+                  "prima_fevals": float(p["feval_median"]),
+                  "prima_over_nlopt_fevals": float(p["feval_median"]) / float(n["feval_median"]),
+                  "nlopt_median_ms": float(n["median_ms"]),
+                  "prima_median_ms": float(p["median_ms"]),
+                  "objective_delta": objective_delta,
+                  "objective_tolerance": tol,
+              })
+          print(json.dumps(rows, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trustbq-prima-vs-nlopt
+          path: |
+            nlopt.csv
+            prima.csv
+            prima-vs-nlopt.json
+          retention-days: 30
