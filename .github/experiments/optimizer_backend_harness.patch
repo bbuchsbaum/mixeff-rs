@@ -1,0 +1,61 @@
+diff --git a/examples/optimizer_bench_harness.rs b/examples/optimizer_bench_harness.rs
+index f5b8f6b..e14acee 100644
+--- a/examples/optimizer_bench_harness.rs
++++ b/examples/optimizer_bench_harness.rs
+@@ -16,6 +16,7 @@ use mixeff_rs::model::linear::{
+     FitOptions, LinearMixedModel, OptimizerControl, TrustBqSampleReuse, TrustBqStartLadder,
+ };
+ use mixeff_rs::model::traits::MixedModelFit;
++use mixeff_rs::types::Optimizer;
+ 
+ const DEFAULT_WARMUP: usize = 1;
+ const DEFAULT_REPS: usize = 5;
+@@ -482,26 +483,42 @@ fn bench_sample_reuse() -> TrustBqSampleReuse {
+     }
+ }
+ 
++fn forced_bench_optimizer() -> Option<Optimizer> {
++    match std::env::var("MIXEFF_BENCH_FORCE_OPTIMIZER").as_deref() {
++        Ok("prima") | Ok("prima_bobyqa") => Some(Optimizer::PrimaBobyqa),
++        Ok("nlopt_bobyqa") => Some(Optimizer::NloptBobyqa),
++        Ok("nlopt_newuoa") => Some(Optimizer::NloptNewuoa),
++        Ok("trust_bq") => Some(Optimizer::TrustBq),
++        _ => None,
++    }
++}
++
+ fn fit_with_bench_controls(
+     model: &mut LinearMixedModel,
+     reml: bool,
+ ) -> mixeff_rs::error::Result<()> {
+     let ladder = bench_start_ladder();
+     let sample_reuse = bench_sample_reuse();
+-    if ladder == TrustBqStartLadder::Off && sample_reuse == TrustBqSampleReuse::FamilyPolicy {
++    let forced_optimizer = forced_bench_optimizer();
++    if ladder == TrustBqStartLadder::Off
++        && sample_reuse == TrustBqSampleReuse::FamilyPolicy
++        && forced_optimizer.is_none()
++    {
+         model.fit(reml)?;
+         return Ok(());
+     }
++    let mut control = OptimizerControl::auto()
++        .with_trust_bq_start_ladder(ladder)
++        .with_trust_bq_sample_reuse(sample_reuse);
++    if let Some(optimizer) = forced_optimizer {
++        control = control.with_optimizer(optimizer);
++    }
+     let options = if reml {
+         FitOptions::reml()
+     } else {
+         FitOptions::ml()
+     }
+-    .with_optimizer_control(
+-        OptimizerControl::auto()
+-            .with_trust_bq_start_ladder(ladder)
+-            .with_trust_bq_sample_reuse(sample_reuse),
+-    );
++    .with_optimizer_control(control);
+     model.fit_with_options(options)?;
+     Ok(())
+ }
