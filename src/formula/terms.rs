@@ -4,6 +4,7 @@
 //! `y ~ 1 + x1 + x2 + (1 + x1 | group)`.  The design mirrors the term representation
 //! used by Julia's MixedModels.jl.
 
+use std::borrow::Cow;
 use std::fmt;
 
 use super::transform::DerivedColumn;
@@ -187,8 +188,19 @@ impl Formula {
     /// accepting a diverging pre-supplied column would recreate the exact
     /// two-implementations-of-the-recipe failure the seam contract forbids.
     pub fn materialize(&self, data: &DataFrame) -> Result<DataFrame> {
+        Ok(self.materialize_cow(data)?.into_owned())
+    }
+
+    /// Borrowing form of [`materialize`](Self::materialize): returns the
+    /// caller's frame untouched (`Cow::Borrowed`) when the formula has no
+    /// derived columns, and an owned frame with the derived columns
+    /// appended otherwise. Model construction uses this so a formula
+    /// without transforms never deep-copies the data (a per-row `String`
+    /// clone for every categorical column, which dominated construction
+    /// time for scalar random-intercept fits).
+    pub fn materialize_cow<'a>(&self, data: &'a DataFrame) -> Result<Cow<'a, DataFrame>> {
         if self.derived.is_empty() {
-            return Ok(data.clone());
+            return Ok(Cow::Borrowed(data));
         }
         let mut out = data.clone();
         for d in &self.derived {
@@ -242,7 +254,7 @@ impl Formula {
                 out.add_numeric(&d.label, engine_values)?;
             }
         }
-        Ok(out)
+        Ok(Cow::Owned(out))
     }
 }
 

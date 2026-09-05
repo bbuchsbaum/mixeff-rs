@@ -1127,8 +1127,8 @@ impl LinearMixedModel {
         // seeing "a column by name"; the formula's term/response references
         // already carry the canonical labels. See
         // `docs/formula_transform_seam.md`.
-        let materialized = formula.materialize(data)?;
-        let data = &materialized;
+        let materialized = formula.materialize_cow(data)?;
+        let data: &DataFrame = &materialized;
 
         let semantic_model = compile_formula_ir(&formula);
         let mut compiler_artifact = CompiledModelArtifact::new_with_policy(

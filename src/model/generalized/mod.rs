@@ -719,8 +719,8 @@ impl GeneralizedLinearMixedModel {
         // it MUST call `self.lmm.formula.materialize(newdata)` before
         // building the fixed-effects matrix; bypassing the seam would
         // silently omit transform re-evaluation on newdata.
-        let materialized = formula.materialize(data)?;
-        let data = &materialized;
+        let materialized = formula.materialize_cow(data)?;
+        let data: &DataFrame = &materialized;
 
         if let Some(y) = data.numeric(&formula.response) {
             validate_glmm_response_domain(family, link, y)?;
