@@ -251,6 +251,12 @@ pub struct LinearMixedModel {
     /// `&self` accessor. Cleared whenever the certificate is refreshed or
     /// completed in place.
     pub(crate) inspection_artifact: std::sync::OnceLock<CompiledModelArtifact>,
+    /// Cached structural sparsity patterns (keyed by A-block index) for the
+    /// scalar-intercept `Z_a' Z_b` cross blocks, built on the first weighted
+    /// rebuild so PIRLS iterations refresh values in place. The patterns
+    /// depend only on the grouping references, which never change.
+    pub(crate) re_cross_sparse_patterns:
+        std::collections::HashMap<usize, blocks::ScalarCrossPattern>,
 }
 
 /// Wall-clock split of one `fit` call, for benchmarking and profiling.
@@ -1317,6 +1323,7 @@ impl LinearMixedModel {
             fit_phase_timings: None,
             derivative_evidence_pending: false,
             inspection_artifact: std::sync::OnceLock::new(),
+            re_cross_sparse_patterns: std::collections::HashMap::new(),
         };
         debug_assert_eq!(
             model.dims.p, model.feterm.rank,
@@ -1755,30 +1762,50 @@ impl LinearMixedModel {
         debug_assert_eq!(sqrtwts.len(), n);
         debug_assert_eq!(working_y.len(), n);
 
-        self.sqrtwts = sqrtwts.to_vec();
+        // Reuse the existing buffer across PIRLS iterations.
+        self.sqrtwts.clear();
+        self.sqrtwts.extend_from_slice(sqrtwts);
 
-        // Update wtz for every RE term: wtz[s, obs] = sqrtwts[obs] * z[s, obs]
+        // Update wtz for every RE term: wtz[s, obs] = sqrtwts[obs] * z[s, obs].
+        // `z`/`wtz` are `vsize × n` column-major, so observation `obs` is the
+        // contiguous chunk `[obs * vsize, (obs + 1) * vsize)`.
         for rt in &mut self.reterms {
             let vsize = rt.vsize;
-            for (obs, &sw) in sqrtwts.iter().enumerate() {
-                for s in 0..vsize {
-                    rt.wtz[(s, obs)] = sw * rt.z[(s, obs)];
+            let z = rt.z.as_slice();
+            let wtz = rt.wtz.as_mut_slice();
+            for ((z_obs, wtz_obs), &sw) in z
+                .chunks_exact(vsize)
+                .zip(wtz.chunks_exact_mut(vsize))
+                .zip(sqrtwts)
+            {
+                for (w, &value) in wtz_obs.iter_mut().zip(z_obs) {
+                    *w = sw * value;
                 }
             }
         }
 
-        // Update wtxy: first `rank` columns from X, last column from working_y
+        // Update wtxy: first `rank` columns from X, last column from
+        // working_y (column-major, so each column is a contiguous slice).
         let rank = self.feterm.rank;
-        for obs in 0..n {
-            let sw = sqrtwts[obs];
-            for col in 0..rank {
-                self.xy_mat.wtxy[(obs, col)] = sw * self.feterm.x[(obs, col)];
+        for col in 0..rank {
+            let x_col = self.feterm.x.column(col);
+            let x_col = x_col.as_slice();
+            let mut wt_col = self.xy_mat.wtxy.column_mut(col);
+            for ((w, &value), &sw) in wt_col.as_mut_slice().iter_mut().zip(x_col).zip(sqrtwts) {
+                *w = sw * value;
             }
-            // y column (last)
-            self.xy_mat.wtxy[(obs, rank)] = sw * working_y[obs];
-            self.xy_mat.xy[(obs, rank)] = working_y[obs];
         }
-
+        {
+            let mut wt_y = self.xy_mat.wtxy.column_mut(rank);
+            for ((w, &value), &sw) in wt_y.as_mut_slice().iter_mut().zip(working_y).zip(sqrtwts) {
+                *w = sw * value;
+            }
+            self.xy_mat
+                .xy
+                .column_mut(rank)
+                .as_mut_slice()
+                .copy_from_slice(working_y);
+        }
         // Rebuild A blocks
         self.recompute_a_blocks()?;
         Ok(())
@@ -1793,6 +1820,49 @@ impl LinearMixedModel {
     unstable_vis fn recompute_a_blocks(&mut self) -> Result<()> {
         let k = self.reterms.len();
         let mut idx = 0;
+
+        // RE × RE blocks. Scalar-intercept cross blocks keep a cached
+        // structural sparsity pattern (built on first use from the grouping
+        // references) and refresh their values in place; rebuilding the
+        // pattern through a keyed map every PIRLS iteration dominated the
+        // per-iteration cost on crossed Bernoulli fits.
+        for i in 0..k {
+            for j in 0..=i {
+                let block = if i == j {
+                    compute_re_cross_product(&self.reterms[i], &self.reterms[i])
+                } else if self.reterms[i].vsize == 1 && self.reterms[j].vsize == 1 {
+                    let (a, b) = (&self.reterms[i], &self.reterms[j]);
+                    self.re_cross_sparse_patterns
+                        .entry(idx)
+                        .or_insert_with(|| blocks::ScalarCrossPattern::new(a, b))
+                        .refresh(a, b)
+                } else {
+                    compute_re_cross_product(&self.reterms[i], &self.reterms[j])
+                };
+                self.a_blocks[idx] = block;
+                idx += 1;
+            }
+        }
+
+        // Weighted dense designs (PIRLS iterations, weighted refits): the
+        // solver-side weighted `[X|y]` already exists as `xy_mat.wtxy`, so
+        // build the fixed blocks straight from it instead of materializing a
+        // weighted FixedDesign copy per call. Bit-identical to the
+        // FixedDesign route (see the kernels' docs).
+        let weighted_dense = !self.sqrtwts.is_empty()
+            && self.fixed_design.storage() != FixedDesignStorage::Streamed
+            && self.xy_mat.wtxy.ncols() == self.feterm.rank + 1;
+        if weighted_dense {
+            let wtxy = &self.xy_mat.wtxy;
+            for j in 0..k {
+                let block = MatrixBlock::Dense(compute_wtxy_re_cross_product(wtxy, &self.reterms[j]));
+                self.a_blocks[idx] = finalize_fixed_re_block(block, k);
+                idx += 1;
+            }
+            self.a_blocks[idx] = MatrixBlock::Dense(compute_wtxy_cross_product(wtxy));
+            return Ok(());
+        }
+
         let sqrtwts = if self.sqrtwts.is_empty() {
             None
         } else {
@@ -1801,19 +1871,6 @@ impl LinearMixedModel {
         let weighted_fixed_design =
             weighted_fixed_design_for_solver(&self.fixed_design, sqrtwts.as_ref())?;
         let weighted_response = self.xy_mat.wtxy.column(self.feterm.rank).into_owned();
-
-        // RE × RE blocks
-        for i in 0..k {
-            for j in 0..=i {
-                let block = if i == j {
-                    compute_re_cross_product(&self.reterms[i], &self.reterms[i])
-                } else {
-                    compute_re_cross_product(&self.reterms[i], &self.reterms[j])
-                };
-                self.a_blocks[idx] = block;
-                idx += 1;
-            }
-        }
 
         // FE × RE blocks: [X|y]' Z_j
         for j in 0..k {

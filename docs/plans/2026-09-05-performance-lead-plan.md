@@ -496,6 +496,22 @@ T7.4 Construction and PIRLS workspace. Phase 1 applies unchanged (the GLMM
 wraps a `LinearMixedModel`). Profile `pirls.rs` per-iteration allocations
 with the same alloc-count instrumentation as `perf_gate` and hoist them.
 
+T7.4 first slice shipped (pulled ahead of T7.2 because the probe put the
+A-block rebuild, not the certification tail, first): the weighted
+`recompute_a_blocks` builds `[X|y]'Z` and `[X|y]'[X|y]` from the existing
+weighted `wtxy` (no weighted `FixedDesign` copy per iteration), and the
+scalar×scalar `Z'Z` cross blocks keep a cached structural CSC pattern and
+refresh values in place instead of rebuilding through a keyed map. Both
+are bit-identical. Paired vs 08f7733 (GLMM rows, 5 alternating rounds,
+35/35 wins): cbpp 1.16×, grouseticks 1.33×, verbagg 1.67× (560 → 336 ms),
+contra 1.20×, arabidopsis 1.25×. Per-iteration split after this slice:
+verbagg 825 µs = A rebuild 46% / weights 15% / η+objective 13% / Cholesky
+14% / solve 9%; contra 149 µs = A rebuild 50%; grouseticks 629 µs =
+Cholesky 78% (Phase 4). Remaining GLMM levers, in order: Phase 4's
+Cholesky workspace (grouseticks, verbagg), a fused single-pass weighted
+A rebuild (verbagg, contra), cheaper weight/η/objective row kernels, and
+PIRLS iteration count (6–8 per θ vs Julia's ~5).
+
 T7.5 Gate. `tests/glmm_speed_parity.rs` rows re-pinned upward on the new
 same-host numbers (not lowered); GLMM parity fixtures unchanged (the lme4
 references need `tolPwrss=1e-9`, see memory note); new Julia GLMM rows

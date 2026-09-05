@@ -445,7 +445,13 @@ fn scenarios() -> Vec<Scenario> {
             true,
             2399.106780,
         ),
-        glmm_scenario("glmm_arabidopsis_fast", "arabidopsis", 0, true, 18486.865146),
+        glmm_scenario(
+            "glmm_arabidopsis_fast",
+            "arabidopsis",
+            0,
+            true,
+            18486.865146,
+        ),
     ]
 }
 
@@ -943,7 +949,26 @@ fn main() {
     );
 
     let julia_reference = load_julia_reference();
+    // Optional scenario filter for targeted runs: a comma-separated list of
+    // scenario names (or name prefixes) in MIXEFF_BENCH_SCENARIO.
+    let scenario_filter: Vec<String> = std::env::var("MIXEFF_BENCH_SCENARIO")
+        .ok()
+        .map(|list| {
+            list.split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
     for mut scenario in scenarios() {
+        if !scenario_filter.is_empty()
+            && !scenario_filter
+                .iter()
+                .any(|name| scenario.scenario.starts_with(name.as_str()))
+        {
+            continue;
+        }
         if let Some((median_ms, feval)) = julia_reference.get(scenario.scenario) {
             scenario.reference.julia_median_ms = *median_ms;
             scenario.reference.julia_feval = *feval;

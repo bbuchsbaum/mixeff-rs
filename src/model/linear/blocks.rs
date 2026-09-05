@@ -821,6 +821,166 @@ pub(super) fn compute_fixed_response_re_cross_product(
     Ok(MatrixBlock::Dense(result))
 }
 
+/// Structural sparsity pattern of the scalar-intercept cross product
+/// `Z_a' Z_b` (one potential nonzero per distinct `(level_a, level_b)` pair
+/// that co-occurs in an observation), plus, for every observation, the
+/// position of its pair in the CSC value array. The pattern depends only
+/// on the two reference vectors, so the weighted rebuilds that PIRLS runs
+/// every iteration can refresh the values in place instead of re-deriving
+/// the pattern through a map of `(row, col)` keys each time.
+#[derive(Debug, Clone)]
+pub(crate) struct ScalarCrossPattern {
+    pub(super) csc: CscMatrix<f64>,
+    /// `entry_of_obs[obs]` indexes `csc.values()`.
+    pub(super) entry_of_obs: Vec<u32>,
+}
+
+impl ScalarCrossPattern {
+    pub(super) fn new(a: &ReMat, b: &ReMat) -> Self {
+        debug_assert_eq!(a.vsize, 1);
+        debug_assert_eq!(b.vsize, 1);
+        // Unique (col = level_b, row = level_a) pairs in CSC order.
+        let mut pairs: Vec<(u32, u32)> = a
+            .refs
+            .iter()
+            .zip(&b.refs)
+            .map(|(&ri, &rj)| (rj, ri))
+            .collect();
+        pairs.sort_unstable();
+        pairs.dedup();
+        let n_cols = b.n_ranef();
+        let mut col_offsets = Vec::with_capacity(n_cols + 1);
+        let mut row_indices = Vec::with_capacity(pairs.len());
+        col_offsets.push(0usize);
+        let mut current_col = 0usize;
+        for &(col, row) in &pairs {
+            while current_col < col as usize {
+                col_offsets.push(row_indices.len());
+                current_col += 1;
+            }
+            row_indices.push(row as usize);
+        }
+        while col_offsets.len() < n_cols + 1 {
+            col_offsets.push(row_indices.len());
+        }
+        let values = vec![0.0; pairs.len()];
+        let csc =
+            CscMatrix::try_from_csc_data(a.n_ranef(), n_cols, col_offsets, row_indices, values)
+                .expect("structural scalar cross pattern is sorted CSC data");
+        let entry_of_obs = a
+            .refs
+            .iter()
+            .zip(&b.refs)
+            .map(|(&ri, &rj)| {
+                pairs
+                    .binary_search(&(rj, ri))
+                    .expect("every observation pair is in the pattern") as u32
+            })
+            .collect();
+        Self { csc, entry_of_obs }
+    }
+
+    /// Refresh the values for the current weighted `Z` columns: each entry
+    /// accumulates its observations' products in increasing observation
+    /// order, exactly as `compute_re_cross_product`'s map-based arm does.
+    pub(super) fn refresh(&mut self, a: &ReMat, b: &ReMat) -> MatrixBlock {
+        let a_wtz = a.wtz.as_slice();
+        let b_wtz = b.wtz.as_slice();
+        let values = self.csc.values_mut();
+        values.fill(0.0);
+        for ((&entry, &za), &zb) in self.entry_of_obs.iter().zip(a_wtz).zip(b_wtz) {
+            let value = za * zb;
+            if value != 0.0 {
+                values[entry as usize] += value;
+            }
+        }
+        MatrixBlock::Sparse(self.csc.clone())
+    }
+}
+
+/// `[X|y]' Z_j` straight from the already-weighted `[X|y]` matrix
+/// (`FeMat::wtxy`, `n × (p+1)`) and the weighted `Z_j` (`ReMat::wtz`).
+///
+/// Used by the weighted A-block rebuild (PIRLS iterations, weighted
+/// refits), where the solver-side weighted design is exactly `wtxy` and
+/// materializing a weighted `FixedDesign` copy every iteration was the
+/// dominant per-iteration cost. Each output cell is accumulated in
+/// increasing observation order, and the products `sw·x · wtz` are the
+/// same ones the `FixedDesign` route forms, so the block is bit-identical
+/// to `compute_fixed_response_re_cross_product` on the weighted design.
+pub(super) fn compute_wtxy_re_cross_product(wtxy: &DMatrix<f64>, re: &ReMat) -> DMatrix<f64> {
+    let pp1 = wtxy.ncols();
+    let nranef = re.n_ranef();
+    let vsize = re.vsize;
+    let mut result = DMatrix::zeros(pp1, nranef);
+    // `pp1 × nranef` column-major: (col, k) -> k * pp1 + col.
+    let out = result.as_mut_slice();
+    let wtz = re.wtz.as_slice();
+    for col in 0..pp1 {
+        let x_col = wtxy.column(col);
+        let x_col = x_col.as_slice();
+        for ((&ref_idx, &x_value), z) in re.refs.iter().zip(x_col).zip(wtz.chunks_exact(vsize)) {
+            let base = ref_idx as usize * vsize * pp1 + col;
+            for (s, &z_value) in z.iter().enumerate() {
+                out[base + s * pp1] += x_value * z_value;
+            }
+        }
+    }
+    result
+}
+
+/// `[X|y]' [X|y]` straight from the already-weighted `[X|y]` matrix.
+///
+/// Reproduces `compute_fixed_response_cross_product` on the weighted dense
+/// design bit for bit: the `X'X` corner uses sequential column dots up to
+/// `NALGEBRA_SEQUENTIAL_GEMM_MAX_DIM` columns and nalgebra's product above
+/// it (on column views with the same memory layout as the owned weighted
+/// matrix), `X'y` sequential dots, and `y'y` nalgebra's `dot`.
+pub(super) fn compute_wtxy_cross_product(wtxy: &DMatrix<f64>) -> DMatrix<f64> {
+    let pp1 = wtxy.ncols();
+    let p = pp1.saturating_sub(1);
+    let mut result = DMatrix::zeros(pp1, pp1);
+    if pp1 == 0 {
+        return result;
+    }
+    if p > crate::model::fixed_design::NALGEBRA_SEQUENTIAL_GEMM_MAX_DIM {
+        let x = wtxy.columns(0, p);
+        let xtx = x.transpose() * x;
+        for row in 0..p {
+            for col in 0..p {
+                result[(row, col)] = xtx[(row, col)];
+            }
+        }
+    } else {
+        for i in 0..p {
+            let xi = wtxy.column(i);
+            let xi = xi.as_slice();
+            for j in 0..p {
+                let xj = wtxy.column(j);
+                let xj = xj.as_slice();
+                let mut acc = 0.0;
+                for (&a, &b) in xi.iter().zip(xj) {
+                    acc += a * b;
+                }
+                result[(i, j)] = acc;
+            }
+        }
+    }
+    let y = wtxy.column(p);
+    let y_slice = y.as_slice();
+    for col in 0..p {
+        let x_col = wtxy.column(col);
+        let mut acc = 0.0;
+        for (&a, &b) in x_col.as_slice().iter().zip(y_slice) {
+            acc += a * b;
+        }
+        result[(col, p)] = acc;
+        result[(p, col)] = acc;
+    }
+    result[(p, p)] = y.dot(&y);
+    result
+}
+
 /// `y'Z_j` for a single response vector: length `n_ranef`, accumulated in
 /// observation order per cell (bit-identical to the matrix form
 /// `compute_response_re_cross_product` with one column).
