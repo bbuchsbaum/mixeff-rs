@@ -1223,6 +1223,88 @@ fn test_trust_bq_certificate_stop_accepts_scalar_interior() {
 }
 
 #[test]
+fn deferred_certificate_evidence_matches_eager_completion() {
+    let data = shared_julia_parity_fixture();
+    let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+    let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+    model.fit(true).unwrap();
+
+    // The stored certificate defers its finite-difference evidence...
+    assert!(model.derivative_evidence_pending);
+    let stored = model
+        .compiler_artifact
+        .optimizer_certificate
+        .as_ref()
+        .unwrap();
+    assert!(LinearMixedModel::certificate_derivatives_deferred(stored));
+    assert!(stored.free_gradient_norm.is_none());
+
+    // ...but every inspection reports the completed evidence.
+    let inspected = model.optimizer_certificate().unwrap().clone();
+    assert!(!LinearMixedModel::certificate_derivatives_deferred(
+        &inspected
+    ));
+    assert!(inspected.free_gradient_norm.is_some());
+    assert!(inspected.hessian_eigen_min.is_some());
+    assert_eq!(inspected.status, stored.status);
+
+    // Completing in place yields exactly the same certificate and report.
+    let mut eager = model.clone();
+    eager.ensure_derivative_evidence();
+    assert!(!eager.derivative_evidence_pending);
+    assert_eq!(
+        eager
+            .compiler_artifact
+            .optimizer_certificate
+            .as_ref()
+            .unwrap(),
+        &inspected
+    );
+    assert_eq!(
+        eager.audit_report().to_text(),
+        model.audit_report().to_text()
+    );
+    assert_eq!(eager.compiler_artifact(), model.compiler_artifact());
+}
+
+#[test]
+fn refit_resets_the_inspected_certificate() {
+    let data = shared_julia_parity_fixture();
+    let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+    let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+    model.fit(true).unwrap();
+    let before = model.optimizer_certificate().unwrap().objective_value;
+
+    let scaled: Vec<f64> = model.y().iter().map(|value| value * 1.25).collect();
+    model.refit(&scaled).unwrap();
+    assert!(model.derivative_evidence_pending);
+    let after = model.optimizer_certificate().unwrap();
+    assert_eq!(after.objective_value, Some(model.optsum().fmin));
+    assert_ne!(after.objective_value, before);
+    assert!(!LinearMixedModel::certificate_derivatives_deferred(after));
+}
+
+#[test]
+fn verify_convergence_completes_deferred_evidence_first() {
+    let data = shared_julia_parity_fixture();
+    let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
+    let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+    model.fit(true).unwrap();
+    assert!(model.derivative_evidence_pending);
+
+    model.verify_convergence().unwrap();
+    assert!(!model.derivative_evidence_pending);
+    let stored = model
+        .compiler_artifact
+        .optimizer_certificate
+        .as_ref()
+        .unwrap();
+    assert!(!LinearMixedModel::certificate_derivatives_deferred(stored));
+    assert!(stored.free_gradient_norm.is_some());
+    assert!(stored.verification.is_some());
+}
+
+#[test]
 fn test_trust_bq_certificate_stop_accepts_scalar_valid_boundary() {
     let data = singular_re_fixture();
     let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();

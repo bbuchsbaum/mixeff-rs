@@ -219,6 +219,30 @@ fixtures unchanged when evidence is requested; paired harness shows the
 crossed rows' `postfit_ms` drop; no change to `feval` (FD evals were never
 counted).
 
+Phase 2 shipped (no policy flag was needed). The fit tail records the
+derivative checks as deferred; `inspection_artifact()` completes a cloned
+artifact on the first `&self` inspection (every public accessor that
+exposes the artifact or certificate, plus the Satterthwaite reliability
+grade) and `ensure_derivative_evidence()` completes in place before
+mutating paths (`verify_convergence`). A deferred-marker guard means a
+certificate installed wholesale by the GLMM drivers is never completed
+with LMM derivatives. Unit tests pin eager == inspected, refit reset, and
+verification completion.
+
+Paired vs 909e42f (5 alternating rounds, objectives/theta/evals
+bit-identical, perf_gate OK):
+
+| scenario | post-fit ms before → after | total speedup (release / native) |
+|---|---:|---:|
+| vector_1000 | 0.102 → 0.006 | 1.31× / 0.87× (native noise; evals equal) |
+| vector_10000 | 0.495 → 0.009 | 1.29× / 1.11× |
+| crossed_small | 2.50 → 0.024 | 1.60× / 1.52× |
+| crossed_medium | 9.18 → 0.032 | 1.46× / 1.37× |
+| crossed_large | 31.2 → 0.036 | 1.43× / 1.52× |
+
+Same-host standing vs Julia (release): crossed_large 187.5 / 73.7 ms =
+2.5× (was 1.9×), crossed_small 2.0× (was 1.3×), vector_10000 10.1×.
+
 ## Phase 3: Warm-started refits (2-3 days, lever 3)
 
 Target: bootstrap replicate cost −50% on vector_10000 (2.0 ms → ≤ 1.0 ms)

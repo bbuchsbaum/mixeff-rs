@@ -1034,7 +1034,9 @@ impl LinearMixedModel {
             return ReliabilityGrade::Low;
         }
 
-        let Some(certificate) = &self.compiler_artifact.optimizer_certificate else {
+        // Reads derivative evidence, so go through the inspected artifact
+        // (completes deferred finite-difference evidence on first use).
+        let Some(certificate) = &self.inspection_artifact().optimizer_certificate else {
             return ReliabilityGrade::Low;
         };
 

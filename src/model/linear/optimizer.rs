@@ -76,6 +76,9 @@ impl LinearMixedModel {
         &mut self,
         options: ConvergenceVerificationOptions,
     ) -> Result<ConvergenceVerification> {
+        // Verification records onto the stored certificate; make sure it is
+        // the complete one first.
+        self.ensure_derivative_evidence();
         if self.optsum.feval <= 0 {
             let verification = ConvergenceVerification::not_run("model has not been fitted");
             if let Some(certificate) = &mut self.compiler_artifact.optimizer_certificate {
@@ -362,6 +365,11 @@ impl LinearMixedModel {
         vec![alternate]
     }
 
+    /// Reason recorded on the certificate while its derivative evidence is
+    /// deferred. Replaced by the real evidence on first inspection.
+    const DEFERRED_DERIVATIVE_EVIDENCE_REASON: &'static str =
+        "deferred until the certificate is inspected";
+
     pub(super) fn refresh_optimizer_certificate(&mut self) {
         let theta = self.theta();
         let lower_bounds = self.lower_bounds();
@@ -371,23 +379,81 @@ impl LinearMixedModel {
             &lower_bounds,
             Some(self.dims.n),
         );
+        // Any earlier inspected view described the previous fit.
+        self.inspection_artifact = std::sync::OnceLock::new();
+        self.derivative_evidence_pending = false;
         if certificate.evidence.optimizer_stop.acceptable_stop {
             if let Some(reason) = self.derivative_certificate_skip_reason(&certificate) {
                 certificate.mark_derivative_checks_not_assessed(reason);
-            } else if let Some(derivatives) =
-                self.finite_difference_optimizer_derivatives(&theta, &lower_bounds)
-            {
-                let (gradient_tolerance, hessian_tolerance) =
-                    self.derivative_certificate_tolerances(certificate.objective_value);
-                certificate.apply_derivative_evidence(
-                    derivatives,
-                    gradient_tolerance,
-                    hessian_tolerance,
-                );
+            } else {
+                // The finite-difference gradient/Hessian evidence costs about
+                // 2·d² objective evaluations, often a quarter of a fit's wall
+                // time, and most fits are never inspected (bootstrap
+                // replicates, batch columns, benchmark loops). Record it as
+                // deferred and complete it on first inspection
+                // (`inspection_artifact`) or before any mutation
+                // (`ensure_derivative_evidence`); every accessor therefore
+                // still reports exactly the evidence the eager path produced.
+                certificate
+                    .mark_derivative_checks_not_assessed(Self::DEFERRED_DERIVATIVE_EVIDENCE_REASON);
+                self.derivative_evidence_pending = true;
             }
         }
         self.reword_optimizer_certificate_diagnostics(&mut certificate);
         self.compiler_artifact.optimizer_certificate = Some(certificate);
+    }
+
+    /// Complete a certificate's deferred derivative evidence from `&self`
+    /// (objective evaluations run on the fast kernel or a cloned evaluator,
+    /// never on `self`). Applying the evidence replaces the deferred
+    /// not-assessed checks exactly as the eager path filled them.
+    pub(crate) fn complete_certificate_derivatives(&self, certificate: &mut OptimizerCertificate) {
+        if !certificate.evidence.optimizer_stop.acceptable_stop {
+            return;
+        }
+        let theta = self.theta();
+        let lower_bounds = self.lower_bounds();
+        if let Some(derivatives) =
+            self.finite_difference_optimizer_derivatives(&theta, &lower_bounds)
+        {
+            let (gradient_tolerance, hessian_tolerance) =
+                self.derivative_certificate_tolerances(certificate.objective_value);
+            certificate.apply_derivative_evidence(
+                derivatives,
+                gradient_tolerance,
+                hessian_tolerance,
+            );
+        }
+    }
+
+    /// Complete any deferred derivative evidence in place. Mutating paths
+    /// that touch the certificate (verification, refits that append to it)
+    /// call this first so the stored certificate is the complete one.
+    pub(crate) fn ensure_derivative_evidence(&mut self) {
+        if !self.derivative_evidence_pending {
+            return;
+        }
+        // Always complete from the stored certificate (an inspected copy may
+        // predate later mutations of the artifact), then drop that copy.
+        self.inspection_artifact = std::sync::OnceLock::new();
+        if let Some(mut certificate) = self.compiler_artifact.optimizer_certificate.take() {
+            if Self::certificate_derivatives_deferred(&certificate) {
+                self.complete_certificate_derivatives(&mut certificate);
+            }
+            self.compiler_artifact.optimizer_certificate = Some(certificate);
+        }
+        self.derivative_evidence_pending = false;
+    }
+
+    /// Whether `certificate` still carries the deferred-evidence marker set
+    /// by `refresh_optimizer_certificate`. A certificate replaced wholesale
+    /// after the fit (the GLMM drivers install their own) never does, so it
+    /// is never "completed" with the wrong model's derivatives.
+    pub(crate) fn certificate_derivatives_deferred(certificate: &OptimizerCertificate) -> bool {
+        certificate.checks.iter().any(|check| {
+            matches!(check, CertificateCheck::NotAssessed { reason }
+                if reason.contains(Self::DEFERRED_DERIVATIVE_EVIDENCE_REASON))
+        })
     }
 
     fn reword_optimizer_certificate_diagnostics(&self, certificate: &mut OptimizerCertificate) {

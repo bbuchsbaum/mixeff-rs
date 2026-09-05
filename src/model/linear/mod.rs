@@ -241,6 +241,16 @@ pub struct LinearMixedModel {
     /// post-optimizer finalization. `None` until a fit has run. Diagnostic
     /// only; never part of any parity or serialized contract.
     pub(crate) fit_phase_timings: Option<FitPhaseTimings>,
+    /// True while the optimizer certificate in `compiler_artifact` still
+    /// lacks its finite-difference gradient/Hessian evidence. The fit tail
+    /// defers that evidence (≈2·d² objective evaluations) until something
+    /// inspects the certificate; see `inspection_artifact`.
+    pub(crate) derivative_evidence_pending: bool,
+    /// Lazily completed copy of `compiler_artifact` with the deferred
+    /// derivative evidence applied, built on first inspection through a
+    /// `&self` accessor. Cleared whenever the certificate is refreshed or
+    /// completed in place.
+    pub(crate) inspection_artifact: std::sync::OnceLock<CompiledModelArtifact>,
 }
 
 /// Wall-clock split of one `fit` call, for benchmarking and profiling.
@@ -1305,6 +1315,8 @@ impl LinearMixedModel {
             active_face_refit: ActiveFaceRefit::default(),
             progress_callback: None,
             fit_phase_timings: None,
+            derivative_evidence_pending: false,
+            inspection_artifact: std::sync::OnceLock::new(),
         };
         debug_assert_eq!(
             model.dims.p, model.feterm.rank,
@@ -1356,8 +1368,32 @@ impl LinearMixedModel {
     }
 
     /// Round-trippable compiler artifact attached at construction time.
+    ///
+    /// After a fit this is the inspected view: any deferred optimizer
+    /// certificate derivative evidence is completed on first access.
     pub fn compiler_artifact(&self) -> &CompiledModelArtifact {
-        &self.compiler_artifact
+        self.inspection_artifact()
+    }
+
+    /// The artifact as callers should see it. While derivative evidence is
+    /// pending, the first call clones the artifact, completes the
+    /// certificate's finite-difference gradient/Hessian evidence from
+    /// `&self`, and caches the result; otherwise the stored artifact is
+    /// returned directly. Mutating fit paths call
+    /// `ensure_derivative_evidence` instead, which completes in place.
+    pub(crate) fn inspection_artifact(&self) -> &CompiledModelArtifact {
+        if !self.derivative_evidence_pending {
+            return &self.compiler_artifact;
+        }
+        self.inspection_artifact.get_or_init(|| {
+            let mut artifact = self.compiler_artifact.clone();
+            if let Some(certificate) = artifact.optimizer_certificate.as_mut() {
+                if Self::certificate_derivatives_deferred(certificate) {
+                    self.complete_certificate_derivatives(certificate);
+                }
+            }
+            artifact
+        })
     }
 
     unstable_internal_method! {
@@ -1474,32 +1510,32 @@ impl LinearMixedModel {
 
     /// Fit-time optimizer certificate attached to the compiler artifact, if available.
     pub fn optimizer_certificate(&self) -> Option<&OptimizerCertificate> {
-        self.compiler_artifact.optimizer_certificate.as_ref()
+        self.inspection_artifact().optimizer_certificate.as_ref()
     }
 
     /// Stable user-facing audit report derived from the compiler artifact.
     pub fn audit_report(&self) -> ModelAuditReport {
-        self.compiler_artifact.audit_report()
+        self.inspection_artifact().audit_report()
     }
 
     /// Compact default print summary (PRD § 15).
     pub fn print_summary(&self) -> crate::compiler::ModelPrint {
-        self.compiler_artifact.print_summary()
+        self.inspection_artifact().print_summary()
     }
 
     /// Source-to-fitted parameterization drilldown (PRD § 15).
     pub fn parameterization(&self) -> crate::compiler::ParameterizationDrilldown {
-        self.compiler_artifact.parameterization()
+        self.inspection_artifact().parameterization()
     }
 
     /// Requested, semantic, supported, and fitted model-state view.
     pub fn model_state_summary(&self) -> ModelStateSummary {
-        self.compiler_artifact.model_state_summary()
+        self.inspection_artifact().model_state_summary()
     }
 
     /// Recorded or recommended requested-to-fitted model changes.
     pub fn changes(&self) -> Vec<ModelStateChange> {
-        self.compiler_artifact.changes()
+        self.inspection_artifact().changes()
     }
 
     /// Get the response vector y (last column of xy_mat).
