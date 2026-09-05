@@ -924,19 +924,24 @@ fn run_parametricbootstrap<R: rand::Rng>(
     let mut fits = Vec::with_capacity(n_rep);
     let mut last_progress = 0usize;
 
+    // One working copy of the template, refitted in place for every
+    // replicate (a refit rewrites the response-dependent state, so nothing
+    // from the previous replicate leaks into the next). Every replicate
+    // starts the optimizer from the template optimum, the expected centre
+    // of the replicate optima, so replicates do not depend on refit order.
+    // Replicates record only (objective, sigma, beta, se, theta), so the
+    // optimizer certificate's finite-difference derivative diagnostics are
+    // skipped; the KKT-guided boundary restart still runs because it can
+    // change the fitted estimates.
+    let template_theta = model.theta();
+    let mut work = model.clone();
+    work.suppress_derivative_diagnostics = true;
+
     for replicate in 0..n_rep {
         // Simulate from the template (always use the original fitted model).
         let y_sim = model.simulate(rng);
 
-        // Fresh clone of the template for this replicate. Replicates record
-        // only (objective, sigma, beta, se, theta), so the optimizer
-        // certificate's finite-difference derivative diagnostics are skipped;
-        // the KKT-guided boundary restart still runs because it can change
-        // the fitted estimates.
-        let mut work = model.clone();
-        work.suppress_derivative_diagnostics = true;
-
-        match work.refit(y_sim.as_slice()) {
+        match work.refit_with_start(y_sim.as_slice(), RefitStart::From(template_theta.clone())) {
             Ok(()) => {
                 fits.push(BootstrapReplicate {
                     objective: work.objective(),
@@ -958,6 +963,10 @@ fn run_parametricbootstrap<R: rand::Rng>(
                     beta,
                     theta: work.theta(),
                 });
+                // Do not carry a partially updated state into the next
+                // replicate.
+                work = model.clone();
+                work.suppress_derivative_diagnostics = true;
             }
         }
         if report_progress {

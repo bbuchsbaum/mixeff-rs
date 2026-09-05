@@ -1799,9 +1799,10 @@ pub fn parametric_bootstrap_lrt<R: rand::Rng>(
         // diagnostics on these internal refits.
         null_fit.suppress_derivative_diagnostics = true;
         alt_fit.suppress_derivative_diagnostics = true;
+        // Warm-start each replicate from its template's optimum.
         match (
-            null_fit.refit(y_star.as_slice()),
-            alt_fit.refit(y_star.as_slice()),
+            null_fit.refit_with_start(y_star.as_slice(), crate::model::linear::RefitStart::Fitted),
+            alt_fit.refit_with_start(y_star.as_slice(), crate::model::linear::RefitStart::Fitted),
         ) {
             (Ok(()), Ok(())) => {
                 let diff = alt_fit.loglikelihood() - null_fit.loglikelihood();

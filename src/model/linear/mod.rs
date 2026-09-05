@@ -259,6 +259,25 @@ pub struct LinearMixedModel {
         std::collections::HashMap<usize, blocks::ScalarCrossPattern>,
 }
 
+/// Where a refit starts its θ search. See
+/// [`LinearMixedModel::refit_with_start`].
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum RefitStart {
+    /// The model's recorded initial θ (`refit!` semantics; the default).
+    Initial,
+    /// The model's current fitted θ.
+    Fitted,
+    /// An explicit θ, e.g. a bootstrap template's optimum.
+    From(Vec<f64>),
+}
+
+/// Optimizer first-step size used by warm-started refits (a contraction of
+/// the 0.75 default). The replicate optimum is expected within a fraction
+/// of the parameter scale of the template optimum; the trust region or
+/// BOBYQA radius still grows if it is not.
+pub const WARM_REFIT_INITIAL_STEP: f64 = 0.75 / 8.0;
+
 /// Wall-clock split of one `fit` call, for benchmarking and profiling.
 ///
 /// `optimizer` covers the initial objective evaluation and the θ search;
@@ -3548,11 +3567,28 @@ impl LinearMixedModel {
 
     /// Refit the model with a new response vector.
     ///
-    /// Replaces the response, rebuilds the cross-product matrices, and
-    /// re-runs the full optimization from the original initial parameters.
+    /// Replaces the response, refreshes the response-dependent
+    /// cross-product entries, and re-runs the full optimization from the
+    /// original initial parameters. Internal simulation loops (parametric
+    /// bootstrap, bootstrap likelihood-ratio tests) use
+    /// [`refit_with_start`](Self::refit_with_start) with a warm start
+    /// instead.
     ///
     /// Mirrors `refit!(fm, new_y)` in Julia's MixedModels.jl.
     pub fn refit(&mut self, new_y: &[f64]) -> Result<()> {
+        self.refit_with_start(new_y, RefitStart::Initial)
+    }
+
+    /// [`refit`](Self::refit) with an explicit optimizer start.
+    ///
+    /// `RefitStart::Initial` reproduces `refit`. `Fitted` starts from this
+    /// model's current fitted θ and `From(theta)` from a caller-supplied θ
+    /// (the parametric bootstrap passes the template optimum for every
+    /// replicate, so replicates do not depend on refit order). Warm starts
+    /// also contract the optimizer's first step to
+    /// [`WARM_REFIT_INITIAL_STEP`] because the new optimum is expected
+    /// nearby; the search still expands if it is not.
+    pub fn refit_with_start(&mut self, new_y: &[f64], start: RefitStart) -> Result<()> {
         if new_y.len() != self.dims.n {
             return Err(MixedModelError::InvalidArgument(format!(
                 "Response length {} does not match model ({} observations)",
@@ -3569,29 +3605,122 @@ impl LinearMixedModel {
             ));
         }
 
-        let p = self.feterm.rank;
-        for (obs, &new_response) in new_y.iter().enumerate() {
-            let sw = if self.sqrtwts.is_empty() {
-                1.0
-            } else {
-                self.sqrtwts[obs]
-            };
-            self.y[obs] = new_response;
-            self.xy_mat.xy[(obs, p)] = new_response;
-            self.xy_mat.wtxy[(obs, p)] = sw * new_response;
+        let warm = !matches!(start, RefitStart::Initial);
+        let start_theta = match start {
+            RefitStart::Initial => self.optsum.initial.clone(),
+            RefitStart::Fitted => self.theta(),
+            RefitStart::From(theta) => theta,
+        };
+        if warm {
+            let n_theta = self.n_theta();
+            if start_theta.len() != n_theta {
+                return Err(MixedModelError::InvalidArgument(format!(
+                    "refit start theta length {} does not match theta length {n_theta}",
+                    start_theta.len()
+                )));
+            }
+            let lower = self.lower_bounds();
+            if start_theta
+                .iter()
+                .zip(&lower)
+                .any(|(&value, &bound)| !value.is_finite() || value < bound)
+            {
+                return Err(MixedModelError::InvalidArgument(
+                    "refit start theta must be finite and within the lower bounds".to_string(),
+                ));
+            }
         }
 
-        self.recompute_a_blocks()?;
+        let p = self.feterm.rank;
+        {
+            let sqrtwts = &self.sqrtwts;
+            let y = self.y.as_mut_slice();
+            let mut xy_col = self.xy_mat.xy.column_mut(p);
+            let xy_col = xy_col.as_mut_slice();
+            let mut wtxy_col = self.xy_mat.wtxy.column_mut(p);
+            let wtxy_col = wtxy_col.as_mut_slice();
+            for (obs, &new_response) in new_y.iter().enumerate() {
+                let sw = if sqrtwts.is_empty() {
+                    1.0
+                } else {
+                    sqrtwts[obs]
+                };
+                y[obs] = new_response;
+                xy_col[obs] = new_response;
+                wtxy_col[obs] = sw * new_response;
+            }
+        }
+
+        // Only the response-dependent cross-product entries changed; the
+        // full rebuild is the fallback for block layouts the fast refresh
+        // does not cover.
+        if !self.recompute_response_blocks() {
+            self.recompute_a_blocks()?;
+        }
 
         // Reset fit state so fit() doesn't reject as AlreadyFitted
         let reml = self.optsum.reml;
         self.optsum.feval = 0;
 
-        // Re-optimize from initial θ
-        let initial = self.optsum.initial.clone();
-        self.set_theta(&initial)?;
+        if warm {
+            self.optsum.initial = start_theta.clone();
+            self.optsum.initial_step = vec![WARM_REFIT_INITIAL_STEP; start_theta.len()];
+        }
+        self.set_theta(&start_theta)?;
         self.fit(reml)?;
         Ok(())
+    }
+
+    /// Refresh the response-dependent A entries (`y'Z_j` rows of the
+    /// `[X|y]'Z_j` blocks and the `X'y` / `y'y` entries of `[X|y]'[X|y]`)
+    /// from the current weighted `[X|y]`, leaving the response-free blocks
+    /// untouched. Returns `false` when a fixed-effect block is not dense
+    /// (streamed sparse designs), in which case the caller rebuilds
+    /// everything. The refreshed entries are computed by the same kernels
+    /// as the full rebuild, so the result is bit-identical to it.
+    pub(crate) fn recompute_response_blocks(&mut self) -> bool {
+        let k = self.reterms.len();
+        let base = k * (k + 1) / 2;
+        let pp1 = self.xy_mat.wtxy.ncols();
+        if pp1 == 0 || self.a_blocks.len() != base + k + 1 {
+            return false;
+        }
+        let p = pp1 - 1;
+        if (0..=k).any(|j| !matches!(self.a_blocks[base + j], MatrixBlock::Dense(_))) {
+            return false;
+        }
+
+        let wtxy = &self.xy_mat.wtxy;
+        let wty = wtxy.column(p);
+        let wty_slice = wty.as_slice();
+        for (j, re) in self.reterms.iter().enumerate() {
+            let yz = blocks::response_re_cross_product_vec(wty_slice, re);
+            if let MatrixBlock::Dense(block) = &mut self.a_blocks[base + j] {
+                if block.nrows() != pp1 || block.ncols() != yz.len() {
+                    return false;
+                }
+                let out = block.as_mut_slice();
+                for (col, &value) in yz.as_slice().iter().enumerate() {
+                    out[col * pp1 + p] = value;
+                }
+            }
+        }
+        if let MatrixBlock::Dense(block) = &mut self.a_blocks[base + k] {
+            if block.nrows() != pp1 || block.ncols() != pp1 {
+                return false;
+            }
+            for col in 0..p {
+                let x_col = wtxy.column(col);
+                let mut acc = 0.0;
+                for (&a, &b) in x_col.as_slice().iter().zip(wty_slice) {
+                    acc += a * b;
+                }
+                block[(col, p)] = acc;
+                block[(p, col)] = acc;
+            }
+            block[(p, p)] = wty.dot(&wty);
+        }
+        true
     }
 
     /// Hat matrix diagonal (leverage values) for each observation.

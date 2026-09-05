@@ -270,6 +270,30 @@ T3.3 Gate. `bootstrap_refit_bench` columns `clone_us`, `recompute_a_us`,
 `parametricbootstrap` (1000 reps, sleepstudy) against Julia
 `parametricbootstrap` on this host added to `bench_julia.jl`.
 
+Phase 3 shipped: `RefitStart::{Initial, Fitted, From(theta)}` with
+`refit_with_start` (`refit` keeps `Initial`); warm starts contract the
+first optimizer step to `WARM_REFIT_INITIAL_STEP` (0.75/8); the
+parametric bootstrap refits one reused working copy from the template
+optimum (fresh clone only after a failed replicate); the bootstrap LRT and
+fixed-effect null bootstrap warm-start from their templates; refits
+refresh only the response-dependent A entries (`y'Z_j` rows, `X'y`,
+`y'y`) through the same kernels as the full rebuild (bit-identical), with
+the full rebuild kept as the fallback for non-dense fixed blocks.
+
+`bootstrap_refit_bench` (200 replicates, release/NLopt), per replicate:
+
+| scenario | before | after | evals before → after |
+|---|---:|---:|---:|
+| vector_1000 | 297 µs | 185 µs (1.60×) | 54 → 45 |
+| scalar_1000 | 65 µs | 37 µs (1.73×) | 23 → 20 |
+| vector_10000 | 1693 µs | 1164 µs (1.45×) | 51 → 46 |
+
+The −50% target on vector_10000 was not reached: the non-evaluation
+overhead is gone (refit ≈ evals × per-evaluation cost), but BOBYQA still
+needs ~45 evaluations from a warm start. Fewer evaluations per replicate
+now need Phase 5 (gradient-based steps) or a warm-start-aware native
+TrustBQ route.
+
 ## Phase 4: Crossed per-evaluation workspace (2-3 days, lever 5)
 
 Target: `allocs_per_eval` for crossed rows 8 → ≤ 1, `eval_median_us` −10 to

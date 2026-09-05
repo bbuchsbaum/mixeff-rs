@@ -140,9 +140,16 @@ fn main() {
         let mut rng = StdRng::seed_from_u64(2026);
         let y_sim = model.simulate(&mut rng);
         let mut refit_feval = 0.0;
+        // The production bootstrap loop refits a reused working copy from
+        // the template optimum; time that path.
+        let template_theta = model.theta();
         let refit_us = time_us(COMPONENT_REPS, || {
             let mut work = model.clone();
-            work.refit(y_sim.as_slice()).expect("refit failed");
+            work.refit_with_start(
+                y_sim.as_slice(),
+                mixeff_rs::model::linear::RefitStart::From(template_theta.clone()),
+            )
+            .expect("refit failed");
             refit_feval = work.optsum().feval as f64;
         }) - clone_us;
 

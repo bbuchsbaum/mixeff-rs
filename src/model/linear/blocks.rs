@@ -784,7 +784,7 @@ pub(super) fn compute_fixed_response_re_cross_product(
     }
 
     let fixed_re = fixed_design.xt_reterm(re)?;
-    let response_re = response_re_cross_product_vec(y, re);
+    let response_re = response_re_cross_product_vec(y.as_slice(), re);
     let pp1 = fixed_design.n_cols() + 1;
 
     // A sparse X'Z (streamed high-cardinality designs) stays sparse in the
@@ -984,17 +984,12 @@ pub(super) fn compute_wtxy_cross_product(wtxy: &DMatrix<f64>) -> DMatrix<f64> {
 /// `y'Z_j` for a single response vector: length `n_ranef`, accumulated in
 /// observation order per cell (bit-identical to the matrix form
 /// `compute_response_re_cross_product` with one column).
-pub(super) fn response_re_cross_product_vec(y: &DVector<f64>, re: &ReMat) -> DVector<f64> {
+pub(super) fn response_re_cross_product_vec(y: &[f64], re: &ReMat) -> DVector<f64> {
     let vsize = re.vsize;
     let mut result = DVector::zeros(re.n_ranef());
     let out = result.as_mut_slice();
     let wtz = re.wtz.as_slice();
-    for ((&ref_idx, &response), z) in re
-        .refs
-        .iter()
-        .zip(y.as_slice())
-        .zip(wtz.chunks_exact(vsize))
-    {
+    for ((&ref_idx, &response), z) in re.refs.iter().zip(y).zip(wtz.chunks_exact(vsize)) {
         let base = ref_idx as usize * vsize;
         for (s, &z_value) in z.iter().enumerate() {
             out[base + s] += z_value * response;

@@ -479,7 +479,7 @@ impl LinearMixedModel {
             let y_sim = self.simulate_fixed_effect_null(&mut rng, target)?;
             let mut work = self.clone();
             work.suppress_derivative_diagnostics = true;
-            match work.refit(y_sim.as_slice()) {
+            match work.refit_with_start(y_sim.as_slice(), RefitStart::Fitted) {
                 Ok(()) => {
                     statistics.push(
                         fixed_effect_bootstrap_statistic(&work, hypothesis)
