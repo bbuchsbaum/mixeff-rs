@@ -148,6 +148,26 @@ crossed_large 1855):
 No single stage dominates; the cross-product kernels (T1.5, ~33%) and the
 audit (T1.2 remainder + T1.3, ~35%) are the two largest groups.
 
+Phase 1 status (paired, both profiles, objectives/theta/evals bit-identical
+throughout):
+
+| task | construction effect | notes |
+|---|---|---|
+| T1.1 borrow the frame | 1.10-1.44× | largest single win |
+| T1.2 single-pass audit | within noise on single-factor shapes | exact; wins on interaction groupings |
+| T1.5 slice kernels, Cow copies | 1.03-1.17× | nalgebra order pinned by tests |
+| T1.3 one QR, identity pivot in place | 1.03-1.27× | audit pivot reused when matrices are bit-equal |
+
+Constraint found for T1.4: `ReMat::{wtz, scratch, adj_a}` and
+`FeMat::wtxy` are public fields of public types (`mixeff_rs::types`), so
+making the weighted copies lazy is a 2.0 API change, not a 1.x
+optimization. T1.4 is therefore folded into T1.6 as "build the same
+fields more cheaply" (build `z` column-major directly instead of per-row
+transposes, integer keys for interaction groupings, no repeated
+`levels`/`refs` clones), and the lazy-copy design is deferred to
+`docs/lazy_fixed_design_materialization.md`. The unused `adj_a` CSC
+adjoint is built on every construction; dropping it is also a 2.0 item.
+
 ## Phase 2: Post-fit derivative certificate (1-2 days, lever 2)
 
 Target: crossed_large wall −20% or better with unchanged certificate

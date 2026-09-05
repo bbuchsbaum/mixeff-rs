@@ -4,7 +4,9 @@ use std::collections::BTreeMap;
 use crate::model::data::DataFrame;
 use crate::types::{ConvergenceStatus, OptSummary};
 
-use super::audit::{audit_design, DesignAudit, OptimizerCertificate};
+use nalgebra::DMatrix;
+
+use super::audit::{audit_design_with_matrix, DesignAudit, OptimizerCertificate};
 use super::diagnostics::{Diagnostic, DiagnosticCode};
 use super::estimability::{EstimabilityAssessment, ReliabilityGrade};
 use super::ir::{CovarianceSupportStatus, SemanticModel};
@@ -1078,11 +1080,25 @@ impl CompiledModelArtifact {
     }
 
     pub fn attach_design_audit(&mut self, data: &DataFrame) {
-        let audit = audit_design(&self.semantic_model, data);
+        let _ = self.attach_design_audit_with_matrix(data);
+    }
+
+    /// [`attach_design_audit`](Self::attach_design_audit) that hands back
+    /// the dense fixed-effect matrix the audit factorized and the column
+    /// pivot of its rank assessment, so the model constructor can reuse the
+    /// factorization rather than rebuilding and refactorizing the same
+    /// design. Neither is retained on the artifact.
+    pub fn attach_design_audit_with_matrix(
+        &mut self,
+        data: &DataFrame,
+    ) -> (DMatrix<f64>, Vec<usize>) {
+        let (audit, fixed_matrix, fixed_pivot) =
+            audit_design_with_matrix(&self.semantic_model, data);
         self.diagnostics.extend(audit.diagnostics.clone());
         self.policy_recommendations =
             recommend_policy(&self.semantic_model, &audit, &self.compiler_policy);
         self.design_audit = Some(audit);
+        (fixed_matrix, fixed_pivot)
     }
 
     pub fn set_compiler_policy(&mut self, policy: CompilerPolicy) {

@@ -61,7 +61,7 @@ impl FeTerm {
             x.ncols()
         );
 
-        let (n, p) = (x.nrows(), x.ncols());
+        let p = x.ncols();
 
         if p == 0 {
             return FeTerm {
@@ -73,6 +73,57 @@ impl FeTerm {
         }
 
         let (rank, piv) = stats_rank(&x);
+        Self::from_rank_and_pivot(x, cnames, rank, piv)
+    }
+
+    /// Build the term from an already-computed `stats_rank` result on
+    /// `x` (the same `(rank, pivot)` [`FeTerm::new`] would compute), so a
+    /// caller that has just factorized this exact matrix (the design
+    /// audit) does not pay for a second pivoted QR. The identity pivot
+    /// leaves `x` untouched instead of copying it column by column.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `cnames.len() != x.ncols()` or the pivot is not a
+    /// permutation of the columns.
+    pub(crate) fn from_rank_and_pivot(
+        x: DMatrix<f64>,
+        cnames: Vec<String>,
+        rank: usize,
+        piv: Vec<usize>,
+    ) -> Self {
+        let (n, p) = (x.nrows(), x.ncols());
+        assert_eq!(
+            cnames.len(),
+            p,
+            "FeTerm::from_rank_and_pivot: cnames length ({}) must match number of columns ({})",
+            cnames.len(),
+            p
+        );
+        assert_eq!(
+            piv.len(),
+            p,
+            "FeTerm::from_rank_and_pivot: pivot length ({}) must match number of columns ({})",
+            piv.len(),
+            p
+        );
+        assert!(
+            rank <= p,
+            "FeTerm::from_rank_and_pivot: rank ({rank}) exceeds number of columns ({p})"
+        );
+
+        if piv
+            .iter()
+            .enumerate()
+            .all(|(new_j, &orig_j)| new_j == orig_j)
+        {
+            return FeTerm {
+                x,
+                piv,
+                rank,
+                cnames,
+            };
+        }
 
         // Build the pivoted X (take columns from the original x in pivot order).
         let mut pivoted_x = DMatrix::zeros(n, p);
@@ -263,5 +314,40 @@ mod tests {
         let fe = FeTerm::new(x, cnames);
         assert_eq!(fe.rank, 0);
         assert!(fe.is_full_rank()); // 0 == 0
+    }
+
+    #[test]
+    fn from_rank_and_pivot_matches_new_for_full_and_deficient_designs() {
+        // Full rank with the identity pivot: the matrix must be taken as is.
+        let x = DMatrix::from_row_slice(4, 2, &[1.0, 2.0, 1.0, 3.0, 1.0, 5.0, 1.0, 9.0]);
+        let names = vec!["a".to_string(), "b".to_string()];
+        let via_new = FeTerm::new(x.clone(), names.clone());
+        let (rank, piv) = crate::linalg::stats_rank(&x);
+        let via_reuse = FeTerm::from_rank_and_pivot(x.clone(), names.clone(), rank, piv);
+        assert_eq!(via_reuse.rank, via_new.rank);
+        assert_eq!(via_reuse.piv, via_new.piv);
+        assert_eq!(via_reuse.cnames, via_new.cnames);
+        assert_eq!(via_reuse.x, via_new.x);
+        assert_eq!(
+            via_reuse.x, x,
+            "identity pivot must not reorder or copy columns"
+        );
+
+        // Rank deficient (third column is the sum of the first two): the
+        // non-identity pivot path must reorder exactly like `new`.
+        let x = DMatrix::from_row_slice(
+            4,
+            3,
+            &[1.0, 2.0, 3.0, 1.0, 3.0, 4.0, 1.0, 5.0, 6.0, 1.0, 9.0, 10.0],
+        );
+        let names = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let via_new = FeTerm::new(x.clone(), names.clone());
+        let (rank, piv) = crate::linalg::stats_rank(&x);
+        assert_eq!(rank, 2);
+        let via_reuse = FeTerm::from_rank_and_pivot(x, names, rank, piv);
+        assert_eq!(via_reuse.rank, via_new.rank);
+        assert_eq!(via_reuse.piv, via_new.piv);
+        assert_eq!(via_reuse.cnames, via_new.cnames);
+        assert_eq!(via_reuse.x, via_new.x);
     }
 }

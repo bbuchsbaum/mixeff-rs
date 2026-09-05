@@ -311,8 +311,19 @@ impl DesignAudit {
 
 /// Run the v0 prefit design audit.
 pub fn audit_design(semantic_model: &SemanticModel, data: &DataFrame) -> DesignAudit {
+    audit_design_with_matrix(semantic_model, data).0
+}
+
+/// [`audit_design`] that also returns the dense fixed-effect matrix the
+/// audit factorized, so a caller building the same design can reuse it
+/// (and the audit's rank pivot) instead of rebuilding and refactorizing.
+pub fn audit_design_with_matrix(
+    semantic_model: &SemanticModel,
+    data: &DataFrame,
+) -> (DesignAudit, DMatrix<f64>, Vec<usize>) {
     let mut diagnostics = Vec::new();
-    let fixed_effects = audit_fixed_effects(semantic_model, data);
+    let (fixed_effects, fixed_matrix, fixed_pivot) =
+        audit_fixed_effects_with_matrix(semantic_model, data);
     diagnostics.extend(fixed_effects.diagnostics.clone());
     let mut random_terms = semantic_model
         .random_terms
@@ -364,7 +375,7 @@ pub fn audit_design(semantic_model: &SemanticModel, data: &DataFrame) -> DesignA
             .map(repeated_unit_unmodeled_diagnostic),
     );
 
-    DesignAudit {
+    let audit = DesignAudit {
         schema_name: DESIGN_AUDIT_SCHEMA.to_string(),
         schema_version: DESIGN_AUDIT_SCHEMA_VERSION,
         fixed_effect_rank: fixed_effects.rank.clone(),
@@ -372,7 +383,8 @@ pub fn audit_design(semantic_model: &SemanticModel, data: &DataFrame) -> DesignA
         random_terms,
         covariance_kernels,
         diagnostics,
-    }
+    };
+    (audit, fixed_matrix, fixed_pivot)
 }
 
 fn fixed_random_redundancy_diagnostics(
@@ -911,7 +923,15 @@ fn is_grouping_like_name(name: &str) -> bool {
         || normalized.ends_with("_unit")
 }
 
-fn audit_fixed_effects(semantic_model: &SemanticModel, data: &DataFrame) -> FixedEffectAudit {
+/// Fixed-effect audit plus the dense design matrix it was computed on and
+/// the column pivot of its rank assessment (`stats_rank` convention: the
+/// identity permutation for a full-rank design), so the model constructor
+/// can reuse the factorization when its own design turns out to be the
+/// same matrix. Neither the matrix nor the pivot is part of the audit.
+fn audit_fixed_effects_with_matrix(
+    semantic_model: &SemanticModel,
+    data: &DataFrame,
+) -> (FixedEffectAudit, DMatrix<f64>, Vec<usize>) {
     let mut builder = FixedDesignBuilder::new(data);
     for term in &semantic_model.fixed_terms {
         builder.push_term(term);
@@ -925,7 +945,7 @@ fn audit_fixed_effects(semantic_model: &SemanticModel, data: &DataFrame) -> Fixe
         mut diagnostics,
     } = builder.finish();
 
-    let rank = fixed_rank_assessment(&matrix);
+    let (rank, rank_pivot) = fixed_rank_assessment(&matrix);
     let aliased_columns = if rank.status == RankStatus::RankDeficient {
         aliased_columns(&matrix, rank.rank.unwrap_or(0), &columns)
     } else {
@@ -1034,7 +1054,7 @@ fn audit_fixed_effects(semantic_model: &SemanticModel, data: &DataFrame) -> Fixe
         })
         .collect::<Vec<_>>();
 
-    FixedEffectAudit {
+    let audit = FixedEffectAudit {
         n_rows: data.nrow(),
         n_columns: columns.len(),
         rank,
@@ -1044,7 +1064,8 @@ fn audit_fixed_effects(semantic_model: &SemanticModel, data: &DataFrame) -> Fixe
         aliased_columns,
         empty_cells,
         diagnostics,
-    }
+    };
+    (audit, matrix, rank_pivot)
 }
 
 fn format_factor_level_assignment(factors: &[String], levels: &[String]) -> String {
@@ -1291,10 +1312,14 @@ fn design_matrix_from_columns(n_rows: usize, columns: &[DesignColumn]) -> DMatri
 /// the reported rank is unchanged in every case.
 const GRAM_RANK_FAST_PATH_MIN_COLS: usize = 32;
 
-fn fixed_rank_assessment(matrix: &DMatrix<f64>) -> RankAssessment {
+/// Rank assessment plus the column pivot that produced it. A full-rank
+/// verdict (from the Gram certificate or the QR) carries the identity
+/// permutation, which is exactly what `stats_rank` returns for full-rank
+/// input, so the pivot is valid for reuse either way.
+fn fixed_rank_assessment(matrix: &DMatrix<f64>) -> (RankAssessment, Vec<usize>) {
     let expected = matrix.ncols();
-    let rank = if expected == 0 {
-        0
+    let (rank, pivot) = if expected == 0 {
+        (0, Vec::new())
     } else if expected >= GRAM_RANK_FAST_PATH_MIN_COLS
         && crate::linalg::gram_full_rank_certificate(
             &matrix.tr_mul(matrix),
@@ -1303,12 +1328,11 @@ fn fixed_rank_assessment(matrix: &DMatrix<f64>) -> RankAssessment {
         )
         .is_certified()
     {
-        expected
+        (expected, (0..expected).collect())
     } else {
-        let (rank, _pivots) = stats_rank_with_tol(matrix, 1e-8);
-        rank
+        stats_rank_with_tol(matrix, 1e-8)
     };
-    RankAssessment {
+    let assessment = RankAssessment {
         rank: Some(rank),
         expected: Some(expected),
         status: if rank == expected {
@@ -1321,7 +1345,8 @@ fn fixed_rank_assessment(matrix: &DMatrix<f64>) -> RankAssessment {
         } else {
             Some("fixed-effect columns are linearly dependent under tolerance 1e-8".to_string())
         },
-    }
+    };
+    (assessment, pivot)
 }
 
 fn aliased_columns(

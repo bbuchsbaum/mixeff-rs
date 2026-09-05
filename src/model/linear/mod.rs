@@ -1136,7 +1136,11 @@ impl LinearMixedModel {
             semantic_model,
             compiler_policy,
         );
-        compiler_artifact.attach_design_audit(data);
+        // The audit factorizes the fixed-effect design it builds; keep that
+        // matrix so the model's own FeTerm can reuse the factorization when
+        // the two designs are the same matrix (see feterm_for_fixed_design).
+        let (audit_fixed_matrix, audit_fixed_pivot) =
+            compiler_artifact.attach_design_audit_with_matrix(data);
         let mut effective_formula = formula.clone();
         if compiler_artifact
             .compiler_policy
@@ -1188,8 +1192,23 @@ impl LinearMixedModel {
             &raw_fixed_design,
             &mut compiler_artifact,
             fixed_design_policy,
+            Some((&audit_fixed_matrix, audit_fixed_pivot.as_slice())),
         );
-        let fixed_design = raw_fixed_design.select_columns(&feterm.piv[..feterm.rank])?;
+        drop((audit_fixed_matrix, audit_fixed_pivot));
+        // A full-rank design with the identity pivot selects every column in
+        // place: the raw design already is the solver design, so take it
+        // rather than copying it column by column.
+        let selects_all_columns_in_place = feterm.rank == feterm.x.ncols()
+            && feterm
+                .piv
+                .iter()
+                .enumerate()
+                .all(|(new_col, &orig_col)| new_col == orig_col);
+        let fixed_design = if selects_all_columns_in_place {
+            raw_fixed_design
+        } else {
+            raw_fixed_design.select_columns(&feterm.piv[..feterm.rank])?
+        };
         if fixed_design.storage() == FixedDesignStorage::Streamed {
             compiler_artifact
                 .diagnostics
@@ -3887,12 +3906,26 @@ fn feterm_for_fixed_design(
     raw_fixed_design: &FixedDesign,
     compiler_artifact: &mut CompiledModelArtifact,
     policy: FixedDesignBuildPolicy,
+    audit_hint: Option<(&DMatrix<f64>, &[usize])>,
 ) -> FeTerm {
     if raw_fixed_design.storage() != FixedDesignStorage::Streamed {
-        return FeTerm::new(
-            raw_fixed_design.materialize_dense(),
-            raw_fixed_design.column_names().to_vec(),
-        );
+        let x = raw_fixed_design.materialize_dense();
+        let cnames = raw_fixed_design.column_names().to_vec();
+        // The design audit already ran `stats_rank` on the matrix it built.
+        // When that matrix is bit-identical to this design, the QR input is
+        // identical and so is its (rank, pivot); reuse it instead of
+        // factorizing the same matrix again. Any difference (a design-time
+        // reduction, a different column order) falls back to a fresh QR.
+        let audit_rank = compiler_artifact
+            .design_audit
+            .as_ref()
+            .and_then(|audit| audit.fixed_effects.rank.rank);
+        if let (Some((audit_matrix, pivot)), Some(rank)) = (audit_hint, audit_rank) {
+            if audit_matrix == &x && pivot.len() == x.ncols() {
+                return FeTerm::from_rank_and_pivot(x, cnames, rank, pivot.to_vec());
+            }
+        }
+        return FeTerm::new(x, cnames);
     }
 
     let certificate = crate::linalg::gram_full_rank_certificate(
