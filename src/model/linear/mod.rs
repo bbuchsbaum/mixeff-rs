@@ -4305,21 +4305,58 @@ fn build_re_mat(rt: &crate::formula::RandomTerm, data: &DataFrame, n: usize) -> 
                 .collect::<Result<Vec<_>>>()?;
 
             let group_name = names.join(" & ");
-            let mut level_map = indexmap::IndexMap::new();
+            // Key each row on its tuple of level references (packed into a
+            // u64 when the level-count product fits) rather than on the
+            // joined label strings: same first-appearance numbering, one
+            // label built per distinct combination instead of per row, and
+            // two distinct combinations whose joined labels happen to
+            // coincide (labels containing the separator) stay distinct.
+            let mut strides = Vec::with_capacity(cats.len());
+            let mut stride = 1u64;
+            let mut packed = true;
+            for c in &cats {
+                strides.push(stride);
+                match stride.checked_mul(c.levels.len().max(1) as u64) {
+                    Some(next) => stride = next,
+                    None => {
+                        packed = false;
+                        break;
+                    }
+                }
+            }
+            let row_key = |obs: usize| -> (u64, Vec<u32>) {
+                if packed {
+                    (
+                        cats.iter()
+                            .zip(&strides)
+                            .map(|(c, s)| c.refs[obs] as u64 * s)
+                            .sum(),
+                        Vec::new(),
+                    )
+                } else {
+                    (0, cats.iter().map(|c| c.refs[obs]).collect())
+                }
+            };
+            let mut level_map: std::collections::HashMap<(u64, Vec<u32>), u32> =
+                std::collections::HashMap::with_capacity(n.min(4096));
+            let mut levels: Vec<String> = Vec::new();
             let mut refs = Vec::with_capacity(n);
 
             for obs in 0..n {
-                let key: String = cats
-                    .iter()
-                    .map(|c| c.levels[c.refs[obs] as usize].clone())
-                    .collect::<Vec<_>>()
-                    .join("_");
-                let idx = level_map.len();
-                let idx = *level_map.entry(key.clone()).or_insert(idx);
-                refs.push(idx as u32);
+                let key = row_key(obs);
+                let next = levels.len() as u32;
+                let idx = *level_map.entry(key).or_insert_with(|| {
+                    levels.push(
+                        cats.iter()
+                            .map(|c| c.levels[c.refs[obs] as usize].as_str())
+                            .collect::<Vec<_>>()
+                            .join("_"),
+                    );
+                    next
+                });
+                refs.push(idx);
             }
 
-            let levels: Vec<String> = level_map.keys().cloned().collect();
             (group_name, refs, levels)
         }
     };
@@ -4344,10 +4381,18 @@ fn build_re_mat(rt: &crate::formula::RandomTerm, data: &DataFrame, n: usize) -> 
         }
     }
 
+    // `z` is `vsize × n` column-major, so basis row `i` occupies every
+    // `vsize`-th slot starting at `i`; write it straight from the basis
+    // column instead of transposing each row into a temporary.
     let vsize = z_rows.len();
     let mut z = DMatrix::zeros(vsize, n);
-    for (i, row) in z_rows.iter().enumerate() {
-        z.set_row(i, &row.transpose());
+    {
+        let z_slice = z.as_mut_slice();
+        for (i, row) in z_rows.iter().enumerate() {
+            for (obs, &value) in row.as_slice().iter().enumerate() {
+                z_slice[obs * vsize + i] = value;
+            }
+        }
     }
 
     let mut remat = ReMat::new(group_name, refs, levels, cnames, z);
