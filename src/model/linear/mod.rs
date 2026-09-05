@@ -237,6 +237,26 @@ pub struct LinearMixedModel {
     pub(crate) active_face_refit: ActiveFaceRefit,
     /// Optional host progress/interrupt callback inherited by refits.
     pub(crate) progress_callback: Option<FitProgressCallback>,
+    /// Wall-clock split of the most recent `fit` into optimizer search and
+    /// post-optimizer finalization. `None` until a fit has run. Diagnostic
+    /// only; never part of any parity or serialized contract.
+    pub(crate) fit_phase_timings: Option<FitPhaseTimings>,
+}
+
+/// Wall-clock split of one `fit` call, for benchmarking and profiling.
+///
+/// `optimizer` covers the initial objective evaluation and the θ search;
+/// `post_fit` covers everything after the optimizer returns (boundary
+/// restart, certificate derivative checks, covariance and inference
+/// refreshes). Model construction is not included: time
+/// [`LinearMixedModel::new`] separately.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[non_exhaustive]
+pub struct FitPhaseTimings {
+    /// Time spent in the optimizer search (including the initial objective).
+    pub optimizer: std::time::Duration,
+    /// Time spent finalizing the fit after the optimizer returned.
+    pub post_fit: std::time::Duration,
 }
 
 /// Snapshot of a training categorical column's encoding contract: the
@@ -1265,6 +1285,7 @@ impl LinearMixedModel {
             trust_bq_sample_reuse: TrustBqSampleReuse::default(),
             active_face_refit: ActiveFaceRefit::default(),
             progress_callback: None,
+            fit_phase_timings: None,
         };
         debug_assert_eq!(
             model.dims.p, model.feterm.rank,
@@ -1501,6 +1522,14 @@ impl LinearMixedModel {
     ///
     /// Read-only mirror of [`MixedModelFit::opt_summary`]; mutating optimizer
     /// state after a fit invalidates convergence diagnostics.
+    /// Wall-clock split of the most recent fit into optimizer search and
+    /// post-optimizer finalization, or `None` before any fit. Diagnostic
+    /// only (benchmarks and profiling); it is not part of any parity or
+    /// serialized contract. Construction time is not included.
+    pub fn fit_phase_timings(&self) -> Option<FitPhaseTimings> {
+        self.fit_phase_timings
+    }
+
     pub fn optsum(&self) -> &OptSummary {
         &self.optsum
     }

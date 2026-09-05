@@ -254,6 +254,7 @@ impl LinearMixedModel {
         optimizer: Optimizer,
     ) -> Result<()> {
         self.optsum.reml = reml;
+        let optimizer_start = std::time::Instant::now();
         self.set_initial_objective_with_rescue()?;
         match optimizer {
             Optimizer::PatternSearch => {
@@ -318,6 +319,21 @@ impl LinearMixedModel {
                 ));
             }
         }
+        self.finish_fit_after_optimizer(reml, optimizer_start)?;
+        Ok(())
+    }
+
+    /// Shared post-optimizer tail for every LMM fit path: boundary restart,
+    /// optional active-face refit, optimizer certificate, covariance and
+    /// inference refreshes. Records the optimizer/post-fit wall-clock split
+    /// in `fit_phase_timings` (diagnostic only).
+    pub(super) fn finish_fit_after_optimizer(
+        &mut self,
+        reml: bool,
+        optimizer_start: std::time::Instant,
+    ) -> Result<()> {
+        let post_fit_start = std::time::Instant::now();
+        let optimizer = post_fit_start.duration_since(optimizer_start);
         self.apply_kkt_guided_boundary_restart(reml)?;
         self.apply_active_face_refit()?;
         self.refresh_optimizer_certificate();
@@ -325,6 +341,10 @@ impl LinearMixedModel {
         self.refresh_covariance_parameter_traces();
         self.refresh_fixed_effect_covariance_matrix();
         self.refresh_fixed_effect_inference_table();
+        self.fit_phase_timings = Some(FitPhaseTimings {
+            optimizer,
+            post_fit: post_fit_start.elapsed(),
+        });
         Ok(())
     }
 
@@ -3453,6 +3473,7 @@ impl LinearMixedModel {
 
         // Initial objective evaluation (with one rescaling retry on a
         // non-finite value — see set_initial_objective_with_rescue).
+        let optimizer_start = std::time::Instant::now();
         self.set_initial_objective_with_rescue()?;
 
         if self.use_scalar_single_theta_optimizer() {
@@ -3481,13 +3502,7 @@ impl LinearMixedModel {
             }
         }
 
-        self.apply_kkt_guided_boundary_restart(reml)?;
-        self.apply_active_face_refit()?;
-        self.refresh_optimizer_certificate();
-        self.refresh_effective_covariance_summaries();
-        self.refresh_covariance_parameter_traces();
-        self.refresh_fixed_effect_covariance_matrix();
-        self.refresh_fixed_effect_inference_table();
+        self.finish_fit_after_optimizer(reml, optimizer_start)?;
         Ok(self)
     }
 

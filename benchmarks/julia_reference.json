@@ -1,0 +1,147 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "generated": "2026-09-05",
+    "host": "BUC-GW02.local",
+    "machine": "arm64",
+    "os": "macOS-14.3-arm64-arm-64bit-Mach-O",
+    "julia_version": "1.12.4",
+    "mixedmodels_version": "5.3.0",
+    "script": "scripts/bench_julia.jl",
+    "timing_scope": "construction + fit (fit(MixedModel, f, df; REML=true)); GC.gc() before each rep",
+    "note": "Regenerate on the same host as the Rust harness before quoting speedups."
+  },
+  "scenarios": {
+    "vector_180": {
+      "median_ms": 0.662,
+      "mean_ms": 0.658,
+      "min_ms": 0.611,
+      "objective": 1737.786888
+    },
+    "vector_1000": {
+      "median_ms": 1.97,
+      "mean_ms": 1.96,
+      "min_ms": 1.901,
+      "objective": 9674.682
+    },
+    "vector_5000": {
+      "median_ms": 8.152,
+      "mean_ms": 8.154,
+      "min_ms": 8.02,
+      "objective": 48441.265829
+    },
+    "vector_10000": {
+      "median_ms": 16.675,
+      "mean_ms": 16.737,
+      "min_ms": 16.499,
+      "objective": 96863.829625
+    },
+    "vector_deep_200x50": {
+      "median_ms": 4.278,
+      "mean_ms": 4.312,
+      "min_ms": 4.129,
+      "objective": 94696.021324
+    },
+    "scalar_180": {
+      "median_ms": 0.286,
+      "mean_ms": 0.285,
+      "min_ms": 0.235,
+      "objective": 1785.958191
+    },
+    "scalar_1000": {
+      "median_ms": 0.349,
+      "mean_ms": 0.342,
+      "min_ms": 0.292,
+      "objective": 9888.480193
+    },
+    "scalar_5000": {
+      "median_ms": 0.663,
+      "mean_ms": 0.668,
+      "min_ms": 0.624,
+      "objective": 49634.926921
+    },
+    "scalar_10000": {
+      "median_ms": 1.153,
+      "mean_ms": 1.138,
+      "min_ms": 1.086,
+      "objective": 99330.533013
+    },
+    "scalar_deep_200x50": {
+      "median_ms": 0.948,
+      "mean_ms": 0.952,
+      "min_ms": 0.887,
+      "objective": 118776.271089
+    },
+    "crossed_small": {
+      "median_ms": 8.572,
+      "mean_ms": 8.6,
+      "min_ms": 8.503,
+      "objective": 6177.391766,
+      "feval": 320.0
+    },
+    "crossed_medium": {
+      "median_ms": 88.007,
+      "mean_ms": 85.469,
+      "min_ms": 74.759,
+      "objective": 24348.710095,
+      "feval": 411.0
+    },
+    "crossed_large": {
+      "median_ms": 187.519,
+      "mean_ms": 182.493,
+      "min_ms": 158.448,
+      "objective": 72320.124564,
+      "feval": 408.0
+    }
+  },
+  "unmapped_scenarios": {
+    "medium_50subj": {
+      "median_ms": 0.952,
+      "mean_ms": 0.951,
+      "min_ms": 0.886,
+      "objective": 4847.222914
+    },
+    "large_200subj": {
+      "median_ms": 2.829,
+      "mean_ms": 2.825,
+      "min_ms": 2.744,
+      "objective": 19368.554314
+    },
+    "deep_50x50": {
+      "median_ms": 1.525,
+      "mean_ms": 1.537,
+      "min_ms": 1.401,
+      "objective": 23657.305439
+    },
+    "deep_100x50": {
+      "median_ms": 2.409,
+      "mean_ms": 2.418,
+      "min_ms": 2.324,
+      "objective": 47363.101786
+    },
+    "scalar_medium_50subj": {
+      "median_ms": 0.321,
+      "mean_ms": 0.319,
+      "min_ms": 0.289,
+      "objective": 4981.594605
+    },
+    "scalar_large_200subj": {
+      "median_ms": 0.422,
+      "mean_ms": 0.412,
+      "min_ms": 0.354,
+      "objective": 19876.338934
+    },
+    "scalar_deep_50x50": {
+      "median_ms": 0.41,
+      "mean_ms": 0.419,
+      "min_ms": 0.38,
+      "objective": 29474.794285
+    },
+    "scalar_deep_100x50": {
+      "median_ms": 0.513,
+      "mean_ms": 0.516,
+      "min_ms": 0.463,
+      "objective": 58774.37891
+    }
+  }
+}
