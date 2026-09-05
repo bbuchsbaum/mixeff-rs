@@ -158,6 +158,29 @@ throughout):
 | T1.5 slice kernels, Cow copies | 1.03-1.17× | nalgebra order pinned by tests |
 | T1.3 one QR, identity pivot in place | 1.03-1.27× | audit pivot reused when matrices are bit-equal |
 
+Phase 1 closed (T1.7 gate, release profile, medians of 5 paired rounds
+vs the Phase 0 archive; objectives/theta/evals bit-identical throughout;
+same-host Julia references):
+
+| scenario | construction P0 → now | total P0 → now | vs Julia P0 → now |
+|---|---:|---:|---:|
+| scalar_5000 | 0.476 → 0.247 ms (1.93×) | 0.568 → 0.329 ms (1.72×) | 1.17× → 2.01× |
+| scalar_10000 | 0.795 → 0.497 ms (1.60×) | 0.948 → 0.652 ms (1.46×) | 1.22× → 1.77× |
+| scalar_deep_200x50 | 0.712 → 0.503 ms (1.41×) | 0.750 → 0.543 ms (1.38×) | 1.26× → 1.74× |
+| vector_1000 | 0.098 → 0.063 ms (1.56×) | 0.573 → 0.421 ms (1.36×) | 3.44× → 4.68× |
+| vector_10000 | 1.000 → 0.610 ms (1.64×) | 2.488 → 2.099 ms (1.19×) | 6.70× → 7.94× |
+| vector_deep_200x50 | 0.847 → 0.540 ms (1.57×) | 1.661 → 1.171 ms (1.42×) | 2.58× → 3.65× |
+| crossed_large | 2.145 → 1.425 ms (1.50×) | ~unchanged (construction is 2%) | 1.94× |
+| kb07 build (profile_kb07) | 0.61 → 0.41 ms | | |
+
+The 3× construction target was not reached: with the public-API
+constraint above and the audit kept eager, the remaining ~0.5 ms at
+n = 10 000 is spread over many O(n) passes (audit random-term and
+scope-note statistics, ReMat build, the audit's own X and QR, the
+remaining X copies) each already close to a single tight pass. Further
+gains need the structural changes deferred to 2.0 (shared X ownership,
+lazy weighted copies, dropping `adj_a`) or a lazy audit.
+
 Constraint found for T1.4: `ReMat::{wtz, scratch, adj_a}` and
 `FeMat::wtxy` are public fields of public types (`mixeff_rs::types`), so
 making the weighted copies lazy is a 2.0 API change, not a 1.x
