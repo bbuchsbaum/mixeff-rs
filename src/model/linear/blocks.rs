@@ -145,8 +145,60 @@ pub(super) fn copy_block(dst: &mut MatrixBlock, src: &MatrixBlock) {
                 *dst_mat = src_mat.clone();
             }
         }
+        // A dense destination that the factorization promoted earlier keeps
+        // its dense buffer: scatter the source into it instead of reverting
+        // to the source's variant (which the next factorization would only
+        // promote again, one allocation per evaluation).
+        (MatrixBlock::Dense(dst_mat), src) if dst_mat.shape() == (src.nrows(), src.ncols()) => {
+            fill_dense_from_block(dst_mat, src, 1.0);
+        }
         (dst_block, src_block) => {
             *dst_block = src_block.clone();
+        }
+    }
+}
+
+/// Write `scale * src` into `dst` (same shape), zeroing entries `src` does
+/// not carry. Produces exactly the numbers `src.as_dense()` scaled by
+/// `scale` would, without allocating.
+pub(super) fn fill_dense_from_block(dst: &mut DMatrix<f64>, src: &MatrixBlock, scale: f64) {
+    match src {
+        MatrixBlock::Dense(src_mat) => {
+            if scale == 1.0 {
+                dst.copy_from(src_mat);
+            } else {
+                for (d, &s) in dst.as_mut_slice().iter_mut().zip(src_mat.as_slice()) {
+                    *d = s * scale;
+                }
+            }
+        }
+        MatrixBlock::Diagonal(diag) => {
+            dst.fill(0.0);
+            for (i, &value) in diag.iter().enumerate() {
+                dst[(i, i)] = if scale == 1.0 { value } else { value * scale };
+            }
+        }
+        MatrixBlock::BlockDiagonal(blocks) => {
+            dst.fill(0.0);
+            let mut row_offset = 0;
+            let mut col_offset = 0;
+            for block in blocks {
+                for col in 0..block.ncols() {
+                    for row in 0..block.nrows() {
+                        let value = block[(row, col)];
+                        dst[(row_offset + row, col_offset + col)] =
+                            if scale == 1.0 { value } else { value * scale };
+                    }
+                }
+                row_offset += block.nrows();
+                col_offset += block.ncols();
+            }
+        }
+        MatrixBlock::Sparse(csc) => {
+            dst.fill(0.0);
+            for (row, col, &value) in csc.triplet_iter() {
+                dst[(row, col)] = if scale == 1.0 { value } else { value * scale };
+            }
         }
     }
 }
@@ -1711,6 +1763,15 @@ pub(super) fn copy_and_scale_offdiag(
     if si == 1 && sj == 1 {
         let scale = re_i.lambda[(0, 0)] * re_j.lambda[(0, 0)];
         if let MatrixBlock::Sparse(a_sparse) = a {
+            // An L block the factorization promoted to dense stays dense:
+            // scatter the scaled sparse values into its buffer rather than
+            // reverting it to sparse (and re-promoting it) every evaluation.
+            if let MatrixBlock::Dense(dense) = l {
+                if dense.shape() == (a_sparse.nrows(), a_sparse.ncols()) {
+                    fill_dense_from_block(dense, a, scale);
+                    return;
+                }
+            }
             let result = match l {
                 MatrixBlock::Sparse(result)
                     if result.nrows() == a_sparse.nrows()
@@ -1842,6 +1903,14 @@ pub(super) fn copy_and_rmul_lambda(l: &mut MatrixBlock, a: &MatrixBlock, re_j: &
             MatrixBlock::Sparse(a_sparse) => {
                 // Scalar λ scale of a sparse [X|y]'Z block: keep the sparse
                 // structure and reuse the L buffer when it already matches.
+                // A dense L buffer (promoted by an earlier factorization)
+                // is filled in place instead of reverted to sparse.
+                if let MatrixBlock::Dense(dense) = l {
+                    if dense.shape() == (a_sparse.nrows(), a_sparse.ncols()) {
+                        fill_dense_from_block(dense, a, lam);
+                        return;
+                    }
+                }
                 let result = match l {
                     MatrixBlock::Sparse(result)
                         if result.nrows() == a_sparse.nrows()
@@ -2541,8 +2610,18 @@ pub(super) fn rdiv_lower_transpose(a: &mut MatrixBlock, l: &MatrixBlock) {
             }
         }
         _ => {
-            // L is Dense or Diagonal — original logic
-            let l_dense = l.as_dense();
+            // L is Dense or Diagonal — original logic. Borrow a dense L
+            // directly; this solve only reads it, and cloning the whole
+            // diagonal block here was one full copy per off-diagonal block
+            // per objective evaluation.
+            let l_owned;
+            let l_dense: &DMatrix<f64> = match l.as_dense_ref() {
+                Some(dense) => dense,
+                None => {
+                    l_owned = l.as_dense();
+                    &l_owned
+                }
+            };
             let n = l_dense.nrows();
 
             match a {

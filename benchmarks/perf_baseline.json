@@ -8,8 +8,8 @@
       "fit_feval": 23,
       "optimizer": "pattern_search",
       "backend": "native",
-      "allocs_per_eval": 1,
-      "bytes_per_eval": 72,
+      "allocs_per_eval": 0,
+      "bytes_per_eval": 0,
       "eval_median_us": 1.3644775000000002
     },
     {
@@ -18,8 +18,8 @@
       "fit_feval": 67,
       "optimizer": "bobyqa",
       "backend": "nlopt",
-      "allocs_per_eval": 1,
-      "bytes_per_eval": 72,
+      "allocs_per_eval": 0,
+      "bytes_per_eval": 0,
       "eval_median_us": 2.935625
     },
     {
@@ -28,8 +28,8 @@
       "fit_feval": 39,
       "optimizer": "bobyqa",
       "backend": "nlopt",
-      "allocs_per_eval": 1,
-      "bytes_per_eval": 72,
+      "allocs_per_eval": 0,
+      "bytes_per_eval": 0,
       "eval_median_us": 28.1079175
     },
     {
@@ -38,8 +38,8 @@
       "fit_feval": 268,
       "optimizer": "newuoa",
       "backend": "nlopt",
-      "allocs_per_eval": 8,
-      "bytes_per_eval": 49224,
+      "allocs_per_eval": 4,
+      "bytes_per_eval": 38784,
       "eval_median_us": 12.5246875
     },
     {
@@ -48,8 +48,8 @@
       "fit_feval": 412,
       "optimizer": "newuoa",
       "backend": "nlopt",
-      "allocs_per_eval": 8,
-      "bytes_per_eval": 161864,
+      "allocs_per_eval": 4,
+      "bytes_per_eval": 122880,
       "eval_median_us": 48.7315625
     }
   ],

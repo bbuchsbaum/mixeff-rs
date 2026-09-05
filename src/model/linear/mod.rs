@@ -1920,7 +1920,16 @@ impl LinearMixedModel {
             logdet += logdet_block(&self.l_blocks[block_index(j, j)]);
         }
 
-        let l_dense = self.l_blocks[block_index(k, k)].as_dense();
+        // The trailing block is dense; read its diagonal in place (cloning
+        // it here was one allocation per objective evaluation).
+        let l_owned;
+        let l_dense: &DMatrix<f64> = match self.l_blocks[block_index(k, k)].as_dense_ref() {
+            Some(dense) => dense,
+            None => {
+                l_owned = self.l_blocks[block_index(k, k)].as_dense();
+                &l_owned
+            }
+        };
         let pp1 = l_dense.nrows();
         let last_diag = l_dense[(pp1 - 1, pp1 - 1)];
         let pwrss = last_diag * last_diag;

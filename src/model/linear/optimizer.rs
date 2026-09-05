@@ -1776,7 +1776,15 @@ impl LinearMixedModel {
             logdet_lzz += logdet_block(&l_blocks[block_index(j, j)]);
         }
 
-        let l_last = l_blocks[block_index(k, k)].as_dense();
+        // Read the trailing dense block in place (no per-evaluation clone).
+        let l_owned;
+        let l_last: &DMatrix<f64> = match l_blocks[block_index(k, k)].as_dense_ref() {
+            Some(dense) => dense,
+            None => {
+                l_owned = l_blocks[block_index(k, k)].as_dense();
+                &l_owned
+            }
+        };
         let pp1 = l_last.nrows();
         let last_diag = l_last[(pp1 - 1, pp1 - 1)];
         let pwrss = last_diag * last_diag;

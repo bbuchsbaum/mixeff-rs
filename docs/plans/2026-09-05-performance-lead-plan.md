@@ -338,6 +338,29 @@ T4.4 Gate. `perf_gate` alloc pins re-pinned to 0 for every row;
 `objective_eval_bench` paired; objectives bit-identical (assert equality in
 the paired script). faer stays opt-in (rounding-level drift).
 
+Phase 4 shipped (exact): the trailing-block diagonal reads in the
+objective and the certificate twin borrow the dense block instead of
+cloning it; the dense-L arm of `rdiv_lower_transpose` borrows L; and the
+three copy kernels (`copy_block`, `copy_and_scale_offdiag`,
+`copy_and_rmul_lambda`) fill an L block the factorization previously
+promoted to dense in place (`fill_dense_from_block`) instead of reverting
+it to the sparse/diagonal variant of A, which the next factorization only
+promoted again. `perf_gate` allocation pins after the change: scalar and
+vector rows 1 → 0 allocations per evaluation; crossed rows 8 → 4 (49 KB →
+39 KB, 162 KB → 123 KB). An allocation-size trace shows the four residual
+crossed allocations are matrixmultiply's panel-packing buffers inside
+nalgebra's gemm (sizes equal the L-block products), not crate code; at
+~100 ns each they are left alone. Objectives and evaluation counts are
+bit-identical (perf_gate objective/feval pins). Paired runs (5 alternating
+rounds, host load average ≈ 20 from other sessions) show no measurable
+wall-time change: LMM rows median 1.02×, GLMM rows 0.98×, all within
+noise. Conclusion: the per-evaluation path was already arithmetic-bound;
+the remaining per-evaluation levers are algorithmic (Phase 5) or
+kernel-level (fused weighted A rebuild, cheaper PIRLS row kernels), not
+allocation hygiene. The perf baseline's allocation pins were re-pinned by
+hand to the new counts; its timing baselines were deliberately left as
+recorded on a quiet host.
+
 ## Phase 5: Analytic gradient and a gradient-based optimizer (3-4 weeks, staged, lever 4)
 
 Facts from the objective path. Blocks are the packed lower triangle of
