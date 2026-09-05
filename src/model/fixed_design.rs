@@ -240,6 +240,15 @@ pub trait FixedDesignBackend {
 /// Frontends that compile formulas can choose the representation that best
 /// matches their transformed columns, while the fitting engine consumes a
 /// single design type.
+/// Largest fixed-effect column count for which nalgebra's `x' * x` takes
+/// its small-dimension path (a sequential dot product per cell) rather
+/// than the blocked `matrixmultiply` gemm. Below or at this width the
+/// explicit slice loops in `DenseFixedDesign::xtx` reproduce nalgebra's
+/// result bit for bit; above it the nalgebra product is kept so the
+/// summation order (and therefore every downstream objective) is
+/// unchanged. Pinned by the `nalgebra_summation_order` tests.
+pub(crate) const NALGEBRA_SEQUENTIAL_GEMM_MAX_DIM: usize = 5;
+
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum FixedDesign {
@@ -613,7 +622,30 @@ impl FixedDesignBackend for DenseFixedDesign {
     }
 
     fn xtx(&self) -> DMatrix<f64> {
-        self.x.transpose() * &self.x
+        let p = self.x.ncols();
+        if p > NALGEBRA_SEQUENTIAL_GEMM_MAX_DIM {
+            // Wide designs: keep nalgebra's blocked gemm and its summation
+            // order (see `nalgebra_summation_order` tests).
+            return self.x.transpose() * &self.x;
+        }
+        // Skinny designs: nalgebra's product is a plain sequential dot per
+        // cell, so this column-slice loop reproduces it bit for bit without
+        // the transposed copy or element-wise bounds checks.
+        let mut result = DMatrix::zeros(p, p);
+        for i in 0..p {
+            let xi = self.x.column(i);
+            let xi = xi.as_slice();
+            for j in 0..p {
+                let xj = self.x.column(j);
+                let xj = xj.as_slice();
+                let mut acc = 0.0;
+                for (&a, &b) in xi.iter().zip(xj) {
+                    acc += a * b;
+                }
+                result[(i, j)] = acc;
+            }
+        }
+        result
     }
 
     fn xty(&self, y: &DVector<f64>) -> Result<DVector<f64>> {
@@ -624,7 +656,54 @@ impl FixedDesignBackend for DenseFixedDesign {
                 y.len()
             )));
         }
-        Ok(self.x.transpose() * y)
+        // nalgebra's gemv accumulates each output in observation order, so
+        // a sequential column-slice dot is bit-identical to `x' * y`.
+        let y = y.as_slice();
+        let mut result = DVector::zeros(self.x.ncols());
+        for (col, out) in result.iter_mut().enumerate() {
+            let x_col = self.x.column(col);
+            let mut acc = 0.0;
+            for (&a, &b) in x_col.as_slice().iter().zip(y) {
+                acc += a * b;
+            }
+            *out = acc;
+        }
+        Ok(result)
+    }
+
+    /// `X'Z_j` straight from the stored dense design: no materialized copy,
+    /// column-slice access, and each output cell accumulated in increasing
+    /// observation order exactly as the generic element-indexed loop does,
+    /// so the block is bit-identical to the trait default.
+    fn xt_reterm(&self, re: &ReMat) -> Result<MatrixBlock> {
+        if re.n_obs() != self.n_obs() {
+            return Err(MixedModelError::DimensionMismatch(format!(
+                "fixed-effect design has {} rows but random term '{}' has {} rows",
+                self.n_obs(),
+                re.grouping_name,
+                re.n_obs()
+            )));
+        }
+
+        let p = self.x.ncols();
+        let nranef = re.n_ranef();
+        let vsize = re.vsize;
+        let mut result = DMatrix::zeros(p, nranef);
+        // `p × nranef` column-major: (fixed_col, k) -> k * p + fixed_col.
+        let out = result.as_mut_slice();
+        let wtz = re.wtz.as_slice();
+        for fixed_col in 0..p {
+            let x_col = self.x.column(fixed_col);
+            let x_col = x_col.as_slice();
+            for ((&level, &x_value), z) in re.refs.iter().zip(x_col).zip(wtz.chunks_exact(vsize)) {
+                let base = level as usize * vsize * p + fixed_col;
+                for (basis_row, &z_value) in z.iter().enumerate() {
+                    out[base + basis_row * p] += x_value * z_value;
+                }
+            }
+        }
+
+        Ok(MatrixBlock::Dense(result))
     }
 
     fn row_dot_beta(&self, row: usize, beta: &DVector<f64>) -> Result<f64> {

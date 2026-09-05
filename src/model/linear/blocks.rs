@@ -441,20 +441,26 @@ pub(super) fn finalize_fixed_re_block(block: MatrixBlock, n_reterms: usize) -> M
     }
 }
 
-pub(super) fn weighted_fixed_design_for_solver(
-    fixed_design: &FixedDesign,
+/// The solver-side fixed design: the caller's design borrowed as is when
+/// there are no observation weights, or a row-weighted copy otherwise.
+pub(super) fn weighted_fixed_design_for_solver<'a>(
+    fixed_design: &'a FixedDesign,
     sqrtwts: Option<&DVector<f64>>,
-) -> Result<FixedDesign> {
+) -> Result<std::borrow::Cow<'a, FixedDesign>> {
     match sqrtwts {
-        Some(weights) => fixed_design.with_sqrt_weights(weights),
-        None => Ok(fixed_design.clone()),
+        Some(weights) => Ok(std::borrow::Cow::Owned(
+            fixed_design.with_sqrt_weights(weights)?,
+        )),
+        None => Ok(std::borrow::Cow::Borrowed(fixed_design)),
     }
 }
 
-pub(super) fn weighted_response_for_solver(
-    y: &DVector<f64>,
+/// The solver-side response: borrowed when unweighted, a weighted copy
+/// otherwise.
+pub(super) fn weighted_response_for_solver<'a>(
+    y: &'a DVector<f64>,
     sqrtwts: Option<&DVector<f64>>,
-) -> Result<DVector<f64>> {
+) -> Result<std::borrow::Cow<'a, DVector<f64>>> {
     if let Some(weights) = sqrtwts {
         if weights.len() != y.len() {
             return Err(MixedModelError::DimensionMismatch(format!(
@@ -463,9 +469,9 @@ pub(super) fn weighted_response_for_solver(
                 weights.len()
             )));
         }
-        Ok(y.component_mul(weights))
+        Ok(std::borrow::Cow::Owned(y.component_mul(weights)))
     } else {
-        Ok(y.clone())
+        Ok(std::borrow::Cow::Borrowed(y))
     }
 }
 
@@ -641,13 +647,21 @@ pub(super) fn compute_re_cross_product(a: &ReMat, b: &ReMat) -> MatrixBlock {
     let nranef_a = a.n_ranef();
     let nranef_b = b.n_ranef();
 
+    // `wtz` is `vsize × n_obs` column-major, so observation `obs` occupies
+    // the contiguous run `[obs * vsize, (obs + 1) * vsize)`. Every branch
+    // below accumulates each output cell in increasing observation order,
+    // exactly as the element-indexed loops it replaces, so the sums are
+    // bit-identical; only the bounds-checked matrix indexing is gone.
+    let a_wtz = a.wtz.as_slice();
+    let b_wtz = b.wtz.as_slice();
+
     if std::ptr::eq(a, b) && a.vsize == 1 {
         // Scalar RE: diagonal result
         let n_levels = a.n_levels();
         let mut diag = DVector::zeros(n_levels);
-        for (obs, &ref_idx) in a.refs.iter().enumerate() {
-            let r = ref_idx as usize;
-            diag[r] += a.wtz[(0, obs)] * a.wtz[(0, obs)];
+        let out = diag.as_mut_slice();
+        for (&ref_idx, &z) in a.refs.iter().zip(a_wtz) {
+            out[ref_idx as usize] += z * z;
         }
         MatrixBlock::Diagonal(diag)
     } else if std::ptr::eq(a, b) && a.vsize > 1 {
@@ -658,12 +672,13 @@ pub(super) fn compute_re_cross_product(a: &ReMat, b: &ReMat) -> MatrixBlock {
         let mut blocks: Vec<DMatrix<f64>> = (0..n_levels).map(|_| DMatrix::zeros(s, s)).collect();
 
         for (obs, &ref_idx) in a.refs.iter().enumerate() {
-            let k = ref_idx as usize;
-            let blk = &mut blocks[k];
+            let col = &a_wtz[obs * s..(obs + 1) * s];
+            // `s × s` column-major: (si, sj) -> sj * s + si.
+            let blk = blocks[ref_idx as usize].as_mut_slice();
             for si in 0..s {
-                let wtz_si = a.wtz[(si, obs)];
+                let wtz_si = col[si];
                 for sj in 0..s {
-                    blk[(si, sj)] += wtz_si * a.wtz[(sj, obs)];
+                    blk[sj * s + si] += wtz_si * col[sj];
                 }
             }
         }
@@ -684,20 +699,11 @@ pub(super) fn compute_re_cross_product(a: &ReMat, b: &ReMat) -> MatrixBlock {
         // unchanged to ~1e-8, identical optimizer trajectory) but ~25% faster
         // on the grouseticks Poisson GLMM (bd-01KRSQYRHF8VK627HZ6Z23CP93).
         let mut entries = BTreeMap::<(usize, usize), f64>::new();
-        let n = a.refs.len();
 
-        for obs in 0..n {
-            let ri = a.refs[obs] as usize;
-            let rj = b.refs[obs] as usize;
-            for si in 0..a.vsize {
-                for sj in 0..b.vsize {
-                    let value = a.wtz[(si, obs)] * b.wtz[(sj, obs)];
-                    if value != 0.0 {
-                        *entries
-                            .entry((ri * a.vsize + si, rj * b.vsize + sj))
-                            .or_insert(0.0) += value;
-                    }
-                }
+        for (obs, (&ri, &rj)) in a.refs.iter().zip(b.refs.iter()).enumerate() {
+            let value = a_wtz[obs] * b_wtz[obs];
+            if value != 0.0 {
+                *entries.entry((ri as usize, rj as usize)).or_insert(0.0) += value;
             }
         }
         let mut result = CooMatrix::new(nranef_a, nranef_b);
@@ -711,16 +717,21 @@ pub(super) fn compute_re_cross_product(a: &ReMat, b: &ReMat) -> MatrixBlock {
         // General case: dense result. This includes reverse-ordered nested
         // scalar terms, where preserving the previous dense algebra keeps the
         // optimizer path stable.
+        let va = a.vsize;
+        let vb = b.vsize;
         let mut result = DMatrix::zeros(nranef_a, nranef_b);
-        let n = a.refs.len();
+        // `nranef_a × nranef_b` column-major: (row, col) -> col * nranef_a + row.
+        let out = result.as_mut_slice();
 
-        for obs in 0..n {
-            let ri = a.refs[obs] as usize;
-            let rj = b.refs[obs] as usize;
-            for si in 0..a.vsize {
-                for sj in 0..b.vsize {
-                    result[(ri * a.vsize + si, rj * b.vsize + sj)] +=
-                        a.wtz[(si, obs)] * b.wtz[(sj, obs)];
+        for (obs, (&ri, &rj)) in a.refs.iter().zip(b.refs.iter()).enumerate() {
+            let row0 = ri as usize * va;
+            let col0 = rj as usize * vb;
+            let ca = &a_wtz[obs * va..(obs + 1) * va];
+            let cb = &b_wtz[obs * vb..(obs + 1) * vb];
+            for si in 0..va {
+                let wtz_si = ca[si];
+                for sj in 0..vb {
+                    out[(col0 + sj) * nranef_a + row0 + si] += wtz_si * cb[sj];
                 }
             }
         }
@@ -773,8 +784,7 @@ pub(super) fn compute_fixed_response_re_cross_product(
     }
 
     let fixed_re = fixed_design.xt_reterm(re)?;
-    let response_re =
-        compute_response_re_cross_product(&DMatrix::from_columns(std::slice::from_ref(y)), re);
+    let response_re = response_re_cross_product_vec(y, re);
     let pp1 = fixed_design.n_cols() + 1;
 
     // A sparse X'Z (streamed high-cardinality designs) stays sparse in the
@@ -785,8 +795,7 @@ pub(super) fn compute_fixed_response_re_cross_product(
         for (row, col, value) in xt_sparse.triplet_iter() {
             coo.push(row, col, *value);
         }
-        for col in 0..response_re.nrows() {
-            let value = response_re[(col, 0)];
+        for (col, &value) in response_re.iter().enumerate() {
             if value != 0.0 {
                 coo.push(pp1 - 1, col, value);
             }
@@ -794,18 +803,44 @@ pub(super) fn compute_fixed_response_re_cross_product(
         return Ok(MatrixBlock::Sparse(CscMatrix::from(&coo)));
     }
 
-    let fixed_re = fixed_re.as_dense();
-    let mut result = DMatrix::zeros(pp1, re.n_ranef());
-    for row in 0..fixed_re.nrows() {
-        for col in 0..fixed_re.ncols() {
-            result[(row, col)] = fixed_re[(row, col)];
-        }
-    }
-
-    for col in 0..response_re.nrows() {
-        result[(fixed_design.n_cols(), col)] = response_re[(col, 0)];
+    let fixed_re = match fixed_re {
+        MatrixBlock::Dense(dense) => dense,
+        other => other.as_dense(),
+    };
+    let p = fixed_design.n_cols();
+    let nranef = re.n_ranef();
+    let mut result = DMatrix::zeros(pp1, nranef);
+    // Stack `X'Z` (p rows) over `y'Z` (one row), column by column.
+    let src = fixed_re.as_slice();
+    let out = result.as_mut_slice();
+    let yz = response_re.as_slice();
+    for col in 0..nranef {
+        out[col * pp1..col * pp1 + p].copy_from_slice(&src[col * p..(col + 1) * p]);
+        out[col * pp1 + p] = yz[col];
     }
     Ok(MatrixBlock::Dense(result))
+}
+
+/// `y'Z_j` for a single response vector: length `n_ranef`, accumulated in
+/// observation order per cell (bit-identical to the matrix form
+/// `compute_response_re_cross_product` with one column).
+pub(super) fn response_re_cross_product_vec(y: &DVector<f64>, re: &ReMat) -> DVector<f64> {
+    let vsize = re.vsize;
+    let mut result = DVector::zeros(re.n_ranef());
+    let out = result.as_mut_slice();
+    let wtz = re.wtz.as_slice();
+    for ((&ref_idx, &response), z) in re
+        .refs
+        .iter()
+        .zip(y.as_slice())
+        .zip(wtz.chunks_exact(vsize))
+    {
+        let base = ref_idx as usize * vsize;
+        for (s, &z_value) in z.iter().enumerate() {
+            out[base + s] += z_value * response;
+        }
+    }
+    result
 }
 
 /// Compute `[X|y]' [X|y]` using fixed-design backend cross-products.
@@ -840,14 +875,20 @@ pub(super) fn compute_fixed_response_cross_product(
 pub(super) fn compute_x_re_cross_product(x: &DMatrix<f64>, re: &ReMat) -> MatrixBlock {
     let p = x.ncols();
     let nranef = re.n_ranef();
-    let n = re.refs.len();
+    let vsize = re.vsize;
 
     let mut result = DMatrix::zeros(p, nranef);
-    for obs in 0..n {
-        let r = re.refs[obs] as usize;
-        for col in 0..p {
-            for s in 0..re.vsize {
-                result[(col, r * re.vsize + s)] += x[(obs, col)] * re.wtz[(s, obs)];
+    // `p × nranef` column-major: (col, k) -> k * p + col. Each cell is
+    // accumulated in increasing observation order, as before.
+    let out = result.as_mut_slice();
+    let wtz = re.wtz.as_slice();
+    for col in 0..p {
+        let x_col = x.column(col);
+        let x_col = x_col.as_slice();
+        for ((&ref_idx, &x_value), z) in re.refs.iter().zip(x_col).zip(wtz.chunks_exact(vsize)) {
+            let base = ref_idx as usize * vsize * p + col;
+            for (s, &z_value) in z.iter().enumerate() {
+                out[base + s * p] += x_value * z_value;
             }
         }
     }
@@ -2474,6 +2515,76 @@ pub(super) fn logdet_block(block: &MatrixBlock) -> f64 {
         MatrixBlock::Sparse(mat) => {
             let dense = MatrixBlock::Sparse(mat.clone()).as_dense();
             logdet_block(&MatrixBlock::Dense(dense))
+        }
+    }
+}
+
+/// The A-block builders replace nalgebra products with explicit sequential
+/// slice loops where (and only where) nalgebra itself sums sequentially, so
+/// every `A` entry, and therefore every objective, is bit-identical to the
+/// previous construction. These tests pin that assumption against the
+/// pinned nalgebra version: if an upgrade changes the small-dimension gemm
+/// threshold or the gemv accumulation order, they fail here rather than in
+/// a parity fixture.
+#[cfg(test)]
+mod nalgebra_summation_order {
+    use nalgebra::{DMatrix, DVector};
+
+    use crate::model::fixed_design::NALGEBRA_SEQUENTIAL_GEMM_MAX_DIM;
+
+    fn design(n: usize, p: usize) -> (DMatrix<f64>, DVector<f64>) {
+        let x = DMatrix::from_fn(n, p, |i, j| ((i * 7 + j * 3) as f64 * 0.37).sin() + 0.1);
+        let y = DVector::from_fn(n, |i, _| ((i * 11) as f64 * 0.19).cos());
+        (x, y)
+    }
+
+    fn sequential_xtx(x: &DMatrix<f64>) -> DMatrix<f64> {
+        let p = x.ncols();
+        DMatrix::from_fn(p, p, |i, j| {
+            (0..x.nrows()).fold(0.0, |acc, k| acc + x[(k, i)] * x[(k, j)])
+        })
+    }
+
+    fn sequential_xty(x: &DMatrix<f64>, y: &DVector<f64>) -> DVector<f64> {
+        DVector::from_fn(x.ncols(), |i, _| {
+            (0..x.nrows()).fold(0.0, |acc, k| acc + x[(k, i)] * y[k])
+        })
+    }
+
+    #[test]
+    fn skinny_xtx_is_a_sequential_dot_per_cell_up_to_the_pinned_width() {
+        for p in 1..=NALGEBRA_SEQUENTIAL_GEMM_MAX_DIM {
+            for n in [7usize, 997, 10_000] {
+                let (x, _) = design(n, p);
+                assert_eq!(
+                    x.transpose() * &x,
+                    sequential_xtx(&x),
+                    "nalgebra x'x is no longer sequential at p={p}, n={n}; \
+                     DenseFixedDesign::xtx would change every objective"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wide_xtx_takes_the_blocked_gemm_path_above_the_pinned_width() {
+        // Documents why the explicit loop is not used for wide designs: the
+        // blocked product sums in a different order.
+        let (x, _) = design(4096, NALGEBRA_SEQUENTIAL_GEMM_MAX_DIM + 3);
+        assert_ne!(x.transpose() * &x, sequential_xtx(&x));
+    }
+
+    #[test]
+    fn xty_gemv_accumulates_in_observation_order_for_any_width() {
+        for p in [1usize, 2, 5, 8, 16] {
+            for n in [7usize, 997, 10_000] {
+                let (x, y) = design(n, p);
+                assert_eq!(
+                    x.transpose() * &y,
+                    sequential_xty(&x, &y),
+                    "nalgebra gemv order changed at p={p}, n={n}"
+                );
+            }
         }
     }
 }
