@@ -228,3 +228,55 @@ for (n_subj, n_items, n_sites, n_rep, label) in large_theta_scenarios
     @printf("%s,%d,%d,%d,%d,%d,%.3f,%.3f,%.3f,%.6f,%.1f,%.1f\n",
             label, n_subj, n_items, n_sites, n_rep, total_n, med, mn, mi, obj, fe_med, fe_mean)
 end
+
+# ── GLMM rows ──────────────────────────────────────────────────────────
+# The same lme4-derived datasets the crate ships under datasets/ (MixedModels
+# carries them with lowercase column names). `fast=true` profiles beta out
+# via PIRLS (the crate's default estimator); `fast=false` is the joint
+# Laplace fit over [beta; theta] (lme4 glmer's estimator). Timing scope is
+# construction + fit, as above.
+println("\n# GLMM: MixedModels.dataset rows, fast=true (profiled PIRLS) and fast=false (joint Laplace)")
+println("scenario,total_n,fast,median_ms,mean_ms,min_ms,objective,median_feval,mean_feval")
+
+function bench_glmm(df, f, dist; fast::Bool, wts=nothing, n_warmup=1, n_reps=5)
+    fit_once() = wts === nothing ?
+        fit(MixedModel, f, df, dist; fast=fast, progress=false) :
+        fit(MixedModel, f, df, dist; fast=fast, wts=wts, progress=false)
+    for _ in 1:n_warmup
+        fit_once()
+    end
+    times = Float64[]
+    objs = Float64[]
+    fevals = Float64[]
+    for _ in 1:n_reps
+        GC.gc()
+        t0 = time_ns()
+        m = fit_once()
+        t1 = time_ns()
+        push!(times, (t1 - t0) / 1e6)
+        push!(objs, objective(m))
+        push!(fevals, m.optsum.feval)
+    end
+    return times, objs, fevals
+end
+
+glmm_rows = [
+    ("glmm_cbpp", :cbpp, @formula((incid / hsz) ~ 1 + period + (1 | herd)), Binomial(), :hsz),
+    ("glmm_grouseticks", :grouseticks,
+     @formula(ticks ~ 1 + year + height + (1 | index) + (1 | brood) + (1 | location)), Poisson(), nothing),
+    ("glmm_verbagg", :verbagg,
+     @formula(r2 ~ 1 + anger + gender + btype + situ + mode + (1 | subj) + (1 | item)), Bernoulli(), nothing),
+    ("glmm_contra_intercept", :contra, @formula(use ~ 1 + age + livch + urban + (1 | dist)), Bernoulli(), nothing),
+    ("glmm_contra_slope", :contra, @formula(use ~ 1 + age + livch + urban + (1 + urban | dist)), Bernoulli(), nothing),
+]
+
+for (label, name, f, dist, wts_col) in glmm_rows
+    df = DataFrame(MixedModels.dataset(name))
+    wts = wts_col === nothing ? nothing : float.(df[!, wts_col])
+    for fast in (true, false)
+        times, objs, fevals = bench_glmm(df, f, dist; fast=fast, wts=wts)
+        @printf("%s_%s,%d,%s,%.3f,%.3f,%.3f,%.6f,%.1f,%.1f\n",
+                label, fast ? "fast" : "full", nrow(df), fast, median(times), mean(times),
+                minimum(times), mean(objs), median(fevals), mean(fevals))
+    end
+end

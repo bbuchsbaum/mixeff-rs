@@ -13,134 +13,204 @@
   },
   "scenarios": {
     "vector_180": {
-      "median_ms": 0.662,
-      "mean_ms": 0.658,
-      "min_ms": 0.611,
+      "median_ms": 0.616,
+      "mean_ms": 0.623,
+      "min_ms": 0.586,
       "objective": 1737.786888
     },
     "vector_1000": {
-      "median_ms": 1.97,
-      "mean_ms": 1.96,
-      "min_ms": 1.901,
+      "median_ms": 1.942,
+      "mean_ms": 1.934,
+      "min_ms": 1.856,
       "objective": 9674.682
     },
     "vector_5000": {
-      "median_ms": 8.152,
-      "mean_ms": 8.154,
-      "min_ms": 8.02,
+      "median_ms": 8.117,
+      "mean_ms": 8.104,
+      "min_ms": 7.988,
       "objective": 48441.265829
     },
     "vector_10000": {
-      "median_ms": 16.675,
-      "mean_ms": 16.737,
-      "min_ms": 16.499,
+      "median_ms": 16.527,
+      "mean_ms": 16.656,
+      "min_ms": 16.417,
       "objective": 96863.829625
     },
     "vector_deep_200x50": {
-      "median_ms": 4.278,
-      "mean_ms": 4.312,
-      "min_ms": 4.129,
+      "median_ms": 4.275,
+      "mean_ms": 4.315,
+      "min_ms": 4.234,
       "objective": 94696.021324
     },
     "scalar_180": {
-      "median_ms": 0.286,
-      "mean_ms": 0.285,
-      "min_ms": 0.235,
+      "median_ms": 0.25,
+      "mean_ms": 0.28,
+      "min_ms": 0.226,
       "objective": 1785.958191
     },
     "scalar_1000": {
-      "median_ms": 0.349,
-      "mean_ms": 0.342,
-      "min_ms": 0.292,
+      "median_ms": 0.363,
+      "mean_ms": 0.36,
+      "min_ms": 0.343,
       "objective": 9888.480193
     },
     "scalar_5000": {
-      "median_ms": 0.663,
-      "mean_ms": 0.668,
-      "min_ms": 0.624,
+      "median_ms": 0.642,
+      "mean_ms": 0.647,
+      "min_ms": 0.614,
       "objective": 49634.926921
     },
     "scalar_10000": {
-      "median_ms": 1.153,
-      "mean_ms": 1.138,
-      "min_ms": 1.086,
+      "median_ms": 1.111,
+      "mean_ms": 1.127,
+      "min_ms": 1.039,
       "objective": 99330.533013
     },
     "scalar_deep_200x50": {
-      "median_ms": 0.948,
-      "mean_ms": 0.952,
-      "min_ms": 0.887,
+      "median_ms": 0.909,
+      "mean_ms": 0.93,
+      "min_ms": 0.885,
       "objective": 118776.271089
     },
     "crossed_small": {
-      "median_ms": 8.572,
-      "mean_ms": 8.6,
-      "min_ms": 8.503,
+      "median_ms": 8.516,
+      "mean_ms": 8.519,
+      "min_ms": 8.347,
       "objective": 6177.391766,
       "feval": 320.0
     },
     "crossed_medium": {
-      "median_ms": 88.007,
-      "mean_ms": 85.469,
-      "min_ms": 74.759,
+      "median_ms": 87.111,
+      "mean_ms": 86.946,
+      "min_ms": 74.588,
       "objective": 24348.710095,
       "feval": 411.0
     },
     "crossed_large": {
-      "median_ms": 187.519,
-      "mean_ms": 182.493,
-      "min_ms": 158.448,
+      "median_ms": 185.239,
+      "mean_ms": 183.275,
+      "min_ms": 155.961,
       "objective": 72320.124564,
       "feval": 408.0
+    },
+    "glmm_cbpp_fast": {
+      "median_ms": 1.688,
+      "mean_ms": 1.692,
+      "min_ms": 1.588,
+      "objective": 100.151883,
+      "feval": 22.0
+    },
+    "glmm_cbpp_full": {
+      "median_ms": 3.083,
+      "mean_ms": 3.06,
+      "min_ms": 2.968,
+      "objective": 100.095856,
+      "feval": 63.0
+    },
+    "glmm_grouseticks_fast": {
+      "median_ms": 849.632,
+      "mean_ms": 855.899,
+      "min_ms": 844.155,
+      "objective": 851.404637,
+      "feval": 69.0
+    },
+    "glmm_grouseticks_full": {
+      "median_ms": 37864.751,
+      "mean_ms": 37984.84,
+      "min_ms": 37777.93,
+      "objective": 849.556615,
+      "feval": 3253.0
+    },
+    "glmm_verbagg_fast": {
+      "median_ms": 77.411,
+      "mean_ms": 77.461,
+      "min_ms": 75.885,
+      "objective": 8136.170872,
+      "feval": 33.0
+    },
+    "glmm_verbagg_full": {
+      "median_ms": 2204.397,
+      "mean_ms": 2200.533,
+      "min_ms": 2184.266,
+      "objective": 8135.832857,
+      "feval": 1028.0
+    },
+    "glmm_contra_intercept_fast": {
+      "median_ms": 10.03,
+      "mean_ms": 9.953,
+      "min_ms": 9.723,
+      "objective": 2413.662637,
+      "feval": 20.0
+    },
+    "glmm_contra_intercept_full": {
+      "median_ms": 97.043,
+      "mean_ms": 97.058,
+      "min_ms": 96.729,
+      "objective": 2413.616461,
+      "feval": 254.0
+    },
+    "glmm_contra_slope_fast": {
+      "median_ms": 41.096,
+      "mean_ms": 41.243,
+      "min_ms": 40.826,
+      "objective": 2399.10678,
+      "feval": 55.0
+    },
+    "glmm_contra_slope_full": {
+      "median_ms": 257.641,
+      "mean_ms": 262.787,
+      "min_ms": 253.513,
+      "objective": 2399.017195,
+      "feval": 382.0
     }
   },
   "unmapped_scenarios": {
     "medium_50subj": {
-      "median_ms": 0.952,
-      "mean_ms": 0.951,
-      "min_ms": 0.886,
+      "median_ms": 0.974,
+      "mean_ms": 0.963,
+      "min_ms": 0.922,
       "objective": 4847.222914
     },
     "large_200subj": {
-      "median_ms": 2.829,
-      "mean_ms": 2.825,
-      "min_ms": 2.744,
+      "median_ms": 2.84,
+      "mean_ms": 2.847,
+      "min_ms": 2.731,
       "objective": 19368.554314
     },
     "deep_50x50": {
-      "median_ms": 1.525,
-      "mean_ms": 1.537,
-      "min_ms": 1.401,
+      "median_ms": 1.471,
+      "mean_ms": 1.466,
+      "min_ms": 1.374,
       "objective": 23657.305439
     },
     "deep_100x50": {
-      "median_ms": 2.409,
-      "mean_ms": 2.418,
-      "min_ms": 2.324,
+      "median_ms": 2.412,
+      "mean_ms": 2.419,
+      "min_ms": 2.363,
       "objective": 47363.101786
     },
     "scalar_medium_50subj": {
-      "median_ms": 0.321,
-      "mean_ms": 0.319,
-      "min_ms": 0.289,
+      "median_ms": 0.308,
+      "mean_ms": 0.31,
+      "min_ms": 0.297,
       "objective": 4981.594605
     },
     "scalar_large_200subj": {
-      "median_ms": 0.422,
-      "mean_ms": 0.412,
-      "min_ms": 0.354,
+      "median_ms": 0.397,
+      "mean_ms": 0.402,
+      "min_ms": 0.369,
       "objective": 19876.338934
     },
     "scalar_deep_50x50": {
-      "median_ms": 0.41,
-      "mean_ms": 0.419,
-      "min_ms": 0.38,
+      "median_ms": 0.413,
+      "mean_ms": 0.408,
+      "min_ms": 0.382,
       "objective": 29474.794285
     },
     "scalar_deep_100x50": {
-      "median_ms": 0.513,
+      "median_ms": 0.519,
       "mean_ms": 0.516,
-      "min_ms": 0.463,
+      "min_ms": 0.492,
       "objective": 58774.37891
     }
   }

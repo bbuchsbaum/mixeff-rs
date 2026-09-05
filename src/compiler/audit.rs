@@ -2217,22 +2217,6 @@ fn audit_values(name: &str, kind: &str, refs: &Option<Vec<usize>>, values: &[f64
     }
 }
 
-fn sample_sd(values: &[f64]) -> f64 {
-    if values.len() < 2 {
-        return 0.0;
-    }
-    let mean = values.iter().sum::<f64>() / values.len() as f64;
-    let var = values
-        .iter()
-        .map(|value| {
-            let centered = value - mean;
-            centered * centered
-        })
-        .sum::<f64>()
-        / (values.len() - 1) as f64;
-    var.sqrt()
-}
-
 fn response_constant_within_group_diagnostic(
     term: &RandomTermIr,
     data: &DataFrame,

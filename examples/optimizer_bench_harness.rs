@@ -34,6 +34,35 @@ enum ScenarioKind {
         n_sites: usize,
         n_rep: usize,
     },
+    /// GLMM on a dataset from the crate registry (`datasets/<name>`), using
+    /// that dataset's `fit_index`-th recorded fit spec (formula, family,
+    /// link, weights). `fast` selects profiled PIRLS (the default estimator)
+    /// or the joint Laplace fit. Needs `--features unstable-internals` for
+    /// the registry; without it these rows are skipped with a note.
+    Glmm {
+        dataset: &'static str,
+        fit_index: usize,
+        fast: bool,
+    },
+}
+
+/// Data plus, for GLMM rows, the fit specification resolved from the
+/// dataset registry.
+struct ScenarioData {
+    data: DataFrame,
+    total_n: usize,
+    seed: u64,
+    /// Formula text actually fitted (the scenario's own for LMM rows).
+    formula: String,
+    glmm: Option<GlmmSpec>,
+}
+
+#[cfg_attr(not(feature = "unstable-internals"), allow(dead_code))]
+struct GlmmSpec {
+    family: mixeff_rs::model::traits::Family,
+    link: Option<mixeff_rs::model::traits::LinkFunction>,
+    weights: Option<Vec<f64>>,
+    fast: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -393,31 +422,254 @@ fn scenarios() -> Vec<Scenario> {
                 julia_feval: None,
             },
         },
+        // GLMM rows (dataset registry; skipped without `unstable-internals`).
+        // `objective_best` is the crate's own converged objective for the
+        // row's estimator (fast profiled PIRLS unless `fast: false`), so the
+        // gate catches regressions of this estimator, not lme4/Julia
+        // objective-definition differences.
+        glmm_scenario("glmm_cbpp_fast", "cbpp", 0, true, 100.151883),
+        glmm_scenario("glmm_cbpp_full", "cbpp", 0, false, 184.052565),
+        glmm_scenario("glmm_grouseticks_fast", "grouseticks", 0, true, 851.404637),
+        glmm_scenario("glmm_verbagg_fast", "verbagg", 0, true, 8136.170872),
+        glmm_scenario(
+            "glmm_contra_intercept_fast",
+            "contraception",
+            0,
+            true,
+            2413.662637,
+        ),
+        glmm_scenario(
+            "glmm_contra_slope_fast",
+            "contraception",
+            1,
+            true,
+            2399.106780,
+        ),
+        glmm_scenario("glmm_arabidopsis_fast", "arabidopsis", 0, true, 18486.865146),
     ]
 }
 
-fn build_data(kind: ScenarioKind) -> (DataFrame, usize, u64) {
-    match kind {
+fn glmm_scenario(
+    scenario: &'static str,
+    dataset: &'static str,
+    fit_index: usize,
+    fast: bool,
+    objective_best: f64,
+) -> Scenario {
+    Scenario {
+        scenario,
+        family: "glmm",
+        formula: "",
+        reml: false,
+        kind: ScenarioKind::Glmm {
+            dataset,
+            fit_index,
+            fast,
+        },
+        reference: Reference {
+            objective_best,
+            julia_median_ms: None,
+            julia_feval: None,
+        },
+    }
+}
+
+/// Resolve a scenario's data (and, for GLMM rows, its fit spec). `None`
+/// means the row cannot run in this build (registry rows without the
+/// `unstable-internals` feature) and is skipped with a note on stderr.
+fn build_data(scenario: Scenario) -> Option<ScenarioData> {
+    match scenario.kind {
         ScenarioKind::Sleepstudy {
             n_subjects,
             n_obs,
             seed,
-        } => (
-            simulate_sleepstudy_like(n_subjects, n_obs, seed),
-            n_subjects * n_obs,
+        } => Some(ScenarioData {
+            data: simulate_sleepstudy_like(n_subjects, n_obs, seed),
+            total_n: n_subjects * n_obs,
             seed,
-        ),
+            formula: scenario.formula.to_string(),
+            glmm: None,
+        }),
         ScenarioKind::Crossed {
             n_subjects,
             n_items,
             n_sites,
             n_rep,
-        } => (
-            simulate_crossed(n_subjects, n_items, n_sites, n_rep),
-            n_subjects * n_items * n_rep,
-            0,
-        ),
+        } => Some(ScenarioData {
+            data: simulate_crossed(n_subjects, n_items, n_sites, n_rep),
+            total_n: n_subjects * n_items * n_rep,
+            seed: 0,
+            formula: scenario.formula.to_string(),
+            glmm: None,
+        }),
+        ScenarioKind::Glmm {
+            dataset,
+            fit_index,
+            fast,
+        } => build_glmm_data(scenario.scenario, dataset, fit_index, fast),
     }
+}
+
+#[cfg(feature = "unstable-internals")]
+fn build_glmm_data(
+    scenario: &str,
+    dataset: &str,
+    fit_index: usize,
+    fast: bool,
+) -> Option<ScenarioData> {
+    use mixeff_rs::model::traits::{Family, LinkFunction};
+
+    let (data, meta) = match mixeff_rs::datasets::load(dataset) {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            eprintln!("optimizer_bench_harness: skipping {scenario}: dataset '{dataset}': {error}");
+            return None;
+        }
+    };
+    let Some(spec) = meta.fits.get(fit_index) else {
+        eprintln!(
+            "optimizer_bench_harness: skipping {scenario}: dataset '{dataset}' has no fit #{fit_index}"
+        );
+        return None;
+    };
+    let family = match spec.family.to_ascii_lowercase().as_str() {
+        "bernoulli" => Family::Bernoulli,
+        "binomial" => Family::Binomial,
+        "poisson" => Family::Poisson,
+        other => {
+            eprintln!("optimizer_bench_harness: skipping {scenario}: unsupported family '{other}'");
+            return None;
+        }
+    };
+    let link = match spec.link.to_ascii_lowercase().as_str() {
+        "" | "default" => None,
+        "logit" => Some(LinkFunction::Logit),
+        "log" => Some(LinkFunction::Log),
+        "probit" => Some(LinkFunction::Probit),
+        "cloglog" => Some(LinkFunction::Cloglog),
+        other => {
+            eprintln!("optimizer_bench_harness: skipping {scenario}: unsupported link '{other}'");
+            return None;
+        }
+    };
+    let weights = match &spec.weights {
+        Some(column) => match data.numeric(column) {
+            Some(values) => Some(values.to_vec()),
+            None => {
+                eprintln!(
+                    "optimizer_bench_harness: skipping {scenario}: weights column '{column}' missing"
+                );
+                return None;
+            }
+        },
+        None => None,
+    };
+    // Registry formulas use the lme4 spellings for binomial responses:
+    // `events / trials ~ rhs` (grouped, trials become the case weights) and
+    // a two-level categorical response for Bernoulli. Lower both into the
+    // numeric response the crate's parser expects, as compare_rust does.
+    let (data, formula, weights) =
+        match prepare_binomial_response(&data, &spec.formula, family, weights) {
+            Ok(prepared) => prepared,
+            Err(message) => {
+                eprintln!("optimizer_bench_harness: skipping {scenario}: {message}");
+                return None;
+            }
+        };
+    let total_n = data.nrow();
+    Some(ScenarioData {
+        data,
+        total_n,
+        seed: 0,
+        formula,
+        glmm: Some(GlmmSpec {
+            family,
+            link,
+            weights,
+            fast,
+        }),
+    })
+}
+
+#[cfg(feature = "unstable-internals")]
+fn prepare_binomial_response(
+    df: &DataFrame,
+    formula: &str,
+    family: mixeff_rs::model::traits::Family,
+    weights: Option<Vec<f64>>,
+) -> Result<(DataFrame, String, Option<Vec<f64>>), String> {
+    use mixeff_rs::model::data::Column;
+    use mixeff_rs::model::traits::Family;
+
+    if !matches!(family, Family::Binomial | Family::Bernoulli) {
+        return Ok((df.clone(), formula.to_string(), weights));
+    }
+    let Some((lhs, rhs)) = formula.split_once('~') else {
+        return Err(format!("formula '{formula}' has no '~'"));
+    };
+    let (lhs, rhs) = (lhs.trim(), rhs.trim());
+
+    if let Some((events, trials)) = lhs.split_once('/') {
+        let (events, trials) = (events.trim(), trials.trim());
+        let events = df
+            .numeric(events)
+            .ok_or_else(|| format!("events column '{events}' missing"))?;
+        let trials_values = df
+            .numeric(trials)
+            .ok_or_else(|| format!("trials column '{trials}' missing"))?;
+        let proportion = events
+            .iter()
+            .zip(trials_values)
+            .map(|(&event, &trial)| event / trial)
+            .collect::<Vec<_>>();
+        let response_name = format!("__{lhs}")
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+            .collect::<String>();
+        let mut data = df.clone();
+        data.add_numeric(&response_name, proportion)
+            .map_err(|error| error.to_string())?;
+        return Ok((
+            data,
+            format!("{response_name} ~ {rhs}"),
+            Some(trials_values.to_vec()),
+        ));
+    }
+
+    match df.column(lhs) {
+        Some(Column::Categorical(column)) => {
+            if column.levels.len() != 2 {
+                return Err(format!(
+                    "binary response '{lhs}' has {} levels, expected two",
+                    column.levels.len()
+                ));
+            }
+            let response_name = format!("__{lhs}_binary");
+            let values = column
+                .refs
+                .iter()
+                .map(|&level| f64::from(level == 1))
+                .collect::<Vec<_>>();
+            let mut data = df.clone();
+            data.add_numeric(&response_name, values)
+                .map_err(|error| error.to_string())?;
+            Ok((data, format!("{response_name} ~ {rhs}"), weights))
+        }
+        _ => Ok((df.clone(), formula.to_string(), weights)),
+    }
+}
+
+#[cfg(not(feature = "unstable-internals"))]
+fn build_glmm_data(
+    scenario: &str,
+    dataset: &str,
+    _fit_index: usize,
+    _fast: bool,
+) -> Option<ScenarioData> {
+    eprintln!(
+        "optimizer_bench_harness: skipping {scenario} ({dataset}): GLMM rows need --features unstable-internals"
+    );
+    None
 }
 
 fn median(values: &[f64]) -> f64 {
@@ -558,7 +810,68 @@ fn fit_with_bench_controls(
     Ok(())
 }
 
-fn fit_once(scenario: Scenario, data: &DataFrame) -> Result<FitRecord, String> {
+fn fit_once(scenario: Scenario, scenario_data: &ScenarioData) -> Result<FitRecord, String> {
+    match &scenario_data.glmm {
+        Some(spec) => fit_glmm_once(&scenario_data.formula, &scenario_data.data, spec),
+        None => fit_lmm_once(scenario, &scenario_data.data),
+    }
+}
+
+#[cfg(feature = "unstable-internals")]
+fn fit_glmm_once(formula: &str, data: &DataFrame, spec: &GlmmSpec) -> Result<FitRecord, String> {
+    use mixeff_rs::model::generalized::GeneralizedLinearMixedModel;
+
+    let start = Instant::now();
+    let formula = parse_formula(formula).map_err(|err| err.to_string())?;
+    let mut model = match &spec.weights {
+        Some(weights) => GeneralizedLinearMixedModel::new_with_weights(
+            formula,
+            data,
+            spec.family,
+            spec.link,
+            weights.clone(),
+        ),
+        None => GeneralizedLinearMixedModel::new(formula, data, spec.family, spec.link),
+    }
+    .map_err(|err| err.to_string())?;
+    let build_ms = start.elapsed().as_secs_f64() * 1000.0;
+    model
+        .fit_with_options(spec.fast, 1, false)
+        .map_err(|err| err.to_string())?;
+    let wall_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let lmm = model.lmm();
+    let (n, p, q, n_reterms) = lmm.model_size();
+    let theta = model.theta();
+    let variance_components = theta.iter().map(|t| t * t).collect();
+
+    Ok(FitRecord {
+        wall_ms,
+        build_ms,
+        optimizer_ms: f64::NAN,
+        postfit_ms: f64::NAN,
+        objective: model.objective(),
+        feval: lmm.optsum().feval as f64,
+        optimizer: lmm.optsum().optimizer_name().to_string(),
+        backend: lmm.optsum().backend_name().to_string(),
+        status: lmm.optsum().return_value.clone(),
+        d_theta: theta.len(),
+        theta,
+        fixed_effects: model.coef().as_slice().to_vec(),
+        variance_components,
+        residual_sd: None,
+        n,
+        p,
+        q,
+        n_reterms,
+    })
+}
+
+#[cfg(not(feature = "unstable-internals"))]
+fn fit_glmm_once(_formula: &str, _data: &DataFrame, _spec: &GlmmSpec) -> Result<FitRecord, String> {
+    Err("GLMM rows need --features unstable-internals".to_string())
+}
+
+fn fit_lmm_once(scenario: Scenario, data: &DataFrame) -> Result<FitRecord, String> {
     let start = Instant::now();
     let formula = parse_formula(scenario.formula).map_err(|err| err.to_string())?;
     let mut model = LinearMixedModel::new(formula, data, None).map_err(|err| err.to_string())?;
@@ -635,18 +948,20 @@ fn main() {
             scenario.reference.julia_median_ms = *median_ms;
             scenario.reference.julia_feval = *feval;
         }
-        let (data, total_n, seed) = build_data(scenario.kind);
-        let formula = parse_formula(scenario.formula).expect("formula parse failed");
+        let Some(scenario_data) = build_data(scenario) else {
+            continue;
+        };
+        let total_n = scenario_data.total_n;
+        let seed = scenario_data.seed;
 
         for _ in 0..DEFAULT_WARMUP {
-            let mut model = LinearMixedModel::new(formula.clone(), &data, None).unwrap();
-            let _ = fit_with_bench_controls(&mut model, scenario.reml);
+            let _ = fit_once(scenario, &scenario_data);
         }
 
         let mut records = Vec::with_capacity(DEFAULT_REPS);
         let mut errors = Vec::new();
         for _ in 0..DEFAULT_REPS {
-            match fit_once(scenario, &data) {
+            match fit_once(scenario, &scenario_data) {
                 Ok(record) => records.push(record),
                 Err(err) => errors.push(err),
             }
@@ -661,7 +976,7 @@ fn main() {
                 compile_profile().to_string(),
                 scenario.scenario.to_string(),
                 scenario.family.to_string(),
-                csv_field(scenario.formula),
+                csv_field(&scenario_data.formula),
                 scenario.reml.to_string(),
                 seed.to_string(),
                 String::new(),

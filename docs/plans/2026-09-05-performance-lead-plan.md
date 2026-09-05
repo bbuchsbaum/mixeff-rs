@@ -456,6 +456,26 @@ branch to the harness that loads from `datasets/` via
 same columns. Regenerate the lme4 rows on this host through
 `compare_rust` + `compare_lme4.R`.
 
+T7.1 result (same host; Julia MixedModels 5.3.0; harness GLMM rows via
+`--features unstable-internals`; objectives of the profiled rows match
+Julia `fast=true` to 1e-6):
+
+| row | Rust ms (evals) | Julia fast ms (evals) | Julia full ms (evals) | Rust vs Julia fast |
+|---|---:|---:|---:|---:|
+| cbpp (Binomial, 1 RE) | 0.83 (19) | 1.69 (22) | 3.08 (63) | 2.0× |
+| grouseticks (Poisson, 3 RE) | 417 (48) | 850 (69) | 37 865 (3253) | 2.0× |
+| verbagg (Bernoulli, 2 crossed RE, n=7584) | 565 (41) | 77 (33) | 2204 (1028) | **0.14×** |
+| contra intercept (Bernoulli, 1 RE, n=1934) | 35.7 (33) | 10.0 (20) | 97 (254) | **0.28×** |
+| contra slope (Bernoulli, 1 vector RE) | 73.7 (52) | 41.1 (55) | 258 (382) | **0.56×** |
+| arabidopsis (Poisson, 3 RE) | 81.8 (122) | not in MixedModels | | (lme4 111 ms) |
+| cbpp joint Laplace (`fast: false`) | 5.68 (98) | | 3.08 (63) | 0.54×; the joint objective is on a different scale (184.05 vs 100.10), so only timing is comparable |
+
+Reading: the evaluation counts are similar to Julia's, so the gap is
+per-evaluation PIRLS cost (verbagg ≈ 14 ms per θ evaluation vs Julia ≈ 2.3
+ms; contra intercept ≈ 1.1 ms vs 0.5 ms), not the optimizer. That makes
+T7.4 (PIRLS per-iteration cost) the GLMM lever, with T7.2 (the
+certification tail) second.
+
 T7.2 Measure and defer the GLMM certification tail. Instrument PIRLS
 re-runs inside `record_glmm_fit_metadata`; then apply Phase 2's `Deferred`
 state to `certify_pirls_profiled_optimum` and the joint-path
