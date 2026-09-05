@@ -459,6 +459,7 @@ fn scope_note_diagnostics(
         let Some(refs) = grouping_refs(&term.group, data) else {
             continue;
         };
+        let refs = Some(refs);
         for &fixed_effect in &fixed_numeric_terms {
             if group_has_random_slope(semantic_model, &term.group, fixed_effect) {
                 continue;
@@ -466,8 +467,7 @@ fn scope_note_diagnostics(
             let Some(values) = data.numeric(fixed_effect) else {
                 continue;
             };
-            let refs = Some(refs.clone());
-            let basis = audit_values(fixed_effect, "numeric", &refs, values.iter().copied());
+            let basis = audit_values(fixed_effect, "numeric", &refs, values);
             if basis.supported != Some(true) {
                 continue;
             }
@@ -824,8 +824,7 @@ fn marginal_fixed_effect_covers_unit(
 
 fn single_grouping_counts(name: &str, data: &DataFrame) -> Option<Vec<usize>> {
     let cat = data.categorical(name)?;
-    let refs = cat.refs.iter().map(|&r| r as usize).collect::<Vec<_>>();
-    Some(counts_from_refs(cat.n_levels(), &refs))
+    Some(counts_from_u32_refs(cat.n_levels(), &cat.refs))
 }
 
 fn grouping_refs(group: &GroupingFactorIr, data: &DataFrame) -> Option<Vec<usize>> {
@@ -839,42 +838,22 @@ fn grouping_refs(group: &GroupingFactorIr, data: &DataFrame) -> Option<Vec<usize
     }
 }
 
-fn composite_grouping_refs(names: &[String], data: &DataFrame) -> Option<Vec<usize>> {
+fn composite_levels<'a>(names: &[String], data: &'a DataFrame) -> Option<CompositeLevels<'a>> {
     let cats = names
         .iter()
         .map(|name| data.categorical(name))
         .collect::<Option<Vec<_>>>()?;
-    let mut level_map = std::collections::BTreeMap::new();
-    let mut refs = Vec::with_capacity(data.nrow());
-    for row in 0..data.nrow() {
-        let key = cats
-            .iter()
-            .map(|cat| cat.values[row].clone())
-            .collect::<Vec<_>>();
-        let next = level_map.len();
-        let idx = *level_map.entry(key).or_insert(next);
-        refs.push(idx);
-    }
+    Some(CompositeLevels::new(cats))
+}
+
+fn composite_grouping_refs(names: &[String], data: &DataFrame) -> Option<Vec<usize>> {
+    let (refs, _) = composite_levels(names, data)?.first_appearance_refs(data.nrow());
     Some(refs)
 }
 
 fn composite_grouping_counts(names: &[String], data: &DataFrame) -> Option<Vec<usize>> {
-    let cats = names
-        .iter()
-        .map(|name| data.categorical(name))
-        .collect::<Option<Vec<_>>>()?;
-    let mut level_map = std::collections::BTreeMap::new();
-    let mut refs = Vec::with_capacity(data.nrow());
-    for row in 0..data.nrow() {
-        let key = cats
-            .iter()
-            .map(|cat| cat.values[row].clone())
-            .collect::<Vec<_>>();
-        let next = level_map.len();
-        let idx = *level_map.entry(key).or_insert(next);
-        refs.push(idx);
-    }
-    Some(counts_from_refs(level_map.len(), &refs))
+    let (refs, n_levels) = composite_levels(names, data)?.first_appearance_refs(data.nrow());
+    Some(counts_from_refs(n_levels, &refs))
 }
 
 fn is_grouping_like_name(name: &str) -> bool {
@@ -1389,47 +1368,57 @@ fn empty_cells_for_interaction(
         return Vec::new();
     }
 
-    let mut observed = std::collections::BTreeSet::new();
-    for row in 0..data.nrow() {
-        let key = categorical
-            .iter()
-            .map(|(_factor, cat)| cat.values[row].clone())
-            .collect::<Vec<_>>();
-        observed.insert(key);
-    }
+    let composite = CompositeLevels::new(categorical.iter().map(|(_factor, cat)| *cat).collect());
+    let observed = (0..data.nrow())
+        .map(|row| composite.row_key(row))
+        .collect::<std::collections::HashSet<_>>();
 
-    let mut expected = Vec::new();
-    append_level_products(&categorical, 0, &mut Vec::new(), &mut expected);
-
-    expected
-        .into_iter()
-        .filter(|levels| !observed.contains(levels))
-        .map(|levels| EmptyCellAudit {
-            term: term.to_string(),
-            factors: categorical
-                .iter()
-                .map(|(factor, _cat)| (*factor).clone())
-                .collect(),
-            levels,
-            reason: "no observations exist for this factor combination".to_string(),
-        })
-        .collect()
+    let factors = categorical
+        .iter()
+        .map(|(factor, _cat)| (*factor).clone())
+        .collect::<Vec<_>>();
+    let mut missing = Vec::new();
+    append_missing_level_products(
+        &composite,
+        &observed,
+        0,
+        &mut Vec::new(),
+        &mut |levels: &[u32]| {
+            missing.push(EmptyCellAudit {
+                term: term.to_string(),
+                factors: factors.clone(),
+                levels: levels
+                    .iter()
+                    .zip(&composite.cats)
+                    .map(|(&level, cat)| cat.levels[level as usize].clone())
+                    .collect(),
+                reason: "no observations exist for this factor combination".to_string(),
+            });
+        },
+    );
+    missing
 }
 
-fn append_level_products(
-    factors: &[(&String, &crate::model::data::CategoricalColumn)],
+/// Enumerate the level product in level order (the same nested order the
+/// audit always reported), invoking `on_missing` for each combination not
+/// present in `observed`.
+fn append_missing_level_products(
+    composite: &CompositeLevels<'_>,
+    observed: &std::collections::HashSet<CompositeKey>,
     index: usize,
-    current: &mut Vec<String>,
-    out: &mut Vec<Vec<String>>,
+    current: &mut Vec<u32>,
+    on_missing: &mut dyn FnMut(&[u32]),
 ) {
-    if index == factors.len() {
-        out.push(current.clone());
+    if index == composite.cats.len() {
+        if !observed.contains(&composite.key_of(current.iter().copied())) {
+            on_missing(current);
+        }
         return;
     }
 
-    for level in &factors[index].1.levels {
-        current.push(level.clone());
-        append_level_products(factors, index + 1, current, out);
+    for level in 0..composite.cats[index].n_levels() as u32 {
+        current.push(level);
+        append_missing_level_products(composite, observed, index + 1, current, on_missing);
         current.pop();
     }
 }
@@ -1596,12 +1585,9 @@ fn expand_single_basis_audit(
     coding: RandomBasisCoding,
 ) -> Vec<BasisAudit> {
     match data.column(&coefficient.source) {
-        Some(Column::Numeric(values)) => vec![audit_values(
-            &coefficient.name,
-            "slope",
-            refs,
-            values.iter().copied(),
-        )],
+        Some(Column::Numeric(values)) => {
+            vec![audit_values(&coefficient.name, "slope", refs, values)]
+        }
         Some(Column::Categorical(cat)) => {
             categorical_basis_audits(&coefficient.source, cat, refs, coding)
         }
@@ -1640,7 +1626,7 @@ fn expand_interaction_basis_audit(
 
     cartesian_audit_columns(&per_var)
         .into_iter()
-        .map(|(name, values)| audit_values(&name, "interaction", refs, values))
+        .map(|(name, values)| audit_values(&name, "interaction", refs, &values))
         .collect()
 }
 
@@ -1663,7 +1649,7 @@ fn categorical_basis_audits(
                     "categorical_cell"
                 },
                 refs,
-                encoded.values,
+                &encoded.values,
             )
         })
         .collect()
@@ -1924,8 +1910,8 @@ fn grouping_audit(
     match group {
         GroupingFactorIr::Single { name } => match data.categorical(name) {
             Some(cat) => {
+                let counts = counts_from_u32_refs(cat.n_levels(), &cat.refs);
                 let refs = cat.refs.iter().map(|&r| r as usize).collect::<Vec<_>>();
-                let counts = counts_from_refs(cat.n_levels(), &refs);
                 (audit_from_counts(name.clone(), counts, None), Some(refs))
             }
             None => {
@@ -1996,20 +1982,8 @@ fn interaction_grouping_audit(
         }
     }
 
-    let mut level_map = std::collections::BTreeMap::new();
-    let mut refs = Vec::with_capacity(data.nrow());
-    for row in 0..data.nrow() {
-        let key = cats
-            .iter()
-            .map(|cat| cat.values[row].as_str())
-            .collect::<Vec<_>>()
-            .join(":");
-        let next = level_map.len();
-        let idx = *level_map.entry(key).or_insert(next);
-        refs.push(idx);
-    }
-
-    let counts = counts_from_refs(level_map.len(), &refs);
+    let (refs, n_levels) = CompositeLevels::new(cats).first_appearance_refs(data.nrow());
+    let counts = counts_from_refs(n_levels, &refs);
     (audit_from_counts(label, counts, None), Some(refs))
 }
 
@@ -2055,10 +2029,135 @@ fn counts_from_refs(n_levels: usize, refs: &[usize]) -> Vec<usize> {
     counts
 }
 
-fn audit_values<I>(name: &str, kind: &str, refs: &Option<Vec<usize>>, values: I) -> BasisAudit
-where
-    I: IntoIterator<Item = f64>,
-{
+fn counts_from_u32_refs(n_levels: usize, refs: &[u32]) -> Vec<usize> {
+    let mut counts = vec![0; n_levels];
+    for &idx in refs {
+        if let Some(count) = counts.get_mut(idx as usize) {
+            *count += 1;
+        }
+    }
+    counts
+}
+
+/// Per-level observation counts and sample standard deviations in two
+/// row-order passes (sums, then centred squares). Within each level the
+/// arithmetic is the same sequential fold `sample_sd` performs on that
+/// level's values in row order, so the results are bit-identical to
+/// collecting the values per level first, without allocating one `Vec` per
+/// level. Levels with fewer than two observations get `None`. Pairs
+/// `refs` with `values` by position and stops at the shorter of the two,
+/// exactly as the per-level collection did.
+fn within_group_sample_sds(
+    refs: &[usize],
+    values: &[f64],
+    n_levels: usize,
+) -> (Vec<usize>, Vec<Option<f64>>) {
+    let mut counts = vec![0usize; n_levels];
+    let mut sums = vec![0.0f64; n_levels];
+    for (&group, &value) in refs.iter().zip(values) {
+        counts[group] += 1;
+        sums[group] += value;
+    }
+    let means = counts
+        .iter()
+        .zip(&sums)
+        .map(
+            |(&count, &sum)| {
+                if count == 0 {
+                    0.0
+                } else {
+                    sum / count as f64
+                }
+            },
+        )
+        .collect::<Vec<_>>();
+    let mut centred_squares = vec![0.0f64; n_levels];
+    for (&group, &value) in refs.iter().zip(values) {
+        let centred = value - means[group];
+        centred_squares[group] += centred * centred;
+    }
+    let sds = counts
+        .iter()
+        .zip(&centred_squares)
+        .map(|(&count, &sum_of_squares)| {
+            (count >= 2).then(|| (sum_of_squares / (count - 1) as f64).sqrt())
+        })
+        .collect();
+    (counts, sds)
+}
+
+/// Row key over several categorical columns built from their integer
+/// level references instead of joined level strings. Within a column the
+/// level strings and references are in bijection, so equality of keys is
+/// exactly equality of the level-string tuples the audit used to build,
+/// without a `String` per row. Packs into one `u64` (mixed radix over the
+/// level counts) whenever that fits, and falls back to the reference
+/// tuple otherwise.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum CompositeKey {
+    Packed(u64),
+    Wide(Vec<u32>),
+}
+
+struct CompositeLevels<'a> {
+    cats: Vec<&'a crate::model::data::CategoricalColumn>,
+    /// Mixed-radix strides when the level-count product fits in `u64`.
+    strides: Option<Vec<u64>>,
+}
+
+impl<'a> CompositeLevels<'a> {
+    fn new(cats: Vec<&'a crate::model::data::CategoricalColumn>) -> Self {
+        let mut strides = Vec::with_capacity(cats.len());
+        let mut stride = 1u64;
+        let mut fits = true;
+        for cat in &cats {
+            strides.push(stride);
+            match stride.checked_mul(cat.n_levels().max(1) as u64) {
+                Some(next) => stride = next,
+                None => {
+                    fits = false;
+                    break;
+                }
+            }
+        }
+        Self {
+            cats,
+            strides: fits.then_some(strides),
+        }
+    }
+
+    fn key_of(&self, level_indices: impl Iterator<Item = u32>) -> CompositeKey {
+        match &self.strides {
+            Some(strides) => CompositeKey::Packed(
+                level_indices
+                    .zip(strides)
+                    .map(|(index, stride)| index as u64 * stride)
+                    .sum(),
+            ),
+            None => CompositeKey::Wide(level_indices.collect()),
+        }
+    }
+
+    fn row_key(&self, row: usize) -> CompositeKey {
+        self.key_of(self.cats.iter().map(|cat| cat.refs[row]))
+    }
+
+    /// First-appearance level references over the composite key, exactly
+    /// the numbering the string-keyed map produced (`next = map.len()` on
+    /// first insertion), plus the number of distinct combinations seen.
+    fn first_appearance_refs(&self, n_rows: usize) -> (Vec<usize>, usize) {
+        let mut level_map = std::collections::HashMap::with_capacity(n_rows.min(4096));
+        let mut refs = Vec::with_capacity(n_rows);
+        for row in 0..n_rows {
+            let next = level_map.len();
+            let idx = *level_map.entry(self.row_key(row)).or_insert(next);
+            refs.push(idx);
+        }
+        (refs, level_map.len())
+    }
+}
+
+fn audit_values(name: &str, kind: &str, refs: &Option<Vec<usize>>, values: &[f64]) -> BasisAudit {
     let Some(refs) = refs else {
         return BasisAudit {
             name: name.to_string(),
@@ -2071,16 +2170,10 @@ where
     };
 
     let n_levels = refs.iter().copied().max().map(|m| m + 1).unwrap_or(0);
-    let mut by_level = vec![Vec::new(); n_levels];
-    for (&group, value) in refs.iter().zip(values) {
-        by_level[group].push(value);
-    }
-
-    let sds = by_level
-        .iter()
-        .filter(|vals| vals.len() >= 2)
-        .map(|vals| sample_sd(vals))
-        .collect::<Vec<_>>();
+    let (_, sds) = within_group_sample_sds(refs, values, n_levels);
+    // Level order, levels with at least two observations only: the same
+    // sequence the per-level collection produced.
+    let sds = sds.into_iter().flatten().collect::<Vec<_>>();
     let min_sd = sds.iter().copied().reduce(f64::min);
     let max_sd = sds.iter().copied().reduce(f64::max);
     let supported = max_sd.map(|sd| sd > 1e-8);
@@ -2138,19 +2231,19 @@ fn response_constant_within_group_diagnostic(
     if n_levels == 0 {
         return None;
     }
-    let mut y_by_level = vec![Vec::new(); n_levels];
-    for (&group, &value) in refs.iter().zip(y.iter()) {
-        y_by_level[group].push(value);
-    }
+    let (counts, y_sds) = within_group_sample_sds(refs, y, n_levels);
 
-    let repeated_levels = y_by_level.iter().filter(|values| values.len() >= 2).count();
+    let repeated_levels = counts.iter().filter(|&&count| count >= 2).count();
     if repeated_levels == 0 {
         return None;
     }
-    let constant_response_levels = y_by_level
+    // Levels with at least two observations whose response is constant.
+    let y_constant = counts
         .iter()
-        .filter(|values| values.len() >= 2 && sample_sd(values) <= 1e-8)
-        .count();
+        .zip(&y_sds)
+        .map(|(&count, sd)| count >= 2 && sd.is_some_and(|sd| sd <= 1e-8))
+        .collect::<Vec<_>>();
+    let constant_response_levels = y_constant.iter().filter(|&&constant| constant).count();
     if constant_response_levels == 0 {
         return None;
     }
@@ -2166,7 +2259,7 @@ fn response_constant_within_group_diagnostic(
         .filter(|name| *name != response)
         .filter_map(|name| {
             let values = data.numeric(name)?;
-            numeric_varies_within_constant_response_group(refs, &y_by_level, values)
+            numeric_varies_within_constant_response_group(refs, &y_constant, values)
                 .then(|| name.to_string())
         })
         .collect::<Vec<_>>();
@@ -2213,26 +2306,23 @@ fn response_constant_within_group_diagnostic(
     Some(diagnostic)
 }
 
+/// `y_constant[g]` marks levels with at least two observations whose
+/// response is constant; the predictor "varies" there when its within-level
+/// sample SD exceeds the same threshold.
 fn numeric_varies_within_constant_response_group(
     refs: &[usize],
-    y_by_level: &[Vec<f64>],
+    y_constant: &[bool],
     values: &[f64],
 ) -> bool {
     if refs.len() != values.len() {
         return false;
     }
 
-    let mut x_by_level = vec![Vec::new(); y_by_level.len()];
-    for (&group, &value) in refs.iter().zip(values.iter()) {
-        x_by_level[group].push(value);
-    }
-
-    y_by_level
+    let (_, x_sds) = within_group_sample_sds(refs, values, y_constant.len());
+    y_constant
         .iter()
-        .zip(x_by_level.iter())
-        .any(|(y_values, x_values)| {
-            y_values.len() >= 2 && sample_sd(y_values) <= 1e-8 && sample_sd(x_values) > 1e-8
-        })
+        .zip(&x_sds)
+        .any(|(&constant, sd)| constant && sd.is_some_and(|sd| sd > 1e-8))
 }
 
 fn grouping_factor_label(group: &GroupingFactorIr) -> String {

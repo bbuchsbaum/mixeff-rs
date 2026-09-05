@@ -105,9 +105,48 @@ operation runs; `select_columns` copy (`fixed_design.rs:582-590`) replaced
 by a column-index view where the consumer only reads. This aligns with
 `docs/lazy_fixed_design_materialization.md`.
 
-T1.5 Gate. `profile_kb07` build phase, the new harness `build_ms`, and
+T1.5 Cross-product kernels (added after profiling, see below). The
+`[X|y]'Z`, `[X|y]'[X|y]`, and `Z'Z` builders in
+`src/model/linear/blocks.rs` (`compute_re_cross_product`,
+`compute_fixed_response_re_cross_product`,
+`compute_fixed_response_cross_product`, and the `FixedDesign::xtx/xty/
+xt_reterm` backends) index `DMatrix` element-wise with bounds checks in
+row loops. Rewrite them over column slices (`as_slice()` / column
+iterators with the level reference driving the accumulator index), and
+build `A` once and clone into `L` only for blocks that the factorization
+overwrites.
+
+T1.6 Audit remainder: `scope_note_diagnostics` and `audit_random_term`
+(re-widened refs, response-constant two passes, basis audits) after T1.2;
+`build_re_mat` clones of `refs`/`levels` and the dense `z` + CSC adjoint +
+`wtz` + scratch quadruple.
+
+T1.7 Gate. `profile_kb07` build phase, the new harness `build_ms`, and
 `streamed_rank_bench`; parity fixtures; `perf_gate`. Report ns/row before
 and after for scalar_10000, vector_10000, kb07, crossed_large.
+
+Construction profile after T1.1 + T1.2 (env-gated probes, release build,
+median of 6 constructions, µs; scalar_10000 total 599, vector_10000 735,
+crossed_large 1855):
+
+| stage | scalar_10000 | vector_10000 | crossed_large |
+|---|---:|---:|---:|
+| compile IR + artifact | 4 | 5 | 21 |
+| audit: fixed effects (2nd X + QR) | 55 | 63 | 94 |
+| audit: random terms | 84 | 164 | 356 |
+| audit: scope notes | 70 | 2 | 6 |
+| fixed design build | 7 | 12 | 9 |
+| FeTerm QR + pivot + select copies | 71 | 94 | 102 |
+| ReMat builds | 73 | 124 | 364 |
+| FeMat `[X|y]` + weighted clone | 14 | 36 | 50 |
+| A blocks: weighted copies | 14 | 11 | 16 |
+| A blocks: `Z'Z` | 38 | 63 | 288 |
+| A blocks: `[X|y]'Z` | 92 | 99 | 261 |
+| A blocks: `[X|y]'[X|y]` | 66 | 78 | 81 |
+| snapshot + rest | 15 | 13 | 11 |
+
+No single stage dominates; the cross-product kernels (T1.5, ~33%) and the
+audit (T1.2 remainder + T1.3, ~35%) are the two largest groups.
 
 ## Phase 2: Post-fit derivative certificate (1-2 days, lever 2)
 
