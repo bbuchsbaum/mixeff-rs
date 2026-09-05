@@ -55,6 +55,26 @@ pub(crate) struct TrustBqOptions {
     /// Default `false` keeps the evaluation count byte-identical to the
     /// previous behavior for callers that do not opt in.
     pub(crate) reuse_samples: bool,
+    /// Maximum number of consecutive trust-region steps that may reuse the
+    /// current quadratic model after a *rejected* trial step instead of
+    /// rebuilding it from a fresh finite-difference stencil. After a
+    /// rejection the model centre is unchanged and only the radius shrinks,
+    /// so the existing model is still centred at the right point; restricting
+    /// it to a smaller ball is at least as locally valid as before. Each
+    /// rebuild costs `2d + d(d-1)/2` evaluations for the full-cross-term
+    /// model, so skipping one rebuild per rejection is the dominant saving.
+    /// `0` (the default) rebuilds after every step, byte-identical to the
+    /// historical behaviour.
+    pub(crate) rejected_step_model_reuse: usize,
+    /// Maximum number of consecutive steps that may reuse the quadratic
+    /// model after a *highly successful* accepted step (`ratio >= eta_expand`)
+    /// by translating it to the new centre: `g ← g + H p`, `H ← H`. The
+    /// translation is exact for the surrogate; the guard is that it is only
+    /// taken when the model predicted the last step well. `0` (the default)
+    /// disables translation. A model that has been reused (by either rule)
+    /// `max(rejected_step_model_reuse, accepted_step_model_reuse)` times is
+    /// always rebuilt, so reuse never chains into unbounded model drift.
+    pub(crate) accepted_step_model_reuse: usize,
 }
 
 impl Default for TrustBqOptions {
@@ -76,6 +96,8 @@ impl Default for TrustBqOptions {
             stall_ftol_abs: -1.0,
             stall_requires_stable_x: true,
             reuse_samples: false,
+            rejected_step_model_reuse: 0,
+            accepted_step_model_reuse: 0,
         }
     }
 }
@@ -186,6 +208,25 @@ impl QuadraticInterpolationModel {
         let quadratic = 0.5 * s.dot(&(&self.hessian * &s));
         -(linear + quadratic)
     }
+
+    /// Re-centre the surrogate at `x + displacement`. For
+    /// `q_x(s) = f + gᵀs + ½ sᵀHs` the same quadratic written around the new
+    /// centre is `q_{x+p}(u) = q_x(p) + (g + Hp)ᵀu + ½ uᵀHu`, so only the
+    /// gradient changes. The constant term is never stored (predicted
+    /// reductions are relative to the centre value), so this is exact for the
+    /// surrogate.
+    fn translate(&mut self, displacement: &[f64]) {
+        let p = DVector::from_column_slice(displacement);
+        self.gradient += &self.hessian * p;
+    }
+}
+
+/// A quadratic model carried across loop iterations instead of being rebuilt.
+struct RetainedModel {
+    model: QuadraticInterpolationModel,
+    /// How many trust-region steps this model has already been reused for
+    /// since it was last built from a fresh stencil.
+    reuses: usize,
 }
 
 #[cfg(test)]
@@ -261,6 +302,10 @@ where
     // contracted materially from its startup scale. See the accepted-step
     // check below for the production failure this guards.
     let ftol_radius = (options.initial_radius / 16.0).max(options.final_radius);
+    // Persistent quadratic model (see `rejected_step_model_reuse` /
+    // `accepted_step_model_reuse`). `None` means the next iteration rebuilds
+    // from a fresh finite-difference stencil.
+    let mut retained_model: Option<RetainedModel> = None;
     loop {
         if fevals >= options.max_evaluations {
             return Ok(TrustBqResult {
@@ -327,7 +372,13 @@ where
             stalled = 0;
             stall_best_f = best_f;
             stall_best_x.clone_from(&best_x);
-        } else {
+        } else if retained_model.is_none() {
+            // The stall window is counted in *fresh-model* iterations so that
+            // persistent-model reuse (which makes an iteration cost one
+            // evaluation instead of a whole stencil) does not tighten the
+            // caller's stagnation band in evaluation terms: with reuse off
+            // every iteration is a fresh-model iteration and this is the
+            // historical counter.
             stalled += 1;
         }
         // Only treat a stall as convergence once the search has actually
@@ -359,20 +410,28 @@ where
         }
 
         iterations += 1;
-        let model = build_quadratic_model(
-            &x,
-            f,
-            lower_bounds,
-            upper_bounds,
-            radius,
-            options.max_evaluations,
-            options.max_cross_terms,
-            &mut fevals,
-            &mut objective,
-            &mut cache,
-            reuse,
-        )?;
-        last_model_sample_count = model.sample_count;
+        // `model_reuses` counts how many steps the model in hand has already
+        // been reused for; a freshly built model starts at zero.
+        let (model, model_reuses) = match retained_model.take() {
+            Some(retained) => (retained.model, retained.reuses + 1),
+            None => {
+                let model = build_quadratic_model(
+                    &x,
+                    f,
+                    lower_bounds,
+                    upper_bounds,
+                    radius,
+                    options.max_evaluations,
+                    options.max_cross_terms,
+                    &mut fevals,
+                    &mut objective,
+                    &mut cache,
+                    reuse,
+                )?;
+                last_model_sample_count = model.sample_count;
+                (model, 0)
+            }
+        };
         if fevals >= options.max_evaluations {
             return Ok(TrustBqResult {
                 x: best_x,
@@ -430,11 +489,28 @@ where
         let ratio = actual_reduction / predicted_reduction;
         if ratio >= options.eta_accept && actual_reduction > 0.0 {
             let old_f = f;
+            // Actual displacement (post-projection), which is what the
+            // surrogate must be translated by if it is carried over.
+            let displacement = trial
+                .iter()
+                .zip(x.iter())
+                .map(|(t, xi)| t - xi)
+                .collect::<Vec<_>>();
             x = trial;
             f = trial_f;
 
             if ratio >= options.eta_expand && step_norm > 0.8 * radius {
                 radius *= options.expand_factor;
+            }
+            // Translated reuse: only after a step the model predicted very
+            // well, and only within the per-model reuse cap.
+            if ratio >= options.eta_expand && model_reuses < options.accepted_step_model_reuse {
+                let mut translated = model;
+                translated.translate(&displacement);
+                retained_model = Some(RetainedModel {
+                    model: translated,
+                    reuses: model_reuses,
+                });
             }
 
             let objective_tol = options.ftol_abs + options.ftol_rel * old_f.abs().max(1.0);
@@ -447,7 +523,13 @@ where
             // |gradient|=17.7. Continue contracting until the model has
             // localized by at least four halvings; the existing stagnation
             // and caller-certificate stops remain available in the meantime.
-            if actual_reduction.abs() <= objective_tol
+            // A reused model is never allowed to certify FTOL convergence: a
+            // stale surrogate can propose a poorly aimed short step whose
+            // tiny accepted reduction says nothing about the local optimum.
+            // The next iteration rebuilds a fresh stencil, and only a fresh
+            // model's tiny accepted step counts as objective convergence.
+            if model_reuses == 0
+                && actual_reduction.abs() <= objective_tol
                 && (!options.ftol_requires_local_radius || radius <= ftol_radius)
             {
                 return Ok(TrustBqResult {
@@ -462,6 +544,15 @@ where
             }
         } else {
             radius *= options.shrink_factor;
+            // Rejected-step reuse: the centre is unchanged and only the
+            // radius shrank, so the model is still centred correctly. Keep it
+            // for the next (smaller) trust-region step within the reuse cap.
+            if model_reuses < options.rejected_step_model_reuse {
+                retained_model = Some(RetainedModel {
+                    model,
+                    reuses: model_reuses,
+                });
+            }
         }
     }
 }
@@ -1128,6 +1219,212 @@ mod tests {
             |x| Ok(x[0] * x[0]),
         );
         assert!(err.is_err());
+    }
+
+    #[test]
+    fn quadratic_model_translation_is_exact_for_the_surrogate() {
+        // q_x(s) = gᵀs + ½ sᵀHs (constant dropped). After re-centring at
+        // x + p, the translated model's predicted reduction over u must equal
+        // q_x(p) - q_x(p + u), i.e. the original model's reduction over p + u
+        // minus its reduction over p.
+        let gradient = DVector::from_column_slice(&[0.7, -1.3, 2.1]);
+        let hessian =
+            DMatrix::from_row_slice(3, 3, &[4.0, 0.5, -0.25, 0.5, 3.0, 0.75, -0.25, 0.75, 2.5]);
+        let original = QuadraticInterpolationModel {
+            gradient: gradient.clone(),
+            hessian: hessian.clone(),
+            sample_count: 9,
+        };
+        let mut translated = original.clone();
+        let p = [0.3, -0.2, 0.15];
+        translated.translate(&p);
+        assert_eq!(translated.sample_count, 9);
+        assert_eq!(translated.hessian, hessian);
+
+        for u in [[0.1, 0.2, -0.3], [-0.05, 0.0, 0.4], [0.25, -0.25, 0.25]] {
+            let p_plus_u = [p[0] + u[0], p[1] + u[1], p[2] + u[2]];
+            let expected =
+                original.predicted_reduction(&p_plus_u) - original.predicted_reduction(&p);
+            let actual = translated.predicted_reduction(&u);
+            assert!(
+                (actual - expected).abs() < 1e-12,
+                "u={u:?}: translated {actual} vs expected {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn trust_bq_rejected_step_model_reuse_is_cheaper_and_reaches_same_optimum() {
+        // A quartic bowl: far from the optimum the finite-difference quadratic
+        // built at a coarse radius over-predicts, so trial steps get rejected
+        // and the fresh-rebuild solver pays a whole stencil again at the same
+        // centre. Keeping the model for one shrunken step skips that.
+        fn quartic(x: &[f64]) -> Result<f64> {
+            Ok((x[0] - 1.0).powi(4) + 3.0 * (x[1] + 2.0).powi(4) + (x[0] - 1.0).powi(2))
+        }
+        let opts = |rejected_reuse: usize| TrustBqOptions {
+            initial_radius: 2.0,
+            final_radius: 1e-6,
+            max_evaluations: 20_000,
+            ftol_abs: 1e-12,
+            ftol_rel: 1e-12,
+            rejected_step_model_reuse: rejected_reuse,
+            ..TrustBqOptions::default()
+        };
+        let fresh = minimize(&[3.0, 1.0], &[-6.0, -6.0], &[6.0, 6.0], opts(0), quartic)
+            .expect("fresh-rebuild solve");
+        let reused = minimize(&[3.0, 1.0], &[-6.0, -6.0], &[6.0, 6.0], opts(1), quartic)
+            .expect("rejected-reuse solve");
+
+        assert!(fresh.stop_reason.is_acceptable_convergence(), "{fresh:?}");
+        assert!(reused.stop_reason.is_acceptable_convergence(), "{reused:?}");
+        assert!(reused.fmin < 1e-12, "{reused:?}");
+        assert!((reused.x[0] - 1.0).abs() < 1e-4, "{reused:?}");
+        assert!((reused.x[1] + 2.0).abs() < 1e-3, "{reused:?}");
+        assert!(
+            reused.fevals < fresh.fevals,
+            "rejected-step reuse evals {} not fewer than fresh {}",
+            reused.fevals,
+            fresh.fevals
+        );
+        // Reuse makes iterations cheaper on average (a reused step costs one
+        // evaluation instead of a stencil plus one).
+        assert!(
+            (reused.fevals as f64 / reused.iterations as f64)
+                < (fresh.fevals as f64 / fresh.iterations as f64),
+            "{fresh:?} {reused:?}"
+        );
+    }
+
+    #[test]
+    fn trust_bq_rejected_step_model_reuse_is_not_a_free_lunch_on_a_curved_valley() {
+        // Documented limitation: on Rosenbrock's curved valley a model built
+        // at radius r is a poor fit at r/2 too, so reusing it after a
+        // rejection usually buys another rejection. The rule must still
+        // converge to the same optimum, and the overhead stays small (a few
+        // percent), but it is *not* an evaluation saving there — which is why
+        // the profiled-LMM policy pairs it with the translated accepted-step
+        // rule for the small family and keeps the caps at one.
+        fn rosenbrock(x: &[f64]) -> Result<f64> {
+            Ok(100.0 * (x[1] - x[0] * x[0]).powi(2) + (1.0 - x[0]).powi(2))
+        }
+        let opts = |rejected_reuse: usize| TrustBqOptions {
+            initial_radius: 0.5,
+            final_radius: 1e-6,
+            max_evaluations: 20_000,
+            ftol_abs: 1e-12,
+            ftol_rel: 1e-12,
+            rejected_step_model_reuse: rejected_reuse,
+            ..TrustBqOptions::default()
+        };
+        let fresh = minimize(
+            &[-1.2, 1.0],
+            &[-2.0, -1.0],
+            &[2.0, 3.0],
+            opts(0),
+            rosenbrock,
+        )
+        .expect("fresh-rebuild solve");
+        let reused = minimize(
+            &[-1.2, 1.0],
+            &[-2.0, -1.0],
+            &[2.0, 3.0],
+            opts(1),
+            rosenbrock,
+        )
+        .expect("rejected-reuse solve");
+
+        assert!(reused.stop_reason.is_acceptable_convergence(), "{reused:?}");
+        assert!(reused.fmin < 1e-5, "{reused:?}");
+        assert!((reused.x[0] - 1.0).abs() < 5e-3, "{reused:?}");
+        assert!((reused.x[1] - 1.0).abs() < 1e-2, "{reused:?}");
+        assert!(
+            reused.fevals <= fresh.fevals + fresh.fevals / 10,
+            "rejected-step reuse overhead exceeded 10%: {} vs {}",
+            reused.fevals,
+            fresh.fevals
+        );
+    }
+
+    #[test]
+    fn trust_bq_accepted_step_model_reuse_is_cheaper_and_reaches_same_optimum() {
+        // On an exact quadratic the translated surrogate is the true
+        // objective, so carrying it across a well-predicted accepted step
+        // must lose nothing and skip whole stencils.
+        fn quad(x: &[f64]) -> Result<f64> {
+            Ok((x[0] - 1.25).powi(2)
+                + 2.0 * (x[1] + 2.0).powi(2)
+                + 0.5 * (x[0] - 1.25) * (x[1] + 2.0))
+        }
+        let (lower, upper) = unbounded(2);
+        let opts = |accepted_reuse: usize| TrustBqOptions {
+            initial_radius: 1.0,
+            final_radius: 1e-7,
+            max_evaluations: 400,
+            accepted_step_model_reuse: accepted_reuse,
+            ..TrustBqOptions::default()
+        };
+        let fresh = minimize(&[4.0, -5.0], &lower, &upper, opts(0), quad).expect("fresh solve");
+        let reused = minimize(&[4.0, -5.0], &lower, &upper, opts(1), quad).expect("reuse solve");
+
+        assert!(fresh.stop_reason.is_acceptable_convergence(), "{fresh:?}");
+        assert!(reused.stop_reason.is_acceptable_convergence(), "{reused:?}");
+        assert!((reused.x[0] - 1.25).abs() < 1e-4, "{reused:?}");
+        assert!((reused.x[1] + 2.0).abs() < 1e-4, "{reused:?}");
+        assert!(reused.fmin < 1e-8, "{reused:?}");
+        assert!(
+            reused.fevals < fresh.fevals,
+            "accepted-step reuse evals {} not fewer than fresh {}",
+            reused.fevals,
+            fresh.fevals
+        );
+    }
+
+    #[test]
+    fn trust_bq_translated_model_reuse_cuts_rosenbrock_valley_cost() {
+        // Along the valley floor successive steps are well predicted, so the
+        // translated model keeps being reused instead of re-probing the
+        // stencil; with tight tolerances the fresh-rebuild solver needs an
+        // order of magnitude more evaluations to polish to the same point.
+        fn rosenbrock(x: &[f64]) -> Result<f64> {
+            Ok(100.0 * (x[1] - x[0] * x[0]).powi(2) + (1.0 - x[0]).powi(2))
+        }
+        let opts = |accepted_reuse: usize| TrustBqOptions {
+            initial_radius: 0.5,
+            final_radius: 1e-6,
+            max_evaluations: 20_000,
+            ftol_abs: 1e-12,
+            ftol_rel: 1e-12,
+            accepted_step_model_reuse: accepted_reuse,
+            ..TrustBqOptions::default()
+        };
+        let fresh = minimize(
+            &[-1.2, 1.0],
+            &[-2.0, -1.0],
+            &[2.0, 3.0],
+            opts(0),
+            rosenbrock,
+        )
+        .expect("fresh-rebuild solve");
+        let reused = minimize(
+            &[-1.2, 1.0],
+            &[-2.0, -1.0],
+            &[2.0, 3.0],
+            opts(1),
+            rosenbrock,
+        )
+        .expect("translated-reuse solve");
+
+        assert!(reused.stop_reason.is_acceptable_convergence(), "{reused:?}");
+        assert!(reused.fmin < 1e-8, "{reused:?}");
+        assert!((reused.x[0] - 1.0).abs() < 1e-4, "{reused:?}");
+        assert!((reused.x[1] - 1.0).abs() < 1e-4, "{reused:?}");
+        assert!(
+            reused.fevals * 4 < fresh.fevals,
+            "translated reuse should cut the valley cost by >4x: {} vs {}",
+            reused.fevals,
+            fresh.fevals
+        );
     }
 
     #[test]

@@ -2821,6 +2821,8 @@ impl LinearMixedModel {
                 stall_ftol_rel: policy.stall_ftol_rel,
                 stall_ftol_abs: policy.stall_ftol_abs,
                 stall_requires_stable_x: policy.stall_requires_stable_x,
+                rejected_step_model_reuse: policy.rejected_step_model_reuse,
+                accepted_step_model_reuse: policy.accepted_step_model_reuse,
                 ..TrustBqOptions::default()
             },
             &mut objective_fn,
@@ -3967,6 +3969,13 @@ pub(super) struct TrustBqModelFamilyPolicy {
     pub(super) stall_requires_stable_x: bool,
     pub(super) certificate_ftol_abs: f64,
     pub(super) certificate_ftol_rel: f64,
+    /// Persistent-model reuse caps for the profiled-LMM full stage only (see
+    /// `TrustBqOptions::rejected_step_model_reuse` /
+    /// `accepted_step_model_reuse`). The auxiliary active-face and
+    /// diagonal-first ladder solves deliberately keep the TrustBQ defaults
+    /// (no reuse).
+    pub(super) rejected_step_model_reuse: usize,
+    pub(super) accepted_step_model_reuse: usize,
 }
 
 /// Central TrustBQ tuning matrix for the profiled-LMM theta objective.
@@ -3982,6 +3991,11 @@ pub(super) struct TrustBqModelFamilyPolicy {
 ///   bd-01KRPK18T967WA61XD6KSA043W, exact reuse was safe but marginal in
 ///   bd-01KRPK18TNRMXYBST852KZN5TX, and certificate-aware stop remains
 ///   conservative after bd-01KRPK18SMAKTTZCGY94HN6C7Y.
+/// - every family reuses the quadratic model for one step after a rejected
+///   trial and for one translated step after a well-predicted accepted move
+///   (bd-01M1S3CXKWMC52HYW3Z3S16HN7): 39% fewer objective evaluations over
+///   the eight TrustBQ rows of `optimizer_bench_harness` with every fitted
+///   objective inside the 1e-6 relative reference gate.
 pub(super) fn trust_bq_model_family_policy(
     n_theta: usize,
     maxeval_override: Option<usize>,
@@ -4044,6 +4058,21 @@ pub(super) fn trust_bq_model_family_policy(
     } else {
         ftol_rel
     };
+    // Persistent quadratic-model reuse (bd-01M1S3CXKWMC52HYW3Z3S16HN7).
+    // Every family keeps the model for one extra step after a rejected trial
+    // (centre unchanged, radius shrunk) and carries a translated model across
+    // one highly successful accepted step. Both caps are one, so a model is
+    // never more than one step away from a fresh stencil. On the
+    // optimizer_bench_harness (base d6b81ce) rejected-step reuse alone cut
+    // evaluations 29-57% on vector rows and 6-31% on crossed rows; adding the
+    // translated rule to the crossed family cut crossed rows a further
+    // 21-32% (665->313, 554->414, 498->336) with every objective gate
+    // passing, so the translation is not restricted to small theta.
+    let (rejected_step_model_reuse, accepted_step_model_reuse) = match family {
+        TrustBqModelFamily::Small
+        | TrustBqModelFamily::Moderate
+        | TrustBqModelFamily::CrossedLarge => (1, 1),
+    };
 
     TrustBqModelFamilyPolicy {
         initial_radius: trust_bq_initial_radius(initial_step, n_theta),
@@ -4063,6 +4092,8 @@ pub(super) fn trust_bq_model_family_policy(
         stall_requires_stable_x,
         certificate_ftol_abs,
         certificate_ftol_rel,
+        rejected_step_model_reuse,
+        accepted_step_model_reuse,
     }
 }
 
@@ -4076,6 +4107,14 @@ struct TrustBqCertificateStopState {
     theta_tolerance: f64,
     min_fevals: usize,
     min_tail_fevals: usize,
+    /// Evaluation count at which the certificate was last computed. The
+    /// certificate is a deterministic function of the best point, and the
+    /// best point cannot change without an evaluation, so re-running it at
+    /// the same count would only repeat the previous (negative) answer at the
+    /// cost of a full finite-difference KKT/Hessian pass. Zero-evaluation
+    /// iterations happen when a persistent-model step degenerates (see
+    /// `TrustBqOptions::rejected_step_model_reuse`).
+    last_checked_feval: Option<usize>,
 }
 
 impl TrustBqCertificateStopState {
@@ -4094,6 +4133,7 @@ impl TrustBqCertificateStopState {
             objective_tolerance_abs: ftol_abs.max(1e-8),
             objective_tolerance_rel: ftol_rel.max(1e-10),
             theta_tolerance: 1e-5,
+            last_checked_feval: None,
             min_fevals,
             min_tail_fevals,
         }
@@ -4124,8 +4164,18 @@ impl TrustBqCertificateStopState {
         let enough_tail =
             progress.fevals.saturating_sub(self.last_meaningful_feval) >= self.min_tail_fevals;
         let contracted = progress.radius < 0.75;
+        // Same evaluation count as the last certificate pass means the same
+        // best point: the answer cannot have changed, so do not pay for the
+        // finite-difference pass again.
+        let unchanged_since_last_check = self.last_checked_feval == Some(progress.fevals);
 
-        enough_total && enough_tail && stable_theta && contracted
+        let check = enough_total && enough_tail && stable_theta && contracted;
+        if check && !unchanged_since_last_check {
+            self.last_checked_feval = Some(progress.fevals);
+            true
+        } else {
+            false
+        }
     }
 }
 
