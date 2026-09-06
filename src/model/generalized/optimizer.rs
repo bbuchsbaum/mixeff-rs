@@ -5,6 +5,7 @@
 //! (bd-01KWHYQSTWK60P6HA4S4B2K99P). No logic changes.
 
 use super::*;
+use crate::model::linear::RefitStart;
 
 impl GeneralizedLinearMixedModel {
     /// Fit the GLMM.
@@ -35,6 +36,44 @@ impl GeneralizedLinearMixedModel {
         }
         self.reset_for_refit(Some(new_y))?;
         self.fit_with_options(true, n_agq, verbose)
+    }
+
+    /// Refit to a new response with an explicit start (Phase 7 T7.3).
+    ///
+    /// [`RefitStart::Initial`] is [`refit`](Self::refit). [`RefitStart::Fitted`]
+    /// starts θ at the current optimum and keeps the current conditional
+    /// modes and fixed effects as the first PIRLS start, with the optimizer's
+    /// first step contracted to [`WARM_REFIT_INITIAL_STEP`], because a
+    /// simulated or resampled response's optimum is expected nearby;
+    /// [`RefitStart::From`] does the same from a caller-supplied θ.
+    pub fn refit_with_start(&mut self, new_y: &[f64], start: RefitStart) -> Result<&mut Self> {
+        let n_agq = self.lmm.optsum.n_agq.max(1);
+        let start_theta = match start {
+            RefitStart::Initial => None,
+            RefitStart::Fitted => Some(self.theta.clone()),
+            RefitStart::From(theta) => Some(theta),
+        };
+        if let Some(start_theta) = &start_theta {
+            let n_theta = self.theta.len();
+            if start_theta.len() != n_theta {
+                return Err(MixedModelError::InvalidArgument(format!(
+                    "refit start theta length {} does not match theta length {n_theta}",
+                    start_theta.len()
+                )));
+            }
+            let lower = self.lmm.lower_bounds();
+            if start_theta
+                .iter()
+                .zip(&lower)
+                .any(|(&value, &bound)| !value.is_finite() || value < bound)
+            {
+                return Err(MixedModelError::InvalidArgument(
+                    "refit start theta must be finite and within the lower bounds".to_string(),
+                ));
+            }
+        }
+        self.reset_for_refit_with_start(Some(new_y), start_theta)?;
+        self.fit_with_options(true, n_agq, false)
     }
 
     /// Fit after first applying a compiler policy.
@@ -282,7 +321,9 @@ impl GeneralizedLinearMixedModel {
         } else {
             500
         };
-        let initial_step = if self.lmm.optsum.caller_set_field("initial_step") {
+        let initial_step = if let Some(step) = &self.warm_refit_step {
+            step.clone()
+        } else if self.lmm.optsum.caller_set_field("initial_step") {
             self.lmm.optsum.initial_step.clone()
         } else {
             vec![0.75; n_theta]
@@ -416,6 +457,11 @@ impl GeneralizedLinearMixedModel {
         // Hand the model to the COBYLA callback through a RefCell instead of a
         // raw `*mut Self`. The callback is the only borrower while the optimizer
         // is alive; `model.into_inner()` recovers `&mut self` afterwards.
+        let rhobeg = self
+            .warm_refit_step
+            .as_ref()
+            .and_then(|step| step.first().copied())
+            .unwrap_or(0.75);
         let model = std::cell::RefCell::new(self);
         let objective_fn = |theta: &[f64], _data: &mut ()| -> f64 {
             feval_count.set(feval_count.get() + 1);
@@ -440,7 +486,7 @@ impl GeneralizedLinearMixedModel {
             &cons_refs,
             (),
             maxeval,
-            cobyla::RhoBeg::All(0.75),
+            cobyla::RhoBeg::All(rhobeg),
             Some(stop_tol),
         );
 
@@ -509,7 +555,10 @@ impl GeneralizedLinearMixedModel {
         for tol in &mut step_tol {
             *tol = tol.max(1e-5);
         }
-        let mut step = self.lmm.optsum.initial_step.clone();
+        let mut step = self
+            .warm_refit_step
+            .clone()
+            .unwrap_or_else(|| self.lmm.optsum.initial_step.clone());
         if step.len() != n_theta {
             step = vec![0.75; n_theta];
         }

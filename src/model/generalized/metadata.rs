@@ -4,6 +4,7 @@
 //! (bd-01KWHYQSTWK60P6HA4S4B2K99P). No logic changes.
 
 use super::*;
+use crate::model::linear::WARM_REFIT_INITIAL_STEP;
 
 impl GeneralizedLinearMixedModel {
     /// Fixed-effect covariance from the final PIRLS working Hessian, rescaled
@@ -229,6 +230,17 @@ impl GeneralizedLinearMixedModel {
     }
 
     pub(super) fn reset_for_refit(&mut self, new_y: Option<&[f64]>) -> Result<()> {
+        self.reset_for_refit_with_start(new_y, None)
+    }
+
+    /// Reset for a refit; `start_theta` (a warm start) keeps the current
+    /// conditional modes and fixed effects as the first PIRLS start and
+    /// contracts the optimizer's first step.
+    pub(super) fn reset_for_refit_with_start(
+        &mut self,
+        new_y: Option<&[f64]>,
+        start_theta: Option<Vec<f64>>,
+    ) -> Result<()> {
         if let Some(new_y) = new_y {
             if new_y.len() != self.y.len() {
                 return Err(MixedModelError::InvalidArgument(format!(
@@ -262,25 +274,37 @@ impl GeneralizedLinearMixedModel {
             self.lmm.recompute_a_blocks()?;
         }
 
-        let initial_theta = self.lmm.optsum.initial.clone();
+        let warm = start_theta.is_some();
+        let initial_theta = match start_theta {
+            Some(theta) => theta,
+            None => self.lmm.optsum.initial.clone(),
+        };
         self.lmm.set_theta(&initial_theta)?;
         self.lmm.update_l()?;
         self.theta = initial_theta.clone();
 
-        self.beta = DVector::zeros(self.lmm.feterm.rank);
-        self.beta0 = self.beta.clone();
-        for u in &mut self.u {
-            u.fill(0.0);
+        if warm {
+            // Keep the fitted conditional modes and fixed effects as the
+            // first PIRLS start; only the optimizer's start and step change.
+            self.lmm.optsum.initial = initial_theta.clone();
+            self.warm_refit_step = Some(vec![WARM_REFIT_INITIAL_STEP; initial_theta.len()]);
+        } else {
+            self.warm_refit_step = None;
+            self.beta = DVector::zeros(self.lmm.feterm.rank);
+            self.beta0 = self.beta.clone();
+            for u in &mut self.u {
+                u.fill(0.0);
+            }
+            for u0 in &mut self.u0 {
+                u0.fill(0.0);
+            }
+            for b in &mut self.b {
+                b.fill(0.0);
+            }
+            self.eta.fill(0.0);
+            self.mu.fill(0.0);
+            self.dispersion = 1.0;
         }
-        for u0 in &mut self.u0 {
-            u0.fill(0.0);
-        }
-        for b in &mut self.b {
-            b.fill(0.0);
-        }
-        self.eta.fill(0.0);
-        self.mu.fill(0.0);
-        self.dispersion = 1.0;
         self.update_eta();
 
         self.lmm.optsum.finitial = f64::INFINITY;

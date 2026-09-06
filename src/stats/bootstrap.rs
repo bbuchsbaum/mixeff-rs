@@ -106,8 +106,10 @@ pub fn parametricbootstrap_glmm<R: rand::Rng>(
     let mut last_progress = 0usize;
     for replicate in 0..n_rep {
         let y_sim = model.simulate_response(rng)?;
+        // Each replicate starts from the template's optimum, conditional
+        // modes and fixed effects (Phase 7 T7.3); the clone carries them.
         let mut work = model.clone();
-        match work.refit(&y_sim) {
+        match work.refit_with_start(&y_sim, crate::model::linear::RefitStart::Fitted) {
             Ok(_) => {
                 let beta = MixedModelFit::coef(&work);
                 fits.push(BootstrapReplicate {

@@ -4142,3 +4142,92 @@ fn deferred_pirls_certificate_is_completed_by_verification_and_reset_by_refit() 
         .unwrap();
     assert!(!payload.rows.is_empty());
 }
+
+/// Phase 7 T7.3: a warm-started refit reaches the cold refit's optimum
+/// with fewer evaluations; `refit` keeps its cold-start (Julia `refit!`)
+/// semantics.
+#[test]
+fn warm_refit_reaches_the_cold_refit_optimum_with_fewer_evaluations() {
+    use crate::model::linear::RefitStart;
+    use rand::SeedableRng;
+    let (model, _) = glmm_certified_pirls_poisson_fixture();
+    let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+    let y_sim = model.simulate_response(&mut rng).unwrap();
+
+    let mut cold = model.clone();
+    cold.refit(&y_sim).unwrap();
+    let mut cold_explicit = model.clone();
+    cold_explicit
+        .refit_with_start(&y_sim, RefitStart::Initial)
+        .unwrap();
+    assert_eq!(cold.lmm.optsum.feval, cold_explicit.lmm.optsum.feval);
+    assert_eq!(cold.objective(), cold_explicit.objective());
+
+    let mut warm = model.clone();
+    warm.refit_with_start(&y_sim, RefitStart::Fitted).unwrap();
+    let tolerance = 1e-6 * (1.0 + cold.objective().abs());
+    assert!(
+        (warm.objective() - cold.objective()).abs() <= tolerance,
+        "warm {} vs cold {}",
+        warm.objective(),
+        cold.objective()
+    );
+    for (a, b) in warm.theta().iter().zip(cold.theta()) {
+        assert!((a - b).abs() <= 1e-3, "theta {a} vs {b}");
+    }
+    assert!(
+        warm.lmm.optsum.feval <= cold.lmm.optsum.feval,
+        "warm {} evaluations vs cold {}",
+        warm.lmm.optsum.feval,
+        cold.lmm.optsum.feval
+    );
+    assert!(
+        warm.pirls_certificate_pending,
+        "the refit defers its certificate"
+    );
+
+    let mut bad = model.clone();
+    assert!(bad
+        .refit_with_start(&y_sim, RefitStart::From(vec![f64::NAN]))
+        .is_err());
+}
+
+/// Cold versus warm refit cost on the registry GLMM rows.
+/// `cargo test --release --lib generalized::tests::glmm_refit_cost -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn glmm_refit_cost() {
+    use crate::model::linear::RefitStart;
+    use rand::SeedableRng;
+    use std::time::Instant;
+    let (data, _) = crate::datasets::load("grouseticks").unwrap();
+    let formula = "TICKS ~ 1 + YEAR + cHEIGHT + (1 | BROOD) + (1 | INDEX) + (1 | LOCATION)";
+    let mut model = GeneralizedLinearMixedModel::new(
+        parse_formula(formula).unwrap(),
+        &data,
+        Family::Poisson,
+        None,
+    )
+    .unwrap();
+    model.fit_with_options(true, 1, false).unwrap();
+    let mut rng = rand::rngs::StdRng::seed_from_u64(3);
+    for replicate in 0..3 {
+        let y_sim = model.simulate_response(&mut rng).unwrap();
+        let mut cold = model.clone();
+        let t0 = Instant::now();
+        cold.refit(&y_sim).unwrap();
+        let cold_ms = t0.elapsed().as_secs_f64() * 1e3;
+        let mut warm = model.clone();
+        let t1 = Instant::now();
+        warm.refit_with_start(&y_sim, RefitStart::Fitted).unwrap();
+        let warm_ms = t1.elapsed().as_secs_f64() * 1e3;
+        println!(
+            "grouseticks replicate {replicate}: cold {cold_ms:7.1} ms ({} evals, obj {:.6}) | warm {warm_ms:7.1} ms ({} evals, obj {:.6}) | {:.2}x",
+            cold.lmm.optsum.feval,
+            cold.objective(),
+            warm.lmm.optsum.feval,
+            warm.objective(),
+            cold_ms / warm_ms
+        );
+    }
+}

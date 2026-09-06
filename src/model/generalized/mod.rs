@@ -139,6 +139,10 @@ pub struct GeneralizedLinearMixedModel {
     pirls_certificate_diagnostic_slot: usize,
     /// Completed view for `&self` readers while the certificate is pending.
     inspection: std::sync::OnceLock<GlmmInspection>,
+    /// Contracted first optimizer step for a warm-started refit
+    /// (`refit_with_start`), consumed by the θ drivers; `None` for cold
+    /// starts.
+    warm_refit_step: Option<Vec<f64>>,
 
     /// Callback failure captured inside an optimizer API whose objective
     /// callback cannot return `Result`. The driver takes and returns it as soon
@@ -828,6 +832,7 @@ impl GeneralizedLinearMixedModel {
             pirls_certificate_pending: false,
             pirls_certificate_diagnostic_slot: 0,
             inspection: std::sync::OnceLock::new(),
+            warm_refit_step: None,
             pending_progress_error: None,
         };
         model.initialize_beta_from_response();

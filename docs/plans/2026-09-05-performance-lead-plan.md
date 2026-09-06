@@ -675,6 +675,20 @@ T7.3 GLMM refit warm start. `GeneralizedLinearMixedModel::refit`
 `RefitStart::Fitted` policy as Phase 3, seeding θ and β (PIRLS start) from
 the template. Bootstrap for GLMMs uses it.
 
+T7.3 shipped (mote bd-01M1TF7B175Q310MCJ37Y6ENE2):
+`GeneralizedLinearMixedModel::refit_with_start(new_y, RefitStart)` with
+`Initial` (the cold `refit`, Julia `refit!` parity), `Fitted` (θ from the
+current optimum, the current conditional modes and fixed effects kept as
+the first PIRLS start, the optimizer's first step contracted to
+`WARM_REFIT_INITIAL_STEP` for BOBYQA, COBYLA's `rhobeg` and the pattern
+search alike) and `From(theta)`. `parametricbootstrap_glmm` refits each
+replicate's clone from the template with `Fitted`. Objectives agree with
+the cold refit to 1e-6 relative and θ to 1e-3 on the certified Poisson
+fixture; on grouseticks (release, `generalized::tests::glmm_refit_cost`)
+warm refits took 36-40 evaluations against 49-83 cold ones for 1.2-2.4×
+per replicate with identical objectives, and each replicate also skips
+the deferred certificate (T7.2).
+
 T7.4 Construction and PIRLS workspace. Phase 1 applies unchanged (the GLMM
 wraps a `LinearMixedModel`). Profile `pirls.rs` per-iteration allocations
 with the same alloc-count instrumentation as `perf_gate` and hoist them.
