@@ -63,6 +63,10 @@ use crate::types::{FeMat, FeTerm, FitLogEntry, OptSummary, Optimizer, OptimizerS
 mod active_face;
 
 mod blocks;
+// Analytic profiled-deviance gradient (Phase 5). Its blocked entry points
+// are wired into the optimizer in S5.3; until then only the tests call them.
+#[allow(dead_code)]
+mod gradient;
 pub(crate) use blocks::*;
 
 mod bootstrap;

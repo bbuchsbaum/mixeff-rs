@@ -413,6 +413,44 @@ twins for `profiled_objective_one_vsize1_fast` / `_vsize2_fast`
 usage. Go/no-go: gradient cost ≤ 2 evaluation-equivalents (measured with
 `objective_eval_bench` style timing) and agreement with S5.1 to 1e-10.
 
+S5.1 shipped: `docs/profiled_deviance_gradient.md` derives the gradient
+from the envelope theorem (pwrss term `−2 r̂ᵀ Z_w E_k û`) and trace
+formulas (`2 tr(M⁻¹ Λᵀ A_ZZ E_k)` for logdet M; `C⁻¹` with `Q = M⁻¹R`,
+`V = A_ZZ Λ Q` for the REML logdet C) rather than the tangent Cholesky
+pass sketched above: the trace form needs one selected inverse shared by
+every direction, so its cost is d-independent, whereas the tangent pass
+scales with d. The dense reference (`dense_reference_gradient`) matches
+the certificate's central differences to 1e-5 (one-sided 1e-3 at θ = 0)
+on vector, scalar and weighted sleepstudy shapes and on crossed vector
+terms, ML and REML.
+
+S5.2 shipped: the production gradient (`profiled_gradient_at_current_theta`,
+`objective_and_gradient_at` in `src/model/linear/gradient.rs`) reads only
+the A and L blocks: `e_j = Z_jᵀ(y − Xβ)` from the `[X|y]ᵀZ_j` block, `û`
+and the REML `Q` from one blocked solve with p + 1 right-hand sides,
+`g_j = e_j − Σ_i S_ji Λ_i û_i` from the A blocks, and the REML term folded
+to `2((V − T) C⁻¹ Qᵀ)[a, b]`. Single-term models run allocation-free
+per-level kernels (scalar, unrolled s = 2, generic s ≥ 3); several terms
+use the block Takahashi recursion with only the level-diagonal blocks of
+the leading term's `Z_00` formed, gemm-backed solves, and one `q_j³`
+product per dense diagonal block. Agreement with the dense reference:
+1e-9 relative on single-term (s = 1, 2, 3), weighted, crossed and nested
+fits, including θ = 0 slots. Cost (release, `gradient::cost` probes, host
+load average ≈ 40): scalar_10000 ML 0.89 / REML 1.24, vector_10000 ML
+0.93 / REML 1.47, crossed 60 × 40 × 12 (d = 7) REML 1.93
+evaluation-equivalents of a full `update_l` evaluation, so the ≤ 2
+go/no-go holds. Caveat carried into S5.3: the optimizer's single-term
+fast objective path is 2–2.5× cheaper than `update_l`, so an
+objective-plus-gradient pair costs 2.7–4.9× one fast evaluation on
+single-term rows and ≈ 2.9× on the crossed row. The gradient optimizer
+must therefore cut evaluations by more than that factor to win wall
+time, which the crossed rows (250–400 evaluations today) can deliver and
+the d ≤ 3 single-term rows (30–70) may not. S5.3 gates the oracle by
+family (multi-term or d ≥ 4 first) and measures single-term rows
+separately; a fused fast-path objective-plus-gradient kernel is the
+fallback if single-term rows need it. The `mod gradient` `dead_code`
+allowance stays until S5.3 wires the oracle into the optimizer.
+
 S5.3 Gradient-aware TrustBQ (1 week). Add a `GradientOracle` option to
 `src/optimizer/trust_bq.rs`: model gradient from the oracle (no axis
 stencil), Hessian from symmetric-rank-one/BFGS secant updates seeded by one

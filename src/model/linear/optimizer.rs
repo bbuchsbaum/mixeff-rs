@@ -590,7 +590,7 @@ impl LinearMixedModel {
         (gradient_tolerance, hessian_tolerance)
     }
 
-    fn finite_difference_optimizer_derivatives(
+    pub(super) fn finite_difference_optimizer_derivatives(
         &self,
         theta: &[f64],
         lower_bounds: &[f64],
