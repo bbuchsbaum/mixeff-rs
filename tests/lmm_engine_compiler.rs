@@ -145,9 +145,11 @@ fn test_lmm_optimizer_certificate_records_interior_fit() {
         certificate.evidence.certification_quality,
         EvidenceQuality::Approximate { .. }
     ));
+    // The gradient evidence is the analytic profiled-deviance gradient
+    // (Phase 5 S5.4); the Hessian stays finite differences of it.
     assert!(matches!(
         certificate.evidence.gradient.method,
-        EvidenceMethod::FiniteDifference
+        EvidenceMethod::Exact
     ));
     assert!(certificate.evidence.gradient.raw_gradient_norm.is_some());
     assert!(certificate.evidence.gradient.free_gradient_norm.is_some());

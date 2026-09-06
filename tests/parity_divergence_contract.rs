@@ -621,13 +621,23 @@ fn boundary_pathology_lmm_divergences_stay_diagnostic_not_parity() {
     );
 
     let singular_max = comparison_row(&rust, SINGULAR_MAXIMAL, "rust_results.json");
-    assert_eq!(
+    // The large-theta path may prefix the stop with its optimizer label
+    // (e.g. `GRADIENT_ORACLE: MAXEVAL_REACHED`); the row must still be
+    // budget-bound.
+    assert!(
         field_str(
             singular_max,
             "optimizer_return_code",
             &row_key(SINGULAR_MAXIMAL)
-        ),
-        "MAXEVAL_REACHED"
+        )
+        .ends_with("MAXEVAL_REACHED"),
+        "{}: singular maximal row should stay budget-bound, got {}",
+        row_key(SINGULAR_MAXIMAL),
+        field_str(
+            singular_max,
+            "optimizer_return_code",
+            &row_key(SINGULAR_MAXIMAL)
+        )
     );
     let singular_max_delta = max_abs_delta(
         &numeric_array(singular_max, "beta", &row_key(SINGULAR_MAXIMAL)),

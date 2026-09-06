@@ -4751,10 +4751,23 @@ impl OptimizerCertificate {
             }
         }
 
+        // Certification is only as strong as the weaker of the two pieces
+        // of evidence: an exact gradient with a finite-difference Hessian
+        // still certifies approximately.
+        let gradient_exact = matches!(derivatives.method, EvidenceMethod::Exact);
+        let certifying_method = if matches!(derivatives.hessian_method, EvidenceMethod::Exact) {
+            &derivatives.method
+        } else {
+            &derivatives.hessian_method
+        };
         self.evidence.certification_quality = if failures.is_empty() {
             approximate_or_certified_quality(
-                &derivatives.method,
-                "finite-difference KKT and Hessian checks passed",
+                certifying_method,
+                if gradient_exact {
+                    "analytic-gradient KKT check and finite-difference-of-gradient Hessian check passed"
+                } else {
+                    "finite-difference KKT and Hessian checks passed"
+                },
             )
         } else {
             EvidenceQuality::Approximate {

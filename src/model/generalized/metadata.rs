@@ -370,7 +370,12 @@ impl GeneralizedLinearMixedModel {
             metadata.estimation_method.as_str(),
             "fast_pirls_profiled" | "fallback_fast_pirls"
         ) {
+            // A joint (or otherwise non-profiled) final fit owns its own
+            // certificate evidence: nothing is deferred, and a deferral left
+            // by an earlier profiled stage of the same driver is void.
             self.pirls_profiled_optimum_certificate = None;
+            self.pirls_certificate_pending = false;
+            self.inspection = std::sync::OnceLock::new();
             return;
         }
         // Fit drivers can record metadata more than once for the same final

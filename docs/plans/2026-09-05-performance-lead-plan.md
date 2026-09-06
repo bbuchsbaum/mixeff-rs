@@ -34,7 +34,7 @@ without same-host paired evidence (`docs/difficult_model_release_contract.md`).
   `scripts/bench_paired.sh` + `scripts/bench_compare.py`): two binaries from
   the same commit, 5 rounds alternating order, medians; objective gate
   `|F_cand − F_base| ≤ 1e-6·(1+|F_ref|)`; wall wins counted per scenario.
-- Gates on every merge: `cargo test` (default and `--no-default-features`),
+- Gates on every merge: `cargo test` (default, `--no-default-features`, and `--features unstable-internals`),
   `cargo clippy --all-targets` both feature sets, `perf_gate` (objective,
   feval, alloc pins), cross-engine parity fixtures unchanged.
 - Numbers go in the commit message and the mote note; nothing merges on a
@@ -713,6 +713,42 @@ T7.5 Gate. `tests/glmm_speed_parity.rs` rows re-pinned upward on the new
 same-host numbers (not lowered); GLMM parity fixtures unchanged (the lme4
 references need `tolPwrss=1e-9`, see memory note); new Julia GLMM rows
 reported alongside lme4 in `comparison/REPORT.md`.
+
+T7.5 shipped (mote bd-01M1TG4TWXX2PA1XZ9E02KR20W): `comparison/rust_results.json`
+regenerated on this host with the current tree (`compare_rust`, 46 rows,
+objectives and β unchanged from the recorded values, timings under a load
+average of 30-50 from other sessions); `comparison/lme4_results.json`
+kept as recorded (a same-session `compare_lme4.R` rerun was measured but
+not checked in: its full-precision objectives move the `contraception`
+`(1 | dist)` joint Laplace row inside the promotion gate, which is a
+scorecard decision for the maintainer, and its timings under the same
+load were 41/246/11341 ms for cbpp/grouseticks/verbagg). Speed gates
+(`tests/glmm_speed_parity.rs`) re-pinned upward: cbpp 1.0 → 3.0× (5.9×
+recorded), verbagg 1.0 → 10× (21.5×), the certified fast=false rows
+1.0 → 3.0× (cbpp joint 5.9×, culcitalogreg 4.9×/9.3×); grouseticks stays
+enforced at 1.0× (1.16× against the recorded lme4 timing, but 0.86×
+against the same-session rerun: the INDEX term has one level per
+observation and the blocked Cholesky carries dense fill-in that lme4's
+sparse factor avoids; mote bd-01M1TGFK22VQ8VCASPS83BRSB5). The joint
+cbpp row's Rust time is 5.6 ms where the July record said 0.75 ms (Julia
+3.1 ms): the joint certification path grew a tail before this session
+and is the next GLMM lever after the Cholesky. `comparison/REPORT.md`
+now carries a "MixedModels.jl (Julia) GLMM references" section
+(`examples/compare_report.rs`) from `benchmarks/julia_reference.json`.
+
+Gate correction found while closing Phase 7: the `unstable-internals`
+test lane (CI runs it separately) had not been part of this plan's
+per-task gates. Running it surfaced four items, all fixed here: the
+`rank_mixture` wire fixture had been stale since Phase 2 (217e841; the
+verification runs of a reduced-rank fit now report their effective
+ranks instead of an empty list and a spurious "ranks changed" verdict),
+`lmm_engine_compiler` still pinned the certificate gradient to
+`finite_difference` (S5.4 makes it `exact`), T7.2 left a stale deferral
+flag on a joint GLMM fit that followed a profiled stage (a joint
+certificate could be overwritten by the profiled probes on inspection),
+and certification quality was graded from the gradient method alone (an
+exact gradient with a finite-difference Hessian now stays
+`Approximate`). The lane is part of every gate from here on.
 
 ## Verification (end-to-end)
 

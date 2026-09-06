@@ -36,6 +36,9 @@ struct FastFalseGlmmSpeedCase {
 }
 
 const SPEED_CASES: &[GlmmSpeedCase] = &[
+    // Thresholds are conservative fractions of the speedups recorded in
+    // comparison/{rust,lme4}_results.json after the 2026-09-06 same-host
+    // Rust regeneration (Phase 7 T7.5): cbpp 5.9x, verbagg 21x.
     GlmmSpeedCase {
         dataset: "cbpp",
         formula: "incidence / size ~ 1 + period + (1 | herd)",
@@ -43,9 +46,14 @@ const SPEED_CASES: &[GlmmSpeedCase] = &[
         link: "Logit",
         estimator: "Laplace",
         status: "ok",
-        minimum_speedup: Some(1.0),
+        minimum_speedup: Some(3.0),
         known_slow_bead: None,
     },
+    // grouseticks passes 1.0x against the recorded lme4 timing (333 ms vs
+    // 287 ms) but a same-session lme4 rerun measured 246 ms (0.86x): the
+    // INDEX term has one level per observation, so the blocked Cholesky
+    // carries dense fill-in that lme4's sparse factor avoids (mote
+    // bd-01M1TGFK22VQ8VCASPS83BRSB5). The threshold stays enforced at 1.0x.
     GlmmSpeedCase {
         dataset: "grouseticks",
         formula: "TICKS ~ 1 + YEAR + cHEIGHT + (1 | BROOD) + (1 | INDEX) + (1 | LOCATION)",
@@ -63,7 +71,7 @@ const SPEED_CASES: &[GlmmSpeedCase] = &[
         link: "Logit",
         estimator: "Laplace",
         status: "ok",
-        minimum_speedup: Some(1.0),
+        minimum_speedup: Some(10.0),
         known_slow_bead: None,
     },
     GlmmSpeedCase {
@@ -87,7 +95,7 @@ const FAST_FALSE_SPEED_CASES: &[FastFalseGlmmSpeedCase] = &[
         estimator: "Laplace",
         objective_definition: "joint_glmm_laplace_deviance",
         optimizer_prefix: "JOINT_LAPLACE:",
-        minimum_speedup: 1.0,
+        minimum_speedup: 3.0,
     },
     FastFalseGlmmSpeedCase {
         dataset: "culcitalogreg",
@@ -97,7 +105,7 @@ const FAST_FALSE_SPEED_CASES: &[FastFalseGlmmSpeedCase] = &[
         estimator: "AGQ",
         objective_definition: "joint_glmm_agq_deviance",
         optimizer_prefix: "JOINT_AGQ:",
-        minimum_speedup: 1.0,
+        minimum_speedup: 3.0,
     },
 ];
 

@@ -92,6 +92,108 @@ impl Tol {
     }
 }
 
+/// Same-host MixedModels.jl GLMM references (`benchmarks/julia_reference.json`,
+/// produced by `scripts/bench_julia.jl`) next to the matching comparison rows.
+/// Julia's timing covers construction plus fit; the Rust column is the
+/// comparison harness's fit-only minimum, so the ratio is conservative for
+/// Rust only by the construction share.
+fn julia_glmm_reference_section(rust: &ResultsFile) -> Option<String> {
+    let path = comparison_root()
+        .parent()?
+        .join("benchmarks")
+        .join("julia_reference.json");
+    let text = fs::read_to_string(&path).ok()?;
+    let reference: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let scenarios = reference.get("scenarios")?.as_object()?;
+    let provenance = reference.get("provenance").cloned().unwrap_or_default();
+    // Julia scenario -> (dataset, formula fragment, joint?) in the comparison manifest.
+    let mapping: [(&str, &str, &str, bool); 6] = [
+        ("glmm_cbpp_fast", "cbpp", "(1 | herd)", false),
+        ("glmm_cbpp_full", "cbpp", "(1 | herd)", true),
+        (
+            "glmm_grouseticks_fast",
+            "grouseticks",
+            "(1 | LOCATION)",
+            false,
+        ),
+        ("glmm_verbagg_fast", "verbagg", "(1 | item)", false),
+        (
+            "glmm_contra_intercept_fast",
+            "contraception",
+            "(1 | dist)",
+            false,
+        ),
+        (
+            "glmm_contra_slope_fast",
+            "contraception",
+            "(1 + urban | dist)",
+            false,
+        ),
+    ];
+    let mut out = String::new();
+    out.push_str("\n### MixedModels.jl (Julia) GLMM references\n\n");
+    out.push_str(&format!(
+        "Julia {} / MixedModels.jl {} on {} ({}); Julia times cover construction plus fit, Rust times are the comparison harness's fit-only minimum. Source: `benchmarks/julia_reference.json`.\n\n",
+        provenance.get("julia_version").and_then(|v| v.as_str()).unwrap_or("?"),
+        provenance.get("mixedmodels_version").and_then(|v| v.as_str()).unwrap_or("?"),
+        provenance.get("host").and_then(|v| v.as_str()).unwrap_or("?"),
+        provenance.get("generated").and_then(|v| v.as_str()).unwrap_or("?"),
+    ));
+    out.push_str("| Dataset | Formula | Path | t_Julia (ms, median) | t_Rust (ms, min) | Rust/Julia speedup | Julia fevals | Rust fevals |\n");
+    out.push_str("|---|---|---|---:|---:|---:|---:|---:|\n");
+    let mut any = false;
+    for (scenario, dataset, fragment, joint) in mapping {
+        let Some(row) = scenarios.get(scenario) else {
+            continue;
+        };
+        let julia_ms = row.get("median_ms").and_then(|v| v.as_f64());
+        let julia_fevals = row.get("feval").and_then(|v| v.as_f64());
+        let matched = rust.results.iter().find(|record| {
+            record.dataset == dataset
+                && record.formula.contains(fragment)
+                && record.status == "ok"
+                && record
+                    .objective_definition
+                    .as_deref()
+                    .is_some_and(|definition| definition.starts_with("joint") == joint)
+        });
+        let Some(record) = matched else {
+            continue;
+        };
+        let Some(rust_ms) = record.fit_time_ms_min else {
+            continue;
+        };
+        any = true;
+        let path_label = if joint {
+            "joint Laplace (fast=false)"
+        } else {
+            "fast-PIRLS (fast=true)"
+        };
+        out.push_str(&format!(
+            "| `{}` | `{}` | {} | {} | {:.1} | {} | {} | {} |\n",
+            record.dataset,
+            record.formula.replace('|', "\\|"),
+            path_label,
+            julia_ms
+                .map(|v| format!("{v:.1}"))
+                .unwrap_or_else(|| "—".into()),
+            rust_ms,
+            julia_ms
+                .filter(|_| rust_ms > 0.0)
+                .map(|v| format!("{:.1}×", v / rust_ms))
+                .unwrap_or_else(|| "—".into()),
+            julia_fevals
+                .map(|v| format!("{v:.0}"))
+                .unwrap_or_else(|| "—".into()),
+            record
+                .optimizer_fevals
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "—".into()),
+        ));
+    }
+    any.then_some(out)
+}
+
 fn comparison_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("comparison")
 }
@@ -551,6 +653,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     report.push_str(&acc);
     report.push_str("\n## Performance\n\n");
     report.push_str(&perf);
+    if let Some(julia) = julia_glmm_reference_section(&rust) {
+        report.push_str(&julia);
+    }
     report.push_str("\n## Gaps & disagreements\n\n");
     if gaps.lines().count() <= 2 {
         report.push_str("_None._\n");
