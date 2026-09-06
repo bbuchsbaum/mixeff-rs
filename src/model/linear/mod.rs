@@ -3002,16 +3002,61 @@ impl LinearMixedModel {
         Ok(full)
     }
 
+    /// Gradient of `deviance_varpar` at `varpar = c(theta, sigma)`: the
+    /// analytic θ-gradient of the fixed-σ objective plus
+    /// `∂/∂σ = 2·denomdf/σ − 2·pwrss/σ³`. Restores the fitted state.
+    fn gradient_deviance_varpar(&mut self, varpar: &[f64], reml: bool) -> Result<Vec<f64>> {
+        self.validate_varpar(varpar)?;
+        let n_theta = self.n_theta();
+        let theta = &varpar[..n_theta];
+        let sigma = varpar[n_theta];
+        if !(sigma.is_finite() && sigma > 0.0) {
+            return Err(MixedModelError::InvalidArgument(format!(
+                "sigma must be positive and finite, got {sigma}"
+            )));
+        }
+
+        let original_theta = self.theta();
+        let original_l_blocks = self.l_blocks.clone();
+        let result = (|| {
+            self.set_theta(theta)?;
+            self.update_l()?;
+            let mut gradient = gradient::ProfiledGradientInputs {
+                a_blocks: &self.a_blocks,
+                l_blocks: &self.l_blocks,
+                reterms: &self.reterms,
+                dims: self.dims,
+                reml,
+                sigma: Some(sigma),
+            }
+            .profiled_gradient()?;
+            let denomdf = if reml {
+                (self.dims.n - self.dims.p) as f64
+            } else {
+                self.dims.n as f64
+            };
+            let (_, pwrss) = self.determinant_term_and_pwrss_for_reml(reml);
+            gradient.push(2.0 * denomdf / sigma - 2.0 * pwrss / (sigma * sigma * sigma));
+            if gradient.iter().all(|value| value.is_finite()) {
+                Ok(gradient)
+            } else {
+                Err(MixedModelError::Optimization(
+                    "deviance_varpar gradient is non-finite".to_string(),
+                ))
+            }
+        })();
+        self.set_theta(&original_theta)?;
+        self.l_blocks = original_l_blocks;
+        result
+    }
+
+    /// Hessian of `deviance_varpar`: symmetrized central differences of the
+    /// analytic varpar gradient (two gradient evaluations per coordinate
+    /// instead of four objective evaluations per entry).
     fn hessian_deviance_varpar(&mut self, varpar: &[f64], reml: bool) -> Result<DMatrix<f64>> {
         self.validate_varpar(varpar)?;
         let lower_bounds = self.varpar_lower_bounds();
         let steps = finite_difference_steps(varpar, &lower_bounds, 1e-4);
-        let f0 = self.deviance_varpar(varpar, reml)?;
-        if !f0.is_finite() {
-            return Err(MixedModelError::Optimization(
-                "deviance_varpar at fitted varpar is non-finite".to_string(),
-            ));
-        }
 
         let mut central_steps = Vec::with_capacity(varpar.len());
         for index in 0..varpar.len() {
@@ -3029,32 +3074,23 @@ impl LinearMixedModel {
             central_steps.push(step);
         }
 
-        let mut hessian = DMatrix::zeros(varpar.len(), varpar.len());
-        for row in 0..varpar.len() {
-            let h_row = central_steps[row];
-            let f_plus = finite_difference_deviance_varpar(self, varpar, row, h_row, reml)?;
-            let f_minus = finite_difference_deviance_varpar(self, varpar, row, -h_row, reml)?;
-            hessian[(row, row)] = (f_plus - 2.0 * f0 + f_minus) / (h_row * h_row);
-
-            for col in 0..row {
-                let h_col = central_steps[col];
-                let f_pp = finite_difference_deviance_varpar_2d(
-                    self, varpar, row, h_row, col, h_col, reml,
-                )?;
-                let f_pm = finite_difference_deviance_varpar_2d(
-                    self, varpar, row, h_row, col, -h_col, reml,
-                )?;
-                let f_mp = finite_difference_deviance_varpar_2d(
-                    self, varpar, row, -h_row, col, h_col, reml,
-                )?;
-                let f_mm = finite_difference_deviance_varpar_2d(
-                    self, varpar, row, -h_row, col, -h_col, reml,
-                )?;
-                let value = (f_pp - f_pm - f_mp + f_mm) / (4.0 * h_row * h_col);
-                hessian[(row, col)] = value;
-                hessian[(col, row)] = value;
+        let n = varpar.len();
+        let mut hessian = DMatrix::zeros(n, n);
+        for col in 0..n {
+            let h = central_steps[col];
+            let mut plus = varpar.to_vec();
+            let mut minus = varpar.to_vec();
+            plus[col] += h;
+            minus[col] -= h;
+            let g_plus = self.gradient_deviance_varpar(&plus, reml)?;
+            let g_minus = self.gradient_deviance_varpar(&minus, reml)?;
+            for row in 0..n {
+                hessian[(row, col)] = (g_plus[row] - g_minus[row]) / (2.0 * h);
             }
         }
+        let transposed = hessian.transpose();
+        hessian += transposed;
+        hessian *= 0.5;
 
         if matrix_is_finite(&hessian) {
             Ok(hessian)

@@ -517,6 +517,30 @@ of 2d²); Satterthwaite/KR varpar Jacobian (`mod.rs:2117-2149`) and Hessian
 (`mod.rs:2786-2830`) switch to the same oracle. Then Phase 2's deferral can
 stay or be reverted to eager, whichever the numbers justify.
 
+S5.4 shipped (mote bd-01M1TCHEX4NJB15AKHGJ2GXMD3): the certificate's
+deferred derivative evidence now comes from `analytic_optimizer_derivatives`
+(`src/model/linear/optimizer.rs`): the exact gradient plus a symmetrized
+central-difference-of-gradient Hessian over the interior coordinates,
+evaluated on cloned factor blocks with the A blocks borrowed (two gradient
+evaluations per free coordinate instead of 2·d² objective evaluations);
+`finite_difference_optimizer_derivatives` remains the fallback when the
+blocked gradient cannot be formed. `OptimizerDerivativeEvidence` carries a
+separate `hessian_method`, so the certificate reports the gradient as
+`exact` (certified quality) and the Hessian as `finite_difference` with a
+reason naming the analytic gradient. The Kenward-Roger varpar Hessian
+(`hessian_deviance_varpar`) is the same construction on
+`gradient_deviance_varpar` (θ-gradient of the fixed-σ objective plus
+`∂/∂σ = 2·denomdf/σ − 2·pwrss/σ³`). Agreement with the objective-difference
+evidence on interior fits: gradients within 1e-3 absolute (both are
+rounding-limited at an optimum), Hessians within 1e-3 of their largest
+entry; the certificate deferral, Satterthwaite and Kenward-Roger suites
+are unchanged. Cost (release, `gradient::cost::certificate_evidence_cost`,
+loaded host): crossed d = 7 evidence 2.3× faster (17.5 ms vs 40.1 ms);
+single-term d = 3 0.9× (the objective differences run on the fast kernel
+while each gradient evaluation refactorizes, so the exact gradient is kept
+there for its certified quality, not speed). Phase 2's deferral stays: the
+evidence is still ~15 gradient evaluations for d = 7.
+
 ## Phase 6: Response-matrix batch (2 weeks, lever 6)
 
 Facts: the shared-θ machinery in `docs/multivariate_shared_theta.md`

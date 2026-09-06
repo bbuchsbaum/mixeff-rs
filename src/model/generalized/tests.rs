@@ -126,6 +126,7 @@ fn joint_glmm_stationarity_failure_is_not_converged_interior() {
     certificate.apply_derivative_evidence(
         OptimizerDerivativeEvidence {
             method: EvidenceMethod::FiniteDifference,
+            hessian_method: EvidenceMethod::FiniteDifference,
             gradient: gradient.clone(),
             hessian: None,
         },
@@ -219,6 +220,7 @@ fn joint_glmm_noise_dominated_stationarity_is_not_assessed() {
     certificate.apply_derivative_evidence(
         OptimizerDerivativeEvidence {
             method: EvidenceMethod::FiniteDifference,
+            hessian_method: EvidenceMethod::FiniteDifference,
             gradient: certification.gradient.clone(),
             hessian: None,
         },
@@ -304,6 +306,7 @@ fn joint_glmm_escalated_stationarity_pass_certifies_with_evidence_trail() {
     certificate.apply_derivative_evidence(
         OptimizerDerivativeEvidence {
             method: EvidenceMethod::FiniteDifference,
+            hessian_method: EvidenceMethod::FiniteDifference,
             gradient: certification.gradient.clone(),
             hessian: None,
         },

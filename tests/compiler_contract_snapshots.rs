@@ -1166,11 +1166,16 @@ fn rank_mixture_artifact_matches_wire_fixture() {
     assert_eq!(reduced_rank_diagnostic["payload"]["term_id"], "r0");
     let gradient_method = &value["optimizer_certificate"]["evidence"]["gradient"]["method"];
     if let Some(method) = gradient_method.as_str() {
-        assert_eq!(method, "finite_difference");
+        // The LMM certificate's gradient is analytic (exact); the
+        // finite-difference label remains for engines without a gradient.
+        assert!(
+            method == "exact" || method == "finite_difference",
+            "unexpected gradient method {method}"
+        );
     } else {
         assert!(
             gradient_method.get("not_assessed").is_some(),
-            "gradient method should be finite_difference or explicitly not assessed"
+            "gradient method should be exact, finite_difference or explicitly not assessed"
         );
     }
     if !value["optimizer_certificate"]["verification"].is_null() {

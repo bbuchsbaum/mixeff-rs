@@ -161,3 +161,7 @@ through `profiled_objective_and_gradient_from_parts`
 blocks and hands them to `ProfiledGradientInputs::profiled_gradient`. See
 the S5.3 entry in `docs/plans/2026-09-05-performance-lead-plan.md` for the
 evidence.
+
+The certificate's derivative evidence (`analytic_optimizer_derivatives`)
+and the Kenward-Roger varpar Hessian (`hessian_deviance_varpar`) use the
+same gradient with a central-difference-of-gradient Hessian (S5.4).

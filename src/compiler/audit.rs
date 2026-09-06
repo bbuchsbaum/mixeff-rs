@@ -3227,6 +3227,7 @@ mod tests {
         certificate.apply_derivative_evidence(
             OptimizerDerivativeEvidence {
                 method: EvidenceMethod::FiniteDifference,
+                hessian_method: EvidenceMethod::FiniteDifference,
                 gradient: vec![17.7, -2.0],
                 hessian: Some(DMatrix::identity(2, 2)),
             },
@@ -4130,7 +4131,11 @@ pub struct HessianEvidence {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct OptimizerDerivativeEvidence {
+    /// How the gradient was obtained.
     pub method: EvidenceMethod,
+    /// How the Hessian was obtained (finite differences of the objective, or
+    /// of an exact gradient).
+    pub hessian_method: EvidenceMethod,
     pub gradient: Vec<f64>,
     pub hessian: Option<DMatrix<f64>>,
 }
@@ -4637,11 +4642,15 @@ impl OptimizerCertificate {
                 self.hessian_rank = active.rank;
                 self.information_rank = active.rank;
                 self.evidence.hessian = HessianEvidence {
-                    method: derivatives.method.clone(),
+                    method: derivatives.hessian_method.clone(),
                     quality: if active.psd_ok && active.rank_ok {
                         approximate_or_certified_quality(
-                            &derivatives.method,
-                            "finite-difference active-subspace Hessian is positive semidefinite",
+                            &derivatives.hessian_method,
+                            if matches!(derivatives.method, EvidenceMethod::Exact) {
+                                "active-subspace Hessian from finite differences of the analytic gradient is positive semidefinite"
+                            } else {
+                                "finite-difference active-subspace Hessian is positive semidefinite"
+                            },
                         )
                     } else if !active.psd_ok {
                         EvidenceQuality::Approximate {

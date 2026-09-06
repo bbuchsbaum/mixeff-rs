@@ -4324,6 +4324,7 @@ mod tests {
         cert.apply_derivative_evidence(
             OptimizerDerivativeEvidence {
                 method: EvidenceMethod::FiniteDifference,
+                hessian_method: EvidenceMethod::FiniteDifference,
                 gradient: vec![10.0],
                 hessian: Some(nalgebra::DMatrix::from_element(1, 1, -1.0)),
             },

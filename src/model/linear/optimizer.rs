@@ -413,9 +413,13 @@ impl LinearMixedModel {
         }
         let theta = self.theta();
         let lower_bounds = self.lower_bounds();
-        if let Some(derivatives) =
-            self.finite_difference_optimizer_derivatives(&theta, &lower_bounds)
-        {
+        // Exact gradient with a finite-difference-of-gradient Hessian (2·d
+        // gradient evaluations); the 2·d² objective-difference evidence is
+        // the fallback when the blocked gradient cannot be formed.
+        let derivatives = self
+            .analytic_optimizer_derivatives(&theta, &lower_bounds)
+            .or_else(|| self.finite_difference_optimizer_derivatives(&theta, &lower_bounds));
+        if let Some(derivatives) = derivatives {
             let (gradient_tolerance, hessian_tolerance) =
                 self.derivative_certificate_tolerances(certificate.objective_value);
             certificate.apply_derivative_evidence(
@@ -590,6 +594,96 @@ impl LinearMixedModel {
         (gradient_tolerance, hessian_tolerance)
     }
 
+    /// Certificate derivative evidence from the analytic gradient
+    /// (`docs/profiled_deviance_gradient.md`): the gradient is exact, the
+    /// Hessian is the symmetrized central difference of the gradient over
+    /// the interior coordinates (two gradient evaluations per free
+    /// coordinate instead of the 2·d² objective evaluations of
+    /// `finite_difference_optimizer_derivatives`). `None` when the gradient
+    /// cannot be formed for this design, so the caller can fall back.
+    pub(super) fn analytic_optimizer_derivatives(
+        &self,
+        theta: &[f64],
+        lower_bounds: &[f64],
+    ) -> Option<OptimizerDerivativeEvidence> {
+        let n_theta = theta.len();
+        if n_theta == 0
+            || n_theta
+                > self
+                    .compiler_artifact
+                    .compiler_policy
+                    .thresholds
+                    .convergence_derivative_nparmax
+        {
+            return None;
+        }
+        // Evaluate on cloned factor blocks and terms (the θ-invariant A
+        // blocks are borrowed), as the optimizer does; cloning the whole
+        // model would copy the design for every certificate.
+        let mut l_blocks = self.l_blocks.clone();
+        let mut reterms = self.reterms.clone();
+        let dims = self.dims;
+        let reml = self.optsum.reml;
+        let sigma = self.optsum.sigma;
+        let cholesky_zero_pad_tolerance = self
+            .compiler_policy()
+            .thresholds
+            .cholesky_zero_pad_tolerance;
+        let mut gradient_at = |trial: &[f64]| -> Option<Vec<f64>> {
+            let (objective, gradient) = Self::profiled_objective_and_gradient_from_parts(
+                &self.a_blocks,
+                &mut l_blocks,
+                &mut reterms,
+                trial,
+                dims,
+                reml,
+                sigma,
+                cholesky_zero_pad_tolerance,
+            )
+            .ok()??;
+            (objective.is_finite() && gradient.iter().all(|value| value.is_finite()))
+                .then_some(gradient)
+        };
+        let gradient = gradient_at(theta)?;
+
+        let boundary_tolerance = self.optsum.xtol_zero_abs.max(1e-12) * 10.0;
+        let free_indices = theta
+            .iter()
+            .zip(lower_bounds.iter())
+            .enumerate()
+            .filter_map(|(index, (&value, &lower))| {
+                (!(lower.is_finite() && (value - lower).abs() <= boundary_tolerance))
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        let hessian_steps = finite_difference_steps(theta, lower_bounds, 1e-4);
+        let mut hessian = DMatrix::zeros(n_theta, n_theta);
+        for &row in &free_indices {
+            let step = feasible_central_step(theta[row], lower_bounds[row], hessian_steps[row])?;
+            let mut plus = theta.to_vec();
+            let mut minus = theta.to_vec();
+            plus[row] += step;
+            minus[row] -= step;
+            let g_plus = gradient_at(&plus)?;
+            let g_minus = gradient_at(&minus)?;
+            for &col in &free_indices {
+                hessian[(col, row)] = (g_plus[col] - g_minus[col]) / (2.0 * step);
+            }
+        }
+        // Symmetrize: each entry is the mean of the two one-directional
+        // difference estimates.
+        let transposed = hessian.transpose();
+        hessian += transposed;
+        hessian *= 0.5;
+
+        Some(OptimizerDerivativeEvidence {
+            method: EvidenceMethod::Exact,
+            hessian_method: EvidenceMethod::FiniteDifference,
+            gradient,
+            hessian: Some(hessian),
+        })
+    }
+
     pub(super) fn finite_difference_optimizer_derivatives(
         &self,
         theta: &[f64],
@@ -709,6 +803,7 @@ impl LinearMixedModel {
 
         Some(OptimizerDerivativeEvidence {
             method: EvidenceMethod::FiniteDifference,
+            hessian_method: EvidenceMethod::FiniteDifference,
             gradient,
             hessian: Some(hessian),
         })
@@ -4102,45 +4197,6 @@ where
     trial[row] += row_delta;
     trial[col] += col_delta;
     objective(&trial).filter(|value| value.is_finite())
-}
-
-pub(super) fn finite_difference_deviance_varpar(
-    evaluator: &mut LinearMixedModel,
-    varpar: &[f64],
-    index: usize,
-    delta: f64,
-    reml: bool,
-) -> Result<f64> {
-    let mut trial = varpar.to_vec();
-    trial[index] += delta;
-    evaluator.deviance_varpar(&trial, reml).and_then(|value| {
-        value.is_finite().then_some(value).ok_or_else(|| {
-            MixedModelError::Optimization(
-                "finite-difference deviance_varpar evaluation is non-finite".to_string(),
-            )
-        })
-    })
-}
-
-pub(super) fn finite_difference_deviance_varpar_2d(
-    evaluator: &mut LinearMixedModel,
-    varpar: &[f64],
-    row: usize,
-    row_delta: f64,
-    col: usize,
-    col_delta: f64,
-    reml: bool,
-) -> Result<f64> {
-    let mut trial = varpar.to_vec();
-    trial[row] += row_delta;
-    trial[col] += col_delta;
-    evaluator.deviance_varpar(&trial, reml).and_then(|value| {
-        value.is_finite().then_some(value).ok_or_else(|| {
-            MixedModelError::Optimization(
-                "finite-difference deviance_varpar evaluation is non-finite".to_string(),
-            )
-        })
-    })
 }
 
 pub(in crate::model) fn jittered_theta(

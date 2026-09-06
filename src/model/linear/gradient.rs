@@ -215,8 +215,9 @@ fn guarded_div(numerator: f64, denominator: f64) -> f64 {
     }
 }
 
-// Model-level entry points: exercised by the tests today and by the
-// certificate's derivative evidence in S5.4.
+// Model-level entry points: the production consumers (optimizer oracle,
+// certificate evidence, Kenward-Roger Hessian) run on cloned parts through
+// `ProfiledGradientInputs`; these remain as the test oracles.
 #[cfg_attr(not(test), allow(dead_code))]
 impl LinearMixedModel {
     /// Objective and analytic gradient at `theta` (sets θ and refactorizes,
@@ -1961,6 +1962,123 @@ mod oracle_fit {
 }
 
 #[cfg(test)]
+mod certificate {
+    //! S5.4: the certificate's derivative evidence on the analytic gradient.
+    use super::tests::{crossed_like, fitted, sleepstudy_like};
+    use super::*;
+    use crate::compiler::audit::{CertificateCheck, EvidenceMethod};
+    use crate::model::data::DataFrame;
+
+    fn assert_close(label: &str, analytic: f64, numeric: f64, tolerance: f64) {
+        let scale = numeric.abs().max(1.0);
+        assert!(
+            (analytic - numeric).abs() <= tolerance * scale,
+            "{label}: analytic {analytic} vs finite-difference {numeric}"
+        );
+    }
+
+    /// A fit whose θ are all clearly interior: objective differences across
+    /// a near-singular Λ (pivots inside the Cholesky zero-pad band) are not
+    /// smooth, so the finite-difference Hessian is only meaningful there.
+    fn interior_fit(formula: &str, data: &DataFrame, reml: bool) -> Option<LinearMixedModel> {
+        let model = fitted(formula, data, reml);
+        model.theta().iter().all(|t| *t > 0.05).then_some(model)
+    }
+
+    #[test]
+    fn analytic_derivative_evidence_matches_the_finite_difference_evidence() {
+        let mut checked = 0usize;
+        for reml in [true, false] {
+            let sleep = (1..12u64).find_map(|seed| {
+                interior_fit(
+                    "reaction ~ 1 + days + (1 + days | subj)",
+                    &sleepstudy_like(18, 10, seed),
+                    reml,
+                )
+            });
+            let crossed = interior_fit(
+                "reaction ~ 1 + days + (1 + days | subj) + (1 + days | item) + (1 | site)",
+                &crossed_like(30, 20, 8, 3),
+                reml,
+            );
+            for model in [sleep, crossed].into_iter().flatten() {
+                checked += 1;
+                let formula = "fit";
+                let theta = model.theta();
+                let lower = model.lower_bounds();
+                let analytic = model
+                    .analytic_optimizer_derivatives(&theta, &lower)
+                    .expect("analytic evidence");
+                let numeric = model
+                    .finite_difference_optimizer_derivatives(&theta, &lower)
+                    .expect("finite-difference evidence");
+                assert_eq!(analytic.method, EvidenceMethod::Exact);
+                assert_eq!(analytic.hessian_method, EvidenceMethod::FiniteDifference);
+                let label = format!("{formula} reml={reml}");
+                // At an optimum both gradients are tiny and the objective
+                // differences are rounding-limited (about 1e-4 absolute on
+                // objectives of order 1e4); the formula itself is validated
+                // away from the optimum by `tests::check_at`.
+                for (k, (a, n)) in analytic.gradient.iter().zip(&numeric.gradient).enumerate() {
+                    assert_close(&format!("{label} gradient[{k}]"), *a, *n, 1e-3);
+                }
+                let (ha, hn) = (analytic.hessian.unwrap(), numeric.hessian.unwrap());
+                let scale = hn.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+                for i in 0..ha.nrows() {
+                    for j in 0..ha.ncols() {
+                        assert!(
+                            (ha[(i, j)] - hn[(i, j)]).abs() <= 1e-3 * scale,
+                            "{label} hessian[{i},{j}]: analytic-gradient {} vs objective differences {}",
+                            ha[(i, j)],
+                            hn[(i, j)]
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            checked >= 2,
+            "expected interior fits to compare, got {checked}"
+        );
+    }
+
+    #[test]
+    fn inspected_certificate_reports_the_exact_gradient() {
+        // Derivative checks are skipped for boundary fits by design, so take
+        // the first seed whose optimum is interior.
+        let certificate = (1..12u64)
+            .find_map(|seed| {
+                let data = sleepstudy_like(18, 10, seed);
+                let model = fitted("reaction ~ 1 + days + (1 + days | subj)", &data, true);
+                let certificate = model.optimizer_certificate()?.clone();
+                (certificate.evidence.parameter_space.n_boundary == 0).then_some(certificate)
+            })
+            .expect("an interior sleepstudy-like fit");
+        assert_eq!(certificate.evidence.gradient.method, EvidenceMethod::Exact);
+        assert_eq!(
+            certificate.evidence.hessian.method,
+            EvidenceMethod::FiniteDifference
+        );
+        assert!(
+            certificate
+                .checks
+                .iter()
+                .any(|check| matches!(check, CertificateCheck::FreeGradientOk { .. })),
+            "{:?}",
+            certificate.checks
+        );
+        assert!(
+            certificate
+                .checks
+                .iter()
+                .any(|check| matches!(check, CertificateCheck::HessianPsdOnActiveSubspace { .. })),
+            "{:?}",
+            certificate.checks
+        );
+    }
+}
+
+#[cfg(test)]
 mod cost {
     //! Gradient cost relative to one objective evaluation. Ignored by
     //! default; run with
@@ -2096,6 +2214,45 @@ mod cost {
         )
         .unwrap();
         println!("{result:?}");
+    }
+
+    #[test]
+    #[ignore]
+    fn certificate_evidence_cost() {
+        let cases = [
+            (
+                "vector_10000",
+                "reaction ~ 1 + days + (1 + days | subj)",
+                sleepstudy_like(1000, 10, 42),
+            ),
+            (
+                "crossed d=7",
+                "reaction ~ 1 + days + (1 + days | subj) + (1 + days | item) + (1 | site)",
+                crossed_like(60, 40, 12, 3),
+            ),
+        ];
+        for (label, formula, data) in cases {
+            let model = fitted(formula, &data, true);
+            let theta = model.theta();
+            let lower = model.lower_bounds();
+            let t0 = Instant::now();
+            let analytic = model
+                .analytic_optimizer_derivatives(&theta, &lower)
+                .unwrap();
+            let analytic_ms = t0.elapsed().as_secs_f64() * 1e3;
+            let t1 = Instant::now();
+            let numeric = model
+                .finite_difference_optimizer_derivatives(&theta, &lower)
+                .unwrap();
+            let numeric_ms = t1.elapsed().as_secs_f64() * 1e3;
+            println!(
+                "{label:14} d={} analytic {analytic_ms:8.3} ms  finite-difference {numeric_ms:8.3} ms  ratio {:.1}x  |grad| {:.2e} vs {:.2e}",
+                theta.len(),
+                numeric_ms / analytic_ms,
+                analytic.gradient.iter().fold(0.0_f64, |m, v| m.max(v.abs())),
+                numeric.gradient.iter().fold(0.0_f64, |m, v| m.max(v.abs()))
+            );
+        }
     }
 
     #[test]

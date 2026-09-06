@@ -258,6 +258,7 @@ impl GeneralizedLinearMixedModel {
         certificate.apply_derivative_evidence(
             OptimizerDerivativeEvidence {
                 method: EvidenceMethod::FiniteDifference,
+                hessian_method: EvidenceMethod::FiniteDifference,
                 gradient: certification_gradient.gradient.clone(),
                 hessian: None,
             },
@@ -521,6 +522,7 @@ impl GeneralizedLinearMixedModel {
         certificate.apply_derivative_evidence(
             OptimizerDerivativeEvidence {
                 method: EvidenceMethod::FiniteDifference,
+                hessian_method: EvidenceMethod::FiniteDifference,
                 gradient: certification_gradient.gradient.clone(),
                 hessian: None,
             },
