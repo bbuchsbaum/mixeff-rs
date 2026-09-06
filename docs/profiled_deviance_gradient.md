@@ -149,3 +149,15 @@ The optimizer's single-term fast objective path is 2–2.5× cheaper than
 evaluation on single-term rows and ≈ 2.9× on the crossed row; a gradient
 optimizer has to cut evaluations by more than that factor to win wall
 time (S5.3).
+
+## Consumers (S5.3)
+
+`minimize_with_gradient_and_progress` (`src/optimizer/trust_bq.rs`) drives
+the native TrustBQ trust-region loop with this gradient: one oracle call
+per iteration, a secant Hessian seeded by forward differences of the
+gradient, and an exact projected-gradient stop. The LMM driver reaches it
+through `profiled_objective_and_gradient_from_parts`
+(`src/model/linear/optimizer.rs`), which factorizes on the optimizer's work
+blocks and hands them to `ProfiledGradientInputs::profiled_gradient`. See
+the S5.3 entry in `docs/plans/2026-09-05-performance-lead-plan.md` for the
+evidence.

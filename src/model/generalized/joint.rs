@@ -1217,6 +1217,7 @@ pub(crate) fn trust_bq_status_label(status: TrustBqStopReason) -> &'static str {
         TrustBqStopReason::StepBelowTolerance => "XTOL_REACHED",
         TrustBqStopReason::ObjectiveStagnation => "FTOL_REACHED",
         TrustBqStopReason::CertifiedConvergence => "FTOL_REACHED",
+        TrustBqStopReason::GradientBelowTolerance => "GTOL_REACHED",
     }
 }
 

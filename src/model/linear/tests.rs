@@ -1534,6 +1534,10 @@ fn test_trust_bq_sample_reuse_override_changes_optimizer_trace() {
                 FitOptions::reml().with_optimizer_control(
                     OptimizerControl::auto()
                         .with_optimizer(Optimizer::TrustBq)
+                        // Sample reuse is a property of the finite-difference
+                        // interpolation loop; the analytic-gradient oracle
+                        // (the family default) never re-samples a point.
+                        .with_trust_bq_gradient_oracle(TrustBqGradientOracle::Disabled)
                         .with_trust_bq_sample_reuse(reuse),
                 ),
             )
@@ -1701,9 +1705,12 @@ fn test_active_face_refit_noop_on_full_rank_fit() {
 }
 
 // The maximal over-specified singular row (36 theta for a ~rank-4 block) is
-// where the primary optimizer exhausts its budget far from the lme4
-// optimum; the assertions pin the recovery contract on the default (NLopt)
-// release path.
+// where the primary optimizer exhausts its budget. With NEWUOA the plain fit
+// stopped far from the optimum and the active-face refit recovered more than
+// ten deviance units; the gradient-driven TrustBQ path (Phase 5 S5.3) reaches
+// the refit's certified face on its own within the same budget, so the
+// contract is now: the refit stays audit-visible, never lands above the
+// plain fit, and both sit well below NEWUOA's budget-bound objective.
 #[cfg(feature = "nlopt")]
 #[test]
 fn test_active_face_refit_improves_maximal_singular_fit() {
@@ -1739,16 +1746,26 @@ fn test_active_face_refit_improves_maximal_singular_fit() {
         faced.optsum.return_value
     );
     assert!(
-        faced.objective() < baseline.objective() - 10.0,
-        "active-face refit must materially improve the budget-bound objective: {} vs {}",
+        faced.objective() <= baseline.objective() + 1e-6,
+        "active-face refit must not land above the plain fit: {} vs {}",
         faced.objective(),
         baseline.objective()
     );
-    // lme4 converges this row to 766.554 (comparison/lme4_results.json); the
-    // face refit must land in that neighborhood, not merely improve.
+    // NEWUOA's budget-bound plain fit on this row sat above 790 (and the
+    // finite-difference TrustBQ model stopped at 798); the gradient path
+    // passes 770 in under a hundred evaluations.
     assert!(
-        (faced.objective() - 766.554).abs() < 5.0,
-        "active-face objective {} is far from the lme4 reference 766.554",
+        baseline.objective() < 770.0,
+        "plain gradient-driven fit should pass the old budget-bound level: {}",
+        baseline.objective()
+    );
+    // lme4 reports 766.554 for this row (comparison/lme4_results.json); the
+    // face refit must not land materially above it. The gradient-driven
+    // path keeps descending along the rank-deficient valley past that value
+    // (760.0 within the 475-evaluation budget), so the band is one-sided.
+    assert!(
+        faced.objective() < 766.554 + 5.0,
+        "active-face objective {} is materially above the lme4 reference 766.554",
         faced.objective()
     );
     // The refit's evaluations are accounted for.
@@ -3282,9 +3299,11 @@ fn test_vector_fit_uses_bobyqa_with_bounded_evaluations() {
     );
 }
 
+/// Large-θ automatic dispatch (Phase 5 S5.3): the native TrustBQ path
+/// driven by the analytic gradient, not NEWUOA.
 #[cfg(feature = "nlopt")]
 #[test]
-fn test_large_theta_fit_uses_nlopt_newuoa() {
+fn test_large_theta_fit_uses_trust_bq_gradient_oracle() {
     let data = simulate_large_theta_crossed(123);
     let formula = parse_formula(
         "reaction ~ 1 + days + (1 + days | subj) + (1 + days | item) + (1 + days | site)",
@@ -3296,14 +3315,19 @@ fn test_large_theta_fit_uses_nlopt_newuoa() {
     model.fit(true).unwrap();
 
     assert_eq!(model.n_theta(), 9);
-    assert_eq!(model.optsum.optimizer, Optimizer::NloptNewuoa);
+    assert_eq!(model.optsum.optimizer, Optimizer::TrustBq);
+    assert!(
+        model.optsum.return_value.starts_with("GRADIENT_ORACLE:"),
+        "{}",
+        model.optsum.return_value
+    );
     assert!(model.objective_value().is_finite());
     assert!(model.sigma().is_finite());
 }
 
 #[cfg(feature = "nlopt")]
 #[test]
-fn test_large_theta_nlopt_matches_or_beats_cobyla_baseline() {
+fn test_large_theta_auto_fit_matches_or_beats_cobyla_baseline() {
     let data = simulate_large_theta_crossed(123);
     let formula = parse_formula(
         "reaction ~ 1 + days + (1 + days | subj) + (1 + days | item) + (1 + days | site)",
@@ -3679,8 +3703,11 @@ fn test_large_theta_fit_records_maxeval_status() {
 
     model.fit(true).unwrap();
 
-    assert_eq!(model.optsum.optimizer, Optimizer::NloptNewuoa);
-    assert_eq!(model.optsum.return_value, "MAXEVAL_REACHED");
+    assert_eq!(model.optsum.optimizer, Optimizer::TrustBq);
+    assert_eq!(
+        model.optsum.return_value,
+        "GRADIENT_ORACLE: MAXEVAL_REACHED"
+    );
     assert_eq!(model.optsum.feval, 1);
     assert!(model.objective_value().is_finite());
 }
@@ -3688,6 +3715,7 @@ fn test_large_theta_fit_records_maxeval_status() {
 #[cfg(feature = "nlopt")]
 #[test]
 fn test_large_theta_fit_records_maxtime_status() {
+    // A wall-clock budget keeps the NLopt NEWUOA path, which honors it.
     let data = simulate_large_theta_crossed(123);
     let formula = parse_formula(
         "reaction ~ 1 + days + (1 + days | subj) + (1 + days | item) + (1 + days | site)",
@@ -3801,7 +3829,8 @@ fn test_crossed_fit_matches_julia_on_shared_fixture() {
 
     model.fit(true).unwrap();
 
-    assert_eq!(model.optsum.optimizer, Optimizer::NloptNewuoa);
+    // Large-theta automatic dispatch: TrustBQ on the analytic gradient.
+    assert_eq!(model.optsum.optimizer, Optimizer::TrustBq);
     // A fitted optimizer path is allowed codegen-level drift within the
     // documented VERSIONING.md numerical parity band.
     assert_relative_eq!(

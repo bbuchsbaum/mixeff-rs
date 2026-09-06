@@ -1696,6 +1696,17 @@ impl LinearMixedModel {
             && matches!(self.a_blocks[2], MatrixBlock::Dense(_))
     }
 
+    /// Large-θ fits (`n_theta > 6`) run the native TrustBQ path driven by
+    /// the analytic gradient (Phase 5 S5.3, bd-01M1T81RYWZGSEP95CXNWF3A4C):
+    /// on the default-feature `optimizer_bench_harness` crossed rows it
+    /// replaced NEWUOA's 268-412 evaluations with 39-42 oracle calls
+    /// (1.9-3.4× faster wall) with every objective gate passing. A
+    /// wall-clock budget (`max_time`) keeps the NLopt path, which honors it.
+    #[cfg(feature = "nlopt")]
+    fn use_large_theta_trust_bq_optimizer(&self) -> bool {
+        self.n_theta() > 6 && self.optsum.max_time <= 0.0
+    }
+
     #[cfg(feature = "nlopt")]
     fn use_large_theta_nlopt_optimizer(&self) -> bool {
         self.n_theta() > 6
@@ -1726,6 +1737,94 @@ impl LinearMixedModel {
             offset += nt;
         }
         (offset == theta.len()).then_some(())
+    }
+
+    /// Objective and analytic gradient at `theta` on the optimizer's work
+    /// blocks: always the generic blocked factorization (the objective fast
+    /// paths do not keep `L`), then the gradient from the factor. `None`
+    /// when the factorization fails; the gradient's own failure (a selected
+    /// inverse too large to hold) is returned as an error so the caller can
+    /// fall back to the interpolation model up front.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn profiled_objective_and_gradient_from_parts(
+        a_blocks: &[MatrixBlock],
+        l_blocks: &mut [MatrixBlock],
+        reterms: &mut [ReMat],
+        theta: &[f64],
+        dims: ModelDims,
+        is_reml: bool,
+        fixed_sigma: Option<f64>,
+        cholesky_zero_pad_tolerance: f64,
+    ) -> Result<Option<(f64, Vec<f64>)>> {
+        if Self::apply_theta_to_reterms(reterms, theta).is_none() {
+            return Ok(None);
+        }
+        if update_l_from_parts(a_blocks, l_blocks, reterms, cholesky_zero_pad_tolerance).is_err() {
+            return Ok(None);
+        }
+        let objective = Self::profiled_objective_from_l_blocks(
+            l_blocks,
+            reterms.len(),
+            dims,
+            is_reml,
+            fixed_sigma,
+        );
+        let gradient = super::gradient::ProfiledGradientInputs {
+            a_blocks,
+            l_blocks,
+            reterms,
+            dims,
+            reml: is_reml,
+            sigma: fixed_sigma,
+        }
+        .profiled_gradient()?;
+        Ok(Some((objective, gradient)))
+    }
+
+    /// The profiled objective read off a freshly updated factor.
+    fn profiled_objective_from_l_blocks(
+        l_blocks: &[MatrixBlock],
+        k: usize,
+        dims: ModelDims,
+        is_reml: bool,
+        fixed_sigma: Option<f64>,
+    ) -> f64 {
+        let n = dims.n as f64;
+        let p = dims.p as f64;
+
+        let mut logdet_lzz = 0.0;
+        for j in 0..k {
+            logdet_lzz += logdet_block(&l_blocks[block_index(j, j)]);
+        }
+
+        // Read the trailing dense block in place (no per-evaluation clone).
+        let l_owned;
+        let l_last: &DMatrix<f64> = match l_blocks[block_index(k, k)].as_dense_ref() {
+            Some(dense) => dense,
+            None => {
+                l_owned = l_blocks[block_index(k, k)].as_dense();
+                &l_owned
+            }
+        };
+        let pp1 = l_last.nrows();
+        let last_diag = l_last[(pp1 - 1, pp1 - 1)];
+        let pwrss = last_diag * last_diag;
+
+        let logdet = if is_reml {
+            let mut logdet_lxx = 0.0;
+            for i in 0..(pp1 - 1) {
+                let d = l_last[(i, i)];
+                if d > 0.0 {
+                    logdet_lxx += d.ln();
+                }
+            }
+            logdet_lzz + 2.0 * logdet_lxx
+        } else {
+            logdet_lzz
+        };
+
+        let denomdf = if is_reml { n - p } else { n };
+        Self::objective_from_components(logdet, pwrss, denomdf, fixed_sigma)
     }
 
     fn profiled_objective_from_parts(
@@ -1766,47 +1865,11 @@ impl LinearMixedModel {
         if update_l_from_parts(a_blocks, l_blocks, reterms, cholesky_zero_pad_tolerance).is_err() {
             return None;
         }
-
-        let k = reterms.len();
-        let n = dims.n as f64;
-        let p = dims.p as f64;
-
-        let mut logdet_lzz = 0.0;
-        for j in 0..k {
-            logdet_lzz += logdet_block(&l_blocks[block_index(j, j)]);
-        }
-
-        // Read the trailing dense block in place (no per-evaluation clone).
-        let l_owned;
-        let l_last: &DMatrix<f64> = match l_blocks[block_index(k, k)].as_dense_ref() {
-            Some(dense) => dense,
-            None => {
-                l_owned = l_blocks[block_index(k, k)].as_dense();
-                &l_owned
-            }
-        };
-        let pp1 = l_last.nrows();
-        let last_diag = l_last[(pp1 - 1, pp1 - 1)];
-        let pwrss = last_diag * last_diag;
-
-        let logdet = if is_reml {
-            let mut logdet_lxx = 0.0;
-            for i in 0..(pp1 - 1) {
-                let d = l_last[(i, i)];
-                if d > 0.0 {
-                    logdet_lxx += d.ln();
-                }
-            }
-            logdet_lzz + 2.0 * logdet_lxx
-        } else {
-            logdet_lzz
-        };
-
-        let denomdf = if is_reml { n - p } else { n };
-        Some(Self::objective_from_components(
-            logdet,
-            pwrss,
-            denomdf,
+        Some(Self::profiled_objective_from_l_blocks(
+            l_blocks,
+            reterms.len(),
+            dims,
+            is_reml,
             fixed_sigma,
         ))
     }
@@ -2159,6 +2222,7 @@ impl LinearMixedModel {
             TrustBqStopReason::StepBelowTolerance => "XTOL_REACHED".to_string(),
             TrustBqStopReason::ObjectiveStagnation => "FTOL_REACHED".to_string(),
             TrustBqStopReason::CertifiedConvergence => "FTOL_REACHED".to_string(),
+            TrustBqStopReason::GradientBelowTolerance => "GTOL_REACHED".to_string(),
         }
     }
 
@@ -2675,6 +2739,7 @@ impl LinearMixedModel {
         let is_reml = reml;
         let fixed_sigma = self.optsum.sigma;
         let sample_reuse_control = self.trust_bq_sample_reuse;
+        let gradient_oracle_control = self.trust_bq_gradient_oracle;
         let cholesky_zero_pad_tolerance = self
             .compiler_policy()
             .thresholds
@@ -2742,6 +2807,62 @@ impl LinearMixedModel {
         );
         let resolve_reuse_samples =
             |family_policy_reuse: bool| sample_reuse_control.resolve(family_policy_reuse);
+
+        // Analytic-gradient oracle for the full stage (Phase 5 S5.3). The
+        // family policy chooses it; a caller control can force it either way.
+        // One silent probe at the start point checks that the blocked
+        // gradient can be formed for this design (its selected inverse has a
+        // size guard); otherwise the interpolation model is used.
+        let gradient_oracle_requested = gradient_oracle_control.resolve(policy.gradient_oracle);
+        let use_gradient_oracle = gradient_oracle_requested && {
+            let mut rw = reterms_work.borrow_mut();
+            let mut lw = l_blocks_work.borrow_mut();
+            matches!(
+                Self::profiled_objective_and_gradient_from_parts(
+                    &a_blocks,
+                    &mut lw,
+                    &mut rw,
+                    &self.optsum.initial,
+                    dims,
+                    is_reml,
+                    fixed_sigma,
+                    cholesky_zero_pad_tolerance,
+                ),
+                Ok(Some(_))
+            )
+        };
+        let mut oracle_fn = |theta: &[f64]| -> Result<(f64, Vec<f64>)> {
+            let evaluated = {
+                let mut rw = reterms_work.borrow_mut();
+                let mut lw = l_blocks_work.borrow_mut();
+                Self::profiled_objective_and_gradient_from_parts(
+                    &a_blocks,
+                    &mut lw,
+                    &mut rw,
+                    theta,
+                    dims,
+                    is_reml,
+                    fixed_sigma,
+                    cholesky_zero_pad_tolerance,
+                )
+            };
+            // Failed or non-finite evaluations map to the same finite penalty
+            // as in `objective_fn`; the non-finite gradient tells the
+            // optimizer not to take secant information from the point.
+            let (obj, gradient) = match evaluated {
+                Ok(Some((obj, gradient))) if obj.is_finite() => (obj, gradient),
+                _ => (invalid_objective, vec![f64::NAN; theta.len()]),
+            };
+            fit_log.borrow_mut().push(FitLogEntry {
+                theta: theta.to_vec(),
+                objective: obj,
+            });
+            if obj + 1e-12 < best_fmin.get() {
+                best_fmin.set(obj);
+                *best_theta.borrow_mut() = theta.to_vec();
+            }
+            Ok((obj, gradient))
+        };
         let mut trust_bq_initial = self.optsum.initial.clone();
         let lower_bounds = self.lower_bounds();
         let upper_bounds = vec![f64::INFINITY; n_theta];
@@ -2795,55 +2916,78 @@ impl LinearMixedModel {
                 let stage_result = {
                     let progress_callback = self.progress_callback.clone();
                     let mut last_progress = 0usize;
-                    let mut stage_objective = |reduced: &[f64]| -> Result<f64> {
+                    let expand = |reduced: &[f64]| -> Vec<f64> {
                         let mut full = expanded.clone();
                         for (slot, &index) in diagonal_indices.iter().enumerate() {
                             full[index] = reduced[slot];
                         }
-                        objective_fn(&full)
+                        full
                     };
-                    minimize_trust_bq_with_progress(
-                        &reduced_initial,
-                        &reduced_lower,
-                        &reduced_upper,
-                        TrustBqOptions {
-                            initial_radius: trust_bq_initial_radius(
-                                &reduced_step,
-                                diagonal_indices.len(),
-                            ),
-                            final_radius: trust_bq_final_radius(
-                                &reduced_xtol,
-                                diagonal_indices.len(),
-                            )
+                    let mut stage_objective =
+                        |reduced: &[f64]| -> Result<f64> { objective_fn(&expand(reduced)) };
+                    // The reduced problem's gradient is the full gradient on
+                    // the diagonal slots.
+                    let mut stage_oracle = |reduced: &[f64]| -> Result<(f64, Vec<f64>)> {
+                        let (value, gradient) = oracle_fn(&expand(reduced))?;
+                        let reduced_gradient = diagonal_indices
+                            .iter()
+                            .map(|&index| gradient[index])
+                            .collect();
+                        Ok((value, reduced_gradient))
+                    };
+                    let stage_options = TrustBqOptions {
+                        initial_radius: trust_bq_initial_radius(
+                            &reduced_step,
+                            diagonal_indices.len(),
+                        ),
+                        final_radius: trust_bq_final_radius(&reduced_xtol, diagonal_indices.len())
                             .max(1e-3),
-                            max_evaluations: stage_budget,
-                            ftol_abs: 1e-4,
-                            ftol_rel: 1e-6,
-                            max_cross_terms: if diagonal_indices.len() <= 3 {
-                                usize::MAX
-                            } else {
-                                0
-                            },
-                            reuse_samples: resolve_reuse_samples(diagonal_indices.len() >= 7),
-                            stall_iterations: 3,
-                            stall_ftol_rel: 1e-6,
-                            stall_ftol_abs: 1e-8,
-                            stall_requires_stable_x: false,
-                            ..TrustBqOptions::default()
+                        max_evaluations: stage_budget,
+                        ftol_abs: 1e-4,
+                        ftol_rel: 1e-6,
+                        max_cross_terms: if diagonal_indices.len() <= 3 {
+                            usize::MAX
+                        } else {
+                            0
                         },
-                        &mut stage_objective,
-                        |progress| {
-                            if let Some(callback) = &progress_callback {
-                                callback.report_if_due(
-                                    FitProgressPhase::LmmOptimizer,
-                                    progress.fevals,
-                                    Some(stage_budget),
-                                    &mut last_progress,
-                                )?;
-                            }
-                            Ok(false)
-                        },
-                    )
+                        reuse_samples: resolve_reuse_samples(diagonal_indices.len() >= 7),
+                        stall_iterations: 3,
+                        stall_ftol_rel: 1e-6,
+                        stall_ftol_abs: 1e-8,
+                        stall_requires_stable_x: false,
+                        gradient_tolerance_rel: policy.gradient_tolerance_rel,
+                        ..TrustBqOptions::default()
+                    };
+                    let mut stage_progress = |progress: &TrustBqProgress<'_>| -> Result<bool> {
+                        if let Some(callback) = &progress_callback {
+                            callback.report_if_due(
+                                FitProgressPhase::LmmOptimizer,
+                                progress.fevals,
+                                Some(stage_budget),
+                                &mut last_progress,
+                            )?;
+                        }
+                        Ok(false)
+                    };
+                    if use_gradient_oracle {
+                        minimize_trust_bq_with_gradient_and_progress(
+                            &reduced_initial,
+                            &reduced_lower,
+                            &reduced_upper,
+                            stage_options,
+                            &mut stage_oracle,
+                            &mut stage_progress,
+                        )
+                    } else {
+                        minimize_trust_bq_with_progress(
+                            &reduced_initial,
+                            &reduced_lower,
+                            &reduced_upper,
+                            stage_options,
+                            &mut stage_objective,
+                            &mut stage_progress,
+                        )
+                    }
                 };
                 if let Ok(stage_result) = stage_result {
                     ladder_fevals = stage_result.fevals;
@@ -2891,37 +3035,50 @@ impl LinearMixedModel {
                 reml,
             )
         };
-        let result = minimize_trust_bq_with_progress(
-            &trust_bq_initial,
-            &lower_bounds,
-            &upper_bounds,
-            TrustBqOptions {
-                // From a ladder warm start the optimum is expected nearby, so
-                // begin with a contracted trust region (it re-expands on
-                // successful steps); a cold start keeps the policy radius.
-                initial_radius: if ladder_label.is_some() {
-                    (policy.initial_radius / 8.0).max(policy.final_radius * 10.0)
-                } else {
-                    policy.initial_radius
-                },
-                final_radius: policy.final_radius,
-                max_evaluations: full_stage_max_evaluations,
-                ftol_abs: policy.ftol_abs,
-                ftol_rel: policy.ftol_rel,
-                ftol_requires_local_radius: true,
-                max_cross_terms: policy.max_cross_terms,
-                reuse_samples: resolve_reuse_samples(policy.reuse_samples),
-                stall_iterations: policy.stall_iterations,
-                stall_ftol_rel: policy.stall_ftol_rel,
-                stall_ftol_abs: policy.stall_ftol_abs,
-                stall_requires_stable_x: policy.stall_requires_stable_x,
-                rejected_step_model_reuse: policy.rejected_step_model_reuse,
-                accepted_step_model_reuse: policy.accepted_step_model_reuse,
-                ..TrustBqOptions::default()
+        let full_stage_options = TrustBqOptions {
+            // From a ladder warm start the optimum is expected nearby, so
+            // begin with a contracted trust region (it re-expands on
+            // successful steps); a cold start keeps the policy radius.
+            initial_radius: if ladder_label.is_some() {
+                (policy.initial_radius / 8.0).max(policy.final_radius * 10.0)
+            } else {
+                policy.initial_radius
             },
-            &mut objective_fn,
-            &mut certificate_progress,
-        )?;
+            final_radius: policy.final_radius,
+            max_evaluations: full_stage_max_evaluations,
+            ftol_abs: policy.ftol_abs,
+            ftol_rel: policy.ftol_rel,
+            ftol_requires_local_radius: true,
+            max_cross_terms: policy.max_cross_terms,
+            reuse_samples: resolve_reuse_samples(policy.reuse_samples),
+            stall_iterations: policy.stall_iterations,
+            stall_ftol_rel: policy.stall_ftol_rel,
+            stall_ftol_abs: policy.stall_ftol_abs,
+            stall_requires_stable_x: policy.stall_requires_stable_x,
+            rejected_step_model_reuse: policy.rejected_step_model_reuse,
+            accepted_step_model_reuse: policy.accepted_step_model_reuse,
+            gradient_tolerance_rel: policy.gradient_tolerance_rel,
+            ..TrustBqOptions::default()
+        };
+        let result = if use_gradient_oracle {
+            minimize_trust_bq_with_gradient_and_progress(
+                &trust_bq_initial,
+                &lower_bounds,
+                &upper_bounds,
+                full_stage_options,
+                &mut oracle_fn,
+                &mut certificate_progress,
+            )?
+        } else {
+            minimize_trust_bq_with_progress(
+                &trust_bq_initial,
+                &lower_bounds,
+                &upper_bounds,
+                full_stage_options,
+                &mut objective_fn,
+                &mut certificate_progress,
+            )?
+        };
         let trace_classification = result.trace_classification();
         let _trust_bq_diagnostics = (
             result.iterations,
@@ -2940,6 +3097,11 @@ impl LinearMixedModel {
                 (result.x, result.fmin)
             };
         let base_status = Self::trust_bq_status_label(result.stop_reason);
+        let base_status = if use_gradient_oracle {
+            format!("GRADIENT_ORACLE: {base_status}")
+        } else {
+            base_status
+        };
         let return_value = Some(match &ladder_label {
             Some(label) => format!("START_LADDER({label}): {base_status}"),
             None => base_status,
@@ -3563,6 +3725,8 @@ impl LinearMixedModel {
             {
                 if self.use_nlopt_bobyqa_small_theta_optimizer() {
                     self.fit_nlopt_small_theta(reml)?;
+                } else if self.use_large_theta_trust_bq_optimizer() {
+                    self.fit_trust_bq_with_maxeval(reml, None)?;
                 } else if self.use_large_theta_nlopt_optimizer() {
                     self.fit_nlopt_large_theta(reml)?;
                 } else {
@@ -4065,6 +4229,13 @@ pub(super) struct TrustBqModelFamilyPolicy {
     /// (no reuse).
     pub(super) rejected_step_model_reuse: usize,
     pub(super) accepted_step_model_reuse: usize,
+    /// Drive the full stage with the analytic-gradient oracle
+    /// (`minimize_with_gradient_and_progress`) instead of the
+    /// finite-difference interpolation model.
+    pub(super) gradient_oracle: bool,
+    /// First-order stop band for the gradient oracle
+    /// (`TrustBqOptions::gradient_tolerance_rel`).
+    pub(super) gradient_tolerance_rel: f64,
 }
 
 /// Central TrustBQ tuning matrix for the profiled-LMM theta objective.
@@ -4183,6 +4354,17 @@ pub(super) fn trust_bq_model_family_policy(
         certificate_ftol_rel,
         rejected_step_model_reuse,
         accepted_step_model_reuse,
+        // Analytic gradient (Phase 5 S5.3, bd-01M1T81RYWZGSEP95CXNWF3A4C).
+        // With the exact gradient the trust-region loop needs one oracle
+        // call per iteration (SR1 secant Hessian seeded by d gradient
+        // differences) instead of a `2d + d(d-1)/2` stencil per model. On
+        // the native optimizer_bench_harness rows the oracle cut evaluations
+        // from 145-197 to 15-21 on vector rows (d = 3) and from 313-414 to
+        // 89-94 on crossed rows (d = 9, 60 of which were the finite-difference
+        // ladder stage), with every objective gate passing, so every family
+        // uses it; scalar single-theta fits never reach TrustBQ.
+        gradient_oracle: true,
+        gradient_tolerance_rel: 1e-9,
     }
 }
 

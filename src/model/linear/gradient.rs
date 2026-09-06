@@ -12,6 +12,7 @@ use super::*;
 
 /// Objective and gradient produced by the dense reference.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct DenseReferenceGradient {
     /// Profiled deviance at `theta` (without the observation-weight
     /// constant), on the same scale as `objective_at`.
@@ -20,6 +21,8 @@ pub(crate) struct DenseReferenceGradient {
     pub(crate) gradient: Vec<f64>,
 }
 
+// The dense reference is a test oracle for the blocked gradient.
+#[cfg_attr(not(test), allow(dead_code))]
 impl LinearMixedModel {
     /// Dense reference objective and gradient at `theta` for the given
     /// criterion and the model's current fixed-σ setting.
@@ -212,6 +215,9 @@ fn guarded_div(numerator: f64, denominator: f64) -> f64 {
     }
 }
 
+// Model-level entry points: exercised by the tests today and by the
+// certificate's derivative evidence in S5.4.
+#[cfg_attr(not(test), allow(dead_code))]
 impl LinearMixedModel {
     /// Objective and analytic gradient at `theta` (sets θ and refactorizes,
     /// like `objective_at`). See `docs/profiled_deviance_gradient.md`.
@@ -224,9 +230,39 @@ impl LinearMixedModel {
         Ok((objective, gradient))
     }
 
-    /// Analytic gradient of the profiled deviance at the model's current
-    /// θ, from the current blocked factor and the θ-invariant `A` blocks
-    /// only (no pass over the observations).
+    /// Analytic gradient of the profiled deviance at the model's current θ
+    /// from the current blocked factor (see
+    /// [`ProfiledGradientInputs::profiled_gradient`]).
+    pub(crate) fn profiled_gradient_at_current_theta(&self) -> Result<Vec<f64>> {
+        ProfiledGradientInputs {
+            a_blocks: &self.a_blocks,
+            l_blocks: &self.l_blocks,
+            reterms: &self.reterms,
+            dims: self.dims,
+            reml: self.optsum.reml,
+            sigma: self.optsum.sigma,
+        }
+        .profiled_gradient()
+    }
+}
+
+/// What the analytic gradient reads: the θ-invariant `A` blocks, the factor
+/// `L` at the current θ (as `update_l_from_parts` leaves it), the
+/// random-effects terms carrying Λ, and the objective's settings. Built from
+/// a `LinearMixedModel` or from the optimizer's cloned work blocks.
+pub(super) struct ProfiledGradientInputs<'a> {
+    pub(super) a_blocks: &'a [MatrixBlock],
+    pub(super) l_blocks: &'a [MatrixBlock],
+    pub(super) reterms: &'a [ReMat],
+    pub(super) dims: ModelDims,
+    pub(super) reml: bool,
+    pub(super) sigma: Option<f64>,
+}
+
+impl ProfiledGradientInputs<'_> {
+    /// Analytic gradient of the profiled deviance at the factor's θ, from
+    /// the blocked factor and the θ-invariant `A` blocks only (no pass over
+    /// the observations).
     ///
     /// Single-term models run one allocation-free pass over the levels:
     /// per level, one `s × s` solve with `p + 1` right-hand sides, the
@@ -235,8 +271,8 @@ impl LinearMixedModel {
     /// `M = ΛᵀAΛ + I` on the factor's block pattern (only the per-level
     /// diagonal blocks are formed for the leading level-structured term)
     /// plus one blocked solve with `p + 1` right-hand sides.
-    pub(crate) fn profiled_gradient_at_current_theta(&self) -> Result<Vec<f64>> {
-        let reml = self.optsum.reml;
+    pub(super) fn profiled_gradient(&self) -> Result<Vec<f64>> {
+        let reml = self.reml;
         let k = self.reterms.len();
         if k == 0 {
             return Ok(Vec::new());
@@ -253,7 +289,8 @@ impl LinearMixedModel {
             self.multi_term_gradient_parts(reml, &beta, c_inv.as_deref())?
         };
 
-        let mut gradient = Vec::with_capacity(self.n_theta());
+        let n_theta: usize = self.reterms.iter().map(|re| re.inds.len()).sum();
+        let mut gradient = Vec::with_capacity(n_theta);
         for (re, term) in self.reterms.iter().zip(&parts) {
             let s = re.vsize;
             for &idx in &re.inds {
@@ -267,10 +304,15 @@ impl LinearMixedModel {
     /// Multiplier of `∂pwrss/∂θ` in the objective gradient: `denomdf / pwrss`
     /// for the profiled objective, `1 / σ²` when σ is fixed.
     fn pwrss_gradient_scale(&self, reml: bool) -> f64 {
-        match self.optsum.sigma {
+        match self.sigma {
             Some(sigma) => 1.0 / (sigma * sigma),
             None => {
-                let (_, pwrss) = self.determinant_term_and_pwrss_for_reml(reml);
+                let k = self.reterms.len();
+                let pwrss = with_dense_block(&self.l_blocks[block_index(k, k)], |l_last| {
+                    let pp1 = l_last.nrows();
+                    let last_diag = l_last[(pp1 - 1, pp1 - 1)];
+                    last_diag * last_diag
+                });
                 let denomdf = if reml {
                     (self.dims.n - self.dims.p) as f64
                 } else {
@@ -778,7 +820,7 @@ impl LinearMixedModel {
         // W_j = Σ_i S_ji Λ_i X_i, accumulated negated: −W = [−V | A Λ u − ·].
         let lx: Vec<DMatrix<f64>> = x
             .iter()
-            .zip(&self.reterms)
+            .zip(self.reterms.iter())
             .map(|(xj, re)| {
                 let mut m = xj.clone();
                 apply_lambda_to_rhs(&mut m, re);
@@ -875,8 +917,11 @@ impl LinearMixedModel {
 
         for j in (0..k).rev() {
             let l_jj = &self.l_blocks[block_index(j, j)];
-            let level_structured = LevelBlocks::is_level_structured(l_jj);
-            let l_jj_inv = if level_structured {
+            // The leading level-structured block never needs its dense
+            // inverse (only its level-diagonal selected-inverse blocks are
+            // formed); every other diagonal block does, whatever its storage
+            // (a nested design keeps later blocks (block-)diagonal too).
+            let l_jj_inv = if j == 0 && leading_level_structured {
                 None
             } else {
                 Some(dense_lower_inverse(l_jj))
@@ -1780,13 +1825,278 @@ mod tests {
 }
 
 #[cfg(test)]
+mod oracle_fit {
+    //! The native TrustBQ path driven by the analytic gradient must reach
+    //! the interpolation path's optimum with fewer evaluations.
+    use super::tests::{crossed_like, sleepstudy_like};
+    use super::*;
+    use crate::formula::parse_formula;
+    use crate::model::data::DataFrame;
+
+    fn fit_trust_bq(
+        formula: &str,
+        data: &DataFrame,
+        reml: bool,
+        oracle: TrustBqGradientOracle,
+    ) -> LinearMixedModel {
+        let mut model = LinearMixedModel::new(parse_formula(formula).unwrap(), data, None).unwrap();
+        let options = if reml {
+            FitOptions::reml()
+        } else {
+            FitOptions::ml()
+        }
+        .with_optimizer_control(
+            OptimizerControl::auto()
+                .with_optimizer(Optimizer::TrustBq)
+                .with_trust_bq_gradient_oracle(oracle),
+        );
+        model.fit_with_options(options).unwrap();
+        model
+    }
+
+    fn assert_same_optimum(
+        oracle: &LinearMixedModel,
+        interpolation: &LinearMixedModel,
+        label: &str,
+    ) {
+        let reference = interpolation.optsum.fmin;
+        let tolerance = 1e-6 * (1.0 + reference.abs());
+        assert!(
+            oracle.optsum.fmin <= reference + tolerance,
+            "{label}: oracle objective {} vs interpolation {reference} (tolerance {tolerance})",
+            oracle.optsum.fmin
+        );
+        assert!(
+            oracle.optsum.return_value.starts_with("GRADIENT_ORACLE:"),
+            "{label}: {}",
+            oracle.optsum.return_value
+        );
+        assert!(
+            !interpolation
+                .optsum
+                .return_value
+                .contains("GRADIENT_ORACLE"),
+            "{label}: {}",
+            interpolation.optsum.return_value
+        );
+        assert_eq!(
+            oracle.optsum.convergence_status(),
+            crate::types::opt_summary::ConvergenceStatus::Converged,
+            "{label}: oracle stop {}",
+            oracle.optsum.return_value
+        );
+    }
+
+    #[test]
+    fn gradient_oracle_reaches_the_interpolation_optimum_on_crossed_terms_with_fewer_evaluations() {
+        let data = crossed_like(30, 20, 8, 3);
+        let formula = "reaction ~ 1 + days + (1 + days | subj) + (1 + days | item) + (1 | site)";
+        for reml in [true, false] {
+            // d = 7: the family policy already selects the oracle.
+            let oracle = fit_trust_bq(formula, &data, reml, TrustBqGradientOracle::FamilyPolicy);
+            let interpolation = fit_trust_bq(formula, &data, reml, TrustBqGradientOracle::Disabled);
+            assert_same_optimum(&oracle, &interpolation, &format!("crossed reml={reml}"));
+            assert!(
+                oracle.optsum.feval * 2 < interpolation.optsum.feval,
+                "reml={reml}: oracle {} evaluations vs interpolation {}",
+                oracle.optsum.feval,
+                interpolation.optsum.feval
+            );
+            for (a, b) in oracle.theta().iter().zip(interpolation.theta()) {
+                assert!((a - b).abs() <= 2e-3, "reml={reml}: theta {a} vs {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn gradient_oracle_matches_the_interpolation_optimum_on_a_single_vector_term() {
+        let data = sleepstudy_like(18, 10, 42);
+        let formula = "reaction ~ 1 + days + (1 + days | subj)";
+        for reml in [true, false] {
+            let oracle = fit_trust_bq(formula, &data, reml, TrustBqGradientOracle::FamilyPolicy);
+            let interpolation = fit_trust_bq(formula, &data, reml, TrustBqGradientOracle::Disabled);
+            assert_same_optimum(&oracle, &interpolation, &format!("vector reml={reml}"));
+            assert!(
+                oracle.optsum.feval * 2 < interpolation.optsum.feval,
+                "reml={reml}: oracle {} evaluations vs interpolation {}",
+                oracle.optsum.feval,
+                interpolation.optsum.feval
+            );
+            for (a, b) in oracle.theta().iter().zip(interpolation.theta()) {
+                assert!((a - b).abs() <= 1e-3, "reml={reml}: theta {a} vs {b}");
+            }
+        }
+    }
+
+    #[test]
+    fn gradient_oracle_stops_cleanly_at_a_zero_variance_boundary() {
+        // No subject effect in the data: the intercept variance optimum is
+        // on the θ = 0 boundary, where the gradient points outward.
+        let data = {
+            use rand::rngs::StdRng;
+            use rand::SeedableRng;
+            use rand_distr::{Distribution, Normal};
+            let mut rng = StdRng::seed_from_u64(11);
+            let normal = Normal::new(0.0, 1.0).unwrap();
+            let (mut reaction, mut days, mut subj) = (Vec::new(), Vec::new(), Vec::new());
+            for i in 0..24 {
+                for d in 0..10 {
+                    reaction.push(250.0 + 10.0 * d as f64 + 25.0 * normal.sample(&mut rng));
+                    days.push(d as f64);
+                    subj.push(format!("S{i:03}"));
+                }
+            }
+            let mut df = DataFrame::new();
+            df.add_numeric("reaction", reaction).unwrap();
+            df.add_numeric("days", days).unwrap();
+            df.add_categorical("subj", subj).unwrap();
+            df
+        };
+        let formula = "reaction ~ 1 + days + (1 | subj)";
+        let oracle = fit_trust_bq(formula, &data, true, TrustBqGradientOracle::AllFamilies);
+        let interpolation = fit_trust_bq(formula, &data, true, TrustBqGradientOracle::Disabled);
+        assert_same_optimum(&oracle, &interpolation, "boundary");
+        assert!(oracle.theta()[0] <= 1e-3, "theta {:?}", oracle.theta());
+    }
+}
+
+#[cfg(test)]
 mod cost {
     //! Gradient cost relative to one objective evaluation. Ignored by
     //! default; run with
     //! `cargo test --release --lib gradient::cost -- --ignored --nocapture`.
     use super::tests::{crossed_like, fitted, sleepstudy_like};
-    use super::{block_index, MatrixBlock};
+    use super::{
+        block_index, FitOptions, LinearMixedModel, MatrixBlock, Optimizer, OptimizerControl,
+        ProfiledGradientInputs, TrustBqGradientOracle,
+    };
+    use crate::formula::parse_formula;
     use std::time::Instant;
+
+    /// Trajectory of the maximal singular fixture under each optimizer path.
+    #[test]
+    #[ignore]
+    fn singular_maximal_trajectories() {
+        let (data, _) = crate::datasets::load("singular").unwrap();
+        let formula = "y ~ 1 + A * B * C + (A * B * C | group)";
+        let variants: Vec<(&str, OptimizerControl)> = vec![
+            ("auto", OptimizerControl::auto()),
+            (
+                "trust_bq oracle",
+                OptimizerControl::auto().with_optimizer(Optimizer::TrustBq),
+            ),
+            (
+                "trust_bq interpolation",
+                OptimizerControl::auto()
+                    .with_optimizer(Optimizer::TrustBq)
+                    .with_trust_bq_gradient_oracle(TrustBqGradientOracle::Disabled),
+            ),
+            #[cfg(feature = "nlopt")]
+            (
+                "nlopt newuoa",
+                OptimizerControl::auto().with_optimizer(Optimizer::NloptNewuoa),
+            ),
+        ];
+        for (label, control) in variants {
+            let mut model =
+                LinearMixedModel::new(parse_formula(formula).unwrap(), &data, None).unwrap();
+            let t0 = Instant::now();
+            model
+                .fit_with_options(FitOptions::reml().with_optimizer_control(control))
+                .unwrap();
+            let theta = model.theta();
+            let at_bound = theta.iter().filter(|t| t.abs() <= 1e-10).count();
+            println!(
+                "{label:24} objective {:.6} feval {} ms {:.1} status {} theta_at_zero {}/{}",
+                model.objective_value(),
+                model.optsum.feval,
+                t0.elapsed().as_secs_f64() * 1e3,
+                model.optsum.return_value,
+                at_bound,
+                theta.len()
+            );
+            let log = &model.optsum.fit_log;
+            let mut best = f64::INFINITY;
+            for (i, entry) in log.iter().enumerate() {
+                best = best.min(entry.objective);
+                if i % 25 == 0 || i + 1 == log.len() {
+                    println!("    eval {i:4} best {best:.6}");
+                }
+            }
+        }
+    }
+
+    /// Per-iteration dynamics of the gradient loop on the singular fixture
+    /// (`MIXEFF_TRACE_CASE=crossed_ml` switches to the crossed ML case).
+    #[test]
+    #[ignore]
+    fn singular_maximal_gradient_loop_trace() {
+        use crate::optimizer::trust_bq::{minimize_with_gradient_and_progress, TrustBqOptions};
+        let crossed_case = std::env::var("MIXEFF_TRACE_CASE").as_deref() == Ok("crossed_ml");
+        let (data, formula, reml) = if crossed_case {
+            (
+                crossed_like(30, 20, 8, 3),
+                "reaction ~ 1 + days + (1 + days | subj) + (1 + days | item) + (1 | site)",
+                false,
+            )
+        } else {
+            (
+                crate::datasets::load("singular").unwrap().0,
+                "y ~ 1 + A * B * C + (A * B * C | group)",
+                true,
+            )
+        };
+        let mut model =
+            LinearMixedModel::new(parse_formula(formula).unwrap(), &data, None).unwrap();
+        model.optsum.reml = reml;
+        let initial = model.optsum.initial.clone();
+        let lower = model.lower_bounds();
+        let upper = vec![f64::INFINITY; initial.len()];
+        let mut calls = 0usize;
+        let mut oracle = |theta: &[f64]| -> crate::error::Result<(f64, Vec<f64>)> {
+            calls += 1;
+            match model.objective_and_gradient_at(theta) {
+                Ok(pair) => Ok(pair),
+                Err(_) => Ok((1e9, vec![f64::NAN; theta.len()])),
+            }
+        };
+        let mut last_fevals = 0usize;
+        let mut iteration = 0usize;
+        let result = minimize_with_gradient_and_progress(
+            &initial,
+            &lower,
+            &upper,
+            TrustBqOptions {
+                initial_radius: 0.75,
+                final_radius: 1e-6,
+                max_evaluations: 475,
+                ftol_abs: 1e-8,
+                ftol_rel: 1e-10,
+                ftol_requires_local_radius: true,
+                stall_iterations: 3,
+                stall_ftol_rel: 1e-6,
+                stall_ftol_abs: 1e-8,
+                stall_requires_stable_x: false,
+                gradient_tolerance_rel: 1e-9,
+                ..TrustBqOptions::default()
+            },
+            &mut oracle,
+            |progress| {
+                iteration += 1;
+                let jump = progress.fevals - last_fevals;
+                last_fevals = progress.fevals;
+                if iteration <= 60 || iteration % 10 == 0 || jump > 2 {
+                    println!(
+                        "iter {iteration:4} fevals {:4} (+{jump:2}) fmin {:.6} radius {:.3e}",
+                        progress.fevals, progress.fmin, progress.radius
+                    );
+                }
+                Ok(false)
+            },
+        )
+        .unwrap();
+        println!("{result:?}");
+    }
 
     #[test]
     #[ignore]
@@ -1800,8 +2110,16 @@ mod cost {
         let theta = model.theta();
         model.objective_at(&theta).unwrap();
         let sizes: Vec<usize> = model.reterms.iter().map(|re| re.n_ranef()).collect();
+        let inputs = ProfiledGradientInputs {
+            a_blocks: &model.a_blocks,
+            l_blocks: &model.l_blocks,
+            reterms: &model.reterms,
+            dims: model.dims,
+            reml: true,
+            sigma: None,
+        };
         let reps = 20;
-        let time = |label: &str, mut f: Box<dyn FnMut()>| {
+        let time = |label: &str, mut f: Box<dyn FnMut() + '_>| {
             for _ in 0..3 {
                 f();
             }
@@ -1814,38 +2132,34 @@ mod cost {
                 t0.elapsed().as_secs_f64() * 1e6 / reps as f64
             );
         };
-        let m = &model;
+        let g = &inputs;
         time(
             "beta_and_c_inverse",
             Box::new(move || {
-                std::hint::black_box(m.beta_and_c_inverse(true));
+                std::hint::black_box(g.beta_and_c_inverse(true));
             }),
         );
-        let m = &model;
         let s = sizes.clone();
         time(
             "selected_inverse",
             Box::new(move || {
-                std::hint::black_box(m.selected_inverse(&s).unwrap());
+                std::hint::black_box(g.selected_inverse(&s).unwrap());
             }),
         );
-        let m = &model;
-        let selected = model.selected_inverse(&sizes).unwrap();
+        let selected = inputs.selected_inverse(&sizes).unwrap();
+        let sel = &selected;
         time(
             "logdet_m_level_blocks",
             Box::new(move || {
-                std::hint::black_box(m.logdet_m_level_blocks(&selected));
+                std::hint::black_box(g.logdet_m_level_blocks(sel));
             }),
         );
-        let m = &model;
-        let (beta, c_inv) = model.beta_and_c_inverse(true);
+        let (beta, c_inv) = inputs.beta_and_c_inverse(true);
+        let (b, c) = (&beta, &c_inv);
         time(
             "multi_term_gradient_parts",
             Box::new(move || {
-                std::hint::black_box(
-                    m.multi_term_gradient_parts(true, &beta, c_inv.as_deref())
-                        .unwrap(),
-                );
+                std::hint::black_box(g.multi_term_gradient_parts(true, b, c.as_deref()).unwrap());
             }),
         );
         let m = &model;

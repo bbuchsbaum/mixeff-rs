@@ -34,20 +34,20 @@
     },
     {
       "name": "crossed_small",
-      "fit_objective": 6177.391784718841,
-      "fit_feval": 268,
-      "optimizer": "newuoa",
-      "backend": "nlopt",
+      "fit_objective": 6177.391766001951,
+      "fit_feval": 52,
+      "optimizer": "trust_bq",
+      "backend": "native",
       "allocs_per_eval": 4,
       "bytes_per_eval": 38784,
       "eval_median_us": 12.5246875
     },
     {
       "name": "crossed_medium",
-      "fit_objective": 24348.710146216894,
-      "fit_feval": 412,
-      "optimizer": "newuoa",
-      "backend": "nlopt",
+      "fit_objective": 24348.71009533195,
+      "fit_feval": 110,
+      "optimizer": "trust_bq",
+      "backend": "native",
       "allocs_per_eval": 4,
       "bytes_per_eval": 122880,
       "eval_median_us": 48.7315625

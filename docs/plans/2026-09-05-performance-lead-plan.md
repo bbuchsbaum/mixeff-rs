@@ -460,6 +460,57 @@ Go/no-go: vector rows ≤ 25 evaluations (NLopt 39-69), crossed_large ≤ 200
 (408), all objective gates pass, boundary/singular cases (θ=0 rows, weak
 identification fixtures) converge with acceptable stops.
 
+S5.3 shipped (mote bd-01M1T81RYWZGSEP95CXNWF3A4C): `minimize_with_gradient_and_progress`
+in `src/optimizer/trust_bq.rs` keeps TrustBQ's trust-region acceptance,
+bound clipping and stop logic but takes the model gradient from an oracle
+returning `(f, ∇f)` and builds the model Hessian by secant updates (BFGS
+when the pair has positive curvature, SR1 otherwise) seeded by forward
+differences of the oracle gradient along each axis (d oracle calls). The
+Hessian is re-seeded when the trust radius has contracted 16× since the
+last seed after a rejected or poorly predicted step, after four
+consecutive rejections, or after six consecutive accepted steps with ratio
+< 0.25 (the crawl on a flat, rank-deficient covariance valley). Stops: the
+exact projected gradient `‖x − P(x − ∇f)‖_∞ ≤ 1e-9 · max(1, |f|)`
+(`GTOL_REACHED`, registered as a clean stop), plus the FTOL, stagnation,
+radius and budget stops of the interpolation loop, the objective-based
+ones gated on the projected gradient being within 1e3× that band (without
+the gate the accepted-step FTOL fired 1.3e-4 above the crossed_small
+optimum and broke the Julia parity fixture). The LMM driver
+(`fit_trust_bq_with_maxeval`) evaluates the oracle on its cloned work
+blocks through `profiled_objective_and_gradient_from_parts` (generic
+factorization plus `ProfiledGradientInputs::profiled_gradient`), probes
+it once at the start so designs whose selected inverse exceeds the size
+guard fall back to the interpolation model, and drives the diagonal-first
+ladder stage with the same oracle. `TrustBqGradientOracle`
+(`OptimizerControl::with_trust_bq_gradient_oracle`, harness
+`MIXEFF_BENCH_TRUST_BQ_GRADIENT=all|off`) overrides the family policy,
+which enables the oracle for every family. Under the `nlopt` feature the
+automatic dispatch now sends `n_theta > 6` fits to this path instead of
+NEWUOA (a `max_time` budget keeps NEWUOA, which honors it); `n_theta ≤ 6`
+keeps BOBYQA because an objective-plus-gradient pair still costs 2.7-4.9×
+one fast single-term evaluation, so BOBYQA's 39-69 evaluations beat the
+oracle's 15-21 on wall time at n ≥ 5000 (harness `MIXEFF_BENCH_OPTIMIZER=trust_bq`
+rows: 0.65-0.92× at n ≥ 5000, 1.3× at n ≤ 1000). Paired evidence (5
+alternating rounds, base a303a32, host load average 35-45 from other
+sessions, so wall ratios are conservative): native profile evaluations
+2060 → 392 (−81%), vector rows 145-197 → 17-20 evaluations and 1.9-2.5×
+faster, crossed rows 313-414 → 45-79 and 1.07-2.7× faster, scalar rows
+unchanged, every objective gate passing and every candidate objective at
+or below the base's; default profile crossed rows 268/412/408 → 52/110/47
+evaluations and 1.8×/1.4×/2.6× faster with the other rows bit-identical.
+Go/no-go: vector rows ≤ 25 evaluations (17-20) and crossed_large ≤ 200
+(47-60) hold; boundary cases stop cleanly (a θ = 0 optimum stops on
+GTOL/FTOL with the interpolation path's objective; the maximal singular
+fixture, 36 θ for a rank-4 block, is budget-bound on every optimizer but
+the gradient path reaches 760 where NEWUOA sat above 790 and the
+finite-difference model stopped at 798, so its active-face test contract
+was recalibrated to "refit never lands above the plain fit and both sit
+below the old budget-bound level"). `perf_baseline.json` crossed rows
+re-pinned to the new optimizer, evaluation counts and objectives (1.9e-5
+and 5.1e-5 lower than NEWUOA's). Follow-ups recorded for S5.4: a fused
+fast-path objective-plus-gradient kernel for single-term models (to move
+the d ≤ 6 default dispatch), and the certificate on the analytic gradient.
+
 S5.4 Replace FD in the certificate (2-3 days). `finite_difference_optimizer_derivatives`
 uses the analytic gradient and an FD-of-gradient Hessian (2d evals instead
 of 2d²); Satterthwaite/KR varpar Jacobian (`mod.rs:2117-2149`) and Hessian

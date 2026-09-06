@@ -5061,7 +5061,12 @@ impl HessianEvidence {
 fn optimizer_stop_is_acceptable(return_value: &str) -> bool {
     matches!(
         optimizer_final_status_code(return_value),
-        "SUCCESS" | "FTOL_REACHED" | "XTOL_REACHED" | "STOPVAL_REACHED" | "RADIUS_REACHED"
+        "SUCCESS"
+            | "FTOL_REACHED"
+            | "XTOL_REACHED"
+            | "STOPVAL_REACHED"
+            | "RADIUS_REACHED"
+            | "GTOL_REACHED"
     )
 }
 

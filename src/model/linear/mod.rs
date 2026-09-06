@@ -49,6 +49,7 @@ use crate::model::traits::MixedModelFit;
 #[cfg(feature = "prima")]
 use crate::optimizer::prima::{minimize_bobyqa, PrimaBobyqaOptions};
 use crate::optimizer::trust_bq::{
+    minimize_with_gradient_and_progress as minimize_trust_bq_with_gradient_and_progress,
     minimize_with_progress as minimize_trust_bq_with_progress, TrustBqOptions, TrustBqProgress,
     TrustBqStopReason,
 };
@@ -63,9 +64,7 @@ use crate::types::{FeMat, FeTerm, FitLogEntry, OptSummary, Optimizer, OptimizerS
 mod active_face;
 
 mod blocks;
-// Analytic profiled-deviance gradient (Phase 5). Its blocked entry points
-// are wired into the optimizer in S5.3; until then only the tests call them.
-#[allow(dead_code)]
+// Analytic profiled-deviance gradient (Phase 5).
 mod gradient;
 pub(crate) use blocks::*;
 
@@ -236,6 +235,10 @@ pub struct LinearMixedModel {
     /// [`OptimizerControl::trust_bq_sample_reuse`]. Defaults to the family
     /// policy.
     pub(crate) trust_bq_sample_reuse: TrustBqSampleReuse,
+    /// Analytic-gradient oracle override for native TrustBQ, carried from
+    /// [`OptimizerControl::trust_bq_gradient_oracle`]. Defaults to the family
+    /// policy.
+    pub(crate) trust_bq_gradient_oracle: TrustBqGradientOracle,
     /// Opt-in post-fit active-face refit for singular vector blocks, carried
     /// from [`OptimizerControl::active_face_refit`]. Defaults to `Off`.
     pub(crate) active_face_refit: ActiveFaceRefit,
@@ -826,6 +829,38 @@ impl TrustBqSampleReuse {
     }
 }
 
+/// Analytic-gradient oracle policy for the native TrustBQ path.
+///
+/// The default, [`TrustBqGradientOracle::FamilyPolicy`], lets the central
+/// TrustBQ model-family policy decide (today: the analytic gradient drives
+/// every θ family whose blocked gradient can be formed). The other modes
+/// exist for A/B benchmark runs and diagnostics; they change the optimizer
+/// trace and the reported evaluation count, not the certified optimum.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TrustBqGradientOracle {
+    /// Use the model-family policy in `trust_bq_model_family_policy`.
+    #[default]
+    FamilyPolicy,
+    /// Never use the analytic gradient; every family keeps the
+    /// finite-difference interpolation model.
+    Disabled,
+    /// Use the analytic gradient for every family that can form it.
+    AllFamilies,
+}
+
+impl TrustBqGradientOracle {
+    /// Resolve the effective flag for one TrustBQ solve, given the value the
+    /// model-family policy would otherwise use.
+    pub(crate) fn resolve(self, family_policy_oracle: bool) -> bool {
+        match self {
+            TrustBqGradientOracle::FamilyPolicy => family_policy_oracle,
+            TrustBqGradientOracle::Disabled => false,
+            TrustBqGradientOracle::AllFamilies => true,
+        }
+    }
+}
+
 /// Opt-in post-fit active-face refit for singular vector random-effect
 /// blocks.
 ///
@@ -868,6 +903,9 @@ pub struct OptimizerControl {
     /// Opt-in exact-sample reuse override for native TrustBQ. Defaults to
     /// [`TrustBqSampleReuse::FamilyPolicy`].
     pub trust_bq_sample_reuse: TrustBqSampleReuse,
+    /// Analytic-gradient oracle override for native TrustBQ. Defaults to
+    /// [`TrustBqGradientOracle::FamilyPolicy`].
+    pub trust_bq_gradient_oracle: TrustBqGradientOracle,
     /// Opt-in post-fit active-face refit for singular vector blocks.
     /// Defaults to [`ActiveFaceRefit::Off`].
     pub active_face_refit: ActiveFaceRefit,
@@ -915,6 +953,12 @@ impl OptimizerControl {
         self
     }
 
+    /// Override the analytic-gradient oracle policy for native TrustBQ.
+    pub fn with_trust_bq_gradient_oracle(mut self, oracle: TrustBqGradientOracle) -> Self {
+        self.trust_bq_gradient_oracle = oracle;
+        self
+    }
+
     /// Opt into the experimental post-fit active-face refit.
     pub fn with_active_face_refit(mut self, refit: ActiveFaceRefit) -> Self {
         self.active_face_refit = refit;
@@ -952,6 +996,9 @@ impl OptimizerControl {
         }
         if self.trust_bq_sample_reuse != TrustBqSampleReuse::FamilyPolicy {
             fields.push("trust_bq_sample_reuse".to_string());
+        }
+        if self.trust_bq_gradient_oracle != TrustBqGradientOracle::FamilyPolicy {
+            fields.push("trust_bq_gradient_oracle".to_string());
         }
         if self.active_face_refit != ActiveFaceRefit::Off {
             fields.push("active_face_refit".to_string());
@@ -1341,6 +1388,7 @@ impl LinearMixedModel {
             suppress_derivative_diagnostics: false,
             trust_bq_start_ladder: TrustBqStartLadder::default(),
             trust_bq_sample_reuse: TrustBqSampleReuse::default(),
+            trust_bq_gradient_oracle: TrustBqGradientOracle::default(),
             active_face_refit: ActiveFaceRefit::default(),
             progress_callback: None,
             fit_phase_timings: None,
@@ -1641,6 +1689,7 @@ impl LinearMixedModel {
 
         self.trust_bq_start_ladder = control.trust_bq_start_ladder;
         self.trust_bq_sample_reuse = control.trust_bq_sample_reuse;
+        self.trust_bq_gradient_oracle = control.trust_bq_gradient_oracle;
         self.active_face_refit = control.active_face_refit;
 
         if let Some(value) = control.tolerances.ftol_rel {

@@ -335,7 +335,9 @@ impl OptSummary {
         match status {
             // Clean convergence criteria across all backends.
             "SUCCESS" | "STOPVAL_REACHED" | "FTOL_REACHED" | "XTOL_REACHED" | "RADIUS_REACHED"
-            | "SMALL_TR_RADIUS" | "FTARGET_ACHIEVED" => ConvergenceStatus::Converged,
+            | "GTOL_REACHED" | "SMALL_TR_RADIUS" | "FTARGET_ACHIEVED" => {
+                ConvergenceStatus::Converged
+            }
             // Budget/iteration limits — best-effort, NOT a verified optimum.
             "MAXEVAL_REACHED" | "MAXTIME_REACHED" | "MAXFUN_REACHED" | "MAXTR_REACHED"
             | "CALLBACK_TERMINATE" => ConvergenceStatus::BudgetExhausted,
@@ -597,14 +599,19 @@ impl OptSummary {
 /// certificate describe the same returned fit.
 pub(crate) fn optimizer_final_status_code(mut status: &str) -> &str {
     loop {
-        let stripped = ["KKT_BOUNDARY_RESTART", "START_LADDER", "ACTIVE_FACE"]
-            .iter()
-            .find_map(|prefix| {
-                status
-                    .strip_prefix(prefix)
-                    .and_then(|rest| rest.split_once(": "))
-                    .map(|(_, inner)| inner.trim())
-            });
+        let stripped = [
+            "KKT_BOUNDARY_RESTART",
+            "START_LADDER",
+            "ACTIVE_FACE",
+            "GRADIENT_ORACLE",
+        ]
+        .iter()
+        .find_map(|prefix| {
+            status
+                .strip_prefix(prefix)
+                .and_then(|rest| rest.split_once(": "))
+                .map(|(_, inner)| inner.trim())
+        });
         match stripped {
             Some(inner) => status = inner,
             None => break,
@@ -831,6 +838,7 @@ mod tests {
             "FTOL_REACHED",
             "XTOL_REACHED",
             "RADIUS_REACHED",
+            "GTOL_REACHED",
             "SMALL_TR_RADIUS",
             "FTARGET_ACHIEVED",
         ] {
@@ -890,6 +898,25 @@ mod tests {
         );
         assert_eq!(
             status_of(10, "KKT_BOUNDARY_RESTART(1): MAXEVAL_REACHED"),
+            ConvergenceStatus::BudgetExhausted
+        );
+    }
+
+    #[test]
+    fn convergence_status_unwraps_gradient_oracle_prefix() {
+        assert_eq!(
+            status_of(10, "GRADIENT_ORACLE: GTOL_REACHED"),
+            ConvergenceStatus::Converged
+        );
+        assert_eq!(
+            status_of(
+                10,
+                "START_LADDER(diagonal_first:12 evals): GRADIENT_ORACLE: FTOL_REACHED"
+            ),
+            ConvergenceStatus::Converged
+        );
+        assert_eq!(
+            status_of(10, "GRADIENT_ORACLE: MAXEVAL_REACHED"),
             ConvergenceStatus::BudgetExhausted
         );
     }

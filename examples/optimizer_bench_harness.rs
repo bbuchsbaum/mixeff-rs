@@ -13,9 +13,11 @@ use std::time::Instant;
 use mixeff_rs::formula::parse_formula;
 use mixeff_rs::model::data::DataFrame;
 use mixeff_rs::model::linear::{
-    FitOptions, LinearMixedModel, OptimizerControl, TrustBqSampleReuse, TrustBqStartLadder,
+    FitOptions, LinearMixedModel, OptimizerControl, TrustBqGradientOracle, TrustBqSampleReuse,
+    TrustBqStartLadder,
 };
 use mixeff_rs::model::traits::MixedModelFit;
+use mixeff_rs::types::Optimizer;
 
 const DEFAULT_WARMUP: usize = 1;
 const DEFAULT_REPS: usize = 5;
@@ -792,26 +794,54 @@ fn bench_sample_reuse() -> TrustBqSampleReuse {
     }
 }
 
+/// `MIXEFF_BENCH_TRUST_BQ_GRADIENT=all|off` overrides the analytic-gradient
+/// oracle policy for the native TrustBQ path.
+fn bench_gradient_oracle() -> TrustBqGradientOracle {
+    match std::env::var("MIXEFF_BENCH_TRUST_BQ_GRADIENT").as_deref() {
+        Ok("all") | Ok("all_families") => TrustBqGradientOracle::AllFamilies,
+        Ok("disabled") | Ok("off") => TrustBqGradientOracle::Disabled,
+        _ => TrustBqGradientOracle::FamilyPolicy,
+    }
+}
+
+/// `MIXEFF_BENCH_OPTIMIZER=trust_bq` forces the native TrustBQ path (with
+/// the `nlopt` feature the automatic dispatch would otherwise pick NLopt).
+fn bench_optimizer() -> Option<Optimizer> {
+    match std::env::var("MIXEFF_BENCH_OPTIMIZER").as_deref() {
+        Ok("trust_bq") | Ok("trustbq") => Some(Optimizer::TrustBq),
+        _ => None,
+    }
+}
+
 fn fit_with_bench_controls(
     model: &mut LinearMixedModel,
     reml: bool,
 ) -> mixeff_rs::error::Result<()> {
     let ladder = bench_start_ladder();
     let sample_reuse = bench_sample_reuse();
-    if ladder == TrustBqStartLadder::Off && sample_reuse == TrustBqSampleReuse::FamilyPolicy {
+    let gradient_oracle = bench_gradient_oracle();
+    let optimizer = bench_optimizer();
+    if ladder == TrustBqStartLadder::Off
+        && sample_reuse == TrustBqSampleReuse::FamilyPolicy
+        && gradient_oracle == TrustBqGradientOracle::FamilyPolicy
+        && optimizer.is_none()
+    {
         model.fit(reml)?;
         return Ok(());
+    }
+    let mut control = OptimizerControl::auto()
+        .with_trust_bq_start_ladder(ladder)
+        .with_trust_bq_sample_reuse(sample_reuse)
+        .with_trust_bq_gradient_oracle(gradient_oracle);
+    if let Some(optimizer) = optimizer {
+        control = control.with_optimizer(optimizer);
     }
     let options = if reml {
         FitOptions::reml()
     } else {
         FitOptions::ml()
     }
-    .with_optimizer_control(
-        OptimizerControl::auto()
-            .with_trust_bq_start_ladder(ladder)
-            .with_trust_bq_sample_reuse(sample_reuse),
-    );
+    .with_optimizer_control(control);
     model.fit_with_options(options)?;
     Ok(())
 }
