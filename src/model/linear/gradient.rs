@@ -242,6 +242,8 @@ impl LinearMixedModel {
             dims: self.dims,
             reml: self.optsum.reml,
             sigma: self.optsum.sigma,
+            fe_blocks: None,
+            trailing_l: None,
         }
         .profiled_gradient()
     }
@@ -251,13 +253,37 @@ impl LinearMixedModel {
 /// `L` at the current θ (as `update_l_from_parts` leaves it), the
 /// random-effects terms carrying Λ, and the objective's settings. Built from
 /// a `LinearMixedModel` or from the optimizer's cloned work blocks.
-pub(super) struct ProfiledGradientInputs<'a> {
-    pub(super) a_blocks: &'a [MatrixBlock],
-    pub(super) l_blocks: &'a [MatrixBlock],
-    pub(super) reterms: &'a [ReMat],
-    pub(super) dims: ModelDims,
-    pub(super) reml: bool,
-    pub(super) sigma: Option<f64>,
+pub(crate) struct ProfiledGradientInputs<'a> {
+    pub(crate) a_blocks: &'a [MatrixBlock],
+    pub(crate) l_blocks: &'a [MatrixBlock],
+    pub(crate) reterms: &'a [ReMat],
+    pub(crate) dims: ModelDims,
+    pub(crate) reml: bool,
+    pub(crate) sigma: Option<f64>,
+    /// Batch override (Phase 6): the `(p + 1) × q_j` blocks `[X|y]ᵀ Z_j`
+    /// when `a_blocks` holds only the structural `Xᵀ Z_j`.
+    pub(crate) fe_blocks: Option<&'a [MatrixBlock]>,
+    /// Batch override: the `(p + 1) × (p + 1)` trailing factor
+    /// `[[L_xx, 0], [βᵀ L_xx, √pwrss]]` when `l_blocks` holds only `L_xx`.
+    pub(crate) trailing_l: Option<&'a MatrixBlock>,
+}
+
+impl<'a> ProfiledGradientInputs<'a> {
+    /// The `[X|y]ᵀ Z_j` block for term `j`.
+    fn fe_block(&self, j: usize) -> &'a MatrixBlock {
+        match self.fe_blocks {
+            Some(blocks) => &blocks[j],
+            None => &self.a_blocks[block_index(self.reterms.len(), j)],
+        }
+    }
+
+    /// The trailing `(p + 1) × (p + 1)` factor block.
+    fn trailing_l_block(&self) -> &'a MatrixBlock {
+        match self.trailing_l {
+            Some(block) => block,
+            None => &self.l_blocks[block_index(self.reterms.len(), self.reterms.len())],
+        }
+    }
 }
 
 impl ProfiledGradientInputs<'_> {
@@ -272,7 +298,7 @@ impl ProfiledGradientInputs<'_> {
     /// `M = ΛᵀAΛ + I` on the factor's block pattern (only the per-level
     /// diagonal blocks are formed for the leading level-structured term)
     /// plus one blocked solve with `p + 1` right-hand sides.
-    pub(super) fn profiled_gradient(&self) -> Result<Vec<f64>> {
+    pub(crate) fn profiled_gradient(&self) -> Result<Vec<f64>> {
         let reml = self.reml;
         let k = self.reterms.len();
         if k == 0 {
@@ -308,8 +334,7 @@ impl ProfiledGradientInputs<'_> {
         match self.sigma {
             Some(sigma) => 1.0 / (sigma * sigma),
             None => {
-                let k = self.reterms.len();
-                let pwrss = with_dense_block(&self.l_blocks[block_index(k, k)], |l_last| {
+                let pwrss = with_dense_block(self.trailing_l_block(), |l_last| {
                     let pp1 = l_last.nrows();
                     let last_diag = l_last[(pp1 - 1, pp1 - 1)];
                     last_diag * last_diag
@@ -327,8 +352,7 @@ impl ProfiledGradientInputs<'_> {
     /// β from the trailing factor block (as `beta()`, without cloning the
     /// block) and, for REML, `C⁻¹ = (L_xx L_xxᵀ)⁻¹` row-major.
     fn beta_and_c_inverse(&self, reml: bool) -> (Vec<f64>, Option<Vec<f64>>) {
-        let k = self.reterms.len();
-        with_dense_block(&self.l_blocks[block_index(k, k)], |l_last| {
+        with_dense_block(self.trailing_l_block(), |l_last| {
             let pp1 = l_last.nrows();
             let p = pp1 - 1;
             let mut beta = vec![0.0; p];
@@ -390,7 +414,7 @@ impl ProfiledGradientInputs<'_> {
         let lam = re.lambda[(0, 0)];
         let a00 = LevelBlocks::of(&self.a_blocks[block_index(0, 0)]);
         let l00 = LevelBlocks::of(&self.l_blocks[block_index(0, 0)]);
-        let a10 = FeCrossBlock::of(&self.a_blocks[block_index(1, 0)]);
+        let a10 = FeCrossBlock::of(self.fe_block(0));
         let c_inv = if reml { c_inv } else { None };
 
         let mut b = vec![0.0; pp1];
@@ -454,7 +478,7 @@ impl ProfiledGradientInputs<'_> {
         let (m00, m10, m11) = (re.lambda[(0, 0)], re.lambda[(1, 0)], re.lambda[(1, 1)]);
         let a00 = LevelBlocks::of(&self.a_blocks[block_index(0, 0)]);
         let l00 = LevelBlocks::of(&self.l_blocks[block_index(0, 0)]);
-        let a10 = FeCrossBlock::of(&self.a_blocks[block_index(1, 0)]);
+        let a10 = FeCrossBlock::of(self.fe_block(0));
         let c_inv = if reml { c_inv } else { None };
 
         let mut b = vec![0.0; pp1 * 2]; // b[r * 2 + c] = ([X|y]ᵀ Z_ℓ)[r, c]
@@ -583,7 +607,7 @@ impl ProfiledGradientInputs<'_> {
         let lambda = &re.lambda;
         let a00 = LevelBlocks::of(&self.a_blocks[block_index(0, 0)]);
         let l00 = LevelBlocks::of(&self.l_blocks[block_index(0, 0)]);
-        let a10 = FeCrossBlock::of(&self.a_blocks[block_index(1, 0)]);
+        let a10 = FeCrossBlock::of(self.fe_block(0));
         let c_inv = if reml { c_inv } else { None };
 
         let ss = s * s;
@@ -770,7 +794,7 @@ impl ProfiledGradientInputs<'_> {
             let q = sizes[j];
             let mut t = DMatrix::zeros(q, if reml { p } else { 0 });
             let mut e = vec![0.0; q];
-            for_each_nonzero(&self.a_blocks[block_index(k, j)], |r, c, v| {
+            for_each_nonzero(self.fe_block(j), |r, c, v| {
                 if r < p {
                     e[c] -= beta[r] * v;
                     if reml {
@@ -2274,6 +2298,8 @@ mod cost {
             dims: model.dims,
             reml: true,
             sigma: None,
+            fe_blocks: None,
+            trailing_l: None,
         };
         let reps = 20;
         let time = |label: &str, mut f: Box<dyn FnMut() + '_>| {

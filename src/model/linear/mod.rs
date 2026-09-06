@@ -67,6 +67,7 @@ mod blocks;
 // Analytic profiled-deviance gradient (Phase 5).
 mod gradient;
 pub(crate) use blocks::*;
+pub(crate) use gradient::ProfiledGradientInputs;
 
 mod bootstrap;
 pub use bootstrap::{
@@ -3028,6 +3029,8 @@ impl LinearMixedModel {
                 dims: self.dims,
                 reml,
                 sigma: Some(sigma),
+                fe_blocks: None,
+                trailing_l: None,
             }
             .profiled_gradient()?;
             let denomdf = if reml {

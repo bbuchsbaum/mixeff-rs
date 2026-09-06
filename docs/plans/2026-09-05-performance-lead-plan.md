@@ -584,6 +584,52 @@ T6.5 Gate: `bench_response_matrix_batch` vs the lme4 loop
 (`scripts/bench_response_matrix_lme4.R`) and vs one Julia fit × columns from
 the regenerated references; batch fixtures unchanged.
 
+Phase 6 T6.1, T6.2 and T6.4 shipped (mote bd-01M1TJAKGBW1C9TPCD37P1JNBB).
+T6.1: `ProfileScratch` (`src/model/linear/blocks.rs`) holds the per-term
+response right-hand sides, their unscaled `Z_jᵀY` copies, `XᵀY` and the
+blocked-solve column buffer; `profile_response_matrix_with_scratch`
+fills them in place (`compute_response_re_cross_product_into`,
+`tr_mul_to`) so a θ evaluation over a chunk allocates only its output
+vectors. `LmmWorkspace` owns one scratch for the serial path and the
+rayon path gives each worker its own (`map_init`). `perf_gate`
+`batch_optimize_per_column` allocations 4170 → 2645 per column
+(1.50 MB → 112 KB); `batch_profile_at_theta` stays at 15 per column,
+which is the per-call workspace and output setup amortized over q = 16,
+not per-evaluation work.
+T6.2: the per-column θ search is the Phase 5 gradient-driven TrustBQ
+loop. `LmmWorkspace::objective_and_gradient_for_column` factorizes,
+profiles the column on the scratch, and evaluates the Phase 5 gradient on
+the structural blocks augmented with the column's `Z_jᵀy`, `Xᵀy` and the
+profiled `(β, pwrss)` folded into a `(p + 1) × (p + 1)` trailing factor
+`[[L_xx, 0], [βᵀL_xx, √pwrss]]` (`ProfiledGradientInputs::{fe_blocks,
+trailing_l}` overrides); a kernel test shows it reproduces the model's own
+objective and gradient to 1e-8. The pattern search stays as the fallback
+when the gradient cannot be formed. `BatchWarmStart::Chained { order }`
+starts each column from the previous fitted column (in the caller's
+order, or column order) with the contracted first step, serially by
+construction, falling back to the template θ after a failed column;
+orders must be permutations of the columns. `perf_gate`
+`batch_optimize_per_column`: 46.9 → 18.1 ms for 16 columns (2.6×),
+allocations 2645 → 441 per column; `tests/lmm_batch.rs` per-column
+results still match the scalar refit loop, and chained starts (natural
+and reversed order) match template starts to 1e-6 in objective.
+T6.4: `docs/response_matrix_batch_lmm.md` documents `OptimizeAdaptive`,
+`Chained`, the gradient-driven per-column search and rayon parallelism
+(the "all modes are serial" sentence is gone); `multivariate_shared_theta.md`
+marks steps 1-5 as shipped.
+T6.3 measured, default unchanged: on the batch benchmark's shapes (n ≤
+180, q ≤ 64) the rayon path is 0.7-0.9× the serial path for both
+`profile_at_theta` and `optimize_shared_theta` (chunk-level fan-out sits
+below the `MIN_PARALLEL_CHUNKS`/`MIN_PARALLEL_WORK` thresholds or the
+per-column work is microseconds), so `BatchParallelism::Serial` stays the
+default and Rayon remains the caller's opt-in for large n × q; results are
+identical either way (`tests/lmm_batch.rs` parallel-equivalence tests).
+T6.5: `perf_gate` batch pins re-pinned to the new allocation counts; the
+lme4 loop and Julia comparisons for the batch API are unchanged in kind
+(the per-response cost of `profile_at_theta` and `optimize_shared_theta`
+is within noise of the Phase 5 tree; the per-column mode is the one that
+moved, 2.6× on the gate scenario).
+
 ## Phase 7: GLMM (1-2 weeks, lever 7)
 
 Facts: `scripts/bench_julia.jl` has no GLMM scenario; the only Julia GLMM

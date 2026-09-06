@@ -981,3 +981,90 @@ mod adaptive {
         }
     }
 }
+
+/// Phase 6 T6.2: chained warm starts reach the same per-column optima as
+/// independent template starts, follow the caller's order, and reject
+/// orders that are not permutations of the columns.
+#[test]
+fn chained_warm_start_matches_template_starts_and_validates_order() {
+    let model = fitted_model();
+    let responses = response_matrix(&model);
+    let batch = LinearMixedModelBatch::from_model(&model).unwrap();
+    let control = BatchOptimizerControl {
+        max_evaluations: 160,
+        theta_tolerance: 1e-6,
+        objective_tolerance: 1e-9,
+        initial_step: Some(vec![0.25]),
+        options: BatchOptions {
+            chunk_columns: 1,
+            ..BatchOptions::default()
+        },
+    };
+    let fit = |warm_start: BatchWarmStart| {
+        batch
+            .fit_responses(
+                &responses,
+                ResponseBatchMode::OptimizePerColumn {
+                    reml: true,
+                    warm_start,
+                    control: control.clone(),
+                },
+            )
+            .unwrap()
+    };
+    let template = fit(BatchWarmStart::TemplateTheta);
+    let chained = fit(BatchWarmStart::Chained { order: None });
+    let reversed = fit(BatchWarmStart::Chained {
+        order: Some(vec![2, 1, 0]),
+    });
+    for col in 0..responses.ncols() {
+        assert_eq!(chained.status[col], ResponseFitStatus::Success);
+        assert_eq!(reversed.status[col], ResponseFitStatus::Success);
+        let tolerance = 1e-6 * (1.0 + template.objective[col].abs());
+        assert!(
+            (chained.objective[col] - template.objective[col]).abs() <= tolerance,
+            "column {col}: chained {} vs template {}",
+            chained.objective[col],
+            template.objective[col]
+        );
+        assert!(
+            (reversed.objective[col] - template.objective[col]).abs() <= tolerance,
+            "column {col}: reversed-chain {} vs template {}",
+            reversed.objective[col],
+            template.objective[col]
+        );
+    }
+    let (ThetaBatch::PerColumn(a), ThetaBatch::PerColumn(b)) = (&template.theta, &chained.theta)
+    else {
+        panic!("expected per-column theta");
+    };
+    for col in 0..responses.ncols() {
+        assert!(
+            (a[(0, col)] - b[(0, col)]).abs() <= 1e-3,
+            "column {col}: theta"
+        );
+    }
+
+    let bad_length = batch.fit_responses(
+        &responses,
+        ResponseBatchMode::OptimizePerColumn {
+            reml: true,
+            warm_start: BatchWarmStart::Chained {
+                order: Some(vec![0, 1]),
+            },
+            control: control.clone(),
+        },
+    );
+    assert!(bad_length.is_err(), "order must cover every column");
+    let repeated = batch.fit_responses(
+        &responses,
+        ResponseBatchMode::OptimizePerColumn {
+            reml: true,
+            warm_start: BatchWarmStart::Chained {
+                order: Some(vec![0, 0, 1]),
+            },
+            control,
+        },
+    );
+    assert!(repeated.is_err(), "order must be a permutation");
+}

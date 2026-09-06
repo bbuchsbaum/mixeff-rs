@@ -108,6 +108,12 @@ pub enum BatchWarmStart {
     Fixed(Vec<f64>),
     /// Start column `j` at column `j` of an `ntheta x q` matrix.
     Provided(DMatrix<f64>),
+    /// Start every column from the previous column's fitted theta (in
+    /// `order`, or column order when `None`), with the optimizer's first
+    /// step contracted because neighbouring responses are expected to share
+    /// an optimum; a column whose predecessor failed starts from the
+    /// template theta. Columns are processed serially in that order.
+    Chained { order: Option<Vec<usize>> },
 }
 
 /// Grouping definition for grouped shared-theta optimization.
@@ -342,6 +348,47 @@ pub struct ResponseColumnDiagnostic {
 }
 
 /// Column-local outcome of one per-column θ optimization.
+/// Where a per-column optimization starts.
+enum ColumnStart {
+    /// The warm-start policy's start for the column.
+    Cold,
+    /// The previous chained column's fitted theta (contracted first step).
+    Chained(Vec<f64>),
+}
+
+/// The processing order for `BatchWarmStart::Chained`: the caller's
+/// permutation of `0..q` restricted to the valid columns, or the valid
+/// columns in column order.
+fn chained_column_order(
+    order: Option<&[usize]>,
+    valid_columns: &[usize],
+    q: usize,
+) -> Result<Vec<usize>> {
+    let Some(order) = order else {
+        return Ok(valid_columns.to_vec());
+    };
+    if order.len() != q {
+        return Err(MixedModelError::InvalidArgument(format!(
+            "chained warm-start order has {} entries, expected one per response column ({q})",
+            order.len()
+        )));
+    }
+    let mut seen = vec![false; q];
+    for &column in order {
+        if column >= q || seen[column] {
+            return Err(MixedModelError::InvalidArgument(format!(
+                "chained warm-start order must be a permutation of 0..{q}; column {column} is out of range or repeated"
+            )));
+        }
+        seen[column] = true;
+    }
+    Ok(order
+        .iter()
+        .copied()
+        .filter(|column| valid_columns.contains(column))
+        .collect())
+}
+
 enum ColumnFit {
     OptimizerFailed,
     Fitted {
@@ -616,6 +663,42 @@ impl LinearMixedModelBatch {
             _ => None,
         };
 
+        if let BatchWarmStart::Chained { order } = &warm_start {
+            // Serial by construction: each column starts where the previous
+            // one finished.
+            let ordered = chained_column_order(order.as_deref(), &valid_columns, q)?;
+            let mut workspace = self.kernel.workspace();
+            let mut previous: Option<Vec<f64>> = None;
+            for (index, &column) in ordered.iter().enumerate() {
+                if driver.stopped {
+                    self.mark_sink_stopped(&ordered[index..], &mut result);
+                    break;
+                }
+                let start = match &previous {
+                    Some(theta) => ColumnStart::Chained(theta.clone()),
+                    None => ColumnStart::Cold,
+                };
+                let fit = self.optimize_single_column_from(
+                    &mut workspace,
+                    column,
+                    responses,
+                    reml,
+                    &warm_start,
+                    None,
+                    q,
+                    control,
+                    start,
+                )?;
+                previous = match &fit {
+                    ColumnFit::Fitted { theta, .. } => Some(theta.clone()),
+                    ColumnFit::OptimizerFailed => None,
+                };
+                self.finalize_column_fit(column, fit, ntheta, &mut theta_out, &mut result, driver)?;
+            }
+            result.theta = ThetaBatch::PerColumn(theta_out);
+            return Ok(result);
+        }
+
         if control.options.parallelism.is_parallel() && valid_columns.len() > 1 {
             let column_fits = self.optimize_columns(
                 &valid_columns,
@@ -774,21 +857,68 @@ impl LinearMixedModelBatch {
         q: usize,
         control: &BatchOptimizerControl,
     ) -> Result<ColumnFit> {
-        let initial = self.warm_start_for_column(warm_start, shared_start, column, q)?;
+        self.optimize_single_column_from(
+            workspace,
+            column,
+            responses,
+            reml,
+            warm_start,
+            shared_start,
+            q,
+            control,
+            ColumnStart::Cold,
+        )
+    }
+
+    /// `optimize_single_column` with an explicit start: `Chained(theta)`
+    /// starts there with the contracted first step.
+    #[allow(clippy::too_many_arguments)]
+    fn optimize_single_column_from(
+        &self,
+        workspace: &mut LmmWorkspace<'_>,
+        column: usize,
+        responses: &DMatrix<f64>,
+        reml: bool,
+        warm_start: &BatchWarmStart,
+        shared_start: Option<&[f64]>,
+        q: usize,
+        control: &BatchOptimizerControl,
+        start: ColumnStart,
+    ) -> Result<ColumnFit> {
+        let (initial, contracted) = match start {
+            ColumnStart::Cold => (
+                self.warm_start_for_column(warm_start, shared_start, column, q)?,
+                false,
+            ),
+            ColumnStart::Chained(theta) => (self.kernel.projected_theta(&theta)?, true),
+        };
         let single = select_response_columns(responses, &[column]);
-        let outcome = self.optimize_theta(workspace, initial, control, |workspace, theta| {
-            Ok(workspace
-                .profile_columns_at_theta(
-                    theta,
-                    &single,
-                    reml,
-                    &[0],
-                    control.options.chunk_columns,
-                    false,
-                )
-                .map(|profile| profile.total_objective)
-                .unwrap_or(f64::INFINITY))
-        });
+        // The analytic gradient drives the per-column search (Phase 6 T6.2);
+        // the pattern search remains the fallback when the gradient cannot
+        // be formed for this design.
+        let outcome = match self.optimize_theta_with_gradient(
+            workspace,
+            initial.clone(),
+            control,
+            contracted,
+            &single,
+            reml,
+        )? {
+            Some(outcome) => Ok(outcome),
+            None => self.optimize_theta(workspace, initial, control, |workspace, theta| {
+                Ok(workspace
+                    .profile_columns_at_theta(
+                        theta,
+                        &single,
+                        reml,
+                        &[0],
+                        control.options.chunk_columns,
+                        false,
+                    )
+                    .map(|profile| profile.total_objective)
+                    .unwrap_or(f64::INFINITY))
+            }),
+        };
 
         let Ok(outcome) = outcome else {
             return Ok(ColumnFit::OptimizerFailed);
@@ -1257,6 +1387,9 @@ impl LinearMixedModelBatch {
                 .kernel
                 .projected_theta(shared_start.unwrap_or(self.kernel.template_theta())),
             BatchWarmStart::Fixed(theta) => self.kernel.projected_theta(theta),
+            BatchWarmStart::Chained { .. } => {
+                self.kernel.projected_theta(self.kernel.template_theta())
+            }
             BatchWarmStart::Provided(theta) => {
                 if theta.nrows() != self.kernel.template_theta().len() || theta.ncols() != q {
                     return Err(MixedModelError::DimensionMismatch(format!(
@@ -1269,6 +1402,96 @@ impl LinearMixedModelBatch {
                 self.kernel.projected_theta(theta.column(column).as_slice())
             }
         }
+    }
+
+    /// Per-column θ optimization on the analytic gradient (Phase 6 T6.2):
+    /// the Phase 5 gradient-driven TrustBQ loop over the column's profiled
+    /// objective. `None` when the gradient cannot be formed at the start
+    /// (the caller then runs the pattern search).
+    fn optimize_theta_with_gradient(
+        &self,
+        workspace: &mut LmmWorkspace<'_>,
+        initial: Vec<f64>,
+        control: &BatchOptimizerControl,
+        contracted_first_step: bool,
+        single: &DMatrix<f64>,
+        reml: bool,
+    ) -> Result<Option<crate::model::linear::PatternSearchOutcome>> {
+        use crate::model::linear::{PatternSearchOutcome, WARM_REFIT_INITIAL_STEP};
+        use crate::optimizer::trust_bq::{minimize_with_gradient_and_progress, TrustBqOptions};
+        use crate::types::FitLogEntry;
+
+        self.kernel.validate_theta(&initial)?;
+        let n_theta = initial.len();
+        // A silent probe at the start decides whether this design supports
+        // the blocked gradient; a failed probe is not a fit failure.
+        let Ok((finitial, _)) = workspace.objective_and_gradient_for_column(&initial, single, reml)
+        else {
+            return Ok(None);
+        };
+        if !finitial.is_finite() {
+            return Ok(None);
+        }
+        let invalid_objective = finitial.abs().max(1.0) + 1.0e6 * (1.0 + finitial.abs());
+        let step = if contracted_first_step {
+            WARM_REFIT_INITIAL_STEP
+        } else {
+            control
+                .initial_step
+                .as_ref()
+                .and_then(|step| {
+                    step.iter().copied().fold(None, |acc: Option<f64>, v| {
+                        Some(acc.map_or(v.abs(), |a| a.max(v.abs())))
+                    })
+                })
+                .unwrap_or(0.5)
+        };
+        let lower_bounds = self.kernel.lower_bounds().to_vec();
+        let upper_bounds = vec![f64::INFINITY; n_theta];
+        let mut fit_log: Vec<FitLogEntry> = Vec::new();
+        let mut oracle = |theta: &[f64]| -> Result<(f64, Vec<f64>)> {
+            let (objective, gradient) =
+                match workspace.objective_and_gradient_for_column(theta, single, reml) {
+                    Ok((objective, gradient)) if objective.is_finite() => (objective, gradient),
+                    _ => (invalid_objective, vec![f64::NAN; theta.len()]),
+                };
+            fit_log.push(FitLogEntry {
+                theta: theta.to_vec(),
+                objective,
+            });
+            Ok((objective, gradient))
+        };
+        let result = minimize_with_gradient_and_progress(
+            &initial,
+            &lower_bounds,
+            &upper_bounds,
+            TrustBqOptions {
+                initial_radius: step.max(control.theta_tolerance * 10.0),
+                final_radius: control.theta_tolerance.max(1e-10),
+                max_evaluations: control.max_evaluations.max(1) as usize,
+                ftol_abs: control.objective_tolerance.max(0.0),
+                ftol_rel: 1e-12,
+                ftol_requires_local_radius: true,
+                gradient_tolerance_rel: 1e-9,
+                ..TrustBqOptions::default()
+            },
+            &mut oracle,
+            |_| Ok(false),
+        )?;
+        Ok(Some(PatternSearchOutcome {
+            best_theta: result.x,
+            best_fmin: result.fmin,
+            feval_count: result.fevals as i64,
+            fit_log,
+            #[cfg(test)]
+            trace_label: Some("trust_bq_gradient".to_string()),
+            #[cfg(test)]
+            active_rank: None,
+            #[cfg(test)]
+            inactive_directions: None,
+            #[cfg(test)]
+            exit_reason: format!("{:?}", result.stop_reason),
+        }))
     }
 
     fn optimize_theta<F>(

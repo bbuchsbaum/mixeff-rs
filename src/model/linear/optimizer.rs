@@ -1871,6 +1871,8 @@ impl LinearMixedModel {
             dims,
             reml: is_reml,
             sigma: fixed_sigma,
+            fe_blocks: None,
+            trailing_l: None,
         }
         .profiled_gradient()?;
         Ok(Some((objective, gradient)))

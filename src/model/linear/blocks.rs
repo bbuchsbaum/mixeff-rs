@@ -1103,26 +1103,6 @@ pub(super) fn compute_x_re_cross_product(x: &DMatrix<f64>, re: &ReMat) -> Matrix
     MatrixBlock::Dense(result)
 }
 
-pub(super) fn compute_response_re_cross_product(y: &DMatrix<f64>, re: &ReMat) -> DMatrix<f64> {
-    let q = y.ncols();
-    let nranef = re.n_ranef();
-    let n = re.refs.len();
-    let mut result = DMatrix::zeros(nranef, q);
-
-    for obs in 0..n {
-        let r = re.refs[obs] as usize;
-        for s in 0..re.vsize {
-            let row = r * re.vsize + s;
-            let weight = re.wtz[(s, obs)];
-            for col in 0..q {
-                result[(row, col)] += weight * y[(obs, col)];
-            }
-        }
-    }
-
-    result
-}
-
 pub(super) fn apply_lambda_transpose_to_rhs(rhs: &mut DMatrix<f64>, re: &ReMat) {
     let s = re.vsize;
     let nlevels = re.n_levels();
@@ -1171,22 +1151,6 @@ pub(super) fn apply_lambda_transpose_to_rhs(rhs: &mut DMatrix<f64>, re: &ReMat) 
             }
         }
     }
-}
-
-pub(super) fn build_response_rhs_blocks(
-    reterms: &[ReMat],
-    x: &DMatrix<f64>,
-    y: &DMatrix<f64>,
-) -> Vec<DMatrix<f64>> {
-    let k = reterms.len();
-    let mut rhs_blocks = Vec::with_capacity(k + 1);
-    for re in reterms {
-        let mut block = compute_response_re_cross_product(y, re);
-        apply_lambda_transpose_to_rhs(&mut block, re);
-        rhs_blocks.push(block);
-    }
-    rhs_blocks.push(x.tr_mul(y));
-    rhs_blocks
 }
 
 pub(super) fn subtract_left_block_product(
@@ -1365,22 +1329,6 @@ pub(super) fn solve_lower_block_rhs(rhs: &mut DMatrix<f64>, l: &MatrixBlock) {
     }
 }
 
-pub(super) fn solve_lower_block_rhs_system(
-    l_blocks: &[MatrixBlock],
-    rhs_blocks: &mut [DMatrix<f64>],
-) {
-    let total = rhs_blocks.len();
-    for row_block in 0..total {
-        let (solved, current_and_after) = rhs_blocks.split_at_mut(row_block);
-        let current = &mut current_and_after[0];
-        for (prev, solved_prev) in solved.iter().enumerate() {
-            let lower = &l_blocks[block_index(row_block, prev)];
-            subtract_left_block_product(current, lower, solved_prev);
-        }
-        solve_lower_block_rhs(current, &l_blocks[block_index(row_block, row_block)]);
-    }
-}
-
 pub(super) fn solve_upper_from_lower_transpose(
     l: &DMatrix<f64>,
     rhs: &DMatrix<f64>,
@@ -1415,7 +1363,108 @@ pub(super) fn response_column_sums_of_squares(y: &DMatrix<f64>) -> DVector<f64> 
     sums
 }
 
-pub(crate) fn profile_response_matrix_with_l_blocks(
+/// Reusable buffers for `profile_response_matrix_with_scratch`: the
+/// per-term response right-hand sides, the unscaled `Z_jᵀY` copies (kept for
+/// the batch gradient oracle), the `XᵀY` block, and the column buffer of
+/// the blocked forward solve. Sized on first use and regrown only when a
+/// wider chunk arrives, so a θ evaluation over a chunk allocates nothing
+/// beyond its output vectors.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ProfileScratch {
+    rhs: Vec<DMatrix<f64>>,
+    zty: Vec<DMatrix<f64>>,
+    xty: DMatrix<f64>,
+    column: Vec<f64>,
+}
+
+impl ProfileScratch {
+    /// Unscaled `Z_jᵀY` blocks from the last profile call (per term).
+    pub(crate) fn response_re_cross_products(&self) -> &[DMatrix<f64>] {
+        &self.zty
+    }
+
+    fn prepare(&mut self, reterms: &[ReMat], p: usize, q: usize) {
+        let k = reterms.len();
+        if self.rhs.len() != k + 1 || self.zty.len() != k {
+            self.rhs = reterms
+                .iter()
+                .map(|re| DMatrix::zeros(re.n_ranef(), q))
+                .chain(std::iter::once(DMatrix::zeros(p, q)))
+                .collect();
+            self.zty = reterms
+                .iter()
+                .map(|re| DMatrix::zeros(re.n_ranef(), q))
+                .collect();
+        } else {
+            for (block, re) in self.rhs.iter_mut().zip(reterms) {
+                if block.nrows() != re.n_ranef() || block.ncols() != q {
+                    *block = DMatrix::zeros(re.n_ranef(), q);
+                }
+            }
+            let last = &mut self.rhs[k];
+            if last.nrows() != p || last.ncols() != q {
+                *last = DMatrix::zeros(p, q);
+            }
+            for (block, re) in self.zty.iter_mut().zip(reterms) {
+                if block.nrows() != re.n_ranef() || block.ncols() != q {
+                    *block = DMatrix::zeros(re.n_ranef(), q);
+                }
+            }
+        }
+        if self.xty.nrows() != p || self.xty.ncols() != q {
+            self.xty = DMatrix::zeros(p, q);
+        }
+        let longest = reterms
+            .iter()
+            .map(|re| re.n_ranef())
+            .max()
+            .unwrap_or(0)
+            .max(p);
+        if self.column.len() < longest {
+            self.column.resize(longest, 0.0);
+        }
+    }
+}
+
+/// `dst = Zᵀ Y` for one term, written in place (same accumulation order as
+/// `compute_response_re_cross_product`).
+pub(super) fn compute_response_re_cross_product_into(
+    dst: &mut DMatrix<f64>,
+    y: &DMatrix<f64>,
+    re: &ReMat,
+) {
+    let q = y.ncols();
+    let n = re.refs.len();
+    dst.fill(0.0);
+    for obs in 0..n {
+        let r = re.refs[obs] as usize;
+        for s in 0..re.vsize {
+            let row = r * re.vsize + s;
+            let weight = re.wtz[(s, obs)];
+            for col in 0..q {
+                dst[(row, col)] += weight * y[(obs, col)];
+            }
+        }
+    }
+}
+
+fn solve_lower_block_rhs_with_column(rhs: &mut DMatrix<f64>, l: &MatrixBlock, column: &mut [f64]) {
+    let rows = rhs.nrows();
+    let column = &mut column[..rows];
+    for col in 0..rhs.ncols() {
+        for row in 0..rows {
+            column[row] = rhs[(row, col)];
+        }
+        solve_lower_block_against_rhs(l, column);
+        for row in 0..rows {
+            rhs[(row, col)] = column[row];
+        }
+    }
+}
+
+/// `profile_response_matrix_with_l_blocks` on caller-owned scratch.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn profile_response_matrix_with_scratch(
     reterms: &[ReMat],
     x: &DMatrix<f64>,
     responses: &DMatrix<f64>,
@@ -1423,6 +1472,7 @@ pub(crate) fn profile_response_matrix_with_l_blocks(
     reml: bool,
     n: usize,
     p: usize,
+    scratch: &mut ProfileScratch,
 ) -> Result<ResponseMatrixProfile> {
     if responses.nrows() != x.nrows() {
         return Err(MixedModelError::DimensionMismatch(format!(
@@ -1431,7 +1481,6 @@ pub(crate) fn profile_response_matrix_with_l_blocks(
             x.nrows()
         )));
     }
-
     let k = reterms.len();
     let q = responses.ncols();
     let total = k + 1;
@@ -1444,11 +1493,35 @@ pub(crate) fn profile_response_matrix_with_l_blocks(
         )));
     }
 
-    let mut rhs_blocks = build_response_rhs_blocks(reterms, x, responses);
-    solve_lower_block_rhs_system(l_blocks, &mut rhs_blocks);
+    scratch.prepare(reterms, p, q);
+    for (j, re) in reterms.iter().enumerate() {
+        compute_response_re_cross_product_into(&mut scratch.zty[j], responses, re);
+        scratch.rhs[j].copy_from(&scratch.zty[j]);
+        apply_lambda_transpose_to_rhs(&mut scratch.rhs[j], re);
+    }
+    x.tr_mul_to(responses, &mut scratch.xty);
+    scratch.rhs[k].copy_from(&scratch.xty);
+
+    // Blocked forward solve on the shared column buffer.
+    for row_block in 0..=k {
+        let (solved, current_and_after) = scratch.rhs.split_at_mut(row_block);
+        let current = &mut current_and_after[0];
+        for (prev, solved_prev) in solved.iter().enumerate() {
+            subtract_left_block_product(
+                current,
+                &l_blocks[block_index(row_block, prev)],
+                solved_prev,
+            );
+        }
+        solve_lower_block_rhs_with_column(
+            current,
+            &l_blocks[block_index(row_block, row_block)],
+            &mut scratch.column,
+        );
+    }
 
     let mut solved_norm_sq = DVector::<f64>::zeros(q);
-    for block in &rhs_blocks {
+    for block in &scratch.rhs {
         for col in 0..q {
             let mut sum = 0.0;
             for row in 0..block.nrows() {
@@ -1472,10 +1545,10 @@ pub(crate) fn profile_response_matrix_with_l_blocks(
 
     let x_block = &l_blocks[block_index(k, k)];
     let beta = match x_block {
-        MatrixBlock::Dense(l_xx) => solve_upper_from_lower_transpose(l_xx, &rhs_blocks[k]),
+        MatrixBlock::Dense(l_xx) => solve_upper_from_lower_transpose(l_xx, &scratch.rhs[k]),
         _ => {
             let l_xx = x_block.as_dense();
-            solve_upper_from_lower_transpose(&l_xx, &rhs_blocks[k])
+            solve_upper_from_lower_transpose(&l_xx, &scratch.rhs[k])
         }
     };
 

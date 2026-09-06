@@ -18,9 +18,10 @@ use nalgebra::DMatrix;
 
 use crate::error::{MixedModelError, Result};
 use crate::model::linear::{
-    create_structural_al, profile_response_matrix_with_l_blocks, update_l_from_parts,
-    LinearMixedModel, ResponseMatrixProfile,
+    create_structural_al, profile_response_matrix_with_scratch, update_l_from_parts,
+    LinearMixedModel, ModelDims, ProfileScratch, ProfiledGradientInputs, ResponseMatrixProfile,
 };
+use crate::types::matrix_block::block_index;
 use crate::types::{MatrixBlock, ReMat};
 
 /// Invariant θ → profiled-objective structure shared by all workspaces.
@@ -92,6 +93,9 @@ impl LmmObjectiveKernel {
             kernel: self,
             reterms: self.reterms.clone(),
             l_blocks: self.structural_l.clone(),
+            scratch: ProfileScratch::default(),
+            gradient_fe: Vec::new(),
+            gradient_trailing_l: MatrixBlock::Dense(DMatrix::zeros(0, 0)),
         }
     }
 
@@ -158,6 +162,15 @@ pub(crate) struct LmmWorkspace<'k> {
     kernel: &'k LmmObjectiveKernel,
     reterms: Vec<ReMat>,
     l_blocks: Vec<MatrixBlock>,
+    /// Reusable profile buffers (Phase 6 T6.1): a θ evaluation over a
+    /// chunk allocates only its output vectors.
+    scratch: ProfileScratch,
+    /// `[X|y]ᵀ Z_j` blocks for the per-column gradient oracle (Phase 6
+    /// T6.2): rows `0..p` copied once from the structural `Xᵀ Z_j`, row `p`
+    /// rewritten per evaluation from the profile's `Z_jᵀ y`.
+    gradient_fe: Vec<MatrixBlock>,
+    /// `[[L_xx, 0], [βᵀ L_xx, √pwrss]]` for the per-column gradient oracle.
+    gradient_trailing_l: MatrixBlock,
 }
 
 impl LmmWorkspace<'_> {
@@ -184,13 +197,15 @@ impl LmmWorkspace<'_> {
         self.update_l()
     }
 
-    /// Profile every column of `responses` at the current factorization.
-    pub(crate) fn profile(
+    /// Profile every column of `responses` at the current factorization
+    /// on caller-owned scratch.
+    pub(crate) fn profile_with_scratch(
         &self,
         responses: &DMatrix<f64>,
         reml: bool,
+        scratch: &mut ProfileScratch,
     ) -> Result<ResponseMatrixProfile> {
-        profile_response_matrix_with_l_blocks(
+        profile_response_matrix_with_scratch(
             &self.reterms,
             &self.kernel.x,
             responses,
@@ -198,7 +213,95 @@ impl LmmWorkspace<'_> {
             reml,
             self.kernel.n,
             self.kernel.p,
+            scratch,
         )
+    }
+
+    /// Profile every column of `responses` at the current factorization
+    /// on the workspace's own scratch.
+    pub(crate) fn profile(
+        &mut self,
+        responses: &DMatrix<f64>,
+        reml: bool,
+    ) -> Result<ResponseMatrixProfile> {
+        let mut scratch = std::mem::take(&mut self.scratch);
+        let profile = self.profile_with_scratch(responses, reml, &mut scratch);
+        self.scratch = scratch;
+        profile
+    }
+
+    /// Objective and analytic gradient for one response column at `theta`
+    /// (Phase 6 T6.2): factorize, profile the column on the workspace
+    /// scratch, then evaluate the Phase 5 gradient on the structural blocks
+    /// augmented with the column's `Z_jᵀ y`, `Xᵀ y` and the profiled
+    /// `(β, pwrss)` folded into a `(p + 1) × (p + 1)` trailing factor.
+    pub(crate) fn objective_and_gradient_for_column(
+        &mut self,
+        theta: &[f64],
+        y: &DMatrix<f64>,
+        reml: bool,
+    ) -> Result<(f64, Vec<f64>)> {
+        if y.ncols() != 1 {
+            return Err(MixedModelError::DimensionMismatch(format!(
+                "column gradient oracle expects one response column, got {}",
+                y.ncols()
+            )));
+        }
+        self.factorize_at(theta)?;
+        let profile = self.profile(y, reml)?;
+        let k = self.reterms.len();
+        let p = self.kernel.p;
+        let base = k * (k + 1) / 2;
+        if self.gradient_fe.len() != k {
+            self.gradient_fe = (0..k)
+                .map(|j| {
+                    let xz = self.kernel.structural_a[base + j].as_dense();
+                    let mut block = DMatrix::zeros(p + 1, xz.ncols());
+                    block.rows_mut(0, p).copy_from(&xz);
+                    MatrixBlock::Dense(block)
+                })
+                .collect();
+        }
+        let zty = self.scratch.response_re_cross_products();
+        for (j, block) in self.gradient_fe.iter_mut().enumerate() {
+            if let MatrixBlock::Dense(block) = block {
+                let column = zty[j].column(0);
+                for c in 0..block.ncols() {
+                    block[(p, c)] = column[c];
+                }
+            }
+        }
+        let pwrss = profile.pwrss[0];
+        let beta = profile.beta.column(0);
+        let mut trailing = DMatrix::zeros(p + 1, p + 1);
+        crate::types::matrix_block::with_dense_block(&self.l_blocks[block_index(k, k)], |l_xx| {
+            trailing.view_mut((0, 0), (p, p)).copy_from(l_xx);
+            for c in 0..p {
+                let mut value = 0.0;
+                for r in 0..p {
+                    value += beta[r] * l_xx[(r, c)];
+                }
+                trailing[(p, c)] = value;
+            }
+        });
+        trailing[(p, p)] = pwrss.max(0.0).sqrt();
+        self.gradient_trailing_l = MatrixBlock::Dense(trailing);
+        let gradient = ProfiledGradientInputs {
+            a_blocks: &self.kernel.structural_a,
+            l_blocks: &self.l_blocks,
+            reterms: &self.reterms,
+            dims: ModelDims {
+                n: self.kernel.n,
+                p,
+                nretrms: k,
+            },
+            reml,
+            sigma: None,
+            fe_blocks: Some(&self.gradient_fe),
+            trailing_l: Some(&self.gradient_trailing_l),
+        }
+        .profiled_gradient()?;
+        Ok((profile.total_objective, gradient))
     }
 
     /// Factorize at θ and profile the selected response columns in chunks.
@@ -226,7 +329,7 @@ impl LmmWorkspace<'_> {
     /// the packed results (including the floating-point `total_objective`
     /// accumulation) are identical to serial execution.
     pub(crate) fn profile_columns(
-        &self,
+        &mut self,
         responses: &DMatrix<f64>,
         reml: bool,
         columns: &[usize],
@@ -258,9 +361,16 @@ impl LmmWorkspace<'_> {
             #[cfg(feature = "rayon")]
             {
                 use rayon::prelude::*;
+                let this: &LmmWorkspace<'_> = &*self;
                 chunks
                     .par_iter()
-                    .map(|chunk| self.profile(&select_response_columns(responses, chunk), reml))
+                    .map_init(ProfileScratch::default, |scratch, chunk| {
+                        this.profile_with_scratch(
+                            &select_response_columns(responses, chunk),
+                            reml,
+                            scratch,
+                        )
+                    })
                     .collect::<Result<Vec<_>>>()?
             }
             #[cfg(not(feature = "rayon"))]
@@ -270,10 +380,19 @@ impl LmmWorkspace<'_> {
                 ));
             }
         } else {
-            chunks
+            let mut scratch = std::mem::take(&mut self.scratch);
+            let profiles = chunks
                 .iter()
-                .map(|chunk| self.profile(&select_response_columns(responses, chunk), reml))
-                .collect::<Result<Vec<_>>>()?
+                .map(|chunk| {
+                    self.profile_with_scratch(
+                        &select_response_columns(responses, chunk),
+                        reml,
+                        &mut scratch,
+                    )
+                })
+                .collect::<Result<Vec<_>>>();
+            self.scratch = scratch;
+            profiles?
         };
 
         let p = self.kernel.p;
@@ -345,4 +464,74 @@ pub(crate) fn select_response_columns(responses: &DMatrix<f64>, columns: &[usize
     DMatrix::from_fn(responses.nrows(), columns.len(), |row, col| {
         responses[(row, columns[col])]
     })
+}
+
+#[cfg(test)]
+mod gradient_oracle_tests {
+    use super::*;
+    use crate::formula::parse_formula;
+    use crate::model::data::DataFrame;
+    use crate::model::traits::MixedModelFit;
+
+    /// The batch column oracle (structural blocks augmented with the
+    /// column's `Zᵀy`, `Xᵀy`, `β`, `pwrss`) must reproduce the model's own
+    /// objective and analytic gradient for the same response.
+    #[test]
+    fn column_oracle_matches_the_model_gradient() {
+        use rand::rngs::StdRng;
+        use rand::SeedableRng;
+        use rand_distr::{Distribution, Normal};
+        let mut rng = StdRng::seed_from_u64(5);
+        let normal = Normal::new(0.0, 1.0).unwrap();
+        let (mut reaction, mut days, mut subj) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..24 {
+            let u0 = normal.sample(&mut rng);
+            let u1 = normal.sample(&mut rng);
+            for d in 0..8 {
+                let x = d as f64;
+                reaction.push(
+                    250.0 + 10.0 * x + 20.0 * u0 + 4.0 * u1 * x + 20.0 * normal.sample(&mut rng),
+                );
+                days.push(x);
+                subj.push(format!("S{i:02}"));
+            }
+        }
+        let mut df = DataFrame::new();
+        df.add_numeric("reaction", reaction).unwrap();
+        df.add_numeric("days", days).unwrap();
+        df.add_categorical("subj", subj).unwrap();
+        for (formula, reml) in [
+            ("reaction ~ 1 + days + (1 + days | subj)", true),
+            ("reaction ~ 1 + days + (1 + days | subj)", false),
+            ("reaction ~ 1 + days + (1 | subj)", true),
+        ] {
+            let mut model =
+                LinearMixedModel::new(parse_formula(formula).unwrap(), &df, None).unwrap();
+            model.fit(reml).unwrap();
+            let kernel = LmmObjectiveKernel::from_model(&model);
+            let kernel = kernel.unwrap();
+            let mut workspace = kernel.workspace();
+            let y = DMatrix::from_column_slice(model.response().len(), 1, model.response().as_slice());
+            for theta in [
+                model.theta(),
+                model.theta().iter().map(|t| t + 0.2).collect::<Vec<_>>(),
+            ] {
+                let (objective, gradient) = workspace
+                    .objective_and_gradient_for_column(&theta, &y, reml)
+                    .unwrap();
+                let (model_objective, model_gradient) =
+                    model.objective_and_gradient_at(&theta).unwrap();
+                assert!(
+                    (objective - model_objective).abs() <= 1e-8 * model_objective.abs().max(1.0),
+                    "{formula} reml={reml}: objective {objective} vs {model_objective}"
+                );
+                for (k, (a, b)) in gradient.iter().zip(&model_gradient).enumerate() {
+                    assert!(
+                        (a - b).abs() <= 1e-8 * b.abs().max(1.0),
+                        "{formula} reml={reml}: gradient[{k}] {a} vs {b}"
+                    );
+                }
+            }
+        }
+    }
 }

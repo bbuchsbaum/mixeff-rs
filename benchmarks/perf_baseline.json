@@ -60,7 +60,7 @@
       "success_count": 16,
       "objective_sum": 156444.40653849352,
       "allocs_per_column": 15,
-      "bytes_per_column": 8365,
+      "bytes_per_column": 9982,
       "total_median_ms": 0.056083
     },
     {
@@ -68,8 +68,8 @@
       "q": 16,
       "success_count": 16,
       "objective_sum": 156431.11871913844,
-      "allocs_per_column": 4170,
-      "bytes_per_column": 1497720,
+      "allocs_per_column": 441,
+      "bytes_per_column": 50433,
       "total_median_ms": 40.708375
     }
   ]
