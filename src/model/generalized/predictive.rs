@@ -266,11 +266,12 @@ impl GeneralizedLinearMixedModel {
         let glmm_scale_multiplier = (glmm_covariance_scale / inner_lmm_scale).powi(2);
         let joint_laplace_conditional_variance =
             self.certified_joint_laplace_fixed_covariance().is_some();
-        let pirls_certified_conditional_variance = !joint_laplace_conditional_variance
-            && matches!(self.pirls_profiled_optimum_certificate, Some(Ok(_)));
+        let pirls_certificate = self.pirls_profiled_optimum_certificate();
+        let pirls_certified_conditional_variance =
+            !joint_laplace_conditional_variance && matches!(pirls_certificate, Some(Ok(_)));
         let certified_conditional_variance =
             joint_laplace_conditional_variance || pirls_certified_conditional_variance;
-        let pirls_certificate_failure = match &self.pirls_profiled_optimum_certificate {
+        let pirls_certificate_failure = match pirls_certificate {
             Some(Err(reason)) if !joint_laplace_conditional_variance => Some(reason.clone()),
             _ => None,
         };

@@ -51,6 +51,9 @@ impl GeneralizedLinearMixedModel {
             }
             return Ok(verification);
         }
+        // The verification is recorded on the stored certificate, which must
+        // carry its (deferred) derivative evidence first.
+        self.complete_pirls_certificate();
 
         // The returned fit's own objective family: joint deviances include
         // response constants and carry a JOINT_* return-code prefix; the

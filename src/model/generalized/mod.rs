@@ -127,11 +127,32 @@ pub struct GeneralizedLinearMixedModel {
     /// fits leave this `None` and certify through the joint Hessian instead.
     pirls_profiled_optimum_certificate:
         Option<std::result::Result<PirlsProfiledOptimumCertificate, String>>,
+    /// The profiled-optimum certificate is deferred (Phase 7 T7.2): its
+    /// finite-difference PIRLS probes cost 25-40% of a fit and most fits are
+    /// never inspected. `true` while the certificate, its diagnostic and the
+    /// optimizer certificate's derivative evidence still have to be
+    /// produced; `complete_pirls_certificate` does so in place and
+    /// `glmm_inspection` does so on a clone for `&self` readers.
+    pirls_certificate_pending: bool,
+    /// Where the deferred certificate diagnostic is inserted on completion,
+    /// so the diagnostics list reads exactly as the eager path wrote it.
+    pirls_certificate_diagnostic_slot: usize,
+    /// Completed view for `&self` readers while the certificate is pending.
+    inspection: std::sync::OnceLock<GlmmInspection>,
 
     /// Callback failure captured inside an optimizer API whose objective
     /// callback cannot return `Result`. The driver takes and returns it as soon
     /// as the external optimizer yields control.
     pending_progress_error: Option<String>,
+}
+
+/// The artifact and profiled-optimum certificate as callers should see them
+/// while the certificate is deferred: produced once, on a clone, by the
+/// first `&self` inspection.
+#[derive(Debug, Clone)]
+struct GlmmInspection {
+    artifact: CompiledModelArtifact,
+    pirls_certificate: Option<std::result::Result<PirlsProfiledOptimumCertificate, String>>,
 }
 
 /// Options controlling how a GLMM is fit.
@@ -804,6 +825,9 @@ impl GeneralizedLinearMixedModel {
             sd: vec![0.0; agq_len],
             mult: vec![0.0; agq_len],
             pirls_profiled_optimum_certificate: None,
+            pirls_certificate_pending: false,
+            pirls_certificate_diagnostic_slot: 0,
+            inspection: std::sync::OnceLock::new(),
             pending_progress_error: None,
         };
         model.initialize_beta_from_response();
@@ -853,8 +877,42 @@ impl GeneralizedLinearMixedModel {
     }
 
     /// Round-trippable compiler artifact attached to the internal model.
+    ///
+    /// While the profiled-optimum certificate is deferred, the first call
+    /// completes it on a clone and caches the completed artifact, so every
+    /// reader sees exactly what the eager path produced.
     pub fn compiler_artifact(&self) -> &CompiledModelArtifact {
-        self.lmm.compiler_artifact()
+        match self.glmm_inspection() {
+            Some(inspection) => &inspection.artifact,
+            None => self.lmm.compiler_artifact(),
+        }
+    }
+
+    /// The completed view while the certificate is pending; `None` when
+    /// nothing is deferred (the stored state is current).
+    fn glmm_inspection(&self) -> Option<&GlmmInspection> {
+        if !self.pirls_certificate_pending {
+            return None;
+        }
+        Some(self.inspection.get_or_init(|| {
+            let mut probe = self.clone();
+            probe.complete_pirls_certificate();
+            GlmmInspection {
+                artifact: probe.lmm.compiler_artifact.clone(),
+                pirls_certificate: probe.pirls_profiled_optimum_certificate.clone(),
+            }
+        }))
+    }
+
+    /// The profiled-optimum certificate as callers should see it (completed
+    /// on first inspection while deferred).
+    pub(crate) fn pirls_profiled_optimum_certificate(
+        &self,
+    ) -> &Option<std::result::Result<PirlsProfiledOptimumCertificate, String>> {
+        match self.glmm_inspection() {
+            Some(inspection) => &inspection.pirls_certificate,
+            None => &self.pirls_profiled_optimum_certificate,
+        }
     }
 
     /// Compiler policy attached to the internal compiled artifact.
@@ -876,7 +934,7 @@ impl GeneralizedLinearMixedModel {
 
     /// Stable user-facing audit report derived from the compiler artifact.
     pub fn audit_report(&self) -> ModelAuditReport {
-        self.lmm.audit_report()
+        self.compiler_artifact().audit_report()
     }
 
     /// Explicit refusal for GLMM residual-scale profile likelihood.

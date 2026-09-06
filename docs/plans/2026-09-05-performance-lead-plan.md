@@ -647,6 +647,29 @@ post-optimizer PIRLS in `finalize_theta_after_optimizer` when the last
 optimizer evaluation was at the accepted θ (cache the PIRLS state keyed on
 θ bits, as TrustBQ's sample cache already does).
 
+T7.2 shipped (mote bd-01M1TDWE8D8FZHKED9KRE8KEYX): the fast-PIRLS
+profiled-optimum certificate (finite-difference PIRLS probes: 2d gradient
+probes with escalation plus a 2d² interior Hessian) measured 38% of the
+grouseticks fit and 26% of verbagg (`generalized::tests::glmm_post_fit_tail_cost`).
+It is now deferred exactly like the LMM derivative evidence:
+`record_pirls_profiled_optimum_certificate` marks the optimizer
+certificate with the shared deferred reason and remembers the diagnostic
+slot; `complete_pirls_certificate` (called by `verify_convergence` and any
+mutating path) produces the eager outcome, evidence and provenance
+diagnostic in place, and `&self` readers (`compiler_artifact`,
+`audit_report`, the prediction-variance gate through
+`pirls_profiled_optimum_certificate()`) complete on a clone cached in a
+`OnceLock`, so every inspected view equals the eager one (tests compare
+the artifact JSON and certificate of an inspected clone against in-place
+completion; refits reset the deferral). Paired GLMM rows (5 alternating
+rounds vs 80e767e, loaded host, bit-identical objectives and θ):
+grouseticks 1.74×, verbagg 1.45×, contra_slope 1.25×; cbpp, contra
+intercept and arabidopsis within noise (their certificates are cheap or
+not issued). The "redundant post-optimizer PIRLS" in
+`finalize_theta_after_optimizer` measured 5-10 ms (1-2%) and is left
+alone; the joint-path certification gradient (`cbpp_full`, 1.0× here) is
+not deferred.
+
 T7.3 GLMM refit warm start. `GeneralizedLinearMixedModel::refit`
 (`generalized/optimizer.rs:20`) restarts from `optsum.initial`; add the same
 `RefitStart::Fitted` policy as Phase 3, seeding θ and β (PIRLS start) from

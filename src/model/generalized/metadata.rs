@@ -294,6 +294,8 @@ impl GeneralizedLinearMixedModel {
         self.lmm.compiler_artifact.fixed_effect_covariance_matrix = None;
         self.lmm.compiler_artifact.effective_covariance.clear();
         self.pirls_profiled_optimum_certificate = None;
+        self.pirls_certificate_pending = false;
+        self.inspection = std::sync::OnceLock::new();
         Ok(())
     }
 
@@ -350,9 +352,52 @@ impl GeneralizedLinearMixedModel {
         // Fit drivers can record metadata more than once for the same final
         // fit (e.g. a joint fallback re-labelling a profiled fit); the
         // certificate and its diagnostic are per-fit, not per-recording.
-        if self.pirls_profiled_optimum_certificate.is_some() {
+        if self.pirls_profiled_optimum_certificate.is_some() || self.pirls_certificate_pending {
             return;
         }
+        // Defer the finite-difference PIRLS probes (25-40% of a fit's wall
+        // time) until the certificate is inspected or a mutating path needs
+        // it; the optimizer certificate carries the same deferred marker
+        // the LMM path uses, and `complete_pirls_certificate` produces
+        // exactly the eager outcome, diagnostic and evidence.
+        if let Some(optimizer_certificate) = &mut self.lmm.compiler_artifact.optimizer_certificate {
+            optimizer_certificate.mark_derivative_checks_not_assessed(
+                LinearMixedModel::DEFERRED_DERIVATIVE_EVIDENCE_REASON,
+            );
+        }
+        self.pirls_certificate_diagnostic_slot = self.lmm.compiler_artifact.diagnostics.len();
+        self.pirls_certificate_pending = true;
+        self.inspection = std::sync::OnceLock::new();
+    }
+
+    /// Produce the deferred profiled-optimum certificate in place: the
+    /// probes, the optimizer certificate's derivative evidence, the
+    /// provenance diagnostic (at the slot the eager path used) and the
+    /// stored outcome. No-op when nothing is pending.
+    pub(crate) fn complete_pirls_certificate(&mut self) {
+        if !self.pirls_certificate_pending {
+            return;
+        }
+        self.pirls_certificate_pending = false;
+        self.inspection = std::sync::OnceLock::new();
+        let estimation_method = self
+            .lmm
+            .compiler_artifact
+            .glmm_fit_metadata
+            .as_ref()
+            .map(|metadata| metadata.estimation_method.clone())
+            .unwrap_or_default();
+        let slot = self
+            .pirls_certificate_diagnostic_slot
+            .min(self.lmm.compiler_artifact.diagnostics.len());
+        self.issue_pirls_profiled_optimum_certificate(&estimation_method, slot);
+    }
+
+    fn issue_pirls_profiled_optimum_certificate(
+        &mut self,
+        estimation_method: &str,
+        diagnostic_slot: usize,
+    ) {
         let outcome = self.certify_pirls_profiled_optimum();
 
         // Reflect the certificate outcome into the optimizer certificate's
@@ -415,7 +460,7 @@ impl GeneralizedLinearMixedModel {
         );
         diagnostic.payload.insert(
             "estimation_method".to_string(),
-            serde_json::json!(metadata.estimation_method.as_str()),
+            serde_json::json!(estimation_method),
         );
         match &outcome {
             Ok(certificate) => {
@@ -450,7 +495,10 @@ impl GeneralizedLinearMixedModel {
                     .insert("reason".to_string(), serde_json::json!(reason));
             }
         }
-        self.lmm.compiler_artifact.diagnostics.push(diagnostic);
+        self.lmm
+            .compiler_artifact
+            .diagnostics
+            .insert(diagnostic_slot, diagnostic);
         self.pirls_profiled_optimum_certificate = Some(outcome);
     }
 

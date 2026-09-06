@@ -2935,9 +2935,9 @@ fn glmm_certified_pirls_poisson_fixture() -> (GeneralizedLinearMixedModel, DataF
 fn test_glmm_pirls_certified_prediction_variance_rows_available() {
     let (model, data) = glmm_certified_pirls_poisson_fixture();
     assert!(
-        matches!(model.pirls_profiled_optimum_certificate, Some(Ok(_))),
+        matches!(model.pirls_profiled_optimum_certificate(), Some(Ok(_))),
         "fixture should certify: {:?}",
-        model.pirls_profiled_optimum_certificate
+        model.pirls_profiled_optimum_certificate()
     );
 
     let payload = model
@@ -2985,9 +2985,9 @@ fn test_glmm_pirls_certified_prediction_variance_rows_available() {
 fn test_glmm_pirls_native_prediction_variance_rows_degrade_without_certificate() {
     let (model, data) = glmm_certified_pirls_poisson_fixture();
     assert!(
-        matches!(model.pirls_profiled_optimum_certificate, Some(Err(_))),
+        matches!(model.pirls_profiled_optimum_certificate(), Some(Err(_))),
         "native fixture should keep uncertified geometry explicit: {:?}",
-        model.pirls_profiled_optimum_certificate
+        model.pirls_profiled_optimum_certificate()
     );
 
     let payload = model
@@ -3010,6 +3010,7 @@ fn test_glmm_pirls_native_prediction_variance_rows_degrade_without_certificate()
 #[test]
 fn test_glmm_pirls_uncertified_fit_keeps_degraded_with_refit_guidance() {
     let (mut model, data) = glmm_certified_pirls_poisson_fixture();
+    model.complete_pirls_certificate();
     model.pirls_profiled_optimum_certificate =
         Some(Err("forced certificate failure for test".to_string()));
 
@@ -3037,7 +3038,7 @@ fn test_glmm_link_scale_rows_do_not_carry_future_observation_columns() {
         .predict_new_variance(&data, GlmmPredictionScale::Link, NewReLevels::Error)
         .unwrap();
     let first = &payload.rows[0];
-    if matches!(model.pirls_profiled_optimum_certificate, Some(Ok(_))) {
+    if matches!(model.pirls_profiled_optimum_certificate(), Some(Ok(_))) {
         assert_eq!(first.status, PredictionVarianceStatus::Available);
     } else {
         assert_eq!(first.status, PredictionVarianceStatus::Degraded);
@@ -3951,7 +3952,7 @@ fn glmm_verify_convergence_reports_estimator_substitution_not_objective_drift() 
 fn glmm_native_uncertified_profiled_optimum_leaves_explicit_skip_reason() {
     let (model, _) = glmm_certified_pirls_poisson_fixture();
     assert!(matches!(
-        model.pirls_profiled_optimum_certificate,
+        model.pirls_profiled_optimum_certificate(),
         Some(Err(_))
     ));
     let certificate = model
@@ -3986,4 +3987,158 @@ fn glmm_fit_metadata_deserializes_legacy_json_without_method_fields() {
     assert_eq!(metadata.requested_method, None);
     assert_eq!(metadata.effective_method, None);
     assert_eq!(metadata.fallback_status, None);
+}
+
+/// Post-fit tail cost on the registry GLMM rows: the profiled-optimum
+/// certificate (finite-difference PIRLS probes) and the final PIRLS pass.
+/// `cargo test --release --lib generalized::tests::glmm_post_fit_tail_cost -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn glmm_post_fit_tail_cost() {
+    use std::time::Instant;
+    let cases: Vec<(&str, &str, Family)> = vec![
+        (
+            "grouseticks",
+            "TICKS ~ 1 + YEAR + cHEIGHT + (1 | BROOD) + (1 | INDEX) + (1 | LOCATION)",
+            Family::Poisson,
+        ),
+        (
+            "verbagg",
+            "r2 ~ 1 + Anger + Gender + btype + situ + mode + (1 | id) + (1 | item)",
+            Family::Binomial,
+        ),
+    ];
+    for (name, formula, family) in cases {
+        let (mut data, _) = crate::datasets::load(name).unwrap();
+        if let Some(column) = data.categorical("r2") {
+            // verbagg's binary response is recorded as a factor (N/Y).
+            let numeric: Vec<f64> = column
+                .values
+                .iter()
+                .map(|v| if v == "Y" { 1.0 } else { 0.0 })
+                .collect();
+            let mut lowered = DataFrame::new();
+            for name in data.column_names() {
+                if name == "r2" {
+                    lowered.add_numeric("r2", numeric.clone()).unwrap();
+                } else if let Some(values) = data.numeric(name) {
+                    lowered.add_numeric(name, values.to_vec()).unwrap();
+                } else if let Some(cat) = data.categorical(name) {
+                    lowered.add_categorical(name, cat.values.clone()).unwrap();
+                }
+            }
+            data = lowered;
+        }
+        let mut model =
+            GeneralizedLinearMixedModel::new(parse_formula(formula).unwrap(), &data, family, None)
+                .unwrap();
+        let t0 = Instant::now();
+        model.fit_with_options(true, 1, false).unwrap();
+        let fit_ms = t0.elapsed().as_secs_f64() * 1e3;
+        let t1 = Instant::now();
+        model.complete_pirls_certificate();
+        let certificate_ms = t1.elapsed().as_secs_f64() * 1e3;
+        let outcome = model.pirls_profiled_optimum_certificate().clone().unwrap();
+        let mut theta = model.lmm.optsum.final_params.clone();
+        let t2 = Instant::now();
+        model.finalize_theta_after_optimizer(&mut theta, 1).unwrap();
+        let final_pirls_ms = t2.elapsed().as_secs_f64() * 1e3;
+        println!(
+            "{name:12} d={} fit {fit_ms:8.1} ms (feval {}) | certificate {certificate_ms:7.1} ms ({:.0}% of fit, {}) | final PIRLS {final_pirls_ms:6.1} ms",
+            model.theta.len(),
+            model.lmm.optsum.feval,
+            100.0 * certificate_ms / fit_ms,
+            if outcome.is_ok() { "issued" } else { "not issued" }
+        );
+    }
+}
+
+/// Phase 7 T7.2: the profiled-optimum certificate is deferred; inspecting
+/// through `&self` and completing in place must agree exactly, and the
+/// eager wire form (diagnostic slot, evidence, checks) is preserved.
+#[test]
+fn deferred_pirls_certificate_matches_in_place_completion() {
+    let (fitted, _) = glmm_certified_pirls_poisson_fixture();
+    assert!(
+        fitted.pirls_certificate_pending,
+        "the fit should defer the certificate"
+    );
+    assert!(fitted.pirls_profiled_optimum_certificate.is_none());
+    let deferred_checks = fitted
+        .lmm
+        .compiler_artifact
+        .optimizer_certificate
+        .as_ref()
+        .unwrap()
+        .checks
+        .iter()
+        .filter(|check| {
+            matches!(check, crate::compiler::CertificateCheck::NotAssessed { reason }
+                if reason.contains("deferred"))
+        })
+        .count();
+    assert_eq!(
+        deferred_checks, 3,
+        "deferred marker on the stored certificate"
+    );
+
+    // `&self` inspection completes on a clone and caches the view.
+    let inspected = fitted.clone();
+    let inspected_json = serde_json::to_value(inspected.compiler_artifact()).unwrap();
+    let inspected_certificate = inspected.pirls_profiled_optimum_certificate().clone();
+    assert!(
+        inspected.pirls_certificate_pending,
+        "inspection must not mutate the stored state"
+    );
+
+    // In-place completion (what mutating paths call).
+    let mut completed = fitted.clone();
+    completed.complete_pirls_certificate();
+    assert!(!completed.pirls_certificate_pending);
+    let completed_json = serde_json::to_value(completed.compiler_artifact()).unwrap();
+    assert_eq!(inspected_json, completed_json);
+    assert_eq!(
+        inspected_certificate,
+        completed.pirls_profiled_optimum_certificate
+    );
+    // The completed certificate carries first-order evidence, not the marker.
+    let certificate = completed
+        .compiler_artifact()
+        .optimizer_certificate
+        .as_ref()
+        .unwrap();
+    assert!(!certificate.checks.iter().any(|check| {
+        matches!(check, crate::compiler::CertificateCheck::NotAssessed { reason }
+            if reason.contains("deferred"))
+    }));
+    assert!(completed
+        .compiler_artifact()
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic
+            .payload
+            .contains_key("glmm_pirls_profiled_optimum_certificate")));
+}
+
+#[test]
+fn deferred_pirls_certificate_is_completed_by_verification_and_reset_by_refit() {
+    let (mut model, data) = glmm_certified_pirls_poisson_fixture();
+    assert!(model.pirls_certificate_pending);
+    model.verify_convergence().unwrap();
+    assert!(
+        !model.pirls_certificate_pending,
+        "verification records on the completed certificate"
+    );
+    assert!(model.pirls_profiled_optimum_certificate.is_some());
+
+    let y = data.numeric("y").unwrap().to_vec();
+    model.refit(&y).unwrap();
+    assert!(
+        model.pirls_certificate_pending,
+        "a refit defers its own certificate again"
+    );
+    let payload = model
+        .predict_new_variance(&data, GlmmPredictionScale::Response, NewReLevels::Error)
+        .unwrap();
+    assert!(!payload.rows.is_empty());
 }

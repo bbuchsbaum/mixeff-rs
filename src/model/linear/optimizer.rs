@@ -367,7 +367,7 @@ impl LinearMixedModel {
 
     /// Reason recorded on the certificate while its derivative evidence is
     /// deferred. Replaced by the real evidence on first inspection.
-    const DEFERRED_DERIVATIVE_EVIDENCE_REASON: &'static str =
+    pub(crate) const DEFERRED_DERIVATIVE_EVIDENCE_REASON: &'static str =
         "deferred until the certificate is inspected";
 
     pub(super) fn refresh_optimizer_certificate(&mut self) {
