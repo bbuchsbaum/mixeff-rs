@@ -18,6 +18,48 @@ pub(crate) struct OutcomeCounts {
     failures: usize,
 }
 
+/// Per-observation response constants for the retained-constant GLMM
+/// objective, with the response, prior weights and family they were built
+/// from (the cache key; see `GeneralizedLinearMixedModel::response_log_constants`).
+#[derive(Debug, Clone)]
+pub(super) struct ResponseLogConstants {
+    family: Family,
+    y: Vec<f64>,
+    wt: Vec<f64>,
+    values: Vec<f64>,
+}
+
+impl ResponseLogConstants {
+    /// Bitwise match on the key: any change to a response value or weight
+    /// (including a NaN payload or a signed zero) invalidates the cache.
+    fn matches(&self, family: Family, y: &[f64], wt: &[f64]) -> bool {
+        #[cfg(test)]
+        RESPONSE_LOG_CONSTANT_KEY_CHECKS.with(|count| count.set(count.get() + 1));
+        fn same_bits(a: &[f64], b: &[f64]) -> bool {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.to_bits() == y.to_bits())
+        }
+        self.family == family && same_bits(&self.y, y) && same_bits(&self.wt, wt)
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Number of O(n) cache-key comparisons (`ResponseLogConstants::matches`)
+    /// on this thread; tests use it to pin one check per objective evaluation.
+    pub(super) static RESPONSE_LOG_CONSTANT_KEY_CHECKS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Solve `D x = rhs` in place for a diagonal triangular factor `D`: the
+/// dense forward/back substitutions reduce to this when every off-diagonal
+/// entry is an exact zero.
+fn solve_diagonal_against_rhs(diag: &[f64], rhs: &mut [f64]) {
+    debug_assert_eq!(diag.len(), rhs.len());
+    for (value, &d) in rhs.iter_mut().zip(diag) {
+        *value /= d;
+    }
+}
+
 pub(crate) fn is_binary_response(value: f64) -> bool {
     (value - 0.0).abs() < 1e-12 || (value - 1.0).abs() < 1e-12
 }
@@ -710,6 +752,29 @@ impl GeneralizedLinearMixedModel {
         max_iter: usize,
         reset_modes: bool,
     ) -> Result<bool> {
+        let result = self.pirls_iterations(vary_beta, verbose, max_iter, reset_modes);
+        // Fixed-β iterations update only the RE rows of the LMM's A/L (they
+        // are all the conditional-mode solve and the Laplace log-determinant
+        // read). The `[X|y]` rows are brought back in line with the final
+        // weights before PIRLS returns — on every exit path — so no reader
+        // outside PIRLS (β, vcov, the deferred joint Hessian, refits,
+        // prediction) ever sees them stale. The refresh is bit-identical to
+        // having rebuilt them on the last iteration.
+        // After a failed solve the RE rows of L may be a broken partial
+        // factor; extending it would clear the stale flags on garbage, so the
+        // flags stay set and the next full `update_l` rebuilds everything.
+        let converged = result?;
+        self.lmm.refresh_stale_fe_blocks()?;
+        Ok(converged)
+    }
+
+    fn pirls_iterations(
+        &mut self,
+        vary_beta: bool,
+        verbose: bool,
+        max_iter: usize,
+        reset_modes: bool,
+    ) -> Result<bool> {
         // Mirrors MixedModels.jl/src/generalizedlinearmixedmodel.jl pirls!
         // (lines 614-669): step-halving toward the previous accepted iterate
         // whenever a fresh IRLS step would worsen the Laplace objective. Keeps
@@ -731,7 +796,10 @@ impl GeneralizedLinearMixedModel {
         for (i, rt) in self.lmm.reterms.iter().enumerate() {
             self.b[i] = &rt.lambda * &self.u[i];
         }
-        self.update_eta();
+        // With β held fixed, `offset + Xβ` is the same vector on every
+        // η update of this solve; form it once.
+        let fixed_eta = (!vary_beta).then(|| self.fixed_linear_predictor());
+        self.update_eta_given_fixed(fixed_eta.as_ref());
 
         // Save the initial accepted state for halving. The 1.0001 slack is
         // only an acceptance bound for the first step-halving loop; convergence
@@ -795,8 +863,16 @@ impl GeneralizedLinearMixedModel {
             }
 
             // --- Update the LMM with new IRLS weights ---
-            self.lmm.update_irls_weights(&sqrtwts, &working_y)?;
-            self.lmm.update_l()?;
+            // With β fixed only the RE rows of A/L are read below (the
+            // conditional-mode solve and the log-determinant), so the
+            // `[X|y]` rows are left stale and refreshed once on exit.
+            if vary_beta {
+                self.lmm.update_irls_weights(&sqrtwts, &working_y)?;
+                self.lmm.update_l()?;
+            } else {
+                self.lmm.update_irls_weights_re_only(&sqrtwts, &working_y);
+                self.lmm.update_l_re_only()?;
+            }
 
             // --- Propose new β / u from the LMM solution ---
             let new_u = if vary_beta {
@@ -809,7 +885,7 @@ impl GeneralizedLinearMixedModel {
                 self.u[i].copy_from(&new_u[i]);
                 self.b[i] = &rt.lambda * &self.u[i];
             }
-            self.update_eta();
+            self.update_eta_given_fixed(fixed_eta.as_ref());
             let mut obj = self.laplace_objective();
 
             // --- Step-halving: average toward the previous accepted state
@@ -830,7 +906,7 @@ impl GeneralizedLinearMixedModel {
                 for (i, rt) in self.lmm.reterms.iter().enumerate() {
                     self.b[i] = &rt.lambda * &self.u[i];
                 }
-                self.update_eta();
+                self.update_eta_given_fixed(fixed_eta.as_ref());
                 obj = self.laplace_objective();
             }
 
@@ -926,10 +1002,15 @@ impl GeneralizedLinearMixedModel {
             }
 
             let mut v_j = rhs.as_slice().to_vec();
-            solve_dense_lower_against_rhs(
-                &self.lmm.l_blocks[glmm_block_index(j, j)].as_dense(),
-                &mut v_j,
-            );
+            match &self.lmm.l_blocks[glmm_block_index(j, j)] {
+                // Scalar random-intercept terms: L[j,j] is diagonal, so the
+                // triangular solve is a division (the dense solve's
+                // off-diagonal terms are exact zeros).
+                MatrixBlock::Diagonal(diag) => {
+                    solve_diagonal_against_rhs(diag.as_slice(), &mut v_j)
+                }
+                block => solve_dense_lower_against_rhs(&block.as_dense(), &mut v_j),
+            }
             v_vecs.push(DVector::from_vec(v_j));
         }
 
@@ -948,10 +1029,14 @@ impl GeneralizedLinearMixedModel {
             }
 
             let mut u_j = rhs.as_slice().to_vec();
-            solve_dense_upper_from_lower_transpose_against_rhs(
-                &self.lmm.l_blocks[glmm_block_index(j, j)].as_dense(),
-                &mut u_j,
-            );
+            match &self.lmm.l_blocks[glmm_block_index(j, j)] {
+                MatrixBlock::Diagonal(diag) => {
+                    solve_diagonal_against_rhs(diag.as_slice(), &mut u_j)
+                }
+                block => {
+                    solve_dense_upper_from_lower_transpose_against_rhs(&block.as_dense(), &mut u_j)
+                }
+            }
             u_vecs[j] = DVector::from_vec(u_j);
         }
 
@@ -986,20 +1071,90 @@ impl GeneralizedLinearMixedModel {
             .sum()
     }
 
-    fn minus_two_loglik_observation(&self, index: usize) -> f64 {
+    /// The part of observation `index`'s log-likelihood that depends only on
+    /// the response and its prior weight (`ln C(n, k)` for binomial,
+    /// `ln Γ(y + 1)` for Poisson and negative binomial), or `None` for
+    /// families without such a term.
+    pub(super) fn response_log_constant_observation(&self, index: usize) -> Option<f64> {
+        let y = self.y[index];
+        match self.family {
+            Family::Bernoulli | Family::Binomial => {
+                let trials = self.case_weight(index).max(0.0);
+                let successes = (trials * y).clamp(0.0, trials);
+                let failures = trials - successes;
+                Some(if trials == 0.0 {
+                    0.0
+                } else {
+                    ln_gamma(trials + 1.0) - ln_gamma(successes + 1.0) - ln_gamma(failures + 1.0)
+                })
+            }
+            Family::Poisson | Family::NegativeBinomial => Some(ln_gamma(y + 1.0)),
+            Family::Gamma | Family::Normal | Family::InverseGaussian => None,
+        }
+    }
+
+    /// The cached per-observation response constants, when they were built
+    /// for the current family, response and prior weights.
+    pub(super) fn current_response_log_constants(&self) -> Option<&[f64]> {
+        self.response_log_constants
+            .as_ref()
+            .filter(|cache| cache.matches(self.family, self.y.as_slice(), &self.wt))
+            .map(|cache| cache.values.as_slice())
+    }
+
+    /// Build (or rebuild, after `y`/`wt`/family changed) the per-observation
+    /// response-constant cache used by the retained-constant objective.
+    pub(super) fn ensure_response_log_constants(&mut self) {
+        if self.current_response_log_constants().is_some() {
+            return;
+        }
+        let values: Option<Vec<f64>> = (0..self.y.len())
+            .map(|index| self.response_log_constant_observation(index))
+            .collect();
+        self.response_log_constants = values.map(|values| ResponseLogConstants {
+            family: self.family,
+            y: self.y.as_slice().to_vec(),
+            wt: self.wt.clone(),
+            values,
+        });
+    }
+
+    /// `Σ_i -2 log p(y_i | μ_i)` with response constants retained. The
+    /// cache key (an O(n) comparison) is checked once per sum, never per
+    /// observation; a stale or absent cache falls back to computing each
+    /// constant inline.
+    fn minus_two_loglik_sum(&self) -> f64 {
+        let cached = self.current_response_log_constants();
+        (0..self.y.len())
+            .map(|i| {
+                let constant = match cached {
+                    Some(values) => Some(values[i]),
+                    None => self.response_log_constant_observation(i),
+                };
+                self.minus_two_loglik_observation_given_constant(i, constant)
+            })
+            .sum::<f64>()
+    }
+
+    /// `-2 log p(y_i | μ_i)` with the response-only constant supplied by the
+    /// caller (see [`response_log_constant_observation`](Self::response_log_constant_observation));
+    /// the arithmetic is exactly the uncached expression's.
+    fn minus_two_loglik_observation_given_constant(
+        &self,
+        index: usize,
+        response_constant: Option<f64>,
+    ) -> f64 {
         let y = self.y[index];
         let mu = self.mu[index].max(f64::MIN_POSITIVE);
+        let response_constant =
+            || response_constant.expect("families with a response-only constant always supply it");
         match self.family {
             Family::Bernoulli | Family::Binomial => {
                 let trials = self.case_weight(index).max(0.0);
                 let successes = (trials * y).clamp(0.0, trials);
                 let failures = trials - successes;
                 let p = mu.clamp(1.0e-15, 1.0 - 1.0e-15);
-                let log_choose = if trials == 0.0 {
-                    0.0
-                } else {
-                    ln_gamma(trials + 1.0) - ln_gamma(successes + 1.0) - ln_gamma(failures + 1.0)
-                };
+                let log_choose = response_constant();
                 let success_term = if successes == 0.0 {
                     0.0
                 } else {
@@ -1014,13 +1169,13 @@ impl GeneralizedLinearMixedModel {
             }
             Family::Poisson => {
                 let count_term = if y == 0.0 { 0.0 } else { y * mu.ln() };
-                -2.0 * (count_term - mu - ln_gamma(y + 1.0))
+                -2.0 * (count_term - mu - response_constant())
             }
             Family::NegativeBinomial => {
                 let theta = self
                     .negative_binomial_theta
                     .expect("negative-binomial GLMM stores fixed theta");
-                let loglik = ln_gamma(y + theta) - ln_gamma(theta) - ln_gamma(y + 1.0)
+                let loglik = ln_gamma(y + theta) - ln_gamma(theta) - response_constant()
                     + theta * (theta / (theta + mu)).ln()
                     + if y == 0.0 {
                         0.0
@@ -1061,9 +1216,7 @@ impl GeneralizedLinearMixedModel {
         let dropped: f64 = (0..self.y.len())
             .map(|i| self.case_weight(i) * self.dev_resid_component(self.y[i], self.mu[i]))
             .sum();
-        let included: f64 = (0..self.y.len())
-            .map(|i| self.minus_two_loglik_observation(i))
-            .sum();
+        let included = self.minus_two_loglik_sum();
         included - dropped
     }
 
@@ -1075,11 +1228,7 @@ impl GeneralizedLinearMixedModel {
     /// fitting and comparison artifacts keep their existing dropped-constant
     /// semantics while certified joint GLMM parity is promoted row by row.
     pub fn laplace_objective_with_response_constants(&self) -> f64 {
-        (0..self.y.len())
-            .map(|i| self.minus_two_loglik_observation(i))
-            .sum::<f64>()
-            + self.u_penalty()
-            + self.lmm_logdet()
+        self.minus_two_loglik_sum() + self.u_penalty() + self.lmm_logdet()
     }
 
     /// Deviance of the GLMM.
@@ -1196,6 +1345,10 @@ impl GeneralizedLinearMixedModel {
     /// scale. For AGQ, the quadrature objective is shifted by the same
     /// response-constant offset used by the Laplace path.
     pub fn deviance_with_response_constants(&mut self, n_agq: usize) -> f64 {
+        // The `ln Γ` response constants depend only on y and the prior
+        // weights; computing them per observation on every joint-objective
+        // evaluation dominated its non-PIRLS cost.
+        self.ensure_response_log_constants();
         if n_agq <= 1 {
             return self.laplace_objective_with_response_constants();
         }

@@ -158,6 +158,15 @@ pub struct GeneralizedLinearMixedModel {
     /// callback cannot return `Result`. The driver takes and returns it as soon
     /// as the external optimizer yields control.
     pending_progress_error: Option<String>,
+
+    /// Per-observation response normalising constants (the `ln Γ` terms of
+    /// the retained-constant log-likelihood) for the response and prior
+    /// weights they were computed from. Built on first use by
+    /// `deviance_with_response_constants` and reused only while `y`, `wt`
+    /// and the family still match the recorded copies, so a refit with a new
+    /// response, a simulated response, or a direct write to the public
+    /// `y`/`wt` fields can never read stale constants.
+    response_log_constants: Option<pirls::ResponseLogConstants>,
 }
 
 /// The artifact and profiled-optimum certificate as callers should see them
@@ -853,6 +862,7 @@ impl GeneralizedLinearMixedModel {
             inspection: std::sync::OnceLock::new(),
             warm_refit_step: None,
             pending_progress_error: None,
+            response_log_constants: None,
         };
         model.initialize_beta_from_response();
         Ok(model)
@@ -1053,11 +1063,30 @@ impl GeneralizedLinearMixedModel {
 
     /// Update the linear predictor η and conditional mean μ.
     pub fn update_eta(&mut self) {
+        self.update_eta_given_fixed(None);
+    }
+
+    /// The fixed part of the linear predictor, `offset + Xβ`, at the
+    /// current β.
+    pub(super) fn fixed_linear_predictor(&self) -> DVector<f64> {
+        &self.offset + self.lmm.feterm.full_rank_x() * &self.beta
+    }
+
+    /// [`update_eta`](Self::update_eta) with `offset + Xβ` supplied by a
+    /// caller that holds β fixed across many updates (fixed-β PIRLS);
+    /// `fixed` must equal [`fixed_linear_predictor`](Self::fixed_linear_predictor)
+    /// at the current β. `None` recomputes it.
+    pub(super) fn update_eta_given_fixed(&mut self, fixed: Option<&DVector<f64>>) {
         let n = self.eta.len();
-        let x = self.lmm.feterm.full_rank_x();
 
         // η = offset + X * β
-        self.eta = &self.offset + x * &self.beta;
+        match fixed {
+            Some(fixed) => {
+                debug_assert_eq!(fixed.len(), n);
+                self.eta.copy_from(fixed);
+            }
+            None => self.eta = self.fixed_linear_predictor(),
+        }
 
         // Add random effects: η += Z_i * b_i
         for (i, rt) in self.lmm.reterms.iter().enumerate() {

@@ -265,6 +265,19 @@ pub struct LinearMixedModel {
     /// depend only on the grouping references, which never change.
     pub(crate) re_cross_sparse_patterns:
         std::collections::HashMap<usize, blocks::ScalarCrossPattern>,
+    /// True while the `[X|y]` rows of `a_blocks` (`A[k, 0..=k]`) do not
+    /// reflect the current `wtz`/`wtxy`. Set only by
+    /// [`update_irls_weights_re_only`](Self::update_irls_weights_re_only)
+    /// (fixed-β conditional-mode PIRLS, whose iterations read only the RE
+    /// rows); cleared by any full A rebuild or by
+    /// [`refresh_stale_fe_blocks`](Self::refresh_stale_fe_blocks).
+    pub(crate) fe_a_blocks_stale: bool,
+    /// True while the `[X|y]` row of `l_blocks` (`L[k, 0..=k]`) does not
+    /// reflect the current `A` and Λ. Set by the RE-rows-only factor update
+    /// [`update_l_re_only`](Self::update_l_re_only); cleared by a full
+    /// [`update_l`](Self::update_l) or by
+    /// [`refresh_stale_fe_blocks`](Self::refresh_stale_fe_blocks).
+    pub(crate) fe_l_row_stale: bool,
 }
 
 /// Where a refit starts its θ search. See
@@ -1396,6 +1409,8 @@ impl LinearMixedModel {
             derivative_evidence_pending: false,
             inspection_artifact: std::sync::OnceLock::new(),
             re_cross_sparse_patterns: std::collections::HashMap::new(),
+            fe_a_blocks_stale: false,
+            fe_l_row_stale: false,
         };
         debug_assert_eq!(
             model.dims.p, model.feterm.rank,
@@ -1812,17 +1827,91 @@ impl LinearMixedModel {
     /// feature; otherwise `pub(crate)`. Not covered by the 1.0 SemVer
     /// guarantee.
     unstable_vis fn update_l(&mut self) -> Result<()> {
+        // A fixed-β PIRLS solve may have left the `[X|y]` rows of A behind
+        // the current weights; a full factor must never be built from them.
+        if self.fe_a_blocks_stale {
+            self.recompute_fe_a_blocks()?;
+        }
         let cholesky_zero_pad_tolerance = self
             .compiler_policy()
             .thresholds
             .cholesky_zero_pad_tolerance;
+        self.fe_l_row_stale = true;
         update_l_from_parts(
+            &self.a_blocks,
+            &mut self.l_blocks,
+            &self.reterms,
+            cholesky_zero_pad_tolerance,
+        )?;
+        self.fe_l_row_stale = false;
+        Ok(())
+    }
+    }
+
+    /// Update only the random-effects rows of `L` (`L[i, j]`, `i < k`) and
+    /// mark the `[X|y]` row stale.
+    ///
+    /// The RE rows are bit-identical to the ones [`update_l`](Self::update_l)
+    /// produces (the blocked factorization is left-looking; see
+    /// `update_l_re_rows_from_parts`). Callers must restore the `[X|y]` row
+    /// with [`refresh_stale_fe_blocks`](Self::refresh_stale_fe_blocks) before
+    /// anything that reads it (β, profiled residuals, `vcov`, the profiled
+    /// objective) runs.
+    pub(crate) fn update_l_re_only(&mut self) -> Result<()> {
+        let cholesky_zero_pad_tolerance = self
+            .compiler_policy()
+            .thresholds
+            .cholesky_zero_pad_tolerance;
+        self.fe_l_row_stale = true;
+        update_l_re_rows_from_parts(
             &self.a_blocks,
             &mut self.l_blocks,
             &self.reterms,
             cholesky_zero_pad_tolerance,
         )
     }
+
+    /// Whether any `[X|y]` block of `A` or `L` is behind the current
+    /// weights / Λ (see [`update_irls_weights_re_only`](Self::update_irls_weights_re_only)).
+    pub(crate) fn fe_blocks_stale(&self) -> bool {
+        self.fe_a_blocks_stale || self.fe_l_row_stale
+    }
+
+    /// Bring the `[X|y]` blocks of `A` and `L` up to date after
+    /// [`update_irls_weights_re_only`](Self::update_irls_weights_re_only) /
+    /// [`update_l_re_only`](Self::update_l_re_only). A no-op when nothing is
+    /// stale.
+    ///
+    /// Requires the RE rows of `L` to be factored for the current `A` and Λ
+    /// (the same contract every `L` reader already relies on); the result is
+    /// then bit-identical to a full `recompute_a_blocks` + `update_l`.
+    pub(crate) fn refresh_stale_fe_blocks(&mut self) -> Result<()> {
+        if self.fe_a_blocks_stale {
+            self.recompute_fe_a_blocks()?;
+            self.fe_l_row_stale = true;
+        }
+        if self.fe_l_row_stale {
+            let cholesky_zero_pad_tolerance = self
+                .compiler_policy()
+                .thresholds
+                .cholesky_zero_pad_tolerance;
+            update_l_fe_row_from_parts(
+                &self.a_blocks,
+                &mut self.l_blocks,
+                &self.reterms,
+                cholesky_zero_pad_tolerance,
+            )?;
+            self.fe_l_row_stale = false;
+        }
+        Ok(())
+    }
+
+    #[inline]
+    fn debug_assert_fe_blocks_fresh(&self) {
+        debug_assert!(
+            !self.fe_blocks_stale(),
+            "read of the [X|y] A/L blocks while they are stale from a fixed-beta PIRLS update"
+        );
     }
 
     /// Update IRLS weights and working response, then rebuild A blocks.
@@ -1831,6 +1920,24 @@ impl LinearMixedModel {
     /// * `sqrtwts` - square-root of the IRLS weights (length n)
     /// * `working_y` - working response values (length n)
     pub fn update_irls_weights(&mut self, sqrtwts: &[f64], working_y: &[f64]) -> Result<()> {
+        self.apply_irls_weights(sqrtwts, working_y);
+        self.recompute_a_blocks()
+    }
+
+    /// [`update_irls_weights`](Self::update_irls_weights) for fixed-β
+    /// conditional-mode PIRLS: every weighted buffer (`sqrtwts`, `wtz`,
+    /// `wtxy`, the working response) is updated, but only the RE × RE blocks
+    /// of `A` are rebuilt. The `[X|y]` rows of `A` (and hence of `L`) are
+    /// marked stale; [`refresh_stale_fe_blocks`](Self::refresh_stale_fe_blocks)
+    /// or a full [`update_l`](Self::update_l) restores them.
+    pub(crate) fn update_irls_weights_re_only(&mut self, sqrtwts: &[f64], working_y: &[f64]) {
+        self.apply_irls_weights(sqrtwts, working_y);
+        self.recompute_re_a_blocks();
+        self.fe_a_blocks_stale = true;
+        self.fe_l_row_stale = true;
+    }
+
+    fn apply_irls_weights(&mut self, sqrtwts: &[f64], working_y: &[f64]) {
         let n = self.dims.n;
         debug_assert_eq!(sqrtwts.len(), n);
         debug_assert_eq!(working_y.len(), n);
@@ -1879,9 +1986,6 @@ impl LinearMixedModel {
                 .as_mut_slice()
                 .copy_from_slice(working_y);
         }
-        // Rebuild A blocks
-        self.recompute_a_blocks()?;
-        Ok(())
     }
 
     unstable_internal_method! {
@@ -1891,6 +1995,13 @@ impl LinearMixedModel {
     /// Unstable internal surface: `pub` only with the `unstable-internals`
     /// feature; otherwise `pub(crate)`.
     unstable_vis fn recompute_a_blocks(&mut self) -> Result<()> {
+        self.recompute_re_a_blocks();
+        self.recompute_fe_a_blocks()
+    }
+    }
+
+    /// RE × RE blocks of `A` (`A[i, j]`, `j <= i < k`) from the current `wtz`.
+    fn recompute_re_a_blocks(&mut self) {
         let k = self.reterms.len();
         let mut idx = 0;
 
@@ -1916,6 +2027,19 @@ impl LinearMixedModel {
                 idx += 1;
             }
         }
+    }
+
+    /// `[X|y]` rows of `A` (`A[k, 0..=k]`) from the current `wtz` / `wtxy`;
+    /// clears [`fe_a_blocks_stale`](Self::fe_a_blocks_stale) on success.
+    fn recompute_fe_a_blocks(&mut self) -> Result<()> {
+        self.recompute_fe_a_blocks_inner()?;
+        self.fe_a_blocks_stale = false;
+        Ok(())
+    }
+
+    fn recompute_fe_a_blocks_inner(&mut self) -> Result<()> {
+        let k = self.reterms.len();
+        let mut idx = k * (k + 1) / 2;
 
         // Weighted dense designs (PIRLS iterations, weighted refits): the
         // solver-side weighted `[X|y]` already exists as `xy_mat.wtxy`, so
@@ -1964,9 +2088,9 @@ impl LinearMixedModel {
 
         Ok(())
     }
-    }
 
     fn determinant_term_and_pwrss_for_reml(&self, reml: bool) -> (f64, f64) {
+        self.debug_assert_fe_blocks_fresh();
         let k = self.reterms.len();
 
         let mut logdet = 0.0;
@@ -3149,6 +3273,7 @@ impl LinearMixedModel {
 
     /// Extract the fixed-effects coefficients β from the Cholesky factor.
     pub fn beta(&self) -> DVector<f64> {
+        self.debug_assert_fe_blocks_fresh();
         let k = self.reterms.len();
         let l_last = self.l_blocks[block_index(k, k)].as_dense();
         let pp1 = l_last.nrows();
@@ -3252,6 +3377,7 @@ impl LinearMixedModel {
         reason = "the random-effect calculation mirrors block forward/back substitution and preserves the Julia accumulation order"
     )]
     pub fn ranef_u(&self) -> Vec<DMatrix<f64>> {
+        self.debug_assert_fe_blocks_fresh();
         let k = self.reterms.len();
         let p = self.dims.p;
         let n = self.dims.n;
@@ -3775,6 +3901,11 @@ impl LinearMixedModel {
     /// everything. The refreshed entries are computed by the same kernels
     /// as the full rebuild, so the result is bit-identical to it.
     pub(crate) fn recompute_response_blocks(&mut self) -> bool {
+        // An in-place response-column patch needs the rest of the `[X|y]`
+        // rows current; stale rows take the full rebuild.
+        if self.fe_a_blocks_stale {
+            return false;
+        }
         let k = self.reterms.len();
         let base = k * (k + 1) / 2;
         let pp1 = self.xy_mat.wtxy.ncols();

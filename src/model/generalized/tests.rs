@@ -4732,3 +4732,268 @@ fn glmm_joint_inference_deferral_cost() {
         );
     }
 }
+
+// --- Fixed-β PIRLS `[X|y]`-block staleness and response-constant cache
+// (mote bd-01M35KYR62T30QR6DDPYBYNEVC). ---
+
+fn assert_blocks_bit_identical(actual: &[MatrixBlock], expected: &[MatrixBlock], what: &str) {
+    assert_eq!(actual.len(), expected.len(), "{what}: block count");
+    for (idx, (a, e)) in actual.iter().zip(expected).enumerate() {
+        assert_eq!(
+            std::mem::discriminant(a),
+            std::mem::discriminant(e),
+            "{what}[{idx}]: storage kind changed"
+        );
+        let (a, e) = (a.as_dense(), e.as_dense());
+        assert_eq!(a.shape(), e.shape(), "{what}[{idx}]: shape");
+        for (x, y) in a.iter().zip(e.iter()) {
+            assert_eq!(x.to_bits(), y.to_bits(), "{what}[{idx}]: {x:e} vs {y:e}");
+        }
+    }
+}
+
+fn assert_bits_eq(actual: &[f64], expected: &[f64], what: &str) {
+    assert_eq!(actual.len(), expected.len(), "{what}: length");
+    for (x, y) in actual.iter().zip(expected) {
+        assert_eq!(x.to_bits(), y.to_bits(), "{what}: {x:e} vs {y:e}");
+    }
+}
+
+/// The model with its A/L system rebuilt in full from its own final IRLS
+/// weights and working response (the pre-skip behaviour of every PIRLS
+/// iteration).
+fn with_full_rebuild_at_current_weights(
+    model: &GeneralizedLinearMixedModel,
+) -> GeneralizedLinearMixedModel {
+    let mut reference = model.clone();
+    let sqrtwts = model.lmm.sqrtwts.clone();
+    let rank = model.lmm.feterm.rank;
+    let working_y: Vec<f64> = model.lmm.xy_mat.xy.column(rank).iter().copied().collect();
+    reference
+        .lmm
+        .update_irls_weights(&sqrtwts, &working_y)
+        .unwrap();
+    reference.lmm.update_l().unwrap();
+    reference
+}
+
+#[test]
+fn fixed_beta_pirls_exits_with_fe_blocks_bit_identical_to_a_full_rebuild() {
+    for name in ["cbpp", "contraception"] {
+        let mut model = joint_laplace_row(name);
+        let n_beta = model.lmm.feterm.rank;
+        let mut params: Vec<f64> = model.beta.iter().copied().collect();
+        params.extend(model.theta.iter().map(|t| 0.8 * t));
+        let objective = model.joint_glmm_deviance_at_params(&params, n_beta, 1);
+        assert!(objective.is_finite(), "{name}: probe objective");
+        assert!(
+            !model.lmm.fe_blocks_stale(),
+            "{name}: PIRLS returned with stale [X|y] blocks"
+        );
+
+        let reference = with_full_rebuild_at_current_weights(&model);
+        assert_blocks_bit_identical(&model.lmm.a_blocks, &reference.lmm.a_blocks, "A");
+        assert_blocks_bit_identical(&model.lmm.l_blocks, &reference.lmm.l_blocks, "L");
+        // The readers of the `[X|y]` rows agree too.
+        assert_bits_eq(
+            model.lmm.beta().as_slice(),
+            reference.lmm.beta().as_slice(),
+            "profiled beta",
+        );
+        assert_eq!(model.lmm.pwrss().to_bits(), reference.lmm.pwrss().to_bits());
+    }
+}
+
+#[test]
+fn re_only_update_marks_fe_blocks_stale_until_refreshed_or_fully_factored() {
+    let mut model = joint_laplace_row("cbpp");
+    model.fit_with_options(true, 1, false).unwrap();
+    assert!(
+        !model.lmm.fe_blocks_stale(),
+        "fast (varying-β) fit left stale blocks"
+    );
+
+    let rank = model.lmm.feterm.rank;
+    let sqrtwts: Vec<f64> = model.lmm.sqrtwts.iter().map(|w| 1.1 * w).collect();
+    let working_y: Vec<f64> = model
+        .lmm
+        .xy_mat
+        .xy
+        .column(rank)
+        .iter()
+        .map(|y| y + 0.05)
+        .collect();
+
+    let mut full = model.clone();
+    full.lmm.update_irls_weights(&sqrtwts, &working_y).unwrap();
+    full.lmm.update_l().unwrap();
+    assert!(!full.lmm.fe_blocks_stale());
+
+    let mut partial = model.clone();
+    partial
+        .lmm
+        .update_irls_weights_re_only(&sqrtwts, &working_y);
+    assert!(partial.lmm.fe_a_blocks_stale && partial.lmm.fe_l_row_stale);
+    partial.lmm.update_l_re_only().unwrap();
+    assert!(partial.lmm.fe_blocks_stale());
+
+    // The RE rows are already exact; only the `[X|y]` rows lag.
+    let k = partial.lmm.reterms.len();
+    let re_blocks = k * (k + 1) / 2;
+    assert_blocks_bit_identical(
+        &partial.lmm.a_blocks[..re_blocks],
+        &full.lmm.a_blocks[..re_blocks],
+        "RE A",
+    );
+    assert_blocks_bit_identical(
+        &partial.lmm.l_blocks[..re_blocks],
+        &full.lmm.l_blocks[..re_blocks],
+        "RE L",
+    );
+    let stale_fe_a = partial.lmm.a_blocks[re_blocks + k].as_dense();
+    assert_ne!(
+        stale_fe_a,
+        full.lmm.a_blocks[re_blocks + k].as_dense(),
+        "the skipped [X|y]'[X|y] block should still hold the previous weights"
+    );
+
+    // Path 1: the cheap refresh used on PIRLS exit.
+    let mut refreshed = partial.clone();
+    refreshed.lmm.refresh_stale_fe_blocks().unwrap();
+    assert!(!refreshed.lmm.fe_blocks_stale());
+    assert_blocks_bit_identical(&refreshed.lmm.a_blocks, &full.lmm.a_blocks, "refreshed A");
+    assert_blocks_bit_identical(&refreshed.lmm.l_blocks, &full.lmm.l_blocks, "refreshed L");
+
+    // Path 2: a full factor update self-heals the stale A rows first.
+    partial.lmm.update_l().unwrap();
+    assert!(!partial.lmm.fe_blocks_stale());
+    assert_blocks_bit_identical(&partial.lmm.a_blocks, &full.lmm.a_blocks, "self-healed A");
+    assert_blocks_bit_identical(&partial.lmm.l_blocks, &full.lmm.l_blocks, "self-healed L");
+}
+
+#[test]
+fn joint_and_fast_fits_leave_fe_blocks_matching_a_forced_rebuild() {
+    for fast in [false, true] {
+        let mut model = joint_laplace_row("cbpp");
+        model.fit_with_options(fast, 1, false).unwrap();
+        assert!(
+            !model.lmm.fe_blocks_stale(),
+            "fast={fast}: stale blocks after fit"
+        );
+
+        let mut forced = model.clone();
+        forced.lmm.recompute_a_blocks().unwrap();
+        forced.lmm.update_l().unwrap();
+        assert_blocks_bit_identical(&model.lmm.a_blocks, &forced.lmm.a_blocks, "A");
+        assert_blocks_bit_identical(&model.lmm.l_blocks, &forced.lmm.l_blocks, "L");
+        assert_bits_eq(
+            MixedModelFit::vcov(&model).as_slice(),
+            MixedModelFit::vcov(&forced).as_slice(),
+            "vcov",
+        );
+        assert_bits_eq(
+            MixedModelFit::stderror(&model).as_slice(),
+            MixedModelFit::stderror(&forced).as_slice(),
+            "stderror",
+        );
+    }
+}
+
+#[test]
+fn response_constant_cache_matches_uncached_and_follows_the_response() {
+    let mut model = joint_laplace_row("cbpp");
+    model.fit_with_options(false, 1, false).unwrap();
+    assert!(
+        model.current_response_log_constants().is_some(),
+        "joint fit builds the cache"
+    );
+
+    let uncached_objective = |model: &GeneralizedLinearMixedModel| {
+        let mut plain = model.clone();
+        plain.response_log_constants = None;
+        plain.laplace_objective_with_response_constants()
+    };
+    assert_eq!(
+        model.laplace_objective_with_response_constants().to_bits(),
+        uncached_objective(&model).to_bits()
+    );
+
+    // Reset for a refit with a new response: the constants follow the new y.
+    let old_constants = model.current_response_log_constants().unwrap().to_vec();
+    let sizes = model.wt.clone();
+    let new_y: Vec<f64> = model
+        .y
+        .iter()
+        .zip(&sizes)
+        .map(|(&p, &n)| ((p * n).round() + 1.0).min(n) / n)
+        .collect();
+    model.reset_for_refit(Some(&new_y)).unwrap();
+    assert!(
+        model.current_response_log_constants().is_none(),
+        "a new response must invalidate the cached constants"
+    );
+    // A joint-objective evaluation on the new response (optimizer-free, so
+    // the check is the same with and without NLopt).
+    let n_beta = model.lmm.feterm.rank;
+    let mut params: Vec<f64> = model.beta.iter().copied().collect();
+    params.extend(model.theta.iter().copied());
+    let refit_objective = model.joint_glmm_deviance_at_params(&params, n_beta, 1);
+    assert!(refit_objective.is_finite());
+    let new_constants = model.current_response_log_constants().unwrap().to_vec();
+    assert_ne!(new_constants, old_constants);
+    let expected: Vec<f64> = (0..model.y.len())
+        .map(|i| model.response_log_constant_observation(i).unwrap())
+        .collect();
+    assert_bits_eq(&new_constants, &expected, "refit constants");
+    assert_eq!(
+        model.laplace_objective_with_response_constants().to_bits(),
+        uncached_objective(&model).to_bits()
+    );
+    assert_eq!(
+        refit_objective.to_bits(),
+        uncached_objective(&model).to_bits()
+    );
+
+    // Direct writes to the public response/weight fields are caught too.
+    model.y[0] = if model.y[0] > 0.0 { 0.0 } else { 1.0 };
+    assert!(model.current_response_log_constants().is_none());
+    assert_eq!(
+        model.laplace_objective_with_response_constants().to_bits(),
+        uncached_objective(&model).to_bits()
+    );
+    model.ensure_response_log_constants();
+    model.wt[0] += 1.0;
+    assert!(model.current_response_log_constants().is_none());
+}
+
+#[test]
+fn response_constant_cache_key_is_checked_once_per_objective_evaluation() {
+    use super::pirls::RESPONSE_LOG_CONSTANT_KEY_CHECKS;
+    let key_checks = || RESPONSE_LOG_CONSTANT_KEY_CHECKS.with(|count| count.get());
+
+    let mut model = joint_laplace_row("culcita");
+    model.fit_with_options(true, 1, false).unwrap();
+    model.ensure_response_log_constants();
+    assert!(
+        model.y.len() > 3,
+        "fixture must have more observations than allowed checks"
+    );
+
+    for n_agq in [1, 7] {
+        let before = key_checks();
+        let objective = model.deviance_with_response_constants(n_agq);
+        assert!(objective.is_finite());
+        let checks = key_checks() - before;
+        // One check in `ensure_response_log_constants`, one per summed
+        // objective / offset — independent of the number of observations.
+        assert!(
+            checks <= 2,
+            "n_agq={n_agq}: {checks} cache-key checks for one evaluation (n = {})",
+            model.y.len()
+        );
+    }
+    let before = key_checks();
+    let _ = model.response_constants_offset();
+    let _ = model.laplace_objective_with_response_constants();
+    assert_eq!(key_checks() - before, 2);
+}

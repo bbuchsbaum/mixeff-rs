@@ -540,18 +540,37 @@ pub(super) fn solve_scaled_vsize1_row(
     }
 }
 
-#[allow(
-    clippy::needless_range_loop,
-    reason = "blocked Cholesky indexes packed A/L blocks and covariance terms with the same Julia-compatible block coordinates"
-)]
 pub(crate) fn update_l_from_parts(
     a_blocks: &[MatrixBlock],
     l_blocks: &mut [MatrixBlock],
     reterms: &[ReMat],
     cholesky_zero_pad_tolerance: f64,
 ) -> Result<()> {
+    update_l_re_rows_from_parts(a_blocks, l_blocks, reterms, cholesky_zero_pad_tolerance)?;
+    update_l_fe_row_from_parts(a_blocks, l_blocks, reterms, cholesky_zero_pad_tolerance)
+}
+
+/// Random-effects rows of the blocked Cholesky: every `L[i, j]` with
+/// `i < k`, where `k` is the number of RE terms.
+///
+/// The blocked factorization is left-looking, so the RE rows never read the
+/// trailing `[X|y]` row. Running the RE rows to completion first and the
+/// `[X|y]` row second ([`update_l_fe_row_from_parts`]) applies exactly the
+/// same floating-point operations to every block, in the same per-block
+/// order, as the interleaved sweep; [`update_l_from_parts`] is the two
+/// halves back to back. Conditional-mode PIRLS with fixed β reads only the
+/// RE rows, so it runs this half alone and marks the `[X|y]` row stale.
+#[allow(
+    clippy::needless_range_loop,
+    reason = "blocked Cholesky indexes packed A/L blocks and covariance terms with the same Julia-compatible block coordinates"
+)]
+pub(crate) fn update_l_re_rows_from_parts(
+    a_blocks: &[MatrixBlock],
+    l_blocks: &mut [MatrixBlock],
+    reterms: &[ReMat],
+    cholesky_zero_pad_tolerance: f64,
+) -> Result<()> {
     let k = reterms.len(); // number of RE terms
-    let total = k + 1; // +1 for the [X|y] block
 
     // Copy A to L, scaling by Λ
     // For diagonal blocks L[j,j] = Λ_j' A[j,j] Λ_j + I
@@ -573,6 +592,40 @@ pub(crate) fn update_l_from_parts(
         }
     }
 
+    // Blocked Cholesky factorization of the RE rows
+    for j in 0..k {
+        let diag_idx = block_index(j, j);
+
+        // Update L[j,j] by subtracting L[j,0..j] * L[j,0..j]'
+        downdate_diagonal_block(l_blocks, j);
+
+        // Cholesky of diagonal block
+        cholesky_block_with_tolerance(&mut l_blocks[diag_idx], cholesky_zero_pad_tolerance)?;
+
+        // Solve for off-diagonal RE blocks: L[i,j] for j < i < k
+        for i in (j + 1)..k {
+            solve_off_diagonal_block(l_blocks, i, j)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Trailing `[X|y]` row of the blocked Cholesky (`L[k, 0..=k]`), given RE
+/// rows already factored for the current `A` and Λ by
+/// [`update_l_re_rows_from_parts`].
+#[allow(
+    clippy::needless_range_loop,
+    reason = "blocked Cholesky indexes packed A/L blocks and covariance terms with the same Julia-compatible block coordinates"
+)]
+pub(crate) fn update_l_fe_row_from_parts(
+    a_blocks: &[MatrixBlock],
+    l_blocks: &mut [MatrixBlock],
+    reterms: &[ReMat],
+    cholesky_zero_pad_tolerance: f64,
+) -> Result<()> {
+    let k = reterms.len(); // number of RE terms
+
     // For FE-RE blocks L[k,j] = A[k,j] Λ_j (no Λ on left for FeMat)
     for j in 0..k {
         let idx_kj = block_index(k, j);
@@ -583,51 +636,56 @@ pub(crate) fn update_l_from_parts(
     let idx_kk = block_index(k, k);
     copy_block(&mut l_blocks[idx_kk], &a_blocks[idx_kk]);
 
-    // Blocked Cholesky factorization
-    for j in 0..total {
-        let diag_idx = block_index(j, j);
-
-        // Update L[j,j] by subtracting L[j,0..j] * L[j,0..j]'
-        for jj in 0..j {
-            let off_idx = block_index(j, jj);
-            with_block_pair_mut(l_blocks, diag_idx, off_idx, |diag, off| match off {
-                MatrixBlock::Sparse(off_sparse) => rank_k_downdate_sparse(diag, off_sparse),
-                _ => {
-                    if let Some(off_dense) = off.as_dense_ref() {
-                        rank_k_downdate(diag, off_dense);
-                    } else {
-                        let off_dense = off.as_dense();
-                        rank_k_downdate(diag, &off_dense);
-                    }
-                }
-            });
-        }
-
-        // Cholesky of diagonal block
-        cholesky_block_with_tolerance(&mut l_blocks[diag_idx], cholesky_zero_pad_tolerance)?;
-
-        // Solve for off-diagonal blocks: L[i,j] for i > j
-        for i in (j + 1)..total {
-            let target_idx = block_index(i, j);
-
-            // L[i,j] -= sum_{jj<j} L[i,jj] * L[j,jj]'
-            for jj in 0..j {
-                with_block_triple(
-                    l_blocks,
-                    target_idx,
-                    block_index(i, jj),
-                    block_index(j, jj),
-                    subtract_product_from_blocks,
-                )?;
-            }
-
-            // L[i,j] = L[i,j] * L[j,j]^{-T}
-            with_block_pair_mut(l_blocks, target_idx, diag_idx, |target, diag| {
-                rdiv_lower_transpose(target, diag);
-            });
-        }
+    // L[k,j] for j < k, in the same column order as the interleaved sweep
+    for j in 0..k {
+        solve_off_diagonal_block(l_blocks, k, j)?;
     }
 
+    // L[k,k]: downdate by the finished row, then factor
+    downdate_diagonal_block(l_blocks, k);
+    cholesky_block_with_tolerance(&mut l_blocks[idx_kk], cholesky_zero_pad_tolerance)
+}
+
+/// `L[j,j] -= Σ_{jj<j} L[j,jj] L[j,jj]'`.
+fn downdate_diagonal_block(l_blocks: &mut [MatrixBlock], j: usize) {
+    let diag_idx = block_index(j, j);
+    for jj in 0..j {
+        let off_idx = block_index(j, jj);
+        with_block_pair_mut(l_blocks, diag_idx, off_idx, |diag, off| match off {
+            MatrixBlock::Sparse(off_sparse) => rank_k_downdate_sparse(diag, off_sparse),
+            _ => {
+                if let Some(off_dense) = off.as_dense_ref() {
+                    rank_k_downdate(diag, off_dense);
+                } else {
+                    let off_dense = off.as_dense();
+                    rank_k_downdate(diag, &off_dense);
+                }
+            }
+        });
+    }
+}
+
+/// `L[i,j] = (L[i,j] - Σ_{jj<j} L[i,jj] L[j,jj]') L[j,j]^{-T}` for `i > j`,
+/// with `L[j,j]` already factored.
+fn solve_off_diagonal_block(l_blocks: &mut [MatrixBlock], i: usize, j: usize) -> Result<()> {
+    let target_idx = block_index(i, j);
+    let diag_idx = block_index(j, j);
+
+    // L[i,j] -= sum_{jj<j} L[i,jj] * L[j,jj]'
+    for jj in 0..j {
+        with_block_triple(
+            l_blocks,
+            target_idx,
+            block_index(i, jj),
+            block_index(j, jj),
+            subtract_product_from_blocks,
+        )?;
+    }
+
+    // L[i,j] = L[i,j] * L[j,j]^{-T}
+    with_block_pair_mut(l_blocks, target_idx, diag_idx, |target, diag| {
+        rdiv_lower_transpose(target, diag);
+    });
     Ok(())
 }
 

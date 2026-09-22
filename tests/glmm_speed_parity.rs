@@ -112,6 +112,21 @@ const FAST_FALSE_SPEED_CASES: &[FastFalseGlmmSpeedCase] = &[
         optimizer_prefix: "JOINT_AGQ:",
         minimum_speedup: 3.0,
     },
+    // Promoted certified joint row (mote bd-01M35KYR62T30QR6DDPYBYNEVC):
+    // 103.9 ms vs lme4's recorded 186 ms (1.79x) after fixed-beta PIRLS
+    // stopped rebuilding the unused [X|y] A/L rows every iteration and the
+    // response ln-gamma constants were cached (was 265 ms, 0.70x). The
+    // measured ratio clears 1.3x, so the gate is parity (1.0x).
+    FastFalseGlmmSpeedCase {
+        dataset: "contraception",
+        formula: "use ~ 1 + age + livch + urban + (1 | dist)",
+        family: "Binomial",
+        link: "Logit",
+        estimator: "Laplace",
+        objective_definition: "joint_glmm_laplace_deviance",
+        optimizer_prefix: "JOINT_LAPLACE:",
+        minimum_speedup: 1.0,
+    },
 ];
 
 fn repo_root() -> PathBuf {
