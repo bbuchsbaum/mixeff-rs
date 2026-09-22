@@ -796,6 +796,46 @@ and certification quality was graded from the gradient method alone (an
 exact gradient with a finite-difference Hessian now stays
 `Approximate`). The lane is part of every gate from here on.
 
+Corrections to the T7.5 notes (2026-09-22):
+
+- grouseticks has no fill-in. The terms are ordered INDEX (403) >
+  BROOD (118) > LOCATION (63) and are fully nested, so L[1,1] is
+  Diagonal and the off-diagonal blocks are sparse, as in MixedModels.jl.
+  The cost is per PIRLS iteration and comes from two routines:
+  - `update_l` (73% of each iteration). Most of it is
+    `subtract_product_from_blocks`, which makes dense copies of the
+    sparse L[2,1] and L[3,1] blocks, multiplies them densely, and leaves
+    L[3,2] dense.
+  - `ranef_u`, which also works on dense copies of the off-diagonal
+    blocks.
+
+  PIRLS iteration counts match Julia's. Tracked in mote
+  bd-01M1TGFK22VQ8VCASPS83BRSB5.
+- The joint cbpp row did not regress. The 0.75 ms "July record" was a
+  wall-clock value carried over from the fast-PIRLS row. 6edf0a2 kept
+  bdc7aff's timing fields when it switched the row to the joint fit, and
+  bdc7aff's row was still the fast-PIRLS fit.
+
+  Timed in the same session, 6edf0a2 takes about 6.1 ms and HEAD about
+  4.6 ms (same objective, 98 evaluations), so e32d8b2's 5.6 ms is the
+  first real measurement of this row. Where the time goes:
+
+  | part | share |
+  |---|---:|
+  | BOBYQA loop | 54% |
+  | eager finite-difference joint Hessian in `record_glmm_fit_metadata` | 27% |
+  | profiled start | 11% |
+  | certification gradient | 6% |
+
+  Deferring the Hessian is tracked in mote bd-01M35AQPGMYJT71H0D0FQDYCKS.
+- The recorded `comparison/lme4_results.json` stores objectives with
+  jsonlite's default of 4 decimal places, because it predates
+  `digits = 17` in `compare_lme4.R` (7dfd24a). A full-precision rerun
+  rounds to the same recorded values. The contraception `(1 | dist)`
+  joint row fails the promotion gate only because of that rounding.
+  Refreshing the file changes that gate's expected pass list and needs a
+  promotion decision; tracked in mote bd-01M35AQYXEXZHJA7JA7GTXR032.
+
 ## Verification (end-to-end)
 
 1. `cargo test` and `cargo test --no-default-features`; `cargo clippy
