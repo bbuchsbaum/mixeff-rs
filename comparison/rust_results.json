@@ -1,14 +1,14 @@
 {
   "results": [
     {
-      "aic": 20863.898875520823,
+      "aic": 20863.89887552115,
       "beta": [
-        2.272179547734558,
-        0.4464568704730582,
-        1.4245441923886815,
-        -0.39542507645291464
+        2.272179191992578,
+        0.4464568710813765,
+        1.4245441921411952,
+        -0.39542507537587235
       ],
-      "bic": 20894.96313706898,
+      "bic": 20894.963137069306,
       "coef_names": [
         "(Intercept)",
         "amd: unclipped",
@@ -25,23 +25,23 @@
       "formula": "total.fruits ~ amd * nutrient + (1 | reg/popu) + (1 | gen)",
       "is_singular": false,
       "link": "Log",
-      "loglik": -10424.949437760411,
+      "loglik": -10424.949437760575,
       "n_obs": 625,
-      "objective": 18486.86514628248,
+      "objective": 18486.865146282795,
       "objective_definition": "profiled_glmm_deviance",
       "optimizer": "bobyqa",
       "optimizer_backend": "nlopt",
-      "optimizer_fevals": 122,
-      "optimizer_fmin": 18486.86514628248,
+      "optimizer_fevals": 143,
+      "optimizer_fmin": 18486.865146282795,
       "optimizer_max_fevals": -1,
       "optimizer_return_code": "FTOL_REACHED",
       "response_constants": "dropped",
       "sigma": 1.0,
       "status": "ok",
       "theta": [
-        0.2534675907456828,
-        0.4136029430872265,
-        0.28516625646755384
+        0.25346669673288663,
+        0.4136042022064876,
+        0.28517072385906383
       ]
     },
     {
@@ -157,16 +157,16 @@
       ]
     },
     {
-      "aic": 2427.6626372063224,
+      "aic": 2427.6164622899537,
       "beta": [
-        0.38329042374742917,
-        -0.02614195792347487,
-        -1.3235176481381632,
-        0.03062986489649587,
-        -0.23173380070089758,
-        -0.7196879722814982
+        0.38842094557118795,
+        -0.026594486329621827,
+        -1.3452344078368261,
+        0.03132077463625327,
+        -0.23602585124007372,
+        -0.7329502843774964
       ],
-      "bic": 2466.634056938415,
+      "bic": 2466.5878820220464,
       "coef_names": [
         "(Intercept)",
         "age",
@@ -179,27 +179,27 @@
       "error": null,
       "estimator": "Laplace",
       "family": "Binomial",
-      "fit_time_ms": 32.967834,
-      "fit_time_ms_min": 32.61925,
+      "fit_time_ms": 265.61604100000005,
+      "fit_time_ms_min": 265.438875,
       "fit_time_ms_repeats": 3,
       "formula": "use ~ 1 + age + livch + urban + (1 | dist)",
       "is_singular": false,
       "link": "Logit",
-      "loglik": -1206.8313186031612,
+      "loglik": -1206.8082311449768,
       "n_obs": 1934,
-      "objective": 2413.662637206323,
-      "objective_definition": "profiled_glmm_deviance",
+      "objective": 2413.6164622899537,
+      "objective_definition": "joint_glmm_laplace_deviance",
       "optimizer": "bobyqa",
       "optimizer_backend": "nlopt",
-      "optimizer_fevals": 33,
-      "optimizer_fmin": 2413.662637206323,
-      "optimizer_max_fevals": -1,
-      "optimizer_return_code": "FTOL_REACHED",
-      "response_constants": "dropped",
+      "optimizer_fevals": 169,
+      "optimizer_fmin": 2413.6164622899537,
+      "optimizer_max_fevals": 200,
+      "optimizer_return_code": "JOINT_LAPLACE:FTOL_REACHED",
+      "response_constants": "included",
       "sigma": 1.0,
       "status": "ok",
       "theta": [
-        0.4604141649229396
+        0.46086244315267944
       ]
     },
     {
@@ -563,14 +563,14 @@
       ]
     },
     {
-      "aic": 1796.4033170283833,
+      "aic": 1796.4033170283856,
       "beta": [
-        0.5293111684362596,
-        1.1072988135669513,
-        -0.9184125217234982,
-        -0.02219195796706991
+        0.5293111679289515,
+        1.1072988139448714,
+        -0.9184125217325657,
+        -0.022191957972333528
       ],
-      "bic": 1824.3958729620101,
+      "bic": 1824.3958729620124,
       "coef_names": [
         "(Intercept)",
         "YEAR: 96",
@@ -587,23 +587,23 @@
       "formula": "TICKS ~ 1 + YEAR + cHEIGHT + (1 | BROOD) + (1 | INDEX) + (1 | LOCATION)",
       "is_singular": false,
       "link": "Log",
-      "loglik": -891.2016585141916,
+      "loglik": -891.2016585141928,
       "n_obs": 403,
-      "objective": 851.4046370814442,
+      "objective": 851.4046370814444,
       "objective_definition": "profiled_glmm_deviance",
       "optimizer": "bobyqa",
       "optimizer_backend": "nlopt",
       "optimizer_fevals": 48,
-      "optimizer_fmin": 851.4046370814442,
+      "optimizer_fmin": 851.4046370814444,
       "optimizer_max_fevals": -1,
       "optimizer_return_code": "FTOL_REACHED",
       "response_constants": "dropped",
       "sigma": 1.0,
       "status": "ok",
       "theta": [
-        0.5369700825063781,
-        0.7362778438067625,
-        0.557294450083303
+        0.5369700810501389,
+        0.7362778473593187,
+        0.5572944503371051
       ]
     },
     {
@@ -1049,16 +1049,16 @@
       ]
     },
     {
-      "aic": 581.2371973325536,
+      "aic": 581.2371973325526,
       "beta": [
-        81.90000000000032,
-        8.51666666666659,
-        -8.600000000000092,
-        75.33333333333388,
-        -10.750000000000425,
-        5.74999999999955
+        81.90000000000049,
+        8.516666666666499,
+        -8.600000000000152,
+        75.33333333333394,
+        -10.750000000000508,
+        5.749999999999427
       ],
-      "bic": 601.727192403698,
+      "bic": 601.727192403697,
       "coef_names": [
         "(Intercept)",
         "Variety: Marvellous",
@@ -1077,22 +1077,22 @@
       "formula": "yield ~ 1 + Variety * nitro + (1 | Block) + (1 | Block:Variety)",
       "is_singular": false,
       "link": "Identity",
-      "loglik": -281.6185986662768,
+      "loglik": -281.6185986662763,
       "n_obs": 72,
-      "objective": 563.2371973325536,
+      "objective": 563.2371973325526,
       "objective_definition": "restricted_deviance",
       "optimizer": "bobyqa",
       "optimizer_backend": "nlopt",
       "optimizer_fevals": 25,
-      "optimizer_fmin": 563.2371973325536,
+      "optimizer_fmin": 563.2371973325526,
       "optimizer_max_fevals": -1,
       "optimizer_return_code": "FTOL_REACHED",
       "response_constants": "not_applicable",
-      "sigma": 12.990380942169908,
+      "sigma": 12.99038094461661,
       "status": "ok",
       "theta": [
-        0.8005374714588508,
-        1.1273752941114275
+        0.8005374698737702,
+        1.1273752949907139
       ]
     },
     {
@@ -1824,17 +1824,17 @@
       "theta": null
     },
     {
-      "aic": 8154.170871706002,
+      "aic": 8154.170871705983,
       "beta": [
-        0.5485425285010215,
-        0.054380198551414315,
-        0.3042435368646503,
-        -1.0174895804258473,
-        -2.0206721190081525,
-        -1.0125459780831656,
-        -0.6791019041463462
+        0.5485425282187348,
+        0.054380198524829164,
+        0.3042435367501658,
+        -1.017489580150056,
+        -2.020672117803789,
+        -1.0125459774702308,
+        -0.6791019034805759
       ],
-      "bic": 8216.575036101416,
+      "bic": 8216.575036101396,
       "coef_names": [
         "(Intercept)",
         "Anger",
@@ -1854,22 +1854,22 @@
       "formula": "r2 ~ 1 + Anger + Gender + btype + situ + mode + (1 | id) + (1 | item)",
       "is_singular": false,
       "link": "Logit",
-      "loglik": -4068.085435853001,
+      "loglik": -4068.0854358529914,
       "n_obs": 7584,
-      "objective": 8136.170871706006,
+      "objective": 8136.17087170599,
       "objective_definition": "profiled_glmm_deviance",
       "optimizer": "bobyqa",
       "optimizer_backend": "nlopt",
-      "optimizer_fevals": 41,
-      "optimizer_fmin": 8136.170871706006,
+      "optimizer_fevals": 43,
+      "optimizer_fmin": 8136.17087170599,
       "optimizer_max_fevals": -1,
       "optimizer_return_code": "FTOL_REACHED",
       "response_constants": "dropped",
       "sigma": 1.0,
       "status": "ok",
       "theta": [
-        1.3389174727773498,
-        0.3446095211362474
+        1.3389174713974952,
+        0.34460951015382585
       ]
     }
   ],

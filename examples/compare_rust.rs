@@ -516,6 +516,7 @@ fn fit_glmm(
 
 fn use_fast_glmm_comparison_path(
     dataset: &str,
+    formula: &str,
     estimator: &str,
     family: &str,
     n_obs: usize,
@@ -523,10 +524,17 @@ fn use_fast_glmm_comparison_path(
     let _ = (family, n_obs);
     // The comparison harness stays row-scoped: only rows that have passed the
     // certified joint gate use `fast=false` here. Other GLMM rows keep the
-    // profiled-PIRLS path and documented-divergence classification.
+    // profiled-PIRLS path and documented-divergence classification. The
+    // contraception rows share dataset and estimator, so the promoted
+    // random-intercept row is selected by formula; the random-slope row stays
+    // on the profiled path.
+    let laplace = estimator.eq_ignore_ascii_case("Laplace");
     let joint_certified = (dataset == "culcitalogreg"
-        && (estimator.eq_ignore_ascii_case("Laplace") || estimator.eq_ignore_ascii_case("AGQ")))
-        || (dataset == "cbpp" && estimator.eq_ignore_ascii_case("Laplace"));
+        && (laplace || estimator.eq_ignore_ascii_case("AGQ")))
+        || (dataset == "cbpp" && laplace)
+        || (dataset == "contraception"
+            && laplace
+            && formula == "use ~ 1 + age + livch + urban + (1 | dist)");
     !joint_certified
 }
 
@@ -635,7 +643,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 fit_lmm(&df, &fit.formula, reml)
             } else {
                 let fast_glmm =
-                    use_fast_glmm_comparison_path(&name, &fit.estimator, &fit.family, n_obs);
+                    use_fast_glmm_comparison_path(
+                        &name,
+                        &fit.formula,
+                        &fit.estimator,
+                        &fit.family,
+                        n_obs,
+                    );
                 let glmm_mode = if fast_glmm { "fast" } else { "joint" };
                 print!(
                     "fitting {name} :: {} [{} {}/{} {glmm_mode}] ... ",

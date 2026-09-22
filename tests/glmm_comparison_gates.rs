@@ -174,12 +174,9 @@ const MATCHING_GLMM_GATES: &[MatchingGate] = &[
     },
 ];
 
-const FAST_ORACLE_ROWS: &[ExpectedGlmmRow] = &[
-    CONTRACEPTION_INTERCEPT,
-    CONTRACEPTION_SLOPE,
-    GROUSETICKS,
-    VERBAGG,
-];
+// The contraception `(1 | dist)` row left this set when it was promoted to the
+// certified fast=false joint Laplace gate (mote bd-01M35AQYXEXZHJA7JA7GTXR032).
+const FAST_ORACLE_ROWS: &[ExpectedGlmmRow] = &[CONTRACEPTION_SLOPE, GROUSETICKS, VERBAGG];
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -541,8 +538,9 @@ fn glmm_comparison_rows_have_expected_status_and_payload_shape() {
         if row.status == "ok" {
             assert_ok_glmm_payload(rust_record, "rust_results.json", &key);
             assert_ok_glmm_payload(r_record, "lme4_results.json", &key);
-            let is_promoted_joint_laplace =
-                key == expected_row_key(CULCITA_BINOMIAL_LAPLACE) || key == expected_row_key(CBPP);
+            let is_promoted_joint_laplace = key == expected_row_key(CULCITA_BINOMIAL_LAPLACE)
+                || key == expected_row_key(CBPP)
+                || key == expected_row_key(CONTRACEPTION_INTERCEPT);
             let is_promoted_joint_agq = key == expected_row_key(CULCITA_BINOMIAL_AGQ);
             assert_eq!(
                 rust_record
@@ -1048,6 +1046,9 @@ fn experimental_joint_binomial_rows_stay_below_promotion_gate() {
         let status = joint.opt_summary().return_value.clone();
         // Rust 1.96/Linux shifts the cbpp Laplace beta by about 2.3e-5 past
         // the older 1e-3 smoke gate while objective and theta still certify.
+        // contraception (1 | dist) certifies at objective_delta ~8.9e-5 with
+        // Rust at the lower optimum; the margin exists only against the
+        // full-precision lme4 reference (the digits=4 file missed at 1.4e-4).
         let pass = objective_delta <= 1e-4 && beta_delta <= 1.1e-3 && theta_delta <= 2e-3;
 
         println!(
@@ -1066,9 +1067,10 @@ fn experimental_joint_binomial_rows_stay_below_promotion_gate() {
         vec![
             expected_row_key(CBPP),
             expected_row_key(CULCITA_BINOMIAL_LAPLACE),
-            expected_row_key(CULCITA_BINOMIAL_AGQ)
+            expected_row_key(CULCITA_BINOMIAL_AGQ),
+            expected_row_key(CONTRACEPTION_INTERCEPT)
         ],
-        "only the cbpp Laplace and culcitalogreg Laplace/AGQ rows are currently certified for promotion"
+        "only the cbpp Laplace, culcitalogreg Laplace/AGQ, and contraception (1 | dist) Laplace rows are currently certified for promotion"
     );
     assert!(
         !missed_objective_gate.is_empty(),
@@ -1088,7 +1090,6 @@ fn glmm_report_contains_expected_numeric_classifications() {
         "Poisson/Log multi-random-intercept row matches MixedModels.jl 5.3.0 fast=true",
         "rare-event Bernoulli/Logit row uses the current fast-PIRLS profiled path",
         "large crossed Binomial/Logit row matches MixedModels.jl 5.3.0 fast=true",
-        "large Binomial/Logit random-intercept row matches MixedModels.jl 5.3.0 fast=true",
         "large Binomial/Logit random-slope row matches MixedModels.jl 5.3.0 fast=true",
     ] {
         assert!(

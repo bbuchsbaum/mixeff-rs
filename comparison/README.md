@@ -23,10 +23,12 @@ not a blanket raw-speed or universal superiority claim.
 Documented divergence rows are not soft parity passes. They are release-visible
 decisions with tests in `tests/parity_divergence_contract.rs`:
 
-- GLMM fast-PIRLS rows (`cbpp`, `contraception`, `verbagg`) remain non-`lme4`
+- GLMM fast-PIRLS rows (the `contraception` `(1 + urban | dist)` random-slope
+  row, `verbagg`) remain non-`lme4`
   claims unless a row passes the certified joint GLMM gate. `culcitalogreg`
-  Laplace and AGQ are row-scoped promotions: the Rust comparison harness fits
-  them through `fast=false` joint estimation with response constants retained.
+  Laplace and AGQ, `cbpp` Laplace, and the `contraception` `(1 | dist)`
+  Laplace row are row-scoped promotions: the Rust comparison harness fits them
+  through `fast=false` joint estimation with response constants retained.
 - `gopherdat2` keeps coefficient parity but remains divergent because Rust
   estimates a near-zero covariance parameter without lme4's singular flag, and
   GLMM objective constants are not comparable.

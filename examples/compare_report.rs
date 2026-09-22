@@ -107,7 +107,7 @@ fn julia_glmm_reference_section(rust: &ResultsFile) -> Option<String> {
     let scenarios = reference.get("scenarios")?.as_object()?;
     let provenance = reference.get("provenance").cloned().unwrap_or_default();
     // Julia scenario -> (dataset, formula fragment, joint?) in the comparison manifest.
-    let mapping: [(&str, &str, &str, bool); 6] = [
+    let mapping: [(&str, &str, &str, bool); 7] = [
         ("glmm_cbpp_fast", "cbpp", "(1 | herd)", false),
         ("glmm_cbpp_full", "cbpp", "(1 | herd)", true),
         (
@@ -122,6 +122,12 @@ fn julia_glmm_reference_section(rust: &ResultsFile) -> Option<String> {
             "contraception",
             "(1 | dist)",
             false,
+        ),
+        (
+            "glmm_contra_intercept_full",
+            "contraception",
+            "(1 | dist)",
+            true,
         ),
         (
             "glmm_contra_slope_fast",
@@ -262,9 +268,6 @@ fn known_glmm_numeric_classification(r: &ResultRecord) -> Option<&'static str> {
         ),
         ("contraception", "Laplace") if r.formula.contains("(1 + urban | dist)") => Some(
             "large Binomial/Logit random-slope row matches MixedModels.jl 5.3.0 fast=true profiled objective; lme4 beta gap is fast-PIRLS versus joint-estimate divergence",
-        ),
-        ("contraception", "Laplace") => Some(
-            "large Binomial/Logit random-intercept row matches MixedModels.jl 5.3.0 fast=true profiled objective; lme4 beta gap is fast-PIRLS versus joint-estimate divergence",
         ),
         _ => None,
     }

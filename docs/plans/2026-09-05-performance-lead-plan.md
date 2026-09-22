@@ -832,9 +832,14 @@ Corrections to the T7.5 notes (2026-09-22):
   jsonlite's default of 4 decimal places, because it predates
   `digits = 17` in `compare_lme4.R` (7dfd24a). A full-precision rerun
   rounds to the same recorded values. The contraception `(1 | dist)`
-  joint row fails the promotion gate only because of that rounding.
-  Refreshing the file changes that gate's expected pass list and needs a
-  promotion decision; tracked in mote bd-01M35AQYXEXZHJA7JA7GTXR032.
+  joint row failed the promotion gate only because of that rounding.
+  Resolved (mote bd-01M35AQYXEXZHJA7JA7GTXR032): the file was regenerated
+  at full precision (timings preserved) and the row was promoted to
+  `release_blocking_parity` / `lme4_joint_laplace` in lockstep — Rust
+  objective 8.9e-5 below lme4 (1e-4 gate), β within 1.6e-4, θ within
+  3.3e-5. Its Rust timing was re-measured on the joint path (265 ms vs
+  lme4's recorded 186 ms, 0.7×); the random-slope row stays a documented
+  divergence.
 
 ## Verification (end-to-end)
 

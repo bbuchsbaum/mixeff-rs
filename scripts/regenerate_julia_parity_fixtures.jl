@@ -399,7 +399,10 @@ end
 
 # Regenerate tests/fixtures/parity/glmm_fast_oracles.json: MixedModels.jl
 # fast=true oracle rows for large GLMMs where Rust intentionally uses the
-# fast-PIRLS comparison path (see comparison/parity_scorecard.toml). Oracle
+# fast-PIRLS comparison path (see comparison/parity_scorecard.toml). The
+# contraception `(1 | dist)` row left this fixture when it was promoted to
+# the certified fast=false joint Laplace gate (mote
+# bd-01M35AQYXEXZHJA7JA7GTXR032); the random-slope row stays. Oracle
 # numerics (objective, beta, theta, feval counts) are refreshed from live
 # fits; tolerances, comparability policy, and classification strings are
 # versioned here because they encode Rust-side gating decisions, not Julia
@@ -409,27 +412,6 @@ function glmm_fast_oracles_fixture()
 
     contra = DataFrame(MixedModels.dataset(:contra))
     contra.usenum = Float64.(contra.use .== "Y")
-    contra_ri = fit(
-        MixedModel,
-        @formula(usenum ~ 1 + age + livch + urban + (1 | dist)),
-        contra,
-        Bernoulli();
-        fast=true,
-        progress=false,
-    )
-    push!(rows, fast_oracle_row(
-        contra_ri;
-        dataset="contraception",
-        formula="use ~ 1 + age + livch + urban + (1 | dist)",
-        family="Binomial",
-        link="Logit",
-        compare_beta=false,
-        beta_abs_tol=nothing,
-        compare_theta=true,
-        theta_abs_tol=0.001,
-        classification="fast-PIRLS oracle: Rust and MixedModels.jl fast=true agree on the profiled objective; beta is not directly compared because the local fixture uses different factor coding than the lme4 comparison artifact.",
-    ))
-
     contra_rs = fit(
         MixedModel,
         @formula(usenum ~ 1 + age + livch + urban + (1 + urban | dist)),

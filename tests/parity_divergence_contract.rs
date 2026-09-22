@@ -274,12 +274,6 @@ fn glmm_fast_pirls_divergences_are_quantified_and_kept_non_lme4() {
     let lme4 = results_by_key("comparison/lme4_results.json");
 
     let expectations = [
-        (
-            CONTRACEPTION_INTERCEPT,
-            0.02,
-            0.03,
-            "MixedModels.jl fast=true",
-        ),
         (CONTRACEPTION_SLOPE, 0.03, 0.04, "MixedModels.jl fast=true"),
         (VERBAGG, 0.08, 0.09, "MixedModels.jl fast=true"),
     ];
@@ -395,6 +389,77 @@ fn cbpp_laplace_is_promoted_to_joint_laplace_parity() {
 }
 
 #[test]
+fn contraception_intercept_laplace_is_promoted_to_joint_laplace_parity() {
+    let scorecard = scorecard_by_key();
+    let key = row_key(CONTRACEPTION_INTERCEPT);
+    let score = scorecard_row(&scorecard, CONTRACEPTION_INTERCEPT);
+    assert_eq!(score.class_name, "release_blocking_parity", "{key}");
+    assert_eq!(score.reference, "lme4_joint_laplace", "{key}");
+    assert_eq!(
+        score.issue_id.as_deref(),
+        Some("bd-01M35AQYXEXZHJA7JA7GTXR032")
+    );
+    let reason = score.reason.as_deref().unwrap_or("");
+    assert!(
+        reason.contains("fast=false") && reason.contains("objective"),
+        "{key}: promoted GLMM row must name the certified joint path and objective evidence"
+    );
+    assert!(
+        reason.contains("full-precision") && reason.contains("tolPwrss"),
+        "{key}: reason must record that the thin objective margin needs the full-precision, tolPwrss-tightened lme4 reference"
+    );
+
+    // Numeric lockstep: both engines on the included-constants joint
+    // Laplace objective, certified return code, and deltas inside the
+    // report tolerances. The random-slope row stays a documented divergence.
+    let rust = results_by_key("comparison/rust_results.json");
+    let lme4 = results_by_key("comparison/lme4_results.json");
+    let rust_row = comparison_row(&rust, CONTRACEPTION_INTERCEPT, "rust_results.json");
+    let lme4_row = comparison_row(&lme4, CONTRACEPTION_INTERCEPT, "lme4_results.json");
+    assert_eq!(field_str(rust_row, "status", &key), "ok", "{key}");
+    assert_eq!(field_str(lme4_row, "status", &key), "ok", "{key}");
+    assert_eq!(
+        field_str(rust_row, "response_constants", &key),
+        "included",
+        "{key}: certified joint row must keep response constants"
+    );
+    assert_eq!(
+        field_str(lme4_row, "response_constants", &key),
+        "included",
+        "{key}"
+    );
+    assert!(
+        field_str(rust_row, "optimizer_return_code", &key).starts_with("JOINT_LAPLACE:"),
+        "{key}: promoted row must carry the certified joint Laplace label, got {}",
+        field_str(rust_row, "optimizer_return_code", &key)
+    );
+    let beta_delta = max_abs_delta(
+        &numeric_array(rust_row, "beta", &key),
+        &numeric_array(lme4_row, "beta", &key),
+        &format!("{key}: beta"),
+    );
+    assert!(
+        beta_delta <= 1.0e-3,
+        "{key}: promoted joint Laplace beta gap must sit inside the report tolerance, got {beta_delta}"
+    );
+    let objective_delta =
+        (field_f64(rust_row, "objective", &key) - field_f64(lme4_row, "objective", &key)).abs();
+    assert!(
+        objective_delta <= 1.0e-4,
+        "{key}: promoted joint Laplace objective gap must sit inside the promotion gate, got {objective_delta}"
+    );
+    let theta_delta = max_abs_delta(
+        &numeric_array(rust_row, "theta", &key),
+        &numeric_array(lme4_row, "theta", &key),
+        &format!("{key}: theta"),
+    );
+    assert!(
+        theta_delta <= 2.0e-3,
+        "{key}: promoted joint Laplace theta gap must sit inside the promotion gate, got {theta_delta}"
+    );
+}
+
+#[test]
 fn culcitalogreg_laplace_is_promoted_to_joint_laplace_parity() {
     let scorecard = scorecard_by_key();
     let key = row_key(CULCITA_LAPLACE);
@@ -447,7 +512,7 @@ fn mixedmodels_fast_oracle_scope_is_explicit_for_large_profiled_rows() {
         .and_then(Value::as_array)
         .expect("glmm_fast_oracles.json rows[]");
     let covered = rows.iter().map(record_key).collect::<BTreeSet<_>>();
-    let expected = [CONTRACEPTION_INTERCEPT, CONTRACEPTION_SLOPE, VERBAGG]
+    let expected = [CONTRACEPTION_SLOPE, VERBAGG]
         .into_iter()
         .map(row_key)
         .collect::<BTreeSet<_>>();
@@ -458,6 +523,10 @@ fn mixedmodels_fast_oracle_scope_is_explicit_for_large_profiled_rows() {
     assert!(
         !covered.contains(&row_key(CBPP)),
         "cbpp remains outside the MixedModels.jl fast-oracle fixture scope"
+    );
+    assert!(
+        !covered.contains(&row_key(CONTRACEPTION_INTERCEPT)),
+        "contraception (1 | dist) left the fast-oracle fixture when it was promoted to the certified joint gate"
     );
 }
 

@@ -292,6 +292,7 @@ fn release_blocking_scorecard_rows_pass_checked_in_comparison_artifacts() {
                 ("culcitalogreg", false) => "bd-01KRVGT0H37JYNYB5FA2EZD5CW",
                 ("culcitalogreg", true) => "bd-01KRVGW2H561CF8GY70E1072M3",
                 ("cbpp", false) => "bd-01KWFNE6GB3FN3FQJM0VKGXCG0",
+                ("contraception", false) => "bd-01M35AQYXEXZHJA7JA7GTXR032",
                 other => panic!(
                     "{key}: joint GLMM release row {other:?} has no registered promotion issue; \
                      add it to the expected-issue map together with its promotion evidence"

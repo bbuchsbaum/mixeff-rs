@@ -96,7 +96,6 @@ for fixture in "${fixtures[@]}"; do
       --ignore=/rows/0/optimizer_fevals \
       --ignore=/rows/1/optimizer_fevals \
       --ignore=/rows/2/optimizer_fevals \
-      --ignore=/rows/3/optimizer_fevals \
       "$fixture" "$tmp_dir/$fixture"
   else
     python scripts/compare_json_tolerant.py --abs-tol=1e-7 --rel-tol=1e-8 "$fixture" "$tmp_dir/$fixture"

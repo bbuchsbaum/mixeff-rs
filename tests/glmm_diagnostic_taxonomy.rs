@@ -180,12 +180,32 @@ fn five_glmm_failure_modes_map_to_distinct_artifact_signals() {
 #[test]
 fn response_constant_convention_is_a_mode_not_a_failure() {
     // The convention difference must coexist with an ok optimizer status: it
-    // is a convention, not a fit failure or identification problem. Uses a row
-    // still on the profiled fast-PIRLS `dropped` path (cbpp was promoted to the
-    // certified joint `included` convention in mote bd-01KWFNE6GB3FN3FQJM0VKGXCG0).
-    let rust = results_by_key("comparison/rust_results.json");
-    let key = "contraception\nLaplace".to_string();
-    let rust_row = rust.get(&key).expect("rust contraception Laplace row");
+    // is a convention, not a fit failure or identification problem. Uses the
+    // contraception random-slope row, which stays on the profiled fast-PIRLS
+    // `dropped` path (cbpp and the contraception `(1 | dist)` row were promoted
+    // to the certified joint `included` convention in motes
+    // bd-01KWFNE6GB3FN3FQJM0VKGXCG0 and bd-01M35AQYXEXZHJA7JA7GTXR032). The row
+    // is selected by formula: `results_by_key` keys on (dataset, estimator),
+    // which does not distinguish the two contraception Laplace rows.
+    let formula = "use ~ 1 + age + livch + urban + (1 + urban | dist)";
+    let rust: Value = serde_json::from_str(
+        &fs::read_to_string(repo_root().join("comparison/rust_results.json"))
+            .expect("read comparison results"),
+    )
+    .expect("parse comparison results");
+    let matches = rust
+        .get("results")
+        .and_then(Value::as_array)
+        .expect("results[]")
+        .iter()
+        .filter(|r| {
+            r.get("dataset").and_then(Value::as_str) == Some("contraception")
+                && r.get("estimator").and_then(Value::as_str) == Some("Laplace")
+                && r.get("formula").and_then(Value::as_str) == Some(formula)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(matches.len(), 1, "exactly one contraception random-slope Laplace row");
+    let rust_row = matches[0];
     assert_eq!(
         rust_row.get("response_constants").and_then(Value::as_str),
         Some("dropped")

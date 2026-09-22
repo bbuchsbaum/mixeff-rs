@@ -2347,6 +2347,31 @@ fn test_cbpp_agq_deviance_uses_case_weights() {
         );
 }
 
+/// fast=true regression guard for the contraception `(1 | dist)` row. The
+/// comparison harness fits this row through the certified fast=false joint
+/// path since its promotion (mote bd-01M35AQYXEXZHJA7JA7GTXR032), so the
+/// MixedModels.jl fast=true oracle it used to carry is pinned here instead.
+/// Reference: MixedModels.jl 5.3.0 `fit(MixedModel, @formula(use ~ 1 + age +
+/// livch + urban + (1 | dist)), contra, Bernoulli(); fast=true)`, deviance
+/// 2413.6626372063283 (also `glmm_contra_intercept_fast` in
+/// examples/optimizer_bench_harness.rs). Response constants are zero for 0/1
+/// data, so the dropped-constants deviance is directly comparable.
+#[test]
+fn contraception_intercept_fast_pirls_matches_mixedmodels_fast_true_objective() {
+    let (data, _) = crate::datasets::load("contraception").unwrap();
+    let formula = parse_formula("use ~ 1 + age + livch + urban + (1 | dist)").unwrap();
+    let mut model =
+        GeneralizedLinearMixedModel::new(formula, &data, Family::Binomial, None).unwrap();
+    model.fit_with_options(true, 1, false).unwrap();
+    let objective = model.deviance(1);
+    let julia_fast = 2413.6626372063283;
+    let delta = (objective - julia_fast).abs();
+    assert!(
+        delta <= 1e-3,
+        "contraception (1 | dist) fast=true objective {objective:.9} should match MixedModels.jl fast=true {julia_fast:.9}; delta={delta:.3e}"
+    );
+}
+
 #[cfg(feature = "nlopt")]
 #[test]
 fn test_grouseticks_poisson_glmm_deviance() {
