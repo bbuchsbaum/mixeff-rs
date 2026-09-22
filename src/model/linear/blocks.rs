@@ -422,7 +422,11 @@ pub(crate) fn subtract_block_matvec(dst: &mut [f64], l: &MatrixBlock, v: &[f64])
             // (the uniform block-diagonal RE layout).
             let mut offset = 0;
             for block in blocks {
-                debug_assert_eq!(block.nrows(), block.ncols(), "non-square diagonal sub-block");
+                debug_assert_eq!(
+                    block.nrows(),
+                    block.ncols(),
+                    "non-square diagonal sub-block"
+                );
                 for row in 0..block.nrows() {
                     let mut dot = 0.0;
                     for col in 0..block.ncols() {
@@ -471,7 +475,11 @@ pub(crate) fn subtract_block_transpose_matvec(dst: &mut [f64], l: &MatrixBlock, 
             // One offset serves rows and columns: sub-blocks are square.
             let mut offset = 0;
             for block in blocks {
-                debug_assert_eq!(block.nrows(), block.ncols(), "non-square diagonal sub-block");
+                debug_assert_eq!(
+                    block.nrows(),
+                    block.ncols(),
+                    "non-square diagonal sub-block"
+                );
                 for row in 0..block.ncols() {
                     let mut dot = 0.0;
                     for col in 0..block.nrows() {
@@ -1242,11 +1250,17 @@ pub(super) fn compute_wtxy_re_cross_product(wtxy: &DMatrix<f64>, re: &ReMat) -> 
     // `pp1 × nranef` column-major: (col, k) -> k * pp1 + col.
     let out = result.as_mut_slice();
     let wtz = re.wtz.as_slice();
-    for col in 0..pp1 {
-        let x_col = wtxy.column(col);
-        let x_col = x_col.as_slice();
-        for ((&ref_idx, &x_value), z) in re.refs.iter().zip(x_col).zip(wtz.chunks_exact(vsize)) {
-            let base = ref_idx as usize * vsize * pp1 + col;
+    let x = wtxy.as_slice();
+    let n = wtxy.nrows();
+    // Observation-outer: when rows are sorted by group, a column-outer pass
+    // hits the same output cell on consecutive iterations and serializes on
+    // the load/store chain. Each cell still sums in increasing observation
+    // order, so the result is unchanged.
+    for (obs, (&ref_idx, z)) in re.refs.iter().zip(wtz.chunks_exact(vsize)).enumerate() {
+        let level_base = ref_idx as usize * vsize * pp1;
+        for col in 0..pp1 {
+            let x_value = x[col * n + obs];
+            let base = level_base + col;
             for (s, &z_value) in z.iter().enumerate() {
                 out[base + s * pp1] += x_value * z_value;
             }
@@ -3393,7 +3407,11 @@ mod sparse_product_paths {
     fn dense_dense_path_is_unchanged_bitwise() {
         let mut rng = StdRng::seed_from_u64(0x5eed_0004);
         for _ in 0..20 {
-            let (m, n, k) = (rng.gen_range(1..20), rng.gen_range(1..20), rng.gen_range(1..40));
+            let (m, n, k) = (
+                rng.gen_range(1..20),
+                rng.gen_range(1..20),
+                rng.gen_range(1..40),
+            );
             let a = random_dense(&mut rng, m, k);
             let b = random_dense(&mut rng, n, k);
             let c0 = random_dense(&mut rng, m, n);
@@ -3540,10 +3558,9 @@ mod sparse_product_paths {
             .map(|t| (t + 1.0).ln())
             .collect();
         data.add_numeric("LT", ticks).unwrap();
-        let formula = parse_formula(
-            "LT ~ 1 + YEAR + cHEIGHT + (1 | BROOD) + (1 | INDEX) + (1 | LOCATION)",
-        )
-        .unwrap();
+        let formula =
+            parse_formula("LT ~ 1 + YEAR + cHEIGHT + (1 | BROOD) + (1 | INDEX) + (1 | LOCATION)")
+                .unwrap();
         let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
         let k = model.reterms.len();
         assert_eq!(k, 3);
@@ -3628,6 +3645,58 @@ mod sparse_product_paths {
                 model.set_theta(theta).unwrap();
                 model.update_l().unwrap();
                 assert_blocked_l_matches_dense_cholesky(&model, &format!("{formula} {theta:?}"));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod wtxy_re_cross_product {
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
+    use super::{compute_fe_re_cross_product, compute_wtxy_re_cross_product};
+    use crate::formula::parse_formula;
+    use crate::model::data::DataFrame;
+    use crate::model::linear::LinearMixedModel;
+    use crate::types::MatrixBlock;
+
+    /// The observation-outer kernel must equal the reference `[X|y]'Z_j`
+    /// bit for bit, for group-sorted and interleaved rows and for scalar and
+    /// vector-valued terms.
+    #[test]
+    fn matches_reference_bitwise() {
+        for sorted in [true, false] {
+            let mut rng = StdRng::seed_from_u64(if sorted { 3 } else { 4 });
+            let (mut g, mut h, mut x, mut y) = (vec![], vec![], vec![], vec![]);
+            for i in 0..400 {
+                let level = if sorted { i / 20 } else { rng.gen_range(0..20) };
+                g.push(format!("g{level}"));
+                h.push(format!("h{}", rng.gen_range(0..7)));
+                x.push(rng.gen_range(-2.0..2.0));
+                y.push(rng.gen_range(-1.0..1.0));
+            }
+            let mut df = DataFrame::new();
+            df.add_categorical("g", g).unwrap();
+            df.add_categorical("h", h).unwrap();
+            df.add_numeric("x", x).unwrap();
+            df.add_numeric("y", y).unwrap();
+            let model = LinearMixedModel::new(
+                parse_formula("y ~ 1 + x + (1 + x | g) + (1 | h)").unwrap(),
+                &df,
+                None,
+            )
+            .unwrap();
+            for re in &model.reterms {
+                let fast = compute_wtxy_re_cross_product(&model.xy_mat.wtxy, re);
+                let MatrixBlock::Dense(reference) = compute_fe_re_cross_product(&model.xy_mat, re)
+                else {
+                    panic!("reference block is dense");
+                };
+                assert_eq!(fast.shape(), reference.shape());
+                for (a, b) in fast.iter().zip(reference.iter()) {
+                    assert_eq!(a.to_bits(), b.to_bits(), "sorted={sorted}");
+                }
             }
         }
     }
