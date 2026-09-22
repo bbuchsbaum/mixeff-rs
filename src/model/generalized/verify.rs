@@ -46,13 +46,16 @@ impl GeneralizedLinearMixedModel {
     ) -> Result<ConvergenceVerification> {
         if self.lmm.optsum.feval <= 0 {
             let verification = ConvergenceVerification::not_run("model has not been fitted");
+            self.inspection = std::sync::OnceLock::new();
             if let Some(certificate) = &mut self.lmm.compiler_artifact.optimizer_certificate {
                 certificate.verification = Some(verification.clone());
             }
             return Ok(verification);
         }
         // The verification is recorded on the stored certificate, which must
-        // carry its (deferred) derivative evidence first.
+        // carry its (deferred) derivative evidence first. The deferred
+        // joint-Laplace inference touches neither the certificate nor the
+        // fitted state (the runs below refit clones), so it stays deferred.
         self.complete_pirls_certificate();
 
         // The returned fit's own objective family: joint deviances include
@@ -128,6 +131,8 @@ impl GeneralizedLinearMixedModel {
             message,
         };
 
+        // A cached `&self` view predates the verification record.
+        self.inspection = std::sync::OnceLock::new();
         if let Some(certificate) = &mut self.lmm.compiler_artifact.optimizer_certificate {
             certificate.verification = Some(verification.clone());
         }

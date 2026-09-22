@@ -58,8 +58,7 @@ impl GeneralizedLinearMixedModel {
 
     pub(super) fn recorded_fixed_effect_covariance(&self) -> Option<DMatrix<f64>> {
         let payload = self
-            .lmm
-            .compiler_artifact
+            .inference_artifact()
             .fixed_effect_covariance_matrix
             .as_ref()?;
         // Noninferential payloads stay usable as covariance geometry for
@@ -85,6 +84,8 @@ impl GeneralizedLinearMixedModel {
     }
 
     pub(super) fn record_invalid_agq_diagnostic(&mut self, n_agq: usize, reason: &str) {
+        // A cached `&self` view predates this diagnostic.
+        self.inspection = std::sync::OnceLock::new();
         self.lmm
             .compiler_artifact
             .diagnostics
@@ -140,6 +141,8 @@ impl GeneralizedLinearMixedModel {
     }
 
     pub(super) fn record_pirls_failure_diagnostic(&mut self, theta: &[f64], reason: &str) {
+        // A cached `&self` view predates this diagnostic.
+        self.inspection = std::sync::OnceLock::new();
         self.lmm
             .compiler_artifact
             .diagnostics
@@ -191,6 +194,8 @@ impl GeneralizedLinearMixedModel {
     /// modes. Distinct from [`Self::record_pirls_failure_diagnostic`], which
     /// flags a hard PIRLS/linear-algebra failure that aborts the fit.
     pub(super) fn record_pirls_nonconvergence_diagnostic(&mut self, theta: &[f64]) {
+        // A cached `&self` view predates this diagnostic.
+        self.inspection = std::sync::OnceLock::new();
         self.lmm
             .compiler_artifact
             .diagnostics
@@ -259,6 +264,9 @@ impl GeneralizedLinearMixedModel {
                 ));
             }
 
+            // The fitted state is overwritten from here on, and the fallible
+            // recomputation below must not leave a stale deferral behind.
+            self.clear_deferred_inspection();
             let p = self.lmm.feterm.rank;
             for (obs, &new_response) in new_y.iter().enumerate() {
                 let sw = if self.lmm.sqrtwts.is_empty() {
@@ -274,6 +282,7 @@ impl GeneralizedLinearMixedModel {
             self.lmm.recompute_a_blocks()?;
         }
 
+        self.clear_deferred_inspection();
         let warm = start_theta.is_some();
         let initial_theta = match start_theta {
             Some(theta) => theta,
@@ -318,9 +327,15 @@ impl GeneralizedLinearMixedModel {
         self.lmm.compiler_artifact.fixed_effect_covariance_matrix = None;
         self.lmm.compiler_artifact.effective_covariance.clear();
         self.pirls_profiled_optimum_certificate = None;
-        self.pirls_certificate_pending = false;
-        self.inspection = std::sync::OnceLock::new();
         Ok(())
+    }
+
+    /// Drop every deferral and cached view without completing them: for
+    /// paths that discard the fitted state.
+    fn clear_deferred_inspection(&mut self) {
+        self.pirls_certificate_pending = false;
+        self.joint_inference_pending = false;
+        self.inspection = std::sync::OnceLock::new();
     }
 
     pub(super) fn record_glmm_fit_metadata(&mut self) {
@@ -347,9 +362,51 @@ impl GeneralizedLinearMixedModel {
         }
         self.record_fast_pirls_parity_scope_diagnostic(&metadata);
         self.record_pirls_profiled_optimum_certificate(&metadata);
-        let inference_artifacts = self.glmm_fixed_effect_inference_artifacts(&metadata);
+        // Every recording is a new final fit (or a relabelling of one): any
+        // deferral left by an earlier stage of the same driver is void.
+        self.joint_inference_pending = false;
+        self.inspection = std::sync::OnceLock::new();
+        if self.defers_joint_laplace_inference(&metadata) {
+            // Defer the finite-difference joint Hessian until the inference
+            // payloads are inspected or a mutating path needs them. The
+            // stored payloads are cleared so no reader can see an earlier
+            // stage's (profiled) values; readers go through
+            // `inference_artifact`/`compiler_artifact`, which produce exactly
+            // the eager payloads.
+            self.lmm
+                .compiler_artifact
+                .model_boundary
+                .inference_availability = InferenceAvailability::NotAssessed {
+                reason: LinearMixedModel::DEFERRED_DERIVATIVE_EVIDENCE_REASON.to_string(),
+            };
+            self.lmm.compiler_artifact.glmm_fit_metadata = Some(metadata);
+            self.lmm.compiler_artifact.fixed_effect_covariance_matrix = None;
+            self.lmm.compiler_artifact.fixed_effect_inference_table = None;
+            self.joint_inference_pending = true;
+            return;
+        }
+        self.record_glmm_inference_artifacts(&metadata);
+        self.lmm.compiler_artifact.glmm_fit_metadata = Some(metadata);
+    }
+
+    /// Joint-Laplace fits defer their fixed-effect inference artifacts: the
+    /// only estimator whose artifacts cost a finite-difference Hessian.
+    fn defers_joint_laplace_inference(&self, metadata: &GlmmFitMetadata) -> bool {
+        #[cfg(test)]
+        if super::tests::EAGER_JOINT_LAPLACE_INFERENCE.with(std::cell::Cell::get) {
+            return false;
+        }
+        metadata.estimation_method == "joint_laplace" && self.lmm.optsum.n_agq <= 1
+    }
+
+    /// Compute and store the fixed-effect inference table, the covariance
+    /// payload and the inference-availability boundary for `metadata`'s
+    /// estimator. For joint-Laplace fits this runs the finite-difference
+    /// joint Hessian, whose PIRLS probes move the conditional modes.
+    fn record_glmm_inference_artifacts(&mut self, metadata: &GlmmFitMetadata) {
+        let inference_artifacts = self.glmm_fixed_effect_inference_artifacts(metadata);
         let inference_availability =
-            glmm_inference_availability_for_table(&metadata, &inference_artifacts.table);
+            glmm_inference_availability_for_table(metadata, &inference_artifacts.table);
         let covariance = inference_artifacts
             .covariance
             .unwrap_or_else(|| self.profiled_glmm_fixed_effect_covariance_matrix());
@@ -357,9 +414,60 @@ impl GeneralizedLinearMixedModel {
             .compiler_artifact
             .model_boundary
             .inference_availability = inference_availability;
-        self.lmm.compiler_artifact.glmm_fit_metadata = Some(metadata);
         self.lmm.compiler_artifact.fixed_effect_covariance_matrix = Some(covariance);
         self.lmm.compiler_artifact.fixed_effect_inference_table = Some(inference_artifacts.table);
+    }
+
+    /// Run the deferred joint-Laplace inference on this model itself. Only
+    /// for disposable clones: the Hessian probes perturb the fitted modes.
+    pub(super) fn issue_deferred_joint_laplace_inference(&mut self) {
+        if !self.joint_inference_pending {
+            return;
+        }
+        self.joint_inference_pending = false;
+        let metadata = self
+            .lmm
+            .compiler_artifact
+            .glmm_fit_metadata
+            .clone()
+            .expect("a deferred joint inference always has recorded fit metadata");
+        self.record_glmm_inference_artifacts(&metadata);
+    }
+
+    /// Produce the deferred joint-Laplace inference artifacts in place, as
+    /// the eager path would have recorded them. The Hessian runs on a clone
+    /// (or is taken from an existing `&self` inspection), so the fitted
+    /// conditional modes, linear predictor and deviance are left exactly as
+    /// they are. No-op when nothing is pending.
+    pub(crate) fn complete_joint_laplace_inference(&mut self) {
+        if !self.joint_inference_pending {
+            return;
+        }
+        let completed = match self.inspection.take() {
+            Some(inspection) => inspection.artifact,
+            None => {
+                let mut probe = self.clone();
+                probe.issue_deferred_joint_laplace_inference();
+                probe.lmm.compiler_artifact
+            }
+        };
+        self.joint_inference_pending = false;
+        self.lmm
+            .compiler_artifact
+            .model_boundary
+            .inference_availability = completed.model_boundary.inference_availability;
+        self.lmm.compiler_artifact.fixed_effect_covariance_matrix =
+            completed.fixed_effect_covariance_matrix;
+        self.lmm.compiler_artifact.fixed_effect_inference_table =
+            completed.fixed_effect_inference_table;
+    }
+
+    /// Complete every deferred post-fit computation in place. Mutating
+    /// paths that record on, or move away from, the fitted state call this
+    /// first.
+    pub(crate) fn complete_deferred_inspection(&mut self) {
+        self.complete_joint_laplace_inference();
+        self.complete_pirls_certificate();
     }
 
     /// Run the post-fit profiled-optimum certificate for profiled fast-PIRLS
@@ -538,6 +646,7 @@ impl GeneralizedLinearMixedModel {
         update_iterations: usize,
         converged: bool,
     ) {
+        self.inspection = std::sync::OnceLock::new();
         if let Some(metadata) = &mut self.lmm.compiler_artifact.glmm_fit_metadata {
             metadata
                 .family_parameters
@@ -689,6 +798,7 @@ impl GeneralizedLinearMixedModel {
             return;
         }
 
+        self.inspection = std::sync::OnceLock::new();
         self.lmm
             .compiler_artifact
             .diagnostics
@@ -699,6 +809,7 @@ impl GeneralizedLinearMixedModel {
     }
 
     pub(super) fn refresh_binomial_separation_diagnostics(&mut self) {
+        self.inspection = std::sync::OnceLock::new();
         self.lmm
             .compiler_artifact
             .diagnostics

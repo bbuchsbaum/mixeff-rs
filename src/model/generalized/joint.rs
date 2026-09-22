@@ -1115,8 +1115,7 @@ impl GeneralizedLinearMixedModel {
 
     pub(super) fn certified_joint_laplace_fixed_covariance(&self) -> Option<DMatrix<f64>> {
         let covariance = self
-            .lmm
-            .compiler_artifact
+            .inference_artifact()
             .fixed_effect_covariance_matrix
             .as_ref()?;
         if covariance.status != FixedEffectCovarianceStatus::Available

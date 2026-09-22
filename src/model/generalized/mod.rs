@@ -137,7 +137,17 @@ pub struct GeneralizedLinearMixedModel {
     /// Where the deferred certificate diagnostic is inserted on completion,
     /// so the diagnostics list reads exactly as the eager path wrote it.
     pirls_certificate_diagnostic_slot: usize,
-    /// Completed view for `&self` readers while the certificate is pending.
+    /// The joint-Laplace fixed-effect inference artifacts (the finite-
+    /// difference joint Hessian behind the Wald table, the covariance payload
+    /// and the inference-availability boundary) are deferred: the Hessian is
+    /// ~51 PIRLS probes on cbpp, about a quarter of the joint fit, and most
+    /// fits are never inspected. `true` while they still have to be
+    /// produced; `complete_joint_laplace_inference` does so in place and
+    /// `glmm_inspection` on a clone for `&self` readers. Both paths run the
+    /// Hessian on a clone, so its PIRLS probes never move the fitted modes.
+    joint_inference_pending: bool,
+    /// Completed view for `&self` readers while the certificate or the
+    /// joint inference artifacts are pending.
     inspection: std::sync::OnceLock<GlmmInspection>,
     /// Contracted first optimizer step for a warm-started refit
     /// (`refit_with_start`), consumed by the θ drivers; `None` for cold
@@ -151,8 +161,8 @@ pub struct GeneralizedLinearMixedModel {
 }
 
 /// The artifact and profiled-optimum certificate as callers should see them
-/// while the certificate is deferred: produced once, on a clone, by the
-/// first `&self` inspection.
+/// while the certificate or the joint inference artifacts are deferred:
+/// produced once, on a clone, by the first `&self` inspection.
 #[derive(Debug, Clone)]
 struct GlmmInspection {
     artifact: CompiledModelArtifact,
@@ -402,8 +412,7 @@ impl<'a> GeneralizedLinearMixedModelBuilder<'a> {
 impl GeneralizedLinearMixedModel {
     fn fixed_effect_inference_standard_errors(&self) -> Option<DVector<f64>> {
         let table = self
-            .lmm
-            .compiler_artifact
+            .inference_artifact()
             .fixed_effect_inference_table
             .as_ref()?;
         let names = self.coef_names();
@@ -463,6 +472,9 @@ impl GeneralizedLinearMixedModel {
     /// feature; otherwise `pub(crate)`. Not part of the stable 1.0 API.
     #[allow(dead_code)]
     unstable_vis fn lmm_mut(&mut self) -> &mut LinearMixedModel {
+        // Callers may move the fitted state; deferred post-fit evidence is
+        // produced from it first.
+        self.complete_deferred_inspection();
         &mut self.lmm
     }
     }
@@ -481,6 +493,8 @@ impl GeneralizedLinearMixedModel {
         theta: &[f64],
         n_agq: usize,
     ) -> Result<f64> {
+        // Probes move beta, theta and the modes off the fit.
+        self.complete_deferred_inspection();
         self.update_pirls_at_theta(theta, true)?;
         Ok(self.deviance_with_response_constants(n_agq))
     }
@@ -500,6 +514,8 @@ impl GeneralizedLinearMixedModel {
         n_agq: usize,
         max_iter: usize,
     ) -> Result<f64> {
+        // Probes move beta, theta and the modes off the fit.
+        self.complete_deferred_inspection();
         self.update_pirls_at_theta_with_options(theta, true, max_iter, true)?;
         Ok(self.deviance_with_response_constants(n_agq))
     }
@@ -521,6 +537,8 @@ impl GeneralizedLinearMixedModel {
         theta: &[f64],
         n_agq: usize,
     ) -> Result<f64> {
+        // Probes move beta, theta and the modes off the fit.
+        self.complete_deferred_inspection();
         self.update_pirls_at_theta(theta, true)?;
         let n_beta = self.beta.len();
         let mut params = self.beta.as_slice().to_vec();
@@ -831,6 +849,7 @@ impl GeneralizedLinearMixedModel {
             pirls_profiled_optimum_certificate: None,
             pirls_certificate_pending: false,
             pirls_certificate_diagnostic_slot: 0,
+            joint_inference_pending: false,
             inspection: std::sync::OnceLock::new(),
             warm_refit_step: None,
             pending_progress_error: None,
@@ -883,9 +902,10 @@ impl GeneralizedLinearMixedModel {
 
     /// Round-trippable compiler artifact attached to the internal model.
     ///
-    /// While the profiled-optimum certificate is deferred, the first call
-    /// completes it on a clone and caches the completed artifact, so every
-    /// reader sees exactly what the eager path produced.
+    /// While the profiled-optimum certificate or the joint-Laplace inference
+    /// artifacts are deferred, the first call completes them on a clone and
+    /// caches the completed artifact, so every reader sees exactly what the
+    /// eager path produced.
     pub fn compiler_artifact(&self) -> &CompiledModelArtifact {
         match self.glmm_inspection() {
             Some(inspection) => &inspection.artifact,
@@ -893,15 +913,33 @@ impl GeneralizedLinearMixedModel {
         }
     }
 
-    /// The completed view while the certificate is pending; `None` when
-    /// nothing is deferred (the stored state is current).
+    /// The artifact for readers of the fixed-effect inference payloads
+    /// (`fixed_effect_inference_table`, `fixed_effect_covariance_matrix`,
+    /// `model_boundary.inference_availability`): completes only the deferred
+    /// joint-Laplace inference, never the profiled-optimum certificate,
+    /// which does not touch those fields. The two deferrals are exclusive
+    /// (a joint fit clears the profiled one), so a fast fit's `vcov()` or
+    /// `stderror()` stays free of certificate probes.
+    pub(super) fn inference_artifact(&self) -> &CompiledModelArtifact {
+        if self.joint_inference_pending {
+            if let Some(inspection) = self.glmm_inspection() {
+                return &inspection.artifact;
+            }
+        }
+        &self.lmm.compiler_artifact
+    }
+
+    /// The completed view while the certificate or the joint inference is
+    /// pending; `None` when nothing is deferred (the stored state is
+    /// current).
     fn glmm_inspection(&self) -> Option<&GlmmInspection> {
-        if !self.pirls_certificate_pending {
+        if !self.pirls_certificate_pending && !self.joint_inference_pending {
             return None;
         }
         Some(self.inspection.get_or_init(|| {
             let mut probe = self.clone();
             probe.complete_pirls_certificate();
+            probe.issue_deferred_joint_laplace_inference();
             GlmmInspection {
                 artifact: probe.lmm.compiler_artifact.clone(),
                 pirls_certificate: probe.pirls_profiled_optimum_certificate.clone(),
@@ -964,12 +1002,12 @@ impl GeneralizedLinearMixedModel {
 
     /// Compact default print summary (PRD § 15).
     pub fn print_summary(&self) -> crate::compiler::ModelPrint {
-        self.lmm.print_summary()
+        self.compiler_artifact().print_summary()
     }
 
     /// Source-to-fitted parameterization drilldown (PRD § 15).
     pub fn parameterization(&self) -> crate::compiler::ParameterizationDrilldown {
-        self.lmm.parameterization()
+        self.compiler_artifact().parameterization()
     }
 
     /// Replace the fixed linear predictor offset before fitting.

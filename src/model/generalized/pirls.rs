@@ -697,6 +697,9 @@ impl GeneralizedLinearMixedModel {
     /// optimizer probes tolerate it). `Err` is reserved for hard linear-
     /// algebra/state failures.
     pub fn pirls(&mut self, vary_beta: bool, verbose: bool) -> Result<bool> {
+        // A caller-driven PIRLS moves the fitted modes; deferred post-fit
+        // evidence must be produced from the fitted state first.
+        self.complete_deferred_inspection();
         self.pirls_with_options(vary_beta, verbose, GLMM_PIRLS_MAX_ITER, true)
     }
 

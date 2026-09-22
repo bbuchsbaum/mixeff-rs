@@ -4256,3 +4256,479 @@ fn glmm_refit_cost() {
         );
     }
 }
+
+/// Joint Laplace rows used by the deferred-inference tests: cbpp grouped
+/// binomial, culcita Bernoulli and contraception `(1 | dist)`.
+fn joint_laplace_row(name: &str) -> GeneralizedLinearMixedModel {
+    let (formula, data, family, weights) = match name {
+        "cbpp" => {
+            let (mut data, _) = crate::datasets::load("cbpp").unwrap();
+            let incidence = data.numeric("incidence").unwrap().to_vec();
+            let size = data.numeric("size").unwrap().to_vec();
+            let proportion = incidence
+                .iter()
+                .zip(&size)
+                .map(|(&y, &n)| y / n)
+                .collect::<Vec<_>>();
+            data.add_numeric("proportion", proportion).unwrap();
+            (
+                "proportion ~ 1 + period + (1 | herd)",
+                data,
+                Family::Binomial,
+                Some(size),
+            )
+        }
+        "culcita" => {
+            let (data, _) = crate::datasets::load("culcitalogreg").unwrap();
+            (
+                "predation ~ ttt + (1 | block)",
+                data,
+                Family::Binomial,
+                None,
+            )
+        }
+        "contraception" => {
+            let (data, _) = crate::datasets::load("contraception").unwrap();
+            (
+                "use ~ 1 + age + livch + urban + (1 | dist)",
+                data,
+                Family::Binomial,
+                None,
+            )
+        }
+        other => panic!("unknown joint row {other}"),
+    };
+    let formula = parse_formula(formula).unwrap();
+    match weights {
+        Some(weights) => {
+            GeneralizedLinearMixedModel::new_with_weights(formula, &data, family, None, weights)
+                .unwrap()
+        }
+        None => GeneralizedLinearMixedModel::new(formula, &data, family, None).unwrap(),
+    }
+}
+
+fn joint_laplace_fit(name: &str) -> GeneralizedLinearMixedModel {
+    let mut model = joint_laplace_row(name);
+    model.fit_with_options(false, 1, false).unwrap();
+    model
+}
+
+/// Everything a caller can read about a fitted model's inference, as JSON.
+fn joint_reported_results(model: &GeneralizedLinearMixedModel) -> serde_json::Value {
+    let matrix = |m: DMatrix<f64>| {
+        (0..m.nrows())
+            .map(|i| (0..m.ncols()).map(|j| m[(i, j)]).collect::<Vec<_>>())
+            .collect::<Vec<_>>()
+    };
+    serde_json::json!({
+        "coef": MixedModelFit::coef(model).as_slice(),
+        "theta": model.theta(),
+        "objective": MixedModelFit::objective(model),
+        "vcov": matrix(MixedModelFit::vcov(model)),
+        "stderror": MixedModelFit::stderror(model).as_slice(),
+        "fit_summary": serde_json::to_value(
+            crate::stats::model_summary::FitSummaryPayload::from_generalized_model(model)
+        ).unwrap(),
+        "artifact": serde_json::to_value(model.compiler_artifact()).unwrap(),
+        "audit_report": serde_json::to_value(model.audit_report()).unwrap(),
+        "print_summary": model.print_summary().to_string(),
+    })
+}
+
+thread_local! {
+    /// Test-only switch restoring the eager joint-Laplace inference path, so
+    /// the deferred path can be compared against it in the same build.
+    pub(super) static EAGER_JOINT_LAPLACE_INFERENCE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+fn eager_joint_laplace_fit(name: &str) -> GeneralizedLinearMixedModel {
+    EAGER_JOINT_LAPLACE_INFERENCE.with(|eager| eager.set(true));
+    let mut model = joint_laplace_row(name);
+    let result = model.fit_with_options(false, 1, false).map(|_| ());
+    EAGER_JOINT_LAPLACE_INFERENCE.with(|eager| eager.set(false));
+    result.unwrap();
+    assert!(!model.joint_inference_pending);
+    model
+}
+
+fn pirls_state(model: &GeneralizedLinearMixedModel) -> Vec<f64> {
+    let mut state = Vec::new();
+    for u in &model.u {
+        state.extend_from_slice(u.as_slice());
+    }
+    state.extend_from_slice(model.eta.as_slice());
+    state.extend_from_slice(model.mu.as_slice());
+    state.extend_from_slice(model.beta.as_slice());
+    state.push(model.dispersion);
+    state
+}
+
+/// The joint-Laplace inference artifacts (finite-difference joint Hessian)
+/// are deferred until inspected; every reported result must equal the eager
+/// path's, and neither `&self` inspection nor in-place completion may move
+/// the fitted PIRLS state.
+#[test]
+fn deferred_joint_laplace_inference_matches_eager_path() {
+    for name in ["cbpp", "culcita", "contraception"] {
+        let eager = eager_joint_laplace_fit(name);
+        let eager_results = joint_reported_results(&eager);
+
+        let deferred = joint_laplace_fit(name);
+        assert!(deferred.joint_inference_pending, "{name}: fit should defer");
+        assert!(!deferred.pirls_certificate_pending);
+        assert!(deferred
+            .lmm
+            .compiler_artifact
+            .fixed_effect_inference_table
+            .is_none());
+        assert!(deferred
+            .lmm
+            .compiler_artifact
+            .fixed_effect_covariance_matrix
+            .is_none());
+        let fitted_state = pirls_state(&deferred);
+        // The eager Hessian's restoring re-evaluation lands on the fitted
+        // modes on these rows, so even the unreported state agrees.
+        assert_eq!(fitted_state, pirls_state(&eager), "{name}: fitted state");
+
+        // `&self` readers complete on a clone and see the eager payloads.
+        let inspected = deferred.clone();
+        assert_eq!(
+            MixedModelFit::vcov(&inspected),
+            MixedModelFit::vcov(&eager),
+            "{name}: vcov"
+        );
+        assert_eq!(joint_reported_results(&inspected), eager_results, "{name}");
+        assert!(
+            inspected.joint_inference_pending,
+            "{name}: &self stays deferred"
+        );
+        assert_eq!(pirls_state(&inspected), fitted_state, "{name}: &self state");
+
+        // In-place completion (what mutating paths call), from a fresh
+        // clone and from one with a cached inspection.
+        let mut completed = deferred.clone();
+        completed.complete_joint_laplace_inference();
+        assert!(!completed.joint_inference_pending);
+        assert_eq!(joint_reported_results(&completed), eager_results, "{name}");
+        assert_eq!(
+            serde_json::to_value(&completed.lmm.compiler_artifact).unwrap(),
+            eager_results["artifact"],
+            "{name}: stored artifact after completion"
+        );
+        assert_eq!(pirls_state(&completed), fitted_state, "{name}: state");
+        let mut completed_from_view = inspected.clone();
+        completed_from_view.complete_joint_laplace_inference();
+        assert_eq!(
+            serde_json::to_value(&completed_from_view.lmm.compiler_artifact).unwrap(),
+            eager_results["artifact"],
+            "{name}: completion from a cached inspection"
+        );
+    }
+}
+
+/// Values pinned from the eager path before the deferral (HEAD d82cea9,
+/// NLopt BOBYQA joint driver).
+#[cfg(feature = "nlopt")]
+#[test]
+fn deferred_joint_laplace_inference_matches_pinned_eager_values() {
+    let pinned: [(&str, f64, &[f64]); 3] = [
+        (
+            "cbpp",
+            184.05256539929854,
+            &[
+                0.2324631401441643,
+                0.3066323942322891,
+                0.32663758902591544,
+                0.4275065452453521,
+            ],
+        ),
+        (
+            "culcita",
+            60.705841296738754,
+            &[
+                1.8129020322255722,
+                1.4651214682955915,
+                1.5518915263618465,
+                1.7252054240838384,
+            ],
+        ),
+        (
+            "contraception",
+            2413.6164622899537,
+            &[
+                0.14903523754999762,
+                0.007885874943525583,
+                0.17958014355202034,
+                0.15438229948003707,
+                0.16294103935958237,
+                0.1194250867363911,
+            ],
+        ),
+    ];
+    for (name, objective, stderror) in pinned {
+        let model = joint_laplace_fit(name);
+        assert!(model.joint_inference_pending);
+        assert_relative_eq!(
+            MixedModelFit::objective(&model),
+            objective,
+            max_relative = 1e-12
+        );
+        let se = MixedModelFit::stderror(&model);
+        assert_eq!(se.len(), stderror.len());
+        for (actual, expected) in se.iter().zip(stderror) {
+            assert_relative_eq!(*actual, *expected, max_relative = 1e-10);
+        }
+        let vcov = MixedModelFit::vcov(&model);
+        for (index, expected) in stderror.iter().enumerate() {
+            assert_relative_eq!(vcov[(index, index)].sqrt(), *expected, max_relative = 1e-10);
+        }
+        assert!(matches!(
+            model
+                .compiler_artifact()
+                .model_boundary
+                .inference_availability,
+            InferenceAvailability::Available { .. }
+        ));
+    }
+}
+
+/// Every path that records on, re-fits, or switches estimator from a
+/// deferred joint fit must complete or clear the deferral: a stale flag
+/// would let an inspection overwrite a later stage's payloads.
+#[test]
+fn deferred_joint_laplace_inference_across_verification_refit_and_stage_switch() {
+    let eager = eager_joint_laplace_fit("cbpp");
+    let eager_artifact = serde_json::to_value(eager.compiler_artifact()).unwrap();
+
+    // Verification records on the certificate only, so the inference stays
+    // deferred (a view cached before verification is dropped); everything
+    // but the verification record is the eager artifact.
+    let mut verified = joint_laplace_fit("cbpp");
+    let fitted_state = pirls_state(&verified);
+    let _ = MixedModelFit::vcov(&verified);
+    verified.verify_convergence().unwrap();
+    assert!(verified.joint_inference_pending);
+    assert_eq!(pirls_state(&verified), fitted_state);
+    let mut verified_artifact = serde_json::to_value(verified.compiler_artifact()).unwrap();
+    assert!(!verified_artifact["optimizer_certificate"]["verification"].is_null());
+    verified_artifact["optimizer_certificate"]["verification"] =
+        eager_artifact["optimizer_certificate"]["verification"].clone();
+    assert_eq!(verified_artifact, eager_artifact);
+
+    // A caller-driven PIRLS completes from the fitted state first.
+    let mut driven = joint_laplace_fit("cbpp");
+    driven.pirls(false, false).unwrap();
+    assert!(!driven.joint_inference_pending);
+    assert_eq!(
+        serde_json::to_value(driven.compiler_artifact()).unwrap(),
+        eager_artifact
+    );
+
+    // Refits (profiled) clear the joint deferral and defer their own
+    // certificate; the payloads are the profiled ones, not the joint ones.
+    let mut refit = joint_laplace_fit("cbpp");
+    let y = refit.y.as_slice().to_vec();
+    // The joint stage's optimizer is recorded on the fit; dependency-light
+    // builds cannot run TrustBQ on the profiled path a refit takes.
+    refit.configure_profile_start_optimizer();
+    refit.refit(&y).unwrap();
+    assert!(!refit.joint_inference_pending);
+    assert!(refit.pirls_certificate_pending);
+    let refit_artifact = refit.compiler_artifact();
+    assert_eq!(
+        refit_artifact
+            .glmm_fit_metadata
+            .as_ref()
+            .unwrap()
+            .estimation_method,
+        "fast_pirls_profiled"
+    );
+    assert!(matches!(
+        refit_artifact.model_boundary.inference_availability,
+        InferenceAvailability::Unsupported { .. }
+    ));
+
+    // profiled -> joint -> profiled stage switches on one model.
+    let mut model = joint_laplace_row("cbpp");
+    model.fit_with_options(true, 1, false).unwrap();
+    assert!(model.pirls_certificate_pending && !model.joint_inference_pending);
+    model.reset_for_refit(None).unwrap();
+    assert!(!model.pirls_certificate_pending && !model.joint_inference_pending);
+    model.fit_with_options(false, 1, false).unwrap();
+    assert!(!model.pirls_certificate_pending && model.joint_inference_pending);
+    assert!(model.pirls_profiled_optimum_certificate().is_none());
+    assert!(matches!(
+        model
+            .compiler_artifact()
+            .model_boundary
+            .inference_availability,
+        InferenceAvailability::Available { .. }
+    ));
+    model.reset_for_refit(None).unwrap();
+    model.configure_profile_start_optimizer();
+    model.fit_with_options(true, 1, false).unwrap();
+    assert!(model.pirls_certificate_pending && !model.joint_inference_pending);
+    assert!(model.pirls_profiled_optimum_certificate().is_some());
+    assert_eq!(
+        model
+            .compiler_artifact()
+            .glmm_fit_metadata
+            .as_ref()
+            .unwrap()
+            .estimation_method,
+        "fast_pirls_profiled"
+    );
+
+    // Joint AGQ is not deferred (its artifacts carry no Hessian).
+    let mut agq = joint_laplace_row("culcita");
+    agq.fit_with_options(false, 3, false).unwrap();
+    assert!(!agq.joint_inference_pending);
+}
+
+/// A rejected AGQ request after a fit records its diagnostic on the stored
+/// artifact; a `&self` view cached before it must not hide it (fast and
+/// joint deferrals).
+#[test]
+fn deferred_inspection_sees_invalid_agq_diagnostic_recorded_after_fit() {
+    let (_, data) = glmm_certified_pirls_poisson_fixture();
+    for fast in [true, false] {
+        let formula = parse_formula("y ~ 1 + x + (1 + x | group)").unwrap();
+        let mut model =
+            GeneralizedLinearMixedModel::new(formula, &data, Family::Poisson, None).unwrap();
+        model.fit_with_options(fast, 1, false).unwrap();
+        assert!(
+            if fast {
+                model.pirls_certificate_pending
+            } else {
+                model.joint_inference_pending
+            },
+            "fast={fast}: the fit should defer its post-fit work"
+        );
+        let has_invalid_agq = |model: &GeneralizedLinearMixedModel| {
+            model
+                .compiler_artifact()
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == DiagnosticCode::InvalidAgqRequest)
+        };
+        // Fill the cached view, then fail an AGQ request.
+        let _ = MixedModelFit::vcov(&model);
+        assert!(!has_invalid_agq(&model));
+        assert!(model
+            .fit_with_glmm_options(GlmmFitOptions {
+                fast,
+                n_agq: 5,
+                ..GlmmFitOptions::default()
+            })
+            .is_err());
+        assert!(has_invalid_agq(&model), "fast={fast}: compiler_artifact");
+        assert!(
+            model
+                .audit_report()
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == DiagnosticCode::InvalidAgqRequest),
+            "fast={fast}: audit_report"
+        );
+        assert!(
+            model
+                .print_summary()
+                .top_diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == DiagnosticCode::InvalidAgqRequest),
+            "fast={fast}: print_summary"
+        );
+        let view = serde_json::to_value(model.compiler_artifact()).unwrap();
+        model.complete_deferred_inspection();
+        assert_eq!(
+            view,
+            serde_json::to_value(model.compiler_artifact()).unwrap(),
+            "fast={fast}: view vs in-place completion"
+        );
+    }
+}
+
+/// Unstable probes that move beta/theta/modes complete deferred work from
+/// the fitted state first, so the inference table reports the fitted beta.
+#[test]
+fn deferred_joint_laplace_inference_is_completed_before_probes() {
+    let eager = eager_joint_laplace_fit("cbpp");
+    let eager_artifact = serde_json::to_value(eager.compiler_artifact()).unwrap();
+    let mut probed = joint_laplace_fit("cbpp");
+    let far_theta = vec![probed.theta[0] * 0.5];
+    probed.profiled_deviance_at_theta(&far_theta, 1).unwrap();
+    assert!(!probed.joint_inference_pending);
+    assert_eq!(
+        serde_json::to_value(probed.compiler_artifact()).unwrap(),
+        eager_artifact
+    );
+    let mut via_lmm_mut = joint_laplace_fit("cbpp");
+    let _ = via_lmm_mut.lmm_mut();
+    assert!(!via_lmm_mut.joint_inference_pending);
+    assert_eq!(
+        serde_json::to_value(via_lmm_mut.compiler_artifact()).unwrap(),
+        eager_artifact
+    );
+}
+
+/// Prediction variance reads the certified joint covariance through the
+/// deferral.
+#[test]
+fn deferred_joint_laplace_inference_prediction_variance_matches_eager() {
+    let eager = eager_joint_laplace_fit("culcita");
+    let deferred = joint_laplace_fit("culcita");
+    let (data, _) = crate::datasets::load("culcitalogreg").unwrap();
+    let eager_payload = eager
+        .predict_new_variance(&data, GlmmPredictionScale::Response, NewReLevels::Error)
+        .unwrap();
+    let deferred_payload = deferred
+        .predict_new_variance(&data, GlmmPredictionScale::Response, NewReLevels::Error)
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(&deferred_payload).unwrap(),
+        serde_json::to_value(&eager_payload).unwrap()
+    );
+}
+
+/// Joint Laplace fit cost, eager versus deferred inference (interleaved in
+/// one binary), with and without a first inference inspection (`vcov`).
+/// `cargo test --release --lib generalized::tests::glmm_joint_inference_deferral_cost -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn glmm_joint_inference_deferral_cost() {
+    use std::time::Instant;
+    fn median(mut values: Vec<f64>) -> f64 {
+        values.sort_by(f64::total_cmp);
+        values[values.len() / 2]
+    }
+    for name in ["cbpp", "contraception"] {
+        // [eager fit, eager fit+vcov, deferred fit, deferred fit+vcov]
+        let mut samples: [Vec<f64>; 4] = Default::default();
+        for rep in 0..28 {
+            for eager in [true, false] {
+                EAGER_JOINT_LAPLACE_INFERENCE.with(|flag| flag.set(eager));
+                let mut model = joint_laplace_row(name);
+                let t0 = Instant::now();
+                model.fit_with_options(false, 1, false).unwrap();
+                let fit = t0.elapsed().as_secs_f64() * 1e3;
+                let vcov = MixedModelFit::vcov(&model);
+                let inspected = t0.elapsed().as_secs_f64() * 1e3;
+                EAGER_JOINT_LAPLACE_INFERENCE.with(|flag| flag.set(false));
+                assert!(vcov.iter().all(|value| value.is_finite()));
+                if rep >= 3 {
+                    let offset = if eager { 0 } else { 2 };
+                    samples[offset].push(fit);
+                    samples[offset + 1].push(inspected);
+                }
+            }
+        }
+        let [eager_fit, eager_vcov, deferred_fit, deferred_vcov] = samples.map(median);
+        println!(
+            "{name:14} eager fit {eager_fit:8.3} ms (+vcov {eager_vcov:8.3}) | deferred fit {deferred_fit:8.3} ms (+vcov {deferred_vcov:8.3}) | fit speedup {:.2}x (25 reps, interleaved)",
+            eager_fit / deferred_fit
+        );
+    }
+}
