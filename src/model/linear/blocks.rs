@@ -203,12 +203,286 @@ pub(super) fn fill_dense_from_block(dst: &mut DMatrix<f64>, src: &MatrixBlock, s
     }
 }
 
+/// `C -= A * Bᵀ` over typed blocks.
+///
+/// Sparse operands are consumed in CSC form (MixedModels.jl `mul!` for
+/// `BlockedSparse` operands in `src/linalg.jl`) instead of being densified
+/// on every factorization. A sparse `C` stays sparse, with its values
+/// updated in place, when its pattern covers every entry of the product --
+/// the nested-grouping case, where the product pattern is the `A` block
+/// pattern the target was built from. Otherwise `C` is promoted to dense
+/// once, as before. Dense·dense (and any other operand combination) keeps
+/// the original densify-and-gemm path, so fits without sparse off-diagonal
+/// blocks are bit-identical to it.
 pub(super) fn subtract_product_from_blocks(c: &mut MatrixBlock, a: &MatrixBlock, b: &MatrixBlock) {
-    with_dense_block(a, |a_dense| {
-        with_dense_block(b, |b_dense| {
-            subtract_product(c, a_dense, b_dense);
-        })
-    });
+    match (a, b) {
+        (MatrixBlock::Sparse(a_sp), MatrixBlock::Sparse(b_sp)) => {
+            if let MatrixBlock::Sparse(c_sp) = c {
+                if subtract_sparse_sparse_t_in_pattern(c_sp, a_sp, b_sp) {
+                    return;
+                }
+            }
+            subtract_sparse_sparse_t_into_dense(dense_target(c), a_sp, b_sp);
+        }
+        (MatrixBlock::Dense(a_d), MatrixBlock::Sparse(b_sp)) => {
+            subtract_dense_sparse_t_into_dense(dense_target(c), a_d, b_sp);
+        }
+        (MatrixBlock::Sparse(a_sp), MatrixBlock::Dense(b_d)) => {
+            subtract_sparse_dense_t_into_dense(dense_target(c), a_sp, b_d);
+        }
+        _ => with_dense_block(a, |a_dense| {
+            with_dense_block(b, |b_dense| {
+                subtract_product(c, a_dense, b_dense);
+            })
+        }),
+    }
+}
+
+/// Promote a non-dense target to dense (the same promotion
+/// `subtract_product` performs) and return its dense storage.
+fn dense_target(c: &mut MatrixBlock) -> &mut DMatrix<f64> {
+    if !matches!(c, MatrixBlock::Dense(_)) {
+        *c = MatrixBlock::Dense(c.as_dense());
+    }
+    match c {
+        MatrixBlock::Dense(mat) => mat,
+        _ => unreachable!("target was just promoted to dense"),
+    }
+}
+
+/// `C -= A * Bᵀ` with all three sparse, updating `C`'s stored values in
+/// place. Returns `false` -- leaving `C` untouched -- when some entry of
+/// the product falls outside `C`'s pattern.
+pub(super) fn subtract_sparse_sparse_t_in_pattern(
+    c: &mut CscMatrix<f64>,
+    a: &CscMatrix<f64>,
+    b: &CscMatrix<f64>,
+) -> bool {
+    debug_assert_eq!(a.ncols(), b.ncols());
+    debug_assert_eq!(c.nrows(), a.nrows());
+    debug_assert_eq!(c.ncols(), b.nrows());
+    let (a_off, a_rows, a_vals) = a.csc_data();
+    let (b_off, b_rows, b_vals) = b.csc_data();
+
+    // Coverage pass: every (A row, B row) pair sharing an inner index must
+    // be a stored entry of C. Row indices are sorted within each column.
+    {
+        let (c_off, c_rows, _) = c.csc_data();
+        for t in 0..a.ncols() {
+            let a_range = a_off[t]..a_off[t + 1];
+            if a_range.is_empty() {
+                continue;
+            }
+            for &jj in &b_rows[b_off[t]..b_off[t + 1]] {
+                let col_rows = &c_rows[c_off[jj]..c_off[jj + 1]];
+                if a_rows[a_range.clone()]
+                    .iter()
+                    .any(|row| col_rows.binary_search(row).is_err())
+                {
+                    return false;
+                }
+            }
+        }
+    }
+
+    let (c_off, c_rows, c_vals) = c.csc_data_mut();
+    for t in 0..a.ncols() {
+        let a_range = a_off[t]..a_off[t + 1];
+        if a_range.is_empty() {
+            continue;
+        }
+        for ib in b_off[t]..b_off[t + 1] {
+            let jj = b_rows[ib];
+            let bv = b_vals[ib];
+            let start = c_off[jj];
+            let col_rows = &c_rows[start..c_off[jj + 1]];
+            for ia in a_range.clone() {
+                let pos = start
+                    + col_rows
+                        .binary_search(&a_rows[ia])
+                        .expect("coverage checked above");
+                c_vals[pos] -= a_vals[ia] * bv;
+            }
+        }
+    }
+    true
+}
+
+/// `C -= A * Bᵀ` into a dense `C` with `A` and `B` sparse.
+pub(super) fn subtract_sparse_sparse_t_into_dense(
+    c: &mut DMatrix<f64>,
+    a: &CscMatrix<f64>,
+    b: &CscMatrix<f64>,
+) {
+    debug_assert_eq!(a.ncols(), b.ncols());
+    debug_assert_eq!(c.shape(), (a.nrows(), b.nrows()));
+    let (a_off, a_rows, a_vals) = a.csc_data();
+    let (b_off, b_rows, b_vals) = b.csc_data();
+    let m = c.nrows();
+    let c_data = c.as_mut_slice();
+    for t in 0..a.ncols() {
+        for ib in b_off[t]..b_off[t + 1] {
+            let bv = b_vals[ib];
+            let c_col = &mut c_data[b_rows[ib] * m..(b_rows[ib] + 1) * m];
+            for ia in a_off[t]..a_off[t + 1] {
+                c_col[a_rows[ia]] -= a_vals[ia] * bv;
+            }
+        }
+    }
+}
+
+/// `C -= A * Bᵀ` into a dense `C` with `A` dense and `B` sparse: one column
+/// axpy of `A[:, t]` per stored entry of `B[:, t]`.
+pub(super) fn subtract_dense_sparse_t_into_dense(
+    c: &mut DMatrix<f64>,
+    a: &DMatrix<f64>,
+    b: &CscMatrix<f64>,
+) {
+    debug_assert_eq!(a.ncols(), b.ncols());
+    debug_assert_eq!(c.shape(), (a.nrows(), b.nrows()));
+    let (b_off, b_rows, b_vals) = b.csc_data();
+    let m = c.nrows();
+    let a_data = a.as_slice();
+    let c_data = c.as_mut_slice();
+    for t in 0..b.ncols() {
+        let a_col = &a_data[t * m..(t + 1) * m];
+        for ib in b_off[t]..b_off[t + 1] {
+            let bv = b_vals[ib];
+            let c_col = &mut c_data[b_rows[ib] * m..(b_rows[ib] + 1) * m];
+            for (dst, &av) in c_col.iter_mut().zip(a_col) {
+                *dst -= av * bv;
+            }
+        }
+    }
+}
+
+/// `C -= A * Bᵀ` into a dense `C` with `A` sparse and `B` dense.
+pub(super) fn subtract_sparse_dense_t_into_dense(
+    c: &mut DMatrix<f64>,
+    a: &CscMatrix<f64>,
+    b: &DMatrix<f64>,
+) {
+    debug_assert_eq!(a.ncols(), b.ncols());
+    debug_assert_eq!(c.shape(), (a.nrows(), b.nrows()));
+    // Column-major walk over C: for each output column jj, scatter
+    // `A[:, t] * B[jj, t]` down that column (contiguous writes).
+    let (a_off, a_rows, a_vals) = a.csc_data();
+    let m = c.nrows();
+    let c_data = c.as_mut_slice();
+    for jj in 0..b.nrows() {
+        let c_col = &mut c_data[jj * m..(jj + 1) * m];
+        for t in 0..a.ncols() {
+            let bv = b[(jj, t)];
+            for ia in a_off[t]..a_off[t + 1] {
+                c_col[a_rows[ia]] -= a_vals[ia] * bv;
+            }
+        }
+    }
+}
+
+/// `dst -= L * v` for a typed block `L`, accumulating each row's dot
+/// product in column order before subtracting -- the same arithmetic as
+/// the dense row-dot loop over `L.as_dense()`. For finite `v` the results
+/// are identical to that loop (skipped entries are exact zeros); a
+/// non-finite `v` entry differs, since the dense loop forms `0 * Inf = NaN`
+/// for entries the typed kernels never visit.
+pub(crate) fn subtract_block_matvec(dst: &mut [f64], l: &MatrixBlock, v: &[f64]) {
+    debug_assert_eq!(dst.len(), l.nrows());
+    debug_assert_eq!(v.len(), l.ncols());
+    match l {
+        MatrixBlock::Dense(mat) => {
+            for (row, dst_row) in dst.iter_mut().enumerate() {
+                let mut dot = 0.0;
+                for (col, &v_col) in v.iter().enumerate() {
+                    dot += mat[(row, col)] * v_col;
+                }
+                *dst_row -= dot;
+            }
+        }
+        MatrixBlock::Sparse(csc) => {
+            let mut dots = vec![0.0; dst.len()];
+            let (off, rows, vals) = csc.csc_data();
+            for (col, &v_col) in v.iter().enumerate() {
+                for idx in off[col]..off[col + 1] {
+                    dots[rows[idx]] += vals[idx] * v_col;
+                }
+            }
+            for (dst_row, dot) in dst.iter_mut().zip(dots) {
+                *dst_row -= dot;
+            }
+        }
+        MatrixBlock::Diagonal(diag) => {
+            for ((dst_row, &d), &v_row) in dst.iter_mut().zip(diag.iter()).zip(v) {
+                let dot = 0.0 + d * v_row;
+                *dst_row -= dot;
+            }
+        }
+        MatrixBlock::BlockDiagonal(blocks) => {
+            // One offset serves rows and columns: sub-blocks are square
+            // (the uniform block-diagonal RE layout).
+            let mut offset = 0;
+            for block in blocks {
+                debug_assert_eq!(block.nrows(), block.ncols(), "non-square diagonal sub-block");
+                for row in 0..block.nrows() {
+                    let mut dot = 0.0;
+                    for col in 0..block.ncols() {
+                        dot += block[(row, col)] * v[offset + col];
+                    }
+                    dst[offset + row] -= dot;
+                }
+                offset += block.nrows();
+            }
+        }
+    }
+}
+
+/// `dst -= Lᵀ * u` for a typed block `L`, with the same accumulation
+/// contract as [`subtract_block_matvec`] (identical for finite `u`).
+pub(crate) fn subtract_block_transpose_matvec(dst: &mut [f64], l: &MatrixBlock, u: &[f64]) {
+    debug_assert_eq!(dst.len(), l.ncols());
+    debug_assert_eq!(u.len(), l.nrows());
+    match l {
+        MatrixBlock::Dense(mat) => {
+            for (row, dst_row) in dst.iter_mut().enumerate() {
+                let mut dot = 0.0;
+                for (col, &u_col) in u.iter().enumerate() {
+                    dot += mat[(col, row)] * u_col;
+                }
+                *dst_row -= dot;
+            }
+        }
+        MatrixBlock::Sparse(csc) => {
+            let (off, rows, vals) = csc.csc_data();
+            for (row, dst_row) in dst.iter_mut().enumerate() {
+                let mut dot = 0.0;
+                for idx in off[row]..off[row + 1] {
+                    dot += vals[idx] * u[rows[idx]];
+                }
+                *dst_row -= dot;
+            }
+        }
+        MatrixBlock::Diagonal(diag) => {
+            for ((dst_row, &d), &u_row) in dst.iter_mut().zip(diag.iter()).zip(u) {
+                let dot = 0.0 + d * u_row;
+                *dst_row -= dot;
+            }
+        }
+        MatrixBlock::BlockDiagonal(blocks) => {
+            // One offset serves rows and columns: sub-blocks are square.
+            let mut offset = 0;
+            for block in blocks {
+                debug_assert_eq!(block.nrows(), block.ncols(), "non-square diagonal sub-block");
+                for row in 0..block.ncols() {
+                    let mut dot = 0.0;
+                    for col in 0..block.nrows() {
+                        dot += block[(col, row)] * u[offset + col];
+                    }
+                    dst[offset + row] -= dot;
+                }
+                offset += block.nrows();
+            }
+        }
+    }
 }
 
 #[inline]
@@ -2891,6 +3165,469 @@ mod nalgebra_summation_order {
                     sequential_xty(&x, &y),
                     "nalgebra gemv order changed at p={p}, n={n}"
                 );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod sparse_product_paths {
+    use nalgebra::DMatrix;
+    use nalgebra_sparse::{coo::CooMatrix, csc::CscMatrix};
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+
+    use super::{
+        block_index, subtract_block_matvec, subtract_block_transpose_matvec, subtract_product,
+        subtract_product_from_blocks,
+    };
+    use crate::types::MatrixBlock;
+
+    const TOL: f64 = 1e-12;
+
+    fn random_sparse(rng: &mut StdRng, nrows: usize, ncols: usize, density: f64) -> CscMatrix<f64> {
+        let mut coo = CooMatrix::new(nrows, ncols);
+        for col in 0..ncols {
+            for row in 0..nrows {
+                if rng.gen::<f64>() < density {
+                    coo.push(row, col, rng.gen_range(-2.0..2.0));
+                }
+            }
+        }
+        CscMatrix::from(&coo)
+    }
+
+    /// One stored entry per column: the nested-grouping indicator shape.
+    fn random_indicator(rng: &mut StdRng, nrows: usize, ncols: usize) -> CscMatrix<f64> {
+        let mut coo = CooMatrix::new(nrows, ncols);
+        for col in 0..ncols {
+            coo.push(rng.gen_range(0..nrows), col, rng.gen_range(0.1..2.0));
+        }
+        CscMatrix::from(&coo)
+    }
+
+    fn random_dense(rng: &mut StdRng, nrows: usize, ncols: usize) -> DMatrix<f64> {
+        DMatrix::from_fn(nrows, ncols, |_, _| rng.gen_range(-2.0..2.0))
+    }
+
+    fn dense_of(block: &MatrixBlock) -> DMatrix<f64> {
+        block.as_dense()
+    }
+
+    /// Sparse target whose pattern is `pattern_of` plus random extra entries
+    /// (and optionally minus one product entry), with random values.
+    fn sparse_target(
+        rng: &mut StdRng,
+        product: &DMatrix<f64>,
+        extra_density: f64,
+        drop_one: bool,
+    ) -> (CscMatrix<f64>, bool) {
+        let (m, n) = product.shape();
+        let mut coo = CooMatrix::new(m, n);
+        let mut dropped = false;
+        for col in 0..n {
+            for row in 0..m {
+                let in_product = product[(row, col)] != 0.0;
+                if in_product && drop_one && !dropped {
+                    dropped = true;
+                    continue;
+                }
+                if in_product || rng.gen::<f64>() < extra_density {
+                    coo.push(row, col, rng.gen_range(-2.0..2.0));
+                }
+            }
+        }
+        (CscMatrix::from(&coo), dropped)
+    }
+
+    fn assert_close(actual: &DMatrix<f64>, expected: &DMatrix<f64>, what: &str) {
+        assert_eq!(actual.shape(), expected.shape(), "{what}: shape");
+        let diff = (actual - expected).abs().max();
+        assert!(diff <= TOL, "{what}: max abs diff {diff:e}");
+    }
+
+    fn expected_after(c0: &DMatrix<f64>, a: &DMatrix<f64>, b: &DMatrix<f64>) -> DMatrix<f64> {
+        c0 - a * b.transpose()
+    }
+
+    #[test]
+    fn sparse_operands_into_dense_target_match_dense_gemm() {
+        let mut rng = StdRng::seed_from_u64(0x5eed_0001);
+        for trial in 0..40 {
+            let m = rng.gen_range(1..12);
+            let n = rng.gen_range(1..12);
+            let k = rng.gen_range(1..30);
+            let density = [0.05, 0.2, 0.5, 1.0][trial % 4];
+            let a_sp = random_sparse(&mut rng, m, k, density);
+            let b_sp = random_sparse(&mut rng, n, k, density);
+            let a_d = random_dense(&mut rng, m, k);
+            let b_d = random_dense(&mut rng, n, k);
+            let c0 = random_dense(&mut rng, m, n);
+            let a_sp_d = dense_of(&MatrixBlock::Sparse(a_sp.clone()));
+            let b_sp_d = dense_of(&MatrixBlock::Sparse(b_sp.clone()));
+
+            let cases: [(MatrixBlock, MatrixBlock, &DMatrix<f64>, &DMatrix<f64>, &str); 3] = [
+                (
+                    MatrixBlock::Sparse(a_sp.clone()),
+                    MatrixBlock::Sparse(b_sp.clone()),
+                    &a_sp_d,
+                    &b_sp_d,
+                    "sparse*sparse'",
+                ),
+                (
+                    MatrixBlock::Dense(a_d.clone()),
+                    MatrixBlock::Sparse(b_sp.clone()),
+                    &a_d,
+                    &b_sp_d,
+                    "dense*sparse'",
+                ),
+                (
+                    MatrixBlock::Sparse(a_sp.clone()),
+                    MatrixBlock::Dense(b_d.clone()),
+                    &a_sp_d,
+                    &b_d,
+                    "sparse*dense'",
+                ),
+            ];
+            for (a, b, a_ref, b_ref, what) in cases {
+                let expected = expected_after(&c0, a_ref, b_ref);
+                let mut c = MatrixBlock::Dense(c0.clone());
+                subtract_product_from_blocks(&mut c, &a, &b);
+                let MatrixBlock::Dense(got) = &c else {
+                    panic!("{what}: dense target changed variant");
+                };
+                assert_close(got, &expected, what);
+
+                // A diagonal target is promoted to dense, as before.
+                if m == n {
+                    let diag0 = c0.diagonal();
+                    let mut c = MatrixBlock::Diagonal(diag0.clone());
+                    subtract_product_from_blocks(&mut c, &a, &b);
+                    let expected = expected_after(&DMatrix::from_diagonal(&diag0), a_ref, b_ref);
+                    assert!(matches!(c, MatrixBlock::Dense(_)), "{what}: diag promotion");
+                    assert_close(&c.as_dense(), &expected, what);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sparse_target_covering_the_product_stays_sparse_and_matches_dense() {
+        let mut rng = StdRng::seed_from_u64(0x5eed_0002);
+        for trial in 0..60 {
+            let m = rng.gen_range(1..10);
+            let n = rng.gen_range(1..14);
+            let k = rng.gen_range(1..40);
+            let (a_sp, b_sp) = if trial % 2 == 0 {
+                (
+                    random_indicator(&mut rng, m, k),
+                    random_indicator(&mut rng, n, k),
+                )
+            } else {
+                (
+                    random_sparse(&mut rng, m, k, 0.15),
+                    random_sparse(&mut rng, n, k, 0.15),
+                )
+            };
+            let a_ref = dense_of(&MatrixBlock::Sparse(a_sp.clone()));
+            let b_ref = dense_of(&MatrixBlock::Sparse(b_sp.clone()));
+            // Structural product pattern (entries with a shared inner index).
+            let pattern = a_ref.map(|x| (x != 0.0) as u8 as f64)
+                * b_ref.map(|x| (x != 0.0) as u8 as f64).transpose();
+            let (c_sp, _) = sparse_target(&mut rng, &pattern, 0.2, false);
+            let c0 = dense_of(&MatrixBlock::Sparse(c_sp.clone()));
+            let expected = expected_after(&c0, &a_ref, &b_ref);
+
+            let mut c = MatrixBlock::Sparse(c_sp.clone());
+            subtract_product_from_blocks(
+                &mut c,
+                &MatrixBlock::Sparse(a_sp.clone()),
+                &MatrixBlock::Sparse(b_sp.clone()),
+            );
+            let MatrixBlock::Sparse(got) = &c else {
+                panic!("covered sparse target was densified (trial {trial})");
+            };
+            assert_eq!(got.col_offsets(), c_sp.col_offsets(), "pattern changed");
+            assert_eq!(got.row_indices(), c_sp.row_indices(), "pattern changed");
+            assert_close(&c.as_dense(), &expected, "covered sparse target");
+        }
+    }
+
+    #[test]
+    fn sparse_target_missing_a_product_entry_falls_back_to_dense() {
+        let mut rng = StdRng::seed_from_u64(0x5eed_0003);
+        let mut exercised = 0;
+        for trial in 0..60 {
+            let m = rng.gen_range(1..10);
+            let n = rng.gen_range(1..14);
+            let k = rng.gen_range(1..40);
+            let a_sp = random_sparse(&mut rng, m, k, 0.2);
+            let b_sp = random_sparse(&mut rng, n, k, 0.2);
+            let a_ref = dense_of(&MatrixBlock::Sparse(a_sp.clone()));
+            let b_ref = dense_of(&MatrixBlock::Sparse(b_sp.clone()));
+            let pattern = a_ref.map(|x| (x != 0.0) as u8 as f64)
+                * b_ref.map(|x| (x != 0.0) as u8 as f64).transpose();
+            let (c_sp, dropped) = sparse_target(&mut rng, &pattern, 0.1, true);
+            if !dropped {
+                continue;
+            }
+            exercised += 1;
+            let c0 = dense_of(&MatrixBlock::Sparse(c_sp.clone()));
+            let expected = expected_after(&c0, &a_ref, &b_ref);
+            let mut c = MatrixBlock::Sparse(c_sp);
+            subtract_product_from_blocks(
+                &mut c,
+                &MatrixBlock::Sparse(a_sp),
+                &MatrixBlock::Sparse(b_sp),
+            );
+            assert!(
+                matches!(c, MatrixBlock::Dense(_)),
+                "uncovered sparse target must be promoted (trial {trial})"
+            );
+            assert_close(&c.as_dense(), &expected, "uncovered sparse target");
+        }
+        assert!(exercised >= 30, "too few uncovered trials: {exercised}");
+    }
+
+    #[test]
+    fn dense_dense_path_is_unchanged_bitwise() {
+        let mut rng = StdRng::seed_from_u64(0x5eed_0004);
+        for _ in 0..20 {
+            let (m, n, k) = (rng.gen_range(1..20), rng.gen_range(1..20), rng.gen_range(1..40));
+            let a = random_dense(&mut rng, m, k);
+            let b = random_dense(&mut rng, n, k);
+            let c0 = random_dense(&mut rng, m, n);
+            let mut via_blocks = MatrixBlock::Dense(c0.clone());
+            subtract_product_from_blocks(
+                &mut via_blocks,
+                &MatrixBlock::Dense(a.clone()),
+                &MatrixBlock::Dense(b.clone()),
+            );
+            let mut direct = MatrixBlock::Dense(c0);
+            subtract_product(&mut direct, &a, &b);
+            assert_eq!(via_blocks.as_dense(), direct.as_dense());
+        }
+    }
+
+    #[test]
+    fn block_matvecs_are_bit_identical_to_the_dense_loops() {
+        let mut rng = StdRng::seed_from_u64(0x5eed_0005);
+        let dense_matvec = |l: &DMatrix<f64>, v: &[f64], dst: &mut [f64]| {
+            for row in 0..l.nrows() {
+                let mut dot = 0.0;
+                for col in 0..v.len() {
+                    dot += l[(row, col)] * v[col];
+                }
+                dst[row] -= dot;
+            }
+        };
+        let dense_tmatvec = |l: &DMatrix<f64>, u: &[f64], dst: &mut [f64]| {
+            for row in 0..l.ncols() {
+                let mut dot = 0.0;
+                for col in 0..u.len() {
+                    dot += l[(col, row)] * u[col];
+                }
+                dst[row] -= dot;
+            }
+        };
+        for trial in 0..40 {
+            let (m, n) = (rng.gen_range(1..25), rng.gen_range(1..25));
+            let blocks = [
+                MatrixBlock::Sparse(random_sparse(&mut rng, m, n, 0.3)),
+                MatrixBlock::Dense(random_dense(&mut rng, m, n)),
+                MatrixBlock::Diagonal(random_dense(&mut rng, m, 1).column(0).into_owned()),
+                MatrixBlock::BlockDiagonal(vec![
+                    random_dense(&mut rng, 2, 2),
+                    random_dense(&mut rng, 1, 1),
+                    random_dense(&mut rng, 3, 3),
+                ]),
+            ];
+            for block in &blocks {
+                let dense = block.as_dense();
+                let (r, c) = dense.shape();
+                let v: Vec<f64> = (0..c).map(|_| rng.gen_range(-3.0..3.0)).collect();
+                let u: Vec<f64> = (0..r).map(|_| rng.gen_range(-3.0..3.0)).collect();
+                let base_r: Vec<f64> = (0..r).map(|_| rng.gen_range(-3.0..3.0)).collect();
+                let base_c: Vec<f64> = (0..c).map(|_| rng.gen_range(-3.0..3.0)).collect();
+
+                let (mut got, mut want) = (base_r.clone(), base_r.clone());
+                subtract_block_matvec(&mut got, block, &v);
+                dense_matvec(&dense, &v, &mut want);
+                assert_eq!(got, want, "matvec trial {trial}");
+
+                let (mut got, mut want) = (base_c.clone(), base_c.clone());
+                subtract_block_transpose_matvec(&mut got, block, &u);
+                dense_tmatvec(&dense, &u, &mut want);
+                assert_eq!(got, want, "transpose matvec trial {trial}");
+            }
+        }
+    }
+
+    /// Assert the blocked factor held in `model.l_blocks` equals a dense
+    /// Cholesky of the assembled `Λ'AΛ + I` system (general per-term Λ,
+    /// including vector-valued terms).
+    fn assert_blocked_l_matches_dense_cholesky(
+        model: &crate::model::linear::LinearMixedModel,
+        label: &str,
+    ) {
+        let k = model.reterms.len();
+        let sizes: Vec<usize> = (0..=k)
+            .map(|b| model.a_blocks[block_index(b, b)].nrows())
+            .collect();
+        let mut offsets = vec![0; k + 1];
+        for b in 1..=k {
+            offsets[b] = offsets[b - 1] + sizes[b - 1];
+        }
+        let total: usize = sizes.iter().sum();
+        let mut a_full = DMatrix::<f64>::zeros(total, total);
+        let mut lambda = DMatrix::<f64>::identity(total, total);
+        let mut l_full = DMatrix::<f64>::zeros(total, total);
+        for (j, rt) in model.reterms.iter().enumerate() {
+            let s = rt.vsize;
+            for level in 0..sizes[j] / s {
+                let base = offsets[j] + level * s;
+                for r in 0..s {
+                    for c in 0..s {
+                        lambda[(base + r, base + c)] = rt.lambda[(r, c)];
+                    }
+                }
+            }
+        }
+        for i in 0..=k {
+            for j in 0..=i {
+                let a = model.a_blocks[block_index(i, j)].as_dense();
+                let l = model.l_blocks[block_index(i, j)].as_dense();
+                for r in 0..sizes[i] {
+                    for c in 0..sizes[j] {
+                        let (gr, gc) = (offsets[i] + r, offsets[j] + c);
+                        a_full[(gr, gc)] = a[(r, c)];
+                        a_full[(gc, gr)] = a[(r, c)];
+                        if i != j || c <= r {
+                            l_full[(gr, gc)] = l[(r, c)];
+                        }
+                    }
+                }
+            }
+        }
+        let mut system = lambda.transpose() * a_full * &lambda;
+        for d in 0..offsets[k] {
+            system[(d, d)] += 1.0;
+        }
+        let reference = nalgebra::Cholesky::new(system)
+            .unwrap_or_else(|| panic!("{label}: reference system not positive definite"))
+            .l();
+        let diff = (&l_full - &reference).abs().max();
+        let magnitude = reference.abs().max().max(1.0);
+        assert!(
+            diff <= 1e-10 * magnitude,
+            "{label}: blocked L differs from dense Cholesky by {diff:e}"
+        );
+    }
+
+    /// End to end: three nested scalar terms keep every RE off-diagonal L
+    /// block sparse, and the blocked factor equals a dense Cholesky of the
+    /// assembled `Λ'AΛ + I` system.
+    #[test]
+    fn nested_scalar_terms_keep_sparse_l_and_match_dense_cholesky() {
+        use crate::formula::parse_formula;
+        use crate::model::linear::LinearMixedModel;
+
+        let (mut data, _) = crate::datasets::load("grouseticks").unwrap();
+        let ticks: Vec<f64> = data
+            .numeric("TICKS")
+            .unwrap()
+            .iter()
+            .map(|t| (t + 1.0).ln())
+            .collect();
+        data.add_numeric("LT", ticks).unwrap();
+        let formula = parse_formula(
+            "LT ~ 1 + YEAR + cHEIGHT + (1 | BROOD) + (1 | INDEX) + (1 | LOCATION)",
+        )
+        .unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        let k = model.reterms.len();
+        assert_eq!(k, 3);
+
+        for theta in [[1.0, 1.0, 1.0], [0.3, 1.7, 0.6], [2.5, 0.05, 1.1]] {
+            model.set_theta(&theta).unwrap();
+            model.update_l().unwrap();
+            for i in 1..k {
+                for j in 0..i {
+                    assert!(
+                        matches!(model.l_blocks[block_index(i, j)], MatrixBlock::Sparse(_)),
+                        "L[{i},{j}] was densified"
+                    );
+                }
+            }
+            assert_blocked_l_matches_dense_cholesky(&model, &format!("grouseticks {theta:?}"));
+        }
+    }
+
+    /// Partially nested, crossed, zero-valued-covariate and vector-valued
+    /// layouts, each refactored over a θ path (including θ = 0 and a return
+    /// to 1) that reuses the same L buffers across evaluations, so a block
+    /// promoted to dense or kept sparse by one evaluation must stay correct
+    /// on the next.
+    #[test]
+    fn mixed_block_layouts_match_dense_cholesky_across_theta_path() {
+        use crate::formula::parse_formula;
+        use crate::model::data::DataFrame;
+        use crate::model::linear::LinearMixedModel;
+
+        let mut rng = StdRng::seed_from_u64(7);
+        let (mut g0, mut g1, mut g2, mut g3, mut x, mut y) =
+            (vec![], vec![], vec![], vec![], vec![], vec![]);
+        // g0 and g1 are crossed with each other, both nested in g2; g3 is
+        // crossed with everything. 30% of x is exactly zero.
+        for r in 0..8 {
+            for a in 0..6 {
+                for b in 0..3 {
+                    for _ in 0..rng.gen_range(1..4) {
+                        g2.push(format!("r{r}"));
+                        g0.push(format!("s{r}_{a}"));
+                        g1.push(format!("b{r}_{b}"));
+                        g3.push(format!("c{}", rng.gen_range(0..7)));
+                        x.push(if rng.gen::<f64>() < 0.3 {
+                            0.0
+                        } else {
+                            rng.gen_range(-1.0..1.0)
+                        });
+                        y.push(rng.gen_range(-1.0..1.0));
+                    }
+                }
+            }
+        }
+        let mut df = DataFrame::new();
+        df.add_categorical("g0", g0).unwrap();
+        df.add_categorical("g1", g1).unwrap();
+        df.add_categorical("g2", g2).unwrap();
+        df.add_categorical("g3", g3).unwrap();
+        df.add_numeric("x", x).unwrap();
+        df.add_numeric("y", y).unwrap();
+
+        let formulas = [
+            "y ~ 1 + x + (1 | g0) + (1 | g1) + (1 | g2)",
+            "y ~ 1 + x + (1 | g0) + (1 | g1) + (1 | g2) + (1 | g3)",
+            "y ~ 1 + x + (1 | g0) + (0 + x | g2) + (1 | g2)",
+            "y ~ 1 + x + (1 + x | g0) + (1 | g2)",
+            "y ~ 1 + x + (1 | g0) + (1 + x | g2)",
+            "y ~ 1 + x + (1 | g1) + (1 + x | g0) + (1 | g2)",
+        ];
+        let mut rng = StdRng::seed_from_u64(11);
+        for formula in formulas {
+            let mut model =
+                LinearMixedModel::new(parse_formula(formula).unwrap(), &df, None).unwrap();
+            let nt = model.theta().len();
+            let mut thetas = vec![vec![1.0; nt]];
+            for _ in 0..3 {
+                thetas.push((0..nt).map(|_| rng.gen_range(0.05..2.0)).collect());
+            }
+            thetas.push(vec![0.0; nt]);
+            thetas.push(vec![1.0; nt]);
+            for theta in &thetas {
+                model.set_theta(theta).unwrap();
+                model.update_l().unwrap();
+                assert_blocked_l_matches_dense_cholesky(&model, &format!("{formula} {theta:?}"));
             }
         }
     }

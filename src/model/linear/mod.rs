@@ -3311,17 +3311,16 @@ impl LinearMixedModel {
 
             let mut rhs = c_vecs[j].clone();
 
-            // rhs -= L[j,m] * v_m  for all already-solved m < j
+            // rhs -= L[j,m] * v_m  for all already-solved m < j, on the
+            // block's own storage (sparse CSC stays sparse; bit-identical
+            // to the dense row-dot loop).
+            debug_assert_eq!(rhs.len(), nranef_j);
             for m in 0..j {
-                let l_jm = self.l_blocks[block_index(j, m)].as_dense();
-                let v_m = &v_vecs[m];
-                for row in 0..nranef_j {
-                    let mut dot = 0.0;
-                    for col in 0..v_m.len() {
-                        dot += l_jm[(row, col)] * v_m[col];
-                    }
-                    rhs[row] -= dot;
-                }
+                subtract_block_matvec(
+                    rhs.as_mut_slice(),
+                    &self.l_blocks[block_index(j, m)],
+                    v_vecs[m].as_slice(),
+                );
             }
 
             // Solve L[j,j] * v_j = rhs  (forward substitution)
@@ -3339,17 +3338,13 @@ impl LinearMixedModel {
             let mut rhs = v_vecs[j].clone();
 
             // rhs -= L[m,j]' * u_m  for all already-solved m > j
+            debug_assert_eq!(rhs.len(), nranef_j);
             for m in (j + 1)..k {
-                let l_mj = self.l_blocks[block_index(m, j)].as_dense();
-                let u_m = &u_vecs[m];
-                // L[m,j]' is nranef_j × nranef_m: rhs[row] -= sum_col l_mj[(col,row)] * u_m[col]
-                for row in 0..nranef_j {
-                    let mut dot = 0.0;
-                    for col in 0..u_m.len() {
-                        dot += l_mj[(col, row)] * u_m[col];
-                    }
-                    rhs[row] -= dot;
-                }
+                subtract_block_transpose_matvec(
+                    rhs.as_mut_slice(),
+                    &self.l_blocks[block_index(m, j)],
+                    u_vecs[m].as_slice(),
+                );
             }
 
             // Solve L[j,j]' * u_j = rhs  (backward substitution with L')

@@ -913,15 +913,13 @@ impl GeneralizedLinearMixedModel {
             let nranef_j = self.lmm.reterms[j].n_ranef();
             let mut rhs = c_vecs[j].clone();
 
+            debug_assert_eq!(rhs.len(), nranef_j);
             for (m, v_m) in v_vecs.iter().enumerate().take(j) {
-                let l_jm = self.lmm.l_blocks[glmm_block_index(j, m)].as_dense();
-                for row in 0..nranef_j {
-                    let mut dot = 0.0;
-                    for col in 0..v_m.len() {
-                        dot += l_jm[(row, col)] * v_m[col];
-                    }
-                    rhs[row] -= dot;
-                }
+                crate::model::linear::subtract_block_matvec(
+                    rhs.as_mut_slice(),
+                    &self.lmm.l_blocks[glmm_block_index(j, m)],
+                    v_m.as_slice(),
+                );
             }
 
             let mut v_j = rhs.as_slice().to_vec();
@@ -937,16 +935,13 @@ impl GeneralizedLinearMixedModel {
             let nranef_j = self.lmm.reterms[j].n_ranef();
             let mut rhs = v_vecs[j].clone();
 
+            debug_assert_eq!(rhs.len(), nranef_j);
             for m in (j + 1)..k {
-                let l_mj = self.lmm.l_blocks[glmm_block_index(m, j)].as_dense();
-                let u_m = &u_vecs[m];
-                for row in 0..nranef_j {
-                    let mut dot = 0.0;
-                    for col in 0..u_m.len() {
-                        dot += l_mj[(col, row)] * u_m[col];
-                    }
-                    rhs[row] -= dot;
-                }
+                crate::model::linear::subtract_block_transpose_matvec(
+                    rhs.as_mut_slice(),
+                    &self.lmm.l_blocks[glmm_block_index(m, j)],
+                    u_vecs[m].as_slice(),
+                );
             }
 
             let mut u_j = rhs.as_slice().to_vec();
@@ -1355,5 +1350,58 @@ impl GeneralizedLinearMixedModel {
             total += self.case_weight(obs) * residual * residual / variance;
         }
         total
+    }
+}
+
+#[cfg(test)]
+mod nested_sparse_regression {
+    use crate::formula::parse_formula;
+    use crate::model::generalized::GeneralizedLinearMixedModel;
+    use crate::model::traits::{Family, LinkFunction, MixedModelFit};
+    use crate::types::MatrixBlock;
+
+    /// grouseticks Poisson GLMM (INDEX ⊂ BROOD ⊂ LOCATION): pins the fit
+    /// the sparse-aware blocked Cholesky produces and checks that the RE
+    /// off-diagonal L blocks keep their sparse storage through the fit
+    /// (mote bd-01M1TGFK22VQ8VCASPS83BRSB5).
+    #[test]
+    fn grouseticks_poisson_fit_keeps_sparse_l_blocks() {
+        let (data, _) = crate::datasets::load("grouseticks").unwrap();
+        let formula = parse_formula(
+            "TICKS ~ 1 + YEAR + cHEIGHT + (1 | BROOD) + (1 | INDEX) + (1 | LOCATION)",
+        )
+        .unwrap();
+        let mut model = GeneralizedLinearMixedModel::new(
+            formula,
+            &data,
+            Family::Poisson,
+            Some(LinkFunction::Log),
+        )
+        .unwrap();
+        model.fit_with_options(true, 1, false).unwrap();
+
+        // The exact objective and feval pins belong to the NLopt BOBYQA path;
+        // the no-NLopt fallback optimizer stops ~7e-5 higher on this surface.
+        let objective = model.objective();
+        let expected = 851.404_637_081_444;
+        let tolerance = if cfg!(feature = "nlopt") { 1e-8 } else { 1e-6 };
+        assert!(
+            ((objective - expected) / expected).abs() <= tolerance,
+            "objective {objective:.12} drifted from {expected}"
+        );
+        #[cfg(feature = "nlopt")]
+        assert_eq!(model.opt_summary().feval, 48, "feval changed");
+
+        let k = model.lmm.reterms.len();
+        assert_eq!(k, 3);
+        for i in 1..k {
+            for j in 0..i {
+                let idx = i * (i + 1) / 2 + j;
+                assert!(
+                    matches!(model.lmm.l_blocks[idx], MatrixBlock::Sparse(_)),
+                    "L[{i},{j}] was densified by the fit"
+                );
+            }
+        }
     }
 }

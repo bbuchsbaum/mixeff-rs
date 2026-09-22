@@ -50,10 +50,15 @@ const SPEED_CASES: &[GlmmSpeedCase] = &[
         known_slow_bead: None,
     },
     // grouseticks passes 1.0x against the recorded lme4 timing (333 ms vs
-    // 287 ms) but a same-session lme4 rerun measured 246 ms (0.86x): the
-    // INDEX term has one level per observation, so the blocked Cholesky
-    // carries dense fill-in that lme4's sparse factor avoids (mote
-    // bd-01M1TGFK22VQ8VCASPS83BRSB5). The threshold stays enforced at 1.0x.
+    // 287 ms) but a same-session lme4 rerun measured 246 ms (0.86x). The
+    // terms are nested (INDEX ⊂ BROOD ⊂ LOCATION), so the factor has no
+    // structural fill-in: every RE off-diagonal L block keeps the sparse
+    // pattern of its A block, as in MixedModels.jl. The recorded time came
+    // from the blocked Cholesky densifying those sparse blocks for every
+    // off-diagonal product (and permanently densifying L[LOCATION,BROOD])
+    // and from `ranef_u` densifying them per PIRLS iteration; both now run
+    // on the CSC storage (mote bd-01M1TGFK22VQ8VCASPS83BRSB5), which the
+    // recorded comparison rows predate. The threshold stays enforced at 1.0x.
     GlmmSpeedCase {
         dataset: "grouseticks",
         formula: "TICKS ~ 1 + YEAR + cHEIGHT + (1 | BROOD) + (1 | INDEX) + (1 | LOCATION)",
