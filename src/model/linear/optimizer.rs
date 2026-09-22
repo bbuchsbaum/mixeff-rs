@@ -3436,12 +3436,10 @@ impl LinearMixedModel {
             obj
         };
 
-        let maxfun = maxeval_override.unwrap_or_else(|| {
-            if self.optsum.max_feval > 0 {
-                self.optsum.max_feval as usize
-            } else {
-                10000
-            }
+        let maxfun = maxeval_override.unwrap_or(if self.optsum.max_feval > 0 {
+            self.optsum.max_feval as usize
+        } else {
+            10000
         });
 
         let lower_bounds = self.lower_bounds();
