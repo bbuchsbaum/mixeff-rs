@@ -4429,18 +4429,20 @@ fn deferred_joint_laplace_inference_matches_eager_path() {
     }
 }
 
-/// Values pinned from the eager path before the deferral (HEAD d82cea9,
-/// NLopt BOBYQA joint driver, macOS aarch64).
+/// Values pinned from the eager path on macOS aarch64 with the NLopt BOBYQA
+/// joint driver whose FTOL stops are confirmed by restarts (e774238).
 ///
-/// This is a fit-level anchor, not a fixture gate (VERSIONING.md §3.1):
-/// BOBYQA stops at a slightly different point on other platforms (Linux
-/// x86_64 cbpp objective differs by 3e-9 relative), so the objective is held
-/// to the documented parity band and the finite-difference standard errors
-/// to a looser coordinate tolerance: Linux stops ~2e-4 away in β, and the
-/// finite-difference Hessian evaluated there moves the SEs by ~7e-5
-/// relative, so 1e-3 still catches any real Hessian regression.
-/// Deferred-vs-eager equality is checked exactly, on one platform, by the
-/// tests above.
+/// This is a fit-level anchor, not a fixture gate (VERSIONING.md §3.1).
+/// Before the confirmation restarts, BOBYQA's FTOL stop landed wherever
+/// last-bit rounding put it (Linux x86_64 contraception 9.2e-5 above the
+/// optimum); with them, perturbed starts land within ~5e-8 of the optimum,
+/// and the Linux x86_64 and Windows CI lanes for e774238 pass this test.
+/// The objective is held to the documented parity band. The
+/// finite-difference standard errors keep a looser 1e-3 relative tolerance:
+/// the stop point still varies at the 1e-8 objective level, and the
+/// finite-difference Hessian evaluated there moves the SEs far less than
+/// 1e-3, which still catches any real Hessian regression. Deferred-vs-eager
+/// equality is checked exactly, on one platform, by the tests above.
 #[cfg(feature = "nlopt")]
 #[test]
 fn deferred_joint_laplace_inference_matches_pinned_eager_values() {
@@ -4514,8 +4516,8 @@ fn deferred_joint_laplace_inference_matches_pinned_eager_values() {
 /// trust-region radius, so without confirmation restarts the joint fit
 /// stopped anywhere from 1e-7 to 2.5e-4 above the optimum depending on
 /// last-bit differences in the start (contraception stopped 9.2e-5 high on
-/// Linux CI). Starts perturbed at 1e-7..1e-6 relative must all land in the
-/// 1e-7 parity band of the pinned optimum.
+/// Linux CI). Starts perturbed at 1e-7..1e-6 relative must all land no more
+/// than 1e-7 (the parity band) above the pinned optimum.
 #[cfg(feature = "nlopt")]
 #[test]
 fn joint_laplace_nlopt_stop_is_robust_to_start_perturbations() {
@@ -4558,8 +4560,10 @@ fn joint_laplace_nlopt_stop_is_robust_to_start_perturbations() {
                     .unwrap();
                 let optsum = model.opt_summary();
                 let objective = MixedModelFit::objective(&model);
+                // One-sided: a platform that finds a lower optimum passes;
+                // the lower bound only guards against a broken objective.
                 assert!(
-                    (objective - pinned).abs() <= 1e-7,
+                    objective <= pinned + 1e-7 && objective >= pinned - 1e-4,
                     "{name} eps {eps:e}: objective {objective:.10} vs pinned {pinned:.10} \
                      (feval {} of max {}, return {})",
                     optsum.feval,
@@ -4569,6 +4573,89 @@ fn joint_laplace_nlopt_stop_is_robust_to_start_perturbations() {
             }
         }
     }
+}
+
+/// A tight evaluation budget must not turn a confirmed or unconfirmable
+/// FTOL stop into a budget stop. A confirming restart that gains nothing
+/// keeps the FTOL label even if it then exhausts the budget, and a restart
+/// that cannot afford twice BOBYQA's 2n + 1 interpolation set is not
+/// launched; that stop keeps its FTOL label and is recorded as unconfirmed
+/// on the certificate rather than claimed as confirmed. Sweeping the budget
+/// across cbpp's first-pass and restart stop points covers both cases.
+#[cfg(feature = "nlopt")]
+#[test]
+fn joint_laplace_nlopt_ftol_confirmation_respects_tight_budgets() {
+    let pinned = 184.05256373024386;
+    let mut profiled = joint_laplace_row("cbpp");
+    profiled.fit_with_options(true, 1, false).unwrap();
+    let n_params = profiled.beta.len() + profiled.theta.len();
+    let min_restart_budget = 2 * (2 * n_params as i64 + 1);
+    // Objectives reached by an FTOL stop under a smaller budget.
+    let mut ftol_objectives: Vec<f64> = Vec::new();
+    let (mut saw_unconfirmed, mut saw_confirmed) = (false, false);
+    for maxeval in 40..=130u32 {
+        let mut model = profiled.clone();
+        let start_objective = model.deviance_with_response_constants(1);
+        model.lmm.optsum.optimizer = Optimizer::NloptBobyqa;
+        model
+            .fit_joint_glmm_from_start(
+                profiled.beta.as_slice().to_vec(),
+                profiled.theta.clone(),
+                start_objective,
+                1,
+                maxeval,
+                Some(profiled.clone()),
+            )
+            .unwrap();
+        let optsum = model.opt_summary().clone();
+        let objective = MixedModelFit::objective(&model);
+        let label = optsum.return_value.as_str();
+        assert!(
+            label == "JOINT_LAPLACE:FTOL_REACHED" || label == "JOINT_LAPLACE:MAXEVAL_REACHED",
+            "max {maxeval}: unexpected return {label}"
+        );
+        assert!(optsum.feval <= i64::from(maxeval));
+        let unconfirmed = model
+            .compiler_artifact()
+            .optimizer_certificate
+            .as_ref()
+            .is_some_and(|certificate| {
+                certificate
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.payload.contains_key("ftol_confirmation"))
+            });
+        if label.ends_with("MAXEVAL_REACHED") {
+            // A budget stop must have moved past every FTOL stop reached
+            // under a smaller budget: a restart that gained nothing (or was
+            // never launched) cannot relabel the fit.
+            assert!(
+                ftol_objectives.iter().all(|&f| objective < f - 1e-12),
+                "max {maxeval}: MAXEVAL at objective {objective:.12} already reached by an FTOL stop"
+            );
+            assert!(
+                !unconfirmed,
+                "max {maxeval}: budget stop marked as an FTOL confirmation gap"
+            );
+        } else {
+            ftol_objectives.push(objective);
+            if unconfirmed {
+                saw_unconfirmed = true;
+                assert!(
+                    i64::from(maxeval) - optsum.feval < min_restart_budget,
+                    "max {maxeval}: unconfirmed although {} evaluations remained",
+                    i64::from(maxeval) - optsum.feval
+                );
+            } else {
+                saw_confirmed = true;
+                assert!(
+                    objective <= pinned + 1e-7,
+                    "max {maxeval}: confirmed FTOL stop at {objective:.12}, pinned {pinned:.12}"
+                );
+            }
+        }
+    }
+    assert!(saw_unconfirmed && saw_confirmed);
 }
 
 /// Every path that records on, re-fits, or switches estimator from a
