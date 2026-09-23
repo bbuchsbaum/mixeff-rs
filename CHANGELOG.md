@@ -214,6 +214,20 @@ bit-identical unless noted above.
   release workflow (Julia 1.12.4). The eight parity fixtures were regenerated
   under the pin: θ/β move by at most ~4e-9 and objectives by ~1e-10 relative,
   inside the abs 1e-7 / rel 1e-8 band; provenance strings record 5.9.0.
+- The Julia drift gate now passes on Linux CI (it had never reached most
+  fixtures there) and reports every drifting fixture instead of stopping at
+  the first. Three references were only as precise as Float64 rounding
+  allowed, which let Linux and macOS Julia land at different points:
+  `kb07_ranef` and the `easy_full_rank` pathology fixture are now
+  Newton-polished in 256-bit arithmetic from the MixedModels optimum (θ
+  moves by up to 3.3e-4 / 6e-5), and `gamma_glmm_engines`, a boundary fit,
+  is pinned to θ = 0 exactly with β from the Gamma GLM (β moves up to
+  1.5e-5, now matching the Rust reference to ~1e-16). Each polish verifies
+  that the new point is no worse than MixedModels' own optimum.
+- `reduced_rank_unit_correlation` (pathology corpus) has no REML minimum, so
+  MixedModels stops at an arbitrary θ. Its Julia fixture is now checked for
+  its recorded behaviour rather than its digits (a named exception in
+  VERSIONING.md §3.1). Every other fixture stays on the strict band.
 - `comparison/lme4_results.json` regenerated at full precision
   (`digits = 17`); every value rounds to the previous record.
 - Contraception `(1 | dist)` Binomial/Laplace promoted from
