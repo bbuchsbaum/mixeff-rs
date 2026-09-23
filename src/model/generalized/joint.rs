@@ -158,22 +158,31 @@ impl GeneralizedLinearMixedModel {
         self.lmm.optsum.optimizer = Optimizer::NloptBobyqa;
         self.lmm.optsum.backend = Optimizer::NloptBobyqa.canonical_backend();
         self.lmm.optsum.finitial = profiled_start_objective;
+        // Stopping tolerances follow MixedModels.jl's `OptSummary` defaults
+        // for the fast = false joint fit (ftol_rel 1e-12, ftol_abs 1e-8; no
+        // xtol_abs, which Julia only applies when its length matches θ).
         let ftol_rel = if self.lmm.optsum.caller_set_field("ftol_rel") {
             self.lmm.optsum.ftol_rel
         } else {
-            1e-10
+            JOINT_NLOPT_BOBYQA_FTOL_REL
         };
         let ftol_abs = if self.lmm.optsum.caller_set_field("ftol_abs") {
             self.lmm.optsum.ftol_abs
         } else {
-            1e-7
+            JOINT_NLOPT_BOBYQA_FTOL_ABS
         };
         let xtol_rel = self
             .lmm
             .optsum
             .caller_set_field("xtol_rel")
             .then_some(self.lmm.optsum.xtol_rel);
-        let mut initial_step = vec![0.1; n_beta];
+        // NLopt's BOBYQA rescales the parameters so the initial steps are
+        // equal, so the β steps set the conditioning of the β block. One
+        // profiled (fast-PIRLS) standard error per coefficient makes that
+        // block roughly a correlation matrix; a flat 0.1 step leaves it as
+        // ill-conditioned as the covariates' scales (contraception's `age`
+        // coefficient has ~1/19 the SE of the intercept).
+        let mut initial_step = self.joint_nlopt_bobyqa_beta_steps();
         if self.lmm.optsum.caller_set_field("initial_step") {
             initial_step.extend(self.lmm.optsum.initial_step.clone());
         } else {
@@ -194,26 +203,68 @@ impl GeneralizedLinearMixedModel {
             });
             objective
         };
-
-        let mut optimizer = Nlopt::new(
-            NloptAlgorithm::Bobyqa,
-            n_params,
-            obj_fn,
-            NloptTarget::Minimize,
-            (),
-        );
-        optimizer.set_lower_bounds(&lower_bounds).ok();
-        optimizer.set_ftol_rel(ftol_rel).ok();
-        optimizer.set_ftol_abs(ftol_abs).ok();
-        if let Some(xtol_rel) = xtol_rel {
-            optimizer.set_xtol_rel(xtol_rel).ok();
-        }
-        optimizer.set_maxeval(maxeval).ok();
-        optimizer.set_initial_step(&initial_step).ok();
+        let run_bobyqa = |params: &mut Vec<f64>, steps: &[f64], budget: u32| {
+            let mut optimizer = Nlopt::new(
+                NloptAlgorithm::Bobyqa,
+                n_params,
+                &obj_fn,
+                NloptTarget::Minimize,
+                (),
+            );
+            optimizer.set_lower_bounds(&lower_bounds).ok();
+            optimizer.set_ftol_rel(ftol_rel).ok();
+            optimizer.set_ftol_abs(ftol_abs).ok();
+            if let Some(xtol_rel) = xtol_rel {
+                optimizer.set_xtol_rel(xtol_rel).ok();
+            }
+            optimizer.set_maxeval(budget.max(1)).ok();
+            optimizer.set_initial_step(steps).ok();
+            optimizer.optimize(params)
+        };
 
         let mut params = initial;
-        let nlopt_result = optimizer.optimize(&mut params);
-        drop(optimizer);
+        let mut nlopt_result = run_bobyqa(&mut params, &initial_step, maxeval);
+        // NLopt's BOBYQA declares FTOL_REACHED on the first accepted step
+        // whose improvement is below the tolerance, whatever the trust-region
+        // radius; it is not a contraction test (the analogue of TrustBQ's
+        // `ftol_requires_local_radius`). A step that happens to gain little
+        // on a still-large radius therefore stops the fit well short of the
+        // optimum, and which step does so is decided by last-bit rounding
+        // (contraception stopped 9.2e-5 above the optimum on Linux, 1e-6 on
+        // macOS). Confirm every FTOL stop by restarting from the incumbent
+        // with a fresh, 10x smaller interpolation set: the stop stands only
+        // once a restart gains no more than the tolerance.
+        let restart_steps = initial_step
+            .iter()
+            .map(|step| step * JOINT_NLOPT_BOBYQA_RESTART_STEP_FACTOR)
+            .collect::<Vec<_>>();
+        for _ in 0..JOINT_NLOPT_BOBYQA_MAX_CONFIRMATION_RESTARTS {
+            let incumbent = match &nlopt_result {
+                Ok((nlopt::SuccessState::FtolReached, fmin)) => *fmin,
+                _ => break,
+            };
+            let used = u32::try_from(feval_count.get()).unwrap_or(u32::MAX);
+            // A BOBYQA start alone costs 2n + 1 evaluations.
+            if used.saturating_add(2 * n_params as u32 + 2) > maxeval {
+                break;
+            }
+            let mut candidate = params.clone();
+            let result = run_bobyqa(&mut candidate, &restart_steps, maxeval - used);
+            // A failed restart leaves the confirmed-so-far incumbent and its
+            // status in place rather than relabelling the fit as failed.
+            let Ok((_, improved_to)) = &result else {
+                break;
+            };
+            let improved_to = *improved_to;
+            if improved_to.is_nan() || improved_to > incumbent {
+                break;
+            }
+            params = candidate;
+            nlopt_result = result;
+            if incumbent - improved_to <= ftol_abs.max(ftol_rel * incumbent.abs()) {
+                break;
+            }
+        }
 
         let me = model.into_inner();
         let final_objective = me.joint_glmm_deviance_at_params(&params, n_beta, n_agq);
@@ -560,6 +611,29 @@ impl GeneralizedLinearMixedModel {
         me.refresh_binomial_separation_diagnostics();
         me.refresh_near_unit_random_effect_correlation_diagnostics();
         Ok(me)
+    }
+
+    /// NLopt BOBYQA initial steps for the joint β block: one profiled
+    /// (fast-PIRLS) standard error per coefficient where that covariance is
+    /// available and finite, else a flat default step.
+    #[cfg(feature = "nlopt")]
+    fn joint_nlopt_bobyqa_beta_steps(&self) -> Vec<f64> {
+        let n_beta = self.beta.len();
+        let mut steps = vec![JOINT_NLOPT_BOBYQA_DEFAULT_BETA_STEP; n_beta];
+        // The profiled covariance is in the unpivoted coefficient order;
+        // active coefficient `i` is full coefficient `piv[i]`.
+        let piv = &self.lmm.feterm.piv;
+        if let Some(covariance) = self.profiled_glmm_fixed_effect_covariance() {
+            for (step, &full) in steps.iter_mut().zip(piv) {
+                if full < covariance.nrows() && full < covariance.ncols() {
+                    let se = covariance[(full, full)].sqrt();
+                    if se.is_finite() && se > 0.0 {
+                        *step = se;
+                    }
+                }
+            }
+        }
+        steps
     }
 
     pub(super) fn joint_glmm_deviance_at_params(
@@ -1137,6 +1211,25 @@ impl GeneralizedLinearMixedModel {
     }
 }
 
+/// MixedModels.jl `OptSummary` default `ftol_rel`, used by its joint
+/// (`fast = false`) GLMM fit.
+#[cfg(feature = "nlopt")]
+const JOINT_NLOPT_BOBYQA_FTOL_REL: f64 = 1.0e-12;
+/// MixedModels.jl `OptSummary` default `ftol_abs`.
+#[cfg(feature = "nlopt")]
+const JOINT_NLOPT_BOBYQA_FTOL_ABS: f64 = 1.0e-8;
+/// Initial-step factor for the restarts that confirm an NLopt BOBYQA
+/// FTOL stop, relative to the first pass's initial steps.
+#[cfg(feature = "nlopt")]
+const JOINT_NLOPT_BOBYQA_RESTART_STEP_FACTOR: f64 = 0.1;
+/// Cap on FTOL-confirmation restarts; each is also bounded by the remaining
+/// evaluation budget.
+#[cfg(feature = "nlopt")]
+const JOINT_NLOPT_BOBYQA_MAX_CONFIRMATION_RESTARTS: usize = 20;
+/// β initial step when no profiled standard error is available.
+#[cfg(feature = "nlopt")]
+const JOINT_NLOPT_BOBYQA_DEFAULT_BETA_STEP: f64 = 0.1;
+
 pub(crate) fn default_joint_glmm_optimizer() -> Optimizer {
     #[cfg(feature = "nlopt")]
     {
@@ -1158,8 +1251,12 @@ pub(crate) fn trust_bq_joint_glmm_default_maxeval(n_params: usize) -> u32 {
 
 pub(crate) fn joint_glmm_default_maxeval_for(optimizer: Optimizer, n_params: usize) -> u32 {
     match optimizer {
-        Optimizer::TrustBq => trust_bq_joint_glmm_default_maxeval(n_params),
-        Optimizer::NloptBobyqa => 200,
+        // MixedModels.jl runs its joint fit without an evaluation cap; NLopt
+        // BOBYQA's FTOL-confirmation restarts need the same room as TrustBQ
+        // rather than a single-pass budget.
+        Optimizer::TrustBq | Optimizer::NloptBobyqa => {
+            trust_bq_joint_glmm_default_maxeval(n_params)
+        }
         _ => trust_bq_joint_glmm_default_maxeval(n_params),
     }
 }

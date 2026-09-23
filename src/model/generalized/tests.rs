@@ -4447,34 +4447,34 @@ fn deferred_joint_laplace_inference_matches_pinned_eager_values() {
     let pinned: [(&str, f64, &[f64]); 3] = [
         (
             "cbpp",
-            184.05256539929854,
+            184.05256373024386,
             &[
-                0.2324631401441643,
-                0.3066323942322891,
-                0.32663758902591544,
-                0.4275065452453521,
+                0.23247181492924562,
+                0.3066425760106268,
+                0.32663735507697705,
+                0.4274373106693532,
             ],
         ),
         (
             "culcita",
-            60.705841296738754,
+            60.70584123451043,
             &[
-                1.8129020322255722,
-                1.4651214682955915,
-                1.5518915263618465,
-                1.7252054240838384,
+                1.8130429096648315,
+                1.4651833576983542,
+                1.551965193127762,
+                1.725285543382114,
             ],
         ),
         (
             "contraception",
-            2413.6164622899537,
+            2413.6164607096907,
             &[
-                0.14903523754999762,
-                0.007885874943525583,
-                0.17958014355202034,
-                0.15438229948003707,
-                0.16294103935958237,
-                0.1194250867363911,
+                0.14903571978693272,
+                0.007885872895859583,
+                0.17958009844119066,
+                0.15438236572648847,
+                0.16294238769115987,
+                0.11942516623455823,
             ],
         ),
     ];
@@ -4507,6 +4507,67 @@ fn deferred_joint_laplace_inference_matches_pinned_eager_values() {
                 .inference_availability,
             InferenceAvailability::Available { .. }
         ));
+    }
+}
+
+/// NLopt BOBYQA's FTOL stop fires on the first small improving step at any
+/// trust-region radius, so without confirmation restarts the joint fit
+/// stopped anywhere from 1e-7 to 2.5e-4 above the optimum depending on
+/// last-bit differences in the start (contraception stopped 9.2e-5 high on
+/// Linux CI). Starts perturbed at 1e-7..1e-6 relative must all land in the
+/// 1e-7 parity band of the pinned optimum.
+#[cfg(feature = "nlopt")]
+#[test]
+fn joint_laplace_nlopt_stop_is_robust_to_start_perturbations() {
+    for (name, pinned) in [
+        ("contraception", 2413.6164607096907),
+        ("cbpp", 184.05256373024386),
+    ] {
+        let mut profiled = joint_laplace_row(name);
+        profiled.fit_with_options(true, 1, false).unwrap();
+        let start_beta = profiled.beta.as_slice().to_vec();
+        let start_theta = profiled.theta.clone();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(20260922);
+        for eps in [1e-7, 1e-6] {
+            for _ in 0..3 {
+                let mut perturb = |value: f64| {
+                    let r: f64 = rand::Rng::gen_range(&mut rng, -1.0..1.0);
+                    value + eps * r * value.abs().max(1e-3)
+                };
+                let beta = start_beta.iter().map(|&v| perturb(v)).collect::<Vec<_>>();
+                let theta = start_theta
+                    .iter()
+                    .map(|&v| perturb(v).max(0.0))
+                    .collect::<Vec<_>>();
+                let mut model = profiled.clone();
+                let start_objective = model.deviance_with_response_constants(1);
+                model.lmm.optsum.optimizer = Optimizer::NloptBobyqa;
+                let maxeval = joint_glmm_default_maxeval_for(
+                    Optimizer::NloptBobyqa,
+                    beta.len() + theta.len(),
+                );
+                model
+                    .fit_joint_glmm_from_start(
+                        beta,
+                        theta,
+                        start_objective,
+                        1,
+                        maxeval,
+                        Some(profiled.clone()),
+                    )
+                    .unwrap();
+                let optsum = model.opt_summary();
+                let objective = MixedModelFit::objective(&model);
+                assert!(
+                    (objective - pinned).abs() <= 1e-7,
+                    "{name} eps {eps:e}: objective {objective:.10} vs pinned {pinned:.10} \
+                     (feval {} of max {}, return {})",
+                    optsum.feval,
+                    optsum.max_feval,
+                    optsum.return_value
+                );
+            }
+        }
     }
 }
 

@@ -161,6 +161,19 @@ corpus; the Rust parity tests against the Julia fixtures pass unchanged.
   values and β for such formulas change to match R/lme4.
 - TrustBQ no longer accepts FTOL stops at a coarse trust radius: a
   two-variance ML fit had stopped at radius 8.4e-2 with |gradient| 17.7.
+- **Certified joint GLMM (NLopt BOBYQA) premature stops.** NLopt's BOBYQA
+  reports `FTOL_REACHED` on the first small improving step regardless of the
+  trust radius, so the joint (θ, β) fit could stop early at a point decided by
+  platform rounding (contraception `(1 | dist)`: 9.2e-5 above the optimum on
+  Linux/Windows, at the optimum on macOS). The driver now uses MixedModels.jl's
+  tolerances (ftol_rel 1e-12, ftol_abs 1e-8), scales the β initial step by the
+  profiled standard errors, confirms every FTOL stop with a restart at 0.1×
+  the initial step, and raises the default budget from 200 to 500 + 80·n.
+  Across perturbed starts (1e-8 to 1e-5 relative), every cbpp, culcita, and
+  contraception Laplace/AGQ fit now lands within 1e-7 of the best objective
+  (previously up to 2.5e-4 above). Joint objectives move down by up to
+  ~1.7e-6 on macOS (contraception 2413.61646229 → 2413.61646071, MixedModels.jl
+  `fast=false` 2413.6164609).
 
 ### Fixed
 
@@ -182,8 +195,9 @@ bit-identical unless noted above.
   slice-based cross-product kernels, one pivoted QR, column-major Z).
 - Nested scalar random effects keep sparse L blocks: grouseticks GLMM
   220 → 28 ms (lme4 246 ms).
-- Joint Laplace: contraception `(1 | dist)` 265 → 104 ms, cbpp 4.2 → 2.4 ms
-  (deferred Hessian, fixed-β PIRLS skips fixed-effect blocks, cached response
+- Joint Laplace: contraception `(1 | dist)` 265 → 129 ms (242 evaluations
+  after the convergence fix above; 1.4× lme4), cbpp 4.2 → 2.1 ms (deferred
+  Hessian, fixed-β PIRLS skips fixed-effect blocks, cached response
   log-constants). Joint AGQ(7): contraception 211 → 82 ms; n = 20k Bernoulli
   4.6 → 0.35 s.
 - Profiled GLMM: verbagg 560 → 336 ms from weighted A-block rebuilds; deferred
@@ -204,9 +218,10 @@ bit-identical unless noted above.
   (`digits = 17`); every value rounds to the previous record.
 - Contraception `(1 | dist)` Binomial/Laplace promoted from
   `documented_divergence` to `release_blocking_parity` on the certified joint
-  path: 8.95e-5 below lme4 (MixedModels.jl `fast=false` agrees with the Rust
-  side); the gap had been an artefact of the 4-decimal reference. No Rust-side
-  numerical change. The random-slope row stays `documented_divergence`.
+  path: 9.1e-5 below lme4 (MixedModels.jl `fast=false` agrees with the Rust
+  side within the parity band, 8e-11 relative); the gap had been an artefact
+  of the 4-decimal reference. The random-slope row stays
+  `documented_divergence`.
 
 ### Internal
 
