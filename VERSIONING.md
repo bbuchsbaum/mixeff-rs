@@ -171,10 +171,12 @@ Rules:
 
 ### 2.E — Julia-parity contract
 
-The promise "agrees with `MixedModels.jl`" is itself versioned via the
-checked-in fixtures under `tests/fixtures/parity/` and the drift gate
-`scripts/check_julia_parity_fixtures.sh` (default tolerance: `abs=1e-7`,
-`rel=1e-8`, per `scripts/compare_json_tolerant.py`).
+The promise "agrees with `MixedModels.jl`" is versioned through the
+checked-in fixtures under `tests/fixtures/parity/`. The Rust parity tests hold
+this crate's output to those fixtures at their committed tolerances, and the
+drift gate `scripts/check_julia_parity_fixtures.sh` holds the fixtures
+themselves to `abs=1e-7` / `rel=1e-8` (`scripts/compare_json_tolerant.py`); see
+§3.1.
 
 - The parity contract is pinned to a **specific `MixedModels.jl` version**,
   recorded in the fixture provenance. That pinned version is part of the
@@ -205,19 +207,31 @@ opt-in.**
 
 ### 3.1 The tolerance band
 
-`mixeff-rs` guarantees its checked-in parity fixture quantities to a
-**parity tolerance** of:
+Two separate guarantees are enforced in CI. They are often confused, so they
+are stated separately here.
 
-> **absolute `1e-7` or relative `1e-8`** (whichever is satisfied), applied
-> element-wise to: the objective (deviance / -2 log-likelihood), θ, β, σ,
-> the fixed-effect covariance matrix, and ranef BLUPs, on the parity fixture
-> corpus and on any input of comparable conditioning when evaluated through the
-> canonical fixture/parity pipeline.
+**Rust output (the numerical guarantee).** The Rust parity tests
+(`tests/parity_*.rs`, `tests/cross_engine_scoreboard.rs`,
+`tests/glmm_comparison_gates.rs`, and inline parity tests) compare fitted
+quantities from this crate (the objective, θ, β, σ, the fixed-effect
+covariance matrix, and ranef BLUPs) with checked-in references from
+MixedModels.jl and lme4. Each comparison uses a tolerance committed with the
+test. Most quantities are held to `1e-6` or tighter (down to `1e-15`); the few
+looser ones, up to `2e-3`, cover θ coordinates on flat or noise-limited
+surfaces and are commented where they are set. A result is **within band** when
+every parity test passes at its committed tolerance. Tightening a tolerance is
+free. Loosening one is a numerical-output change: it must be justified in the
+test comment and recorded in the CHANGELOG, and §3.2 classifies it.
 
-This is exactly the tolerance the Julia drift gate already enforces
-(`scripts/compare_json_tolerant.py`, `--abs-tol 1e-7 --rel-tol 1e-8`), so the
-public guarantee and the CI gate are the **same number** by construction. No
-new machinery is introduced — the guarantee is the test that already runs.
+**Reference stability (the drift gate).** Separately, CI regenerates the
+MixedModels.jl fixtures under the pinned Julia environment (§2.E) and requires
+them to match the checked-in copies element-wise to **absolute `1e-7` or
+relative `1e-8`** (whichever is satisfied; `scripts/compare_json_tolerant.py`,
+`--abs-tol 1e-7 --rel-tol 1e-8`). This protects the references the Rust tests
+compare against; it makes no statement about Rust output. Precision-limited
+references are polished in extended precision so that they meet this band on
+every platform (`scripts/regenerate_julia_parity_fixtures.jl`,
+`scripts/parity_pathologies.jl`).
 
 **Named exception — `reduced_rank_unit_correlation` MixedModels.jl reference**
 (`tests/fixtures/pathology_corpus/reduced_rank_unit_correlation/parity/mmjl.json`).
@@ -232,7 +246,7 @@ exactly and checks the pathology signature with
 `scripts/check_pathology_signature.py` (θ₁, θ₂ > 1e3 and equal to 1e-4
 relative; σ < 1e-3; objective < −500 and more than 1 away from lme4's;
 objective = −2·loglik) instead of θ/β/σ/objective/loglik digits. The exception
-is keyed to that exact path; every other fixture stays on the band above.
+is keyed to that exact path; every other fixture stays on the drift-gate band.
 
 Bit-for-bit reproducibility is **explicitly not promised.** It is infeasible
 for an iterative optimizer (BOBYQA/NEWUOA/COBYLA/TrustBQ) whose path depends on
@@ -244,8 +258,8 @@ Fit-level optimizer smoke tests are a related but separate release gate. On
 flat, large-θ objectives, two optimizer paths can reach indistinguishable
 objective values while reporting slightly different θ/σ coordinates. Those
 tests must still prove the same optimizer family, an accepted stop, and an
-objective inside the documented parity band; they may use a looser coordinate
-tolerance when the stricter fixed-fixture gate above is unchanged. Any such
+objective within band; they may use a looser coordinate tolerance, commented in
+the test, provided the objective tolerance is unchanged. Any such
 case should be commented in the test so it is not mistaken for a fixture-drift
 acceptance.
 
@@ -254,7 +268,7 @@ acceptance.
 | Change kind | Effect | SemVer |
 |---|---|---|
 | Optimizer converges to the same optimum within tolerance (codegen/FMA/BLAS drift, refactor) | within band | PATCH / not a release-gated change |
-| Tightened/loosened convergence tolerance that keeps results within the parity band | within band | PATCH |
+| Tightened/loosened convergence tolerance that keeps results within band | within band | PATCH |
 | Bug fix correcting a number that was outside tolerance of the true value | corrects wrong output | PATCH (CHANGELOG `### Fixed (numerical)`) |
 | Tracking an upstream `MixedModels.jl` correction | corrects wrong output | PATCH |
 | New optimizer/algorithm selected by default, moving correct results beyond band | beyond band, default | **MAJOR** |
@@ -273,20 +287,22 @@ default**:
 - or a new Cargo feature whose absence preserves prior output.
 
 The default fit path of a non-MAJOR release must keep producing output within
-the parity band of the previous release on the fixture corpus. The Julia drift
-gate is the enforcing test; it must pass (or be explicitly re-accepted with
-provenance) for every release, and a re-accept that moves the default beyond
-band is by definition a MAJOR release.
+band (§3.1) on the fixture corpus. The Rust parity tests are the enforcing
+tests; loosening one of their tolerances to let the default move is by
+definition a MAJOR change unless it corrects wrong output (§3.2). The Julia
+drift gate must also pass, or be explicitly re-accepted with provenance, for
+every release.
 
 ### 3.4 Why this policy
 
 - **Downstream R/Python users run statistical analyses.** They need stable
-  *conclusions* (CIs, LRT decisions, point estimates), not stable bits. A
-  `1e-7` band is far tighter than any reported precision and far below
-  inferential significance, so conclusions are protected while implementation
-  freedom is retained.
-- **The guarantee equals an existing gate.** Reusing the Julia drift
-  tolerance means the policy is testable today and cannot drift away from CI.
+  *conclusions* (CIs, LRT decisions, point estimates), not stable bits. The
+  committed parity tolerances are far tighter than any reported precision and
+  far below inferential significance, so conclusions are protected while
+  implementation freedom is retained.
+- **The guarantee equals existing gates.** "Within band" is defined as the
+  Rust parity tests passing, so the policy is testable today and cannot drift
+  away from CI.
 - **Wrong answers have no warranty.** Treating correctness fixes as PATCH
   (with loud CHANGELOG entries) is standard for numerical libraries (LAPACK,
   SciPy) and avoids the perverse outcome of shipping a known-wrong number to
@@ -341,11 +357,11 @@ Tagging `1.0.0` is a promise to the wrapper packages specifically:
    them directly and rely on stable reason codes and the typed-refusal
    channels (`PValuePolicy::Unavailable{reason}`, the `boundary_lrt_*` reason
    strings).
-2. **Stable numerical conclusions.** Reported quantities stay within the §3
-   parity band across MINOR/PATCH releases on the fixture corpus; statistical
+2. **Stable numerical conclusions.** Reported quantities stay within band
+   (§3.1) across MINOR/PATCH releases on the fixture corpus; statistical
    conclusions do not change under a non-MAJOR upgrade.
 3. **Stable formula meaning.** A formula that fits a given model under `1.x`
-   fits the same model (within the parity band) under any later `1.y`.
+   fits the same model (within band, §3.1) under any later `1.y`.
 4. **A stable, deliberately narrow Rust API** (the modules enumerated in
    `docs/semver_policy.md`, asserted by `tests/public_api.rs`). The
    `unstable-internals` surface (compiler/IR, pathology, datasets) is

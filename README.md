@@ -14,14 +14,14 @@ It is a native Rust implementation of the penalized-least-squares formulation
 are tested against both on shared reference problems. It is also the numerical engine
 behind the [mixeff](https://github.com/bbuchsbaum/mixeff) R package.
 
-> **Status:** release candidate `1.0.0-rc.2`. The numerical core is stable; the
+> **Status:** release candidate `1.0.0-rc.3`. The numerical core is stable; the
 > public API is in its final soak before 1.0.0, so pin the exact version.
 
 ## Installation
 
 ```toml
 [dependencies]
-mixeff-rs = "=1.0.0-rc.2"
+mixeff-rs = "=1.0.0-rc.3"
 ```
 
 The default build includes the NLopt optimizers and needs CMake and a C/C++
