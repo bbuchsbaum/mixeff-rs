@@ -1,4 +1,5 @@
 use super::*;
+use crate::compiler::{NewtonDecrementVariant, NewtonDecrementVerdict};
 use crate::formula::parse_formula;
 use crate::model::data::DataFrame;
 use crate::model::linear::FitToleranceOverrides;
@@ -139,6 +140,8 @@ fn joint_glmm_stationarity_failure_is_not_converged_interior() {
         probe_gradient: gradient.clone(),
         escalated_indices: Vec::new(),
         unassessable_indices: Vec::new(),
+        base_objective: f64::NAN,
+        curvature_probes: Vec::new(),
     };
     annotate_glmm_covariance_status(
         &mut certificate,
@@ -147,6 +150,7 @@ fn joint_glmm_stationarity_failure_is_not_converged_interior() {
         &lower_bounds,
         &certification,
         gradient_tolerance,
+        None,
     );
 
     assert_eq!(certificate.status, crate::compiler::FitStatus::NotOptimized);
@@ -216,6 +220,8 @@ fn joint_glmm_noise_dominated_stationarity_is_not_assessed() {
         probe_gradient: probe_gradient.clone(),
         escalated_indices: Vec::new(),
         unassessable_indices: vec![2, 3],
+        base_objective: f64::NAN,
+        curvature_probes: Vec::new(),
     };
     certificate.apply_derivative_evidence(
         OptimizerDerivativeEvidence {
@@ -234,6 +240,7 @@ fn joint_glmm_noise_dominated_stationarity_is_not_assessed() {
         &lower_bounds,
         &certification,
         gradient_tolerance,
+        None,
     );
 
     assert_eq!(certificate.status, crate::compiler::FitStatus::NotAssessed);
@@ -302,6 +309,8 @@ fn joint_glmm_escalated_stationarity_pass_certifies_with_evidence_trail() {
         probe_gradient,
         escalated_indices: vec![2, 3],
         unassessable_indices: Vec::new(),
+        base_objective: f64::NAN,
+        curvature_probes: Vec::new(),
     };
     certificate.apply_derivative_evidence(
         OptimizerDerivativeEvidence {
@@ -320,6 +329,7 @@ fn joint_glmm_escalated_stationarity_pass_certifies_with_evidence_trail() {
         &lower_bounds,
         &certification,
         gradient_tolerance,
+        None,
     );
 
     assert_eq!(
@@ -5159,4 +5169,578 @@ fn response_constant_cache_key_is_checked_once_per_objective_evaluation() {
     let _ = model.response_constants_offset();
     let _ = model.laplace_objective_with_response_constants();
     assert_eq!(key_checks() - before, 2);
+}
+
+// ---- Newton-decrement stationarity (bd-01M35YW5H031824SVC9EWP0JRZ) ----
+
+/// Certification probes of `f` at `x` built the way the joint certificate
+/// builds them: a default-step probe per coordinate (central unless the minus
+/// step crosses the lower bound), plus the two escalated probes for the
+/// coordinates listed in `escalate`.
+fn synthetic_certification(
+    f: &dyn Fn(&[f64]) -> f64,
+    x: &[f64],
+    lower_bounds: &[f64],
+    escalate: &[usize],
+) -> JointLaplaceCertificationGradient {
+    let base = f(x);
+    let probe = |index: usize, h: f64| {
+        let mut plus = x.to_vec();
+        plus[index] += h;
+        if x[index] - h > lower_bounds[index] {
+            let mut minus = x.to_vec();
+            minus[index] -= h;
+            JointFdProbe::central(h, f(&plus), f(&minus))
+        } else {
+            JointFdProbe::forward(h, f(&plus), base)
+        }
+    };
+    let mut curvature_probes = Vec::new();
+    let mut gradient = Vec::new();
+    for (index, value) in x.iter().enumerate() {
+        let scale = value.abs().max(1.0);
+        let mut probes = vec![probe(index, JOINT_LAPLACE_FD_RELATIVE_STEP * scale)];
+        if escalate.contains(&index) {
+            probes.extend(
+                JOINT_LAPLACE_CERT_FD_ESCALATED_RELATIVE_STEPS
+                    .map(|step| probe(index, step * scale)),
+            );
+        }
+        gradient.push(probes.last().unwrap().gradient);
+        curvature_probes.push(probes);
+    }
+    JointLaplaceCertificationGradient {
+        probe_gradient: curvature_probes.iter().map(|p| p[0].gradient).collect(),
+        gradient,
+        escalated_indices: escalate.to_vec(),
+        unassessable_indices: Vec::new(),
+        base_objective: base,
+        curvature_probes,
+    }
+}
+
+fn quadratic_gap<'a>(hessian: &'a DMatrix<f64>, optimum: &[f64]) -> impl Fn(&[f64]) -> f64 + 'a {
+    let optimum = DVector::from_column_slice(optimum);
+    move |x: &[f64]| {
+        let d = DVector::from_column_slice(x) - &optimum;
+        0.5 * d.dot(&(hessian * &d))
+    }
+}
+
+fn correlated_test_hessian() -> DMatrix<f64> {
+    DMatrix::from_row_slice(3, 3, &[40.0, 30.0, 1.0, 30.0, 25.0, 0.5, 1.0, 0.5, 8.0])
+}
+
+#[test]
+fn newton_decrement_recovers_quadratic_gap() {
+    let hessian = correlated_test_hessian();
+    let optimum = [0.4, -1.2, 0.7];
+    let f = quadratic_gap(&hessian, &optimum);
+    let lower_bounds = [f64::NEG_INFINITY, f64::NEG_INFINITY, 0.0];
+    // Premature point along the flat (correlated) β direction plus a θ offset.
+    for (scale, expect_within) in [(5.0e-4, true), (2.0e-2, false)] {
+        let x = [
+            optimum[0] + scale,
+            optimum[1] - 1.1 * scale,
+            optimum[2] + 0.1 * scale,
+        ];
+        let gap = f(&x);
+        let certification = synthetic_certification(&f, &x, &lower_bounds, &[]);
+        let g = DVector::from_column_slice(&certification.gradient);
+
+        let diagonal = joint_newton_decrement(&certification, &x, &lower_bounds, 2, None, 1.0e-6);
+        assert!(diagonal.excluded.is_empty());
+        assert_eq!(diagonal.parameter_indices, vec![0, 1, 2]);
+        assert_eq!(diagonal.eager.variant, NewtonDecrementVariant::Diagonal);
+        let expected_diagonal = 0.5 * (0..3).map(|i| g[i] * g[i] / hessian[(i, i)]).sum::<f64>();
+        assert_relative_eq!(
+            diagonal.eager.objective_gap.unwrap(),
+            expected_diagonal,
+            max_relative = 1e-5
+        );
+
+        let beta_block = hessian.view((0, 0), (2, 2)).into_owned();
+        let block = joint_newton_decrement(
+            &certification,
+            &x,
+            &lower_bounds,
+            2,
+            Some(&beta_block),
+            1.0e-6,
+        );
+        assert_eq!(
+            block.eager.variant,
+            NewtonDecrementVariant::BetaBlockThetaDiagonal
+        );
+        let g_beta = g.rows(0, 2).into_owned();
+        let expected_block = 0.5
+            * (g_beta.dot(&beta_block.clone().cholesky().unwrap().solve(&g_beta))
+                + g[2] * g[2] / hessian[(2, 2)]);
+        assert_relative_eq!(
+            block.eager.objective_gap.unwrap(),
+            expected_block,
+            max_relative = 1e-5
+        );
+        // The β block absorbs the strong β correlation, so it tracks the
+        // true gap far better than the diagonal does here.
+        assert!((block.eager.objective_gap.unwrap() / gap - 1.0).abs() < 0.1);
+        let diagonal_ratio = diagonal.eager.objective_gap.unwrap() / gap;
+        assert!(
+            !(0.5..=2.0).contains(&diagonal_ratio),
+            "diagonal/true = {diagonal_ratio}"
+        );
+
+        let full = full_newton_decrement_estimate(&block, &hessian, &[0, 1, 2]);
+        assert_eq!(full.variant, NewtonDecrementVariant::Full);
+        assert_relative_eq!(full.objective_gap.unwrap(), gap, max_relative = 1e-5);
+        let expected_verdict = if expect_within {
+            NewtonDecrementVerdict::WithinTolerance
+        } else {
+            NewtonDecrementVerdict::ExceedsTolerance
+        };
+        assert_eq!(full.verdict, expected_verdict, "gap {gap:e}");
+        assert_eq!(block.eager.verdict, expected_verdict, "gap {gap:e}");
+    }
+}
+
+#[test]
+fn newton_decrement_block_falls_back_to_diagonal_when_working_curvature_disagrees() {
+    let hessian = correlated_test_hessian();
+    let optimum = [0.4, -1.2, 0.7];
+    let f = quadratic_gap(&hessian, &optimum);
+    let lower_bounds = [f64::NEG_INFINITY, f64::NEG_INFINITY, 0.0];
+    let x = [0.41, -1.21, 0.71];
+    let certification = synthetic_certification(&f, &x, &lower_bounds, &[]);
+    // A working Hessian whose diagonal is 3x the probed curvature is not a
+    // trustworthy stand-in: the estimate must fall back to the diagonal.
+    let wrong_block = 3.0 * hessian.view((0, 0), (2, 2)).into_owned();
+    let evidence = joint_newton_decrement(
+        &certification,
+        &x,
+        &lower_bounds,
+        2,
+        Some(&wrong_block),
+        1.0e-6,
+    );
+    assert_eq!(evidence.eager.variant, NewtonDecrementVariant::Diagonal);
+}
+
+#[test]
+fn newton_decrement_handles_bound_active_and_one_sided_coordinates() {
+    let hessian = DMatrix::from_diagonal(&DVector::from_vec(vec![10.0, 4.0, 2.0]));
+    let optimum = [0.5, -0.3, 0.0];
+    let f = quadratic_gap(&hessian, &optimum);
+    let lower_bounds = [f64::NEG_INFINITY, f64::NEG_INFINITY, 0.0];
+
+    // θ exactly on its bound: excluded as at_lower_bound; the decrement is
+    // assessed over the free β coordinates only.
+    let x = [0.501, -0.302, 0.0];
+    let certification = synthetic_certification(&f, &x, &lower_bounds, &[]);
+    let evidence = joint_newton_decrement(&certification, &x, &lower_bounds, 2, None, 1.0e-6);
+    assert_eq!(evidence.parameter_indices, vec![0, 1]);
+    assert_eq!(
+        evidence.excluded,
+        vec![crate::compiler::NewtonDecrementExclusion {
+            index: 2,
+            reason: "at_lower_bound".to_string()
+        }]
+    );
+    let expected = 0.5 * (10.0 * 0.001_f64.powi(2) + 4.0 * 0.002_f64.powi(2));
+    assert_relative_eq!(
+        evidence.eager.objective_gap.unwrap(),
+        expected,
+        max_relative = 1e-5
+    );
+    assert_eq!(
+        evidence.eager.verdict,
+        NewtonDecrementVerdict::ExceedsTolerance
+    );
+
+    // θ just inside its bound (closer than the probe step): only a forward
+    // probe exists, so its curvature is unknown and the decrement is not
+    // assessed rather than guessed.
+    let x = [0.5, -0.3, 5.0e-6];
+    let certification = synthetic_certification(&f, &x, &lower_bounds, &[]);
+    let evidence = joint_newton_decrement(&certification, &x, &lower_bounds, 2, None, 1.0e-6);
+    assert_eq!(evidence.eager.verdict, NewtonDecrementVerdict::NotAssessed);
+    assert!(evidence.eager.objective_gap.is_none());
+    assert_eq!(evidence.excluded[0].reason, "one_sided_probe");
+}
+
+#[test]
+fn newton_decrement_refuses_nonpositive_curvature() {
+    // A saddle in the θ coordinate.
+    let hessian = DMatrix::from_diagonal(&DVector::from_vec(vec![10.0, 4.0, -2.0]));
+    let optimum = [0.5, -0.3, 1.0];
+    let f = quadratic_gap(&hessian, &optimum);
+    let lower_bounds = [f64::NEG_INFINITY, f64::NEG_INFINITY, 0.0];
+    let x = [0.5001, -0.3, 1.0005];
+    let certification = synthetic_certification(&f, &x, &lower_bounds, &[]);
+    let evidence = joint_newton_decrement(&certification, &x, &lower_bounds, 2, None, 1.0e-6);
+    assert_eq!(evidence.eager.verdict, NewtonDecrementVerdict::NotAssessed);
+    assert!(evidence.eager.objective_gap.is_none());
+    assert_eq!(evidence.excluded[0].index, 2);
+    assert_eq!(evidence.excluded[0].reason, "nonpositive_curvature");
+
+    // The full Hessian is indefinite: reported as such, never regularized.
+    let x = [0.5001, -0.3, 1.0];
+    let certification = synthetic_certification(&f, &x, &lower_bounds, &[]);
+    let mut evidence = joint_newton_decrement(&certification, &x, &lower_bounds, 2, None, 1.0e-6);
+    // Force the gradient readings to exist for every coordinate.
+    evidence.parameter_indices = vec![0, 1, 2];
+    evidence.gradient = certification.gradient.clone();
+    let full = full_newton_decrement_estimate(&evidence, &hessian, &[0, 1, 2]);
+    assert_eq!(full.verdict, NewtonDecrementVerdict::NotAssessed);
+    assert!(full.objective_gap.is_none());
+    assert!(full.reason.unwrap().contains("not positive definite"));
+}
+
+#[test]
+fn newton_decrement_escalated_readings_are_judged_in_gap_units() {
+    // A stiff coordinate with a strong cubic term: the escalated central
+    // differences disagree through O(h^2) truncation (by far more than the
+    // absolute 2e-2 agreement test allows), but their Richardson
+    // extrapolation reproduces the default-step reading.
+    let (c, k, x0) = (1.7e5, 5.0e4, 0.0);
+    let f = move |x: &[f64]| {
+        let d = x[0] - x0;
+        0.5 * c * d * d + k * d * d * d
+    };
+    let x = [x0 - 2.0e-7];
+    let lower = [f64::NEG_INFINITY];
+    let certification = synthetic_certification(&f, &x, &lower, &[0]);
+    let probes = &certification.curvature_probes[0];
+    // Apart in gap units, not only in absolute terms: the reading is
+    // determined through the default-step confirmation.
+    assert!((probes[1].gradient - probes[2].gradient).powi(2) / (2.0 * c) > 1.0e-7);
+    let true_gradient = c * (x[0] - x0) + 3.0 * k * (x[0] - x0).powi(2);
+    match decrement_reading(&certification, &x, &lower, 0, 1.0e-6) {
+        DecrementReading::Determined {
+            gradient,
+            curvature,
+        } => {
+            assert_relative_eq!(gradient, true_gradient, max_relative = 1e-3);
+            assert_relative_eq!(curvature, c, max_relative = 1e-3);
+        }
+        other => panic!("expected a determined reading, got {other:?}"),
+    }
+
+    // Readings that agree nowhere (escalated pair apart, extrapolation away
+    // from the default-step reading) are ill-determined.
+    let mut noisy = certification.clone();
+    noisy.curvature_probes[0][0] = JointFdProbe::central(
+        probes[0].step,
+        f(&[x[0] + probes[0].step]) + 1.0e-4,
+        f(&[x[0] - probes[0].step]),
+    );
+    assert_eq!(
+        decrement_reading(&noisy, &x, &lower, 0, 1.0e-6),
+        DecrementReading::Excluded("gradient_ill_determined")
+    );
+}
+
+/// Certificate for a synthetic acceptable joint stop at `params`.
+fn synthetic_joint_certificate(
+    params: &[f64],
+    lower_bounds: &[f64],
+    certification: &JointLaplaceCertificationGradient,
+) -> OptimizerCertificate {
+    let mut optsum = OptSummary::new(params.to_vec());
+    optsum.optimizer = Optimizer::TrustBq;
+    optsum.backend = Optimizer::TrustBq.canonical_backend();
+    optsum.return_value = "JOINT_LAPLACE:FTOL_REACHED".to_string();
+    optsum.finitial = 100.1;
+    optsum.fmin = 100.0;
+    optsum.feval = 50;
+    optsum.max_feval = 5000;
+    optsum.final_params = params.to_vec();
+    let mut certificate = OptimizerCertificate::from_opt_summary_with_context(
+        &optsum,
+        params,
+        lower_bounds,
+        Some(500),
+    );
+    certificate.apply_derivative_evidence(
+        OptimizerDerivativeEvidence {
+            method: EvidenceMethod::FiniteDifference,
+            hessian_method: EvidenceMethod::FiniteDifference,
+            gradient: certification.gradient.clone(),
+            hessian: None,
+        },
+        2.0e-2,
+        1.0e-6,
+    );
+    certificate
+}
+
+#[test]
+fn joint_glmm_decrement_certifies_stiff_gradient_and_flags_flat_gap() {
+    let lower_bounds = [f64::NEG_INFINITY, f64::NEG_INFINITY, 0.0];
+    // Stiff β direction (curvature 6e4, like contraception's `age`): a raw
+    // gradient of ~0.15 is only 2e-7 above the optimum in deviance.
+    let stiff = DMatrix::from_diagonal(&DVector::from_vec(vec![6.0e4, 50.0, 30.0]));
+    let optimum = [0.0, 1.0, 0.6];
+    let f = quadratic_gap(&stiff, &optimum);
+    let x = [2.5e-6, 1.0, 0.6];
+    let certification = synthetic_certification(&f, &x, &lower_bounds, &[]);
+    let mut certificate = synthetic_joint_certificate(&x, &lower_bounds, &certification);
+    assert!(certificate.free_gradient_norm.unwrap() > 2.0e-2);
+    annotate_glmm_covariance_status(
+        &mut certificate,
+        &x,
+        2,
+        &lower_bounds,
+        &certification,
+        2.0e-2,
+        Some(&stiff.view((0, 0), (2, 2)).into_owned()),
+    );
+    assert_eq!(
+        certificate.status,
+        crate::compiler::FitStatus::ConvergedInterior
+    );
+    assert!(!joint_certificate_requires_fallback(&certificate));
+    // The raw gradient evidence is kept alongside the decrement.
+    assert!(certificate.free_gradient_norm.unwrap() > 2.0e-2);
+    let evidence = certificate.stationarity_decrement.as_ref().unwrap();
+    assert_eq!(
+        evidence.eager.verdict,
+        NewtonDecrementVerdict::WithinTolerance
+    );
+    assert!(certificate.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == DiagnosticCode::OptimizerRecovery
+            && diagnostic.payload.get("stationarity_check")
+                == Some(&serde_json::json!("newton_decrement"))
+    }));
+    assert!(!certificate
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == DiagnosticCode::OptimizerNonconvergence));
+    // The new field round-trips through the wire format.
+    let json = serde_json::to_value(&certificate).unwrap();
+    assert_eq!(
+        json["stationarity_decrement"]["eager"]["verdict"],
+        serde_json::json!("within_tolerance")
+    );
+    let decoded: OptimizerCertificate = serde_json::from_value(json).unwrap();
+    assert_eq!(decoded, certificate);
+
+    // Flat θ direction (curvature 1e-2): a raw gradient of 2e-4 passes the
+    // absolute tolerance, yet the stop sits 2e-6 above the optimum.
+    let flat = DMatrix::from_diagonal(&DVector::from_vec(vec![50.0, 30.0, 1.0e-2]));
+    let f = quadratic_gap(&flat, &optimum);
+    let x = [0.0, 1.0, 0.62];
+    let certification = synthetic_certification(&f, &x, &lower_bounds, &[]);
+    let mut certificate = synthetic_joint_certificate(&x, &lower_bounds, &certification);
+    assert!(certificate.free_gradient_norm.unwrap() <= 2.0e-2);
+    annotate_glmm_covariance_status(
+        &mut certificate,
+        &x,
+        2,
+        &lower_bounds,
+        &certification,
+        2.0e-2,
+        Some(&flat.view((0, 0), (2, 2)).into_owned()),
+    );
+    assert_eq!(certificate.status, crate::compiler::FitStatus::NotOptimized);
+    assert!(joint_certificate_requires_fallback(&certificate));
+    let diagnostic = certificate
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == DiagnosticCode::OptimizerNonconvergence)
+        .unwrap();
+    assert_eq!(
+        diagnostic.payload.get("stationarity_check"),
+        Some(&serde_json::json!("newton_decrement"))
+    );
+    let gap = diagnostic.payload["decrement_objective_gap"]
+        .as_f64()
+        .unwrap();
+    assert_relative_eq!(gap, f(&x), max_relative = 1e-4);
+    let mut optsum = OptSummary::new(x.to_vec());
+    optsum.finitial = 100.1;
+    optsum.fmin = 100.0;
+    record_uncertified_joint_candidate_diagnostic(&mut certificate, &optsum);
+    assert!(certificate.diagnostics.iter().any(|diagnostic| {
+        diagnostic.payload.get("scorecard_class")
+            == Some(&serde_json::json!(
+                "stationarity_uncertified_joint_candidate"
+            ))
+    }));
+}
+
+/// Objective gap of the joint fit's certificate evidence against the true gap
+/// at deliberately premature points, on real models. Premature points are
+/// displacements along the flattest Hessian direction evaluated as if they
+/// were final (the direction where a raw gradient norm is least informative)
+/// and, with NLopt, loose-`ftol_abs` BOBYQA stops. The eager estimate and the
+/// full-Hessian estimate must track the true gap within a factor of three,
+/// rank every premature point above the optimum, and leave the optimum
+/// certified.
+#[test]
+fn joint_glmm_newton_decrement_calibration() {
+    for (name, n_agq) in [("cbpp", 1), ("culcita", 1), ("culcita", 5)] {
+        let mut best = joint_laplace_row(name);
+        best.fit_with_options(false, n_agq, false).unwrap();
+        let p = best.beta.len();
+        let optimum = best.lmm.optsum.final_params.clone();
+        let mut lower_bounds = vec![f64::NEG_INFINITY; p];
+        lower_bounds.extend(best.lmm.lower_bounds());
+        let certificate = best
+            .lmm
+            .compiler_artifact
+            .optimizer_certificate
+            .clone()
+            .unwrap();
+        assert_eq!(
+            certificate.status,
+            crate::compiler::FitStatus::ConvergedInterior
+        );
+        let optimum_gap = certificate
+            .stationarity_decrement
+            .as_ref()
+            .and_then(|evidence| evidence.eager.objective_gap)
+            .unwrap();
+        assert!(
+            optimum_gap < 1.0e-7,
+            "{name} agq{n_agq}: optimum reads {optimum_gap:e}"
+        );
+
+        let hessian = best
+            .finite_difference_joint_laplace_hessian(&optimum, &lower_bounds)
+            .unwrap();
+        let eigen = SymmetricEigen::new(hessian.clone());
+        let flattest = (0..optimum.len())
+            .min_by(|&a, &b| eigen.eigenvalues[a].total_cmp(&eigen.eigenvalues[b]))
+            .unwrap();
+        let direction = eigen.eigenvectors.column(flattest).into_owned();
+        let curvature = eigen.eigenvalues[flattest];
+        #[allow(unused_mut, reason = "NLopt stops are appended when the feature is on")]
+        let mut points = [1.0e-5, 1.0e-4]
+            .map(|target| {
+                let step = (2.0 * target / curvature).sqrt();
+                let x = (0..optimum.len())
+                    .map(|i| optimum[i] + step * direction[i])
+                    .collect::<Vec<_>>();
+                (x, None::<crate::compiler::FitStatus>)
+            })
+            .to_vec();
+        #[cfg(feature = "nlopt")]
+        {
+            let mut profiled = joint_laplace_row(name);
+            profiled.fit_with_options(true, n_agq, false).unwrap();
+            for ftol_abs in [1.0e-2, 1.0e-4] {
+                let mut model = profiled.clone();
+                let start_objective = model.deviance_with_response_constants(n_agq);
+                model.lmm.optsum.optimizer = Optimizer::NloptBobyqa;
+                model.lmm.optsum.ftol_abs = ftol_abs;
+                model
+                    .lmm
+                    .optsum
+                    .caller_set_fields
+                    .push("ftol_abs".to_string());
+                model
+                    .fit_joint_glmm_from_start(
+                        profiled.beta.as_slice().to_vec(),
+                        profiled.theta.clone(),
+                        start_objective,
+                        n_agq,
+                        2000,
+                        None,
+                    )
+                    .unwrap();
+                let status = model
+                    .lmm
+                    .compiler_artifact
+                    .optimizer_certificate
+                    .as_ref()
+                    .map(|certificate| certificate.status);
+                points.push((model.lmm.optsum.final_params.clone(), status));
+            }
+        }
+
+        let f_optimum = best.joint_glmm_deviance_at_params(&optimum, p, n_agq);
+        let mut calibrated = 0;
+        for (x, fit_status) in points {
+            let mut model = best.clone();
+            let true_gap = model.joint_glmm_deviance_at_params(&x, p, n_agq) - f_optimum;
+            if true_gap < 3.0e-6 {
+                // A stop that landed within the tolerance band is not a
+                // premature-stop calibration point.
+                continue;
+            }
+            calibrated += 1;
+            // A premature optimizer stop's own certificate must say so,
+            // whatever its raw gradient norm read.
+            if let Some(status) = fit_status {
+                assert_eq!(status, crate::compiler::FitStatus::NotOptimized);
+            }
+            let certification =
+                model.joint_laplace_certification_gradient(&x, p, n_agq, &lower_bounds, 2.0e-2);
+            let beta_hessian = model.joint_working_beta_hessian();
+            let evidence = joint_newton_decrement(
+                &certification,
+                &x,
+                &lower_bounds,
+                p,
+                beta_hessian.as_ref(),
+                JOINT_STATIONARITY_GAP_TOLERANCE,
+            );
+            let eager = evidence.eager.objective_gap.unwrap();
+            assert_eq!(
+                evidence.eager.variant,
+                NewtonDecrementVariant::BetaBlockThetaDiagonal
+            );
+            assert_eq!(
+                evidence.eager.verdict,
+                NewtonDecrementVerdict::ExceedsTolerance
+            );
+            assert!(eager > 10.0 * optimum_gap);
+            assert!(
+                (1.0 / 3.0..=3.0).contains(&(eager / true_gap)),
+                "{name} agq{n_agq}: eager {eager:e} vs true {true_gap:e}"
+            );
+            let point_hessian = model
+                .finite_difference_joint_laplace_hessian(&x, &lower_bounds)
+                .unwrap();
+            let active = (0..x.len()).collect::<Vec<_>>();
+            let full = full_newton_decrement_estimate(&evidence, &point_hessian, &active)
+                .objective_gap
+                .unwrap();
+            assert!(
+                (1.0 / 3.0..=3.0).contains(&(full / true_gap)),
+                "{name} agq{n_agq}: full {full:e} vs true {true_gap:e}"
+            );
+        }
+        assert!(calibrated >= 2, "{name} agq{n_agq}: {calibrated} points");
+    }
+}
+
+#[test]
+fn joint_glmm_diagonal_decrement_is_evidence_only() {
+    // Without a working β block the estimate is the pure diagonal, which
+    // correlated coordinates can bias either way: it is recorded, and the
+    // raw gradient rule decides as before.
+    let lower_bounds = [f64::NEG_INFINITY, f64::NEG_INFINITY, 0.0];
+    let stiff = DMatrix::from_diagonal(&DVector::from_vec(vec![6.0e4, 50.0, 30.0]));
+    let optimum = [0.0, 1.0, 0.6];
+    let f = quadratic_gap(&stiff, &optimum);
+    let x = [2.5e-6, 1.0, 0.6];
+    let certification = synthetic_certification(&f, &x, &lower_bounds, &[]);
+    let mut certificate = synthetic_joint_certificate(&x, &lower_bounds, &certification);
+    annotate_glmm_covariance_status(
+        &mut certificate,
+        &x,
+        2,
+        &lower_bounds,
+        &certification,
+        2.0e-2,
+        None,
+    );
+    let evidence = certificate.stationarity_decrement.as_ref().unwrap();
+    assert_eq!(evidence.eager.variant, NewtonDecrementVariant::Diagonal);
+    assert_eq!(
+        evidence.eager.verdict,
+        NewtonDecrementVerdict::WithinTolerance
+    );
+    assert_eq!(certificate.status, crate::compiler::FitStatus::NotOptimized);
 }

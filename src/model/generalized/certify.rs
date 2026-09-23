@@ -4,6 +4,10 @@
 //! module split (bd-01KWG1BKEWB91RXAXC0350SFMK). No logic changes.
 
 use super::*;
+use crate::compiler::{
+    NewtonDecrementEstimate, NewtonDecrementEvidence, NewtonDecrementExclusion,
+    NewtonDecrementVariant, NewtonDecrementVerdict,
+};
 
 pub(crate) fn joint_glmm_status_prefix(n_agq: usize) -> &'static str {
     if n_agq <= 1 {
@@ -22,6 +26,19 @@ pub(crate) fn glmm_objective_includes_response_constants(return_value: &str) -> 
         || return_value.starts_with("EXPERIMENTAL_JOINT_FAILED:")
 }
 
+/// Classify a joint GLMM stop from its certification probes.
+///
+/// Stationarity is judged by the Newton-decrement estimate of the objective
+/// gap (see [`joint_newton_decrement`]) whenever its β-block variant is
+/// assessed (the pure-diagonal fallback is recorded but does not decide):
+/// a gap within [`JOINT_STATIONARITY_GAP_TOLERANCE`] certifies the free
+/// coordinates even when the raw gradient norm exceeds `gradient_tolerance`
+/// (gradient magnitudes depend on parameter scaling; the gap does not), and a
+/// gap above it is an assessed non-stationarity even when the raw gradient
+/// passes. When the decrement is not assessed the raw noise-aware gradient
+/// rule decides, as before. The raw gradient evidence is always kept on the
+/// certificate. Bound-held covariance parameters keep the one-sided KKT
+/// check on the raw gradient.
 pub(crate) fn annotate_glmm_covariance_status(
     certificate: &mut OptimizerCertificate,
     params: &[f64],
@@ -29,6 +46,7 @@ pub(crate) fn annotate_glmm_covariance_status(
     lower_bounds: &[f64],
     certification: &JointLaplaceCertificationGradient,
     gradient_tolerance: f64,
+    beta_hessian: Option<&DMatrix<f64>>,
 ) {
     if !certificate.evidence.optimizer_stop.acceptable_stop || params.len() <= n_beta {
         return;
@@ -36,8 +54,160 @@ pub(crate) fn annotate_glmm_covariance_status(
     let boundary_tolerance = 1.0e-8;
     let gradient = certification.gradient.as_slice();
 
+    let decrement = joint_newton_decrement(
+        certification,
+        params,
+        lower_bounds,
+        n_beta,
+        beta_hessian,
+        JOINT_STATIONARITY_GAP_TOLERANCE,
+    );
+    // Only the β-block estimate decides. The pure diagonal can miss the gap
+    // by the inverse of `1 - ρ` for correlated coordinates in either
+    // direction (it is invariant to rescaling the parameters, not to
+    // rotating them), so it is recorded as evidence and the raw gradient
+    // rule decides, as it did before.
+    let decrement_verdict = match decrement.eager.variant {
+        NewtonDecrementVariant::BetaBlockThetaDiagonal => decrement.eager.verdict,
+        _ => NewtonDecrementVerdict::NotAssessed,
+    };
+    let decrement_gap = decrement.eager.objective_gap;
+    let decrement_variant = decrement.eager.variant;
+    certificate.stationarity_decrement = Some(decrement);
+    let raw_gradient_fails = certificate
+        .free_gradient_norm
+        .is_some_and(|norm| !norm.is_finite() || norm > gradient_tolerance);
+    let insert_decrement_payload = |diagnostic: &mut Diagnostic| {
+        diagnostic.payload.insert(
+            "decrement_objective_gap".to_string(),
+            serde_json::json!(decrement_gap),
+        );
+        diagnostic.payload.insert(
+            "decrement_variant".to_string(),
+            serde_json::json!(decrement_variant),
+        );
+        diagnostic.payload.insert(
+            "decrement_gap_tolerance".to_string(),
+            serde_json::json!(JOINT_STATIONARITY_GAP_TOLERANCE),
+        );
+    };
+    match decrement_verdict {
+        NewtonDecrementVerdict::WithinTolerance if raw_gradient_fails => {
+            // The raw gradient exceeds its absolute tolerance, but the
+            // estimated objective gap is negligible: the large components lie
+            // along stiff directions where a small step already changes the
+            // objective a lot. Replace the generic derivative-failure
+            // diagnostic with the decrement's evidence and certify.
+            certificate.diagnostics.retain(|diagnostic| {
+                !(diagnostic.code == DiagnosticCode::OptimizerNonconvergence
+                    && diagnostic.payload.contains_key("derivative_failures"))
+            });
+            let free_gradient_norm = certificate.free_gradient_norm;
+            let mut diagnostic = Diagnostic::new(
+                DiagnosticCode::OptimizerRecovery,
+                DiagnosticSeverity::Info,
+                DiagnosticStage::Certification,
+                "GLMM joint stationarity certified by the Newton-decrement objective gap; the raw free-gradient norm exceeds its absolute tolerance only along stiff directions",
+            )
+            .with_suggested_actions(vec![
+                "read decrement_objective_gap (deviance units) as the stationarity evidence; the raw gradient norm depends on parameter scaling".to_string(),
+            ]);
+            diagnostic
+                .payload
+                .insert("fit_mode".to_string(), serde_json::json!("joint_glmm"));
+            diagnostic.payload.insert(
+                "stationarity_check".to_string(),
+                serde_json::json!("newton_decrement"),
+            );
+            diagnostic.payload.insert(
+                "free_gradient_norm".to_string(),
+                serde_json::json!(free_gradient_norm),
+            );
+            diagnostic.payload.insert(
+                "gradient_tolerance".to_string(),
+                serde_json::json!(gradient_tolerance),
+            );
+            insert_decrement_payload(&mut diagnostic);
+            insert_certification_gradient_payload(&mut diagnostic, certification);
+            certificate.diagnostics.push(diagnostic);
+            for check in &mut certificate.checks {
+                if let crate::compiler::CertificateCheck::DerivativeMismatch {
+                    kind, message, ..
+                } = check
+                {
+                    if kind == "free_gradient_kkt_mismatch" {
+                        message.push_str(
+                            "; superseded by Newton-decrement stationarity (see stationarity_decrement)",
+                        );
+                    }
+                }
+            }
+            certificate.evidence.certification_quality = EvidenceQuality::Approximate {
+                reason: format!(
+                    "finite-difference Newton-decrement stationarity passed (estimated objective gap {:.3e} <= {JOINT_STATIONARITY_GAP_TOLERANCE:.1e}); raw free-gradient norm {:.6e} exceeds the absolute tolerance {gradient_tolerance:.6e}",
+                    decrement_gap.unwrap_or(f64::NAN),
+                    free_gradient_norm.unwrap_or(f64::NAN),
+                ),
+            };
+        }
+        NewtonDecrementVerdict::ExceedsTolerance if !raw_gradient_fails => {
+            // The raw gradient passes its absolute tolerance, but the
+            // estimated objective gap does not: the stop rests along a flat
+            // direction where small gradients still leave the objective
+            // materially above its optimum.
+            certificate.diagnostics.retain(|diagnostic| {
+                !(diagnostic.code == DiagnosticCode::OptimizerNonconvergence
+                    && diagnostic.payload.contains_key("derivative_failures"))
+            });
+            certificate.status = crate::compiler::FitStatus::NotOptimized;
+            let mut diagnostic = Diagnostic::new(
+                DiagnosticCode::OptimizerNonconvergence,
+                DiagnosticSeverity::Warning,
+                DiagnosticStage::Certification,
+                "GLMM joint optimizer stop failed Newton-decrement stationarity: the estimated objective gap exceeds its tolerance although the raw gradient passes; convergence is not certified",
+            )
+            .with_suggested_actions(vec![
+                "treat this joint GLMM result as not optimized until a tighter run or alternate optimizer certifies stationarity".to_string(),
+                "fall back to the labelled fast-PIRLS GLMM result when available rather than reporting a silent interior convergence".to_string(),
+            ]);
+            diagnostic
+                .payload
+                .insert("fit_mode".to_string(), serde_json::json!("joint_glmm"));
+            diagnostic.payload.insert(
+                "stationarity_check".to_string(),
+                serde_json::json!("newton_decrement"),
+            );
+            diagnostic.payload.insert(
+                "free_gradient_norm".to_string(),
+                serde_json::json!(certificate.free_gradient_norm),
+            );
+            diagnostic.payload.insert(
+                "gradient_tolerance".to_string(),
+                serde_json::json!(gradient_tolerance),
+            );
+            insert_decrement_payload(&mut diagnostic);
+            insert_certification_gradient_payload(&mut diagnostic, certification);
+            if let Some(return_code) = &certificate.evidence.optimizer_stop.return_code {
+                diagnostic
+                    .payload
+                    .insert("return_code".to_string(), serde_json::json!(return_code));
+            }
+            certificate.diagnostics.push(diagnostic);
+            certificate.evidence.certification_quality = EvidenceQuality::Approximate {
+                reason: format!(
+                    "finite-difference Newton-decrement stationarity failed: estimated objective gap {:.3e} exceeds {JOINT_STATIONARITY_GAP_TOLERANCE:.1e}",
+                    decrement_gap.unwrap_or(f64::NAN),
+                ),
+            };
+            return;
+        }
+        _ => {}
+    }
+
     if let Some(free_gradient_norm) = certificate.free_gradient_norm {
-        if !free_gradient_norm.is_finite() || free_gradient_norm > gradient_tolerance {
+        if decrement_verdict != NewtonDecrementVerdict::WithinTolerance
+            && (!free_gradient_norm.is_finite() || free_gradient_norm > gradient_tolerance)
+        {
             // `apply_derivative_evidence` emits a generic convergence
             // diagnostic before this GLMM-specific, noise-aware pass. Replace
             // it here: the assembled reading may be an assessed failure or an
@@ -53,12 +223,15 @@ pub(crate) fn annotate_glmm_covariance_status(
             // failing component is one the noise-aware probe could not
             // assess, the honest verdict is "not assessable", not "not
             // optimized".
-            let assessed_failure = certification_gradient_assessed_free_failure(
-                certification,
-                params,
-                lower_bounds,
-                gradient_tolerance,
-            );
+            // An assessed decrement above tolerance is itself an assessed
+            // failure, whatever the per-component noise verdicts.
+            let assessed_failure = decrement_verdict == NewtonDecrementVerdict::ExceedsTolerance
+                || certification_gradient_assessed_free_failure(
+                    certification,
+                    params,
+                    lower_bounds,
+                    gradient_tolerance,
+                );
             if assessed_failure {
                 certificate.status = crate::compiler::FitStatus::NotOptimized;
                 if !certificate.diagnostics.iter().any(|diagnostic| {
@@ -94,6 +267,9 @@ pub(crate) fn annotate_glmm_covariance_status(
                         "gradient_tolerance".to_string(),
                         serde_json::json!(gradient_tolerance),
                     );
+                    if decrement_verdict == NewtonDecrementVerdict::ExceedsTolerance {
+                        insert_decrement_payload(&mut diagnostic);
+                    }
                     insert_certification_gradient_payload(&mut diagnostic, certification);
                     if let Some(return_code) = &certificate.evidence.optimizer_stop.return_code {
                         diagnostic
@@ -513,7 +689,7 @@ pub(crate) fn record_uncertified_joint_candidate_diagnostic(
                 .payload
                 .get("stationarity_check")
                 .and_then(serde_json::Value::as_str)
-                == Some("free_gradient_kkt")
+                .is_some_and(|check| check == "free_gradient_kkt" || check == "newton_decrement")
     });
     let (message, scorecard_class, certification_gap, first_action) = if budget_limited {
         (
@@ -627,6 +803,7 @@ pub(crate) const PIRLS_PROFILED_CERTIFICATE_MAX_THETA: usize = 12;
 
 /// Result of the noise-aware stationarity gradient probe used by the
 /// joint-Laplace optimizer certificate.
+#[derive(Debug, Clone)]
 pub(crate) struct JointLaplaceCertificationGradient {
     /// Assessed gradient: default-step readings where those already pass the
     /// tolerance, escalated-step readings where the default step was
@@ -640,11 +817,57 @@ pub(crate) struct JointLaplaceCertificationGradient {
     /// Components whose escalated-step readings disagreed: the probe cannot
     /// distinguish noise from signal, so stationarity is not assessable there.
     pub(crate) unassessable_indices: Vec<usize>,
+    /// Objective at the certified point (the base of every central probe).
+    pub(crate) base_objective: f64,
+    /// Per-component probes: the default-step probe, followed by both
+    /// escalated probes (smaller step first) for escalated or unassessable
+    /// components.
+    pub(crate) curvature_probes: Vec<Vec<JointFdProbe>>,
 }
 
 impl JointLaplaceCertificationGradient {
     fn was_escalated(&self) -> bool {
         !self.escalated_indices.is_empty() || !self.unassessable_indices.is_empty()
+    }
+}
+
+/// One finite-difference probe of a single coordinate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct JointFdProbe {
+    /// Absolute step.
+    pub(crate) step: f64,
+    /// Gradient estimate: central `(f+ - f-) / 2h`, or forward `(f+ - f0) / h`.
+    pub(crate) gradient: f64,
+    f_plus: f64,
+    /// `None` for a forward probe (the minus side would cross a lower bound).
+    f_minus: Option<f64>,
+}
+
+impl JointFdProbe {
+    pub(crate) fn central(step: f64, f_plus: f64, f_minus: f64) -> Self {
+        Self {
+            step,
+            gradient: (f_plus - f_minus) / (2.0 * step),
+            f_plus,
+            f_minus: Some(f_minus),
+        }
+    }
+
+    pub(crate) fn forward(step: f64, f_plus: f64, base: f64) -> Self {
+        Self {
+            step,
+            gradient: (f_plus - base) / step,
+            f_plus,
+            f_minus: None,
+        }
+    }
+
+    /// Central second difference `(f+ + f- - 2 f0) / h^2`; `None` for a
+    /// forward probe or a non-finite reading.
+    pub(crate) fn curvature(&self, base: f64) -> Option<f64> {
+        let f_minus = self.f_minus?;
+        let value = (self.f_plus + f_minus - 2.0 * base) / (self.step * self.step);
+        value.is_finite().then_some(value)
     }
 }
 
@@ -887,5 +1110,371 @@ pub(crate) fn glmm_fixed_effect_inference_unsupported_reason(estimation_method: 
          fast-PIRLS/profiled covariance geometry remains a working-Hessian payload, while only \
          joint-laplace fits with a passing certified active-subspace Hessian over active beta plus \
          interior theta parameters can report Wald SE/z/p/confint"
+    )
+}
+
+/// Largest estimated objective gap, in deviance units, that the joint GLMM
+/// certificate counts as stationary.
+///
+/// A deviance gap of 1e-6 moves a likelihood-ratio statistic by 1e-6 and
+/// displaces the estimates by about 1e-3 standard errors (a gap `t` along a
+/// direction is `(δ/SE)^2`): statistically invisible. It sits ten times above
+/// the 1e-7 objective band the joint-fit parity tests hold, so an estimate
+/// off by the factor of 1.5 the β-block curvature shows on the calibration
+/// set (see `joint_glmm_newton_decrement_calibration`) cannot flag a fit
+/// inside that band, and it sits more than an order of magnitude above the
+/// estimate read at certified joint optima (<= 4e-8 across contraception,
+/// cbpp, culcita, grouseticks, tungara and the rare-event Bernoulli set,
+/// Laplace and AGQ), which is the finite-difference noise floor.
+pub(crate) const JOINT_STATIONARITY_GAP_TOLERANCE: f64 = 1.0e-6;
+
+/// Bound tolerance for treating a covariance parameter as held at its lower
+/// bound (matches the certificate's boundary classification).
+const DECREMENT_BOUNDARY_TOLERANCE: f64 = 1.0e-8;
+
+/// Largest ratio between the two escalated-step curvature readings (or
+/// between the working and finite-difference fixed-effect curvatures) for the
+/// curvature to count as determined.
+const DECREMENT_CURVATURE_AGREEMENT_RATIO: f64 = 2.0;
+
+/// Largest disagreement between the two escalated gradient readings of a
+/// coordinate, in gap units `(g_a - g_b)^2 / (2 H_ii)`, as a fraction of the
+/// gap tolerance, for the reading to count as determined.
+const DECREMENT_GRADIENT_AGREEMENT_FRACTION: f64 = 0.1;
+
+/// Gradient and curvature reading of one free coordinate, or why it has none.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum DecrementReading {
+    Determined { gradient: f64, curvature: f64 },
+    Excluded(&'static str),
+}
+
+/// Reading of coordinate `index` for the Newton decrement.
+///
+/// Rules (conservative: a coordinate that cannot be read is excluded and the
+/// decrement is then not assessed, rather than guessed):
+/// - a covariance parameter within 1e-8 of its lower bound is excluded
+///   (`at_lower_bound`): its stationarity is the one-sided KKT condition the
+///   boundary check applies;
+/// - a coordinate probed only on one side (the minus step would cross the
+///   bound) has no curvature (`one_sided_probe`);
+/// - a default-step coordinate uses its central gradient and second
+///   difference `(f+ + f- - 2 f0) / h^2`, which must be positive
+///   (`nonpositive_curvature`);
+/// - an escalated coordinate uses the two escalated probes: both second
+///   differences must be positive and agree within a factor of two
+///   (`curvature_ill_determined`). The gradient is the Richardson
+///   extrapolation `g_R = g_a + (g_a - g_b) / 15` of the two central
+///   differences (steps in ratio 1:4), which cancels their O(h^2) truncation
+///   error; the curvature is the larger-step reading, the less
+///   noise-sensitive one. The reading counts as determined when, in gap
+///   units `(Δg)^2 / (2 H)`, either the two escalated readings agree or `g_R`
+///   agrees with the independent default-step reading, to within
+///   `0.1 * gap_tolerance` (`gradient_ill_determined` otherwise).
+///
+/// The gap-unit agreement test replaces the absolute 2e-2 agreement test of
+/// the gradient certificate. On a stiff coordinate the escalated steps
+/// disagree through truncation alone (grouseticks' `cHEIGHT`, curvature
+/// 1.7e5: 0.016 at h = 1e-3 and 0.874 at 4e-3), while their Richardson
+/// extrapolation (-0.0412) reproduces the default-step reading (-0.0410) to
+/// 1e-13 in objective units. On a flat, noise-dominated coordinate the
+/// default-step reading is the unreliable one and the escalated readings
+/// agree.
+pub(crate) fn decrement_reading(
+    certification: &JointLaplaceCertificationGradient,
+    params: &[f64],
+    lower_bounds: &[f64],
+    index: usize,
+    gap_tolerance: f64,
+) -> DecrementReading {
+    let lower = lower_bounds
+        .get(index)
+        .copied()
+        .unwrap_or(f64::NEG_INFINITY);
+    if lower.is_finite()
+        && params.get(index).copied().unwrap_or(f64::NAN) <= lower + DECREMENT_BOUNDARY_TOLERANCE
+    {
+        return DecrementReading::Excluded("at_lower_bound");
+    }
+    let base = certification.base_objective;
+    let Some(probes) = certification.curvature_probes.get(index) else {
+        return DecrementReading::Excluded("non_finite_reading");
+    };
+    if !base.is_finite() {
+        return DecrementReading::Excluded("non_finite_reading");
+    }
+    match probes.as_slice() {
+        [probe] => {
+            if !probe.gradient.is_finite() {
+                return DecrementReading::Excluded("non_finite_reading");
+            }
+            match probe.curvature(base) {
+                None if probe.f_minus.is_none() => DecrementReading::Excluded("one_sided_probe"),
+                None => DecrementReading::Excluded("non_finite_reading"),
+                Some(curvature) if curvature <= 0.0 => {
+                    DecrementReading::Excluded("nonpositive_curvature")
+                }
+                Some(curvature) => DecrementReading::Determined {
+                    gradient: probe.gradient,
+                    curvature,
+                },
+            }
+        }
+        [default, small, large] => {
+            if small.f_minus.is_none() || large.f_minus.is_none() {
+                return DecrementReading::Excluded("one_sided_probe");
+            }
+            if !(small.gradient.is_finite() && large.gradient.is_finite()) {
+                return DecrementReading::Excluded("non_finite_reading");
+            }
+            let (Some(c_small), Some(c_large)) = (small.curvature(base), large.curvature(base))
+            else {
+                return DecrementReading::Excluded("non_finite_reading");
+            };
+            if c_small <= 0.0 || c_large <= 0.0 {
+                return DecrementReading::Excluded("nonpositive_curvature");
+            }
+            if c_small.max(c_large) > DECREMENT_CURVATURE_AGREEMENT_RATIO * c_small.min(c_large) {
+                return DecrementReading::Excluded("curvature_ill_determined");
+            }
+            let extrapolated = small.gradient + (small.gradient - large.gradient) / 15.0;
+            let gap_units = |a: f64, b: f64| (a - b).powi(2) / (2.0 * c_large);
+            let agreement = DECREMENT_GRADIENT_AGREEMENT_FRACTION * gap_tolerance;
+            let escalated_agree = gap_units(small.gradient, large.gradient) <= agreement;
+            let default_confirms = default.gradient.is_finite()
+                && gap_units(extrapolated, default.gradient) <= agreement;
+            if !(escalated_agree || default_confirms) {
+                return DecrementReading::Excluded("gradient_ill_determined");
+            }
+            DecrementReading::Determined {
+                gradient: extrapolated,
+                curvature: c_large,
+            }
+        }
+        _ => DecrementReading::Excluded("non_finite_reading"),
+    }
+}
+
+/// Eager Newton-decrement stationarity evidence for a joint GLMM stop.
+///
+/// Uses only the certification gradient's own probes (no extra objective
+/// evaluations) plus, when supplied, the fixed-effect block of the working
+/// penalized-least-squares Hessian at the fitted point (`beta_hessian`, in
+/// the optimizer's β order). With that block the estimate is
+/// `½ (g_βᵀ H_ββ⁻¹ g_β + Σ_θ g_i² / H_ii)`; without it (or when its diagonal
+/// disagrees with the finite-difference curvature by more than a factor of
+/// two, or it is not positive definite) the estimate is the diagonal
+/// `½ Σ g_i² / H_ii`. If any free coordinate has no determined reading the
+/// estimate is not assessed.
+pub(crate) fn joint_newton_decrement(
+    certification: &JointLaplaceCertificationGradient,
+    params: &[f64],
+    lower_bounds: &[f64],
+    n_beta: usize,
+    beta_hessian: Option<&DMatrix<f64>>,
+    gap_tolerance: f64,
+) -> NewtonDecrementEvidence {
+    let mut parameter_indices = Vec::new();
+    let mut gradient = Vec::new();
+    let mut curvature = Vec::new();
+    let mut excluded = Vec::new();
+    let mut undetermined = Vec::new();
+    for index in 0..params.len() {
+        match decrement_reading(certification, params, lower_bounds, index, gap_tolerance) {
+            DecrementReading::Determined {
+                gradient: g,
+                curvature: c,
+            } => {
+                parameter_indices.push(index);
+                gradient.push(g);
+                curvature.push(c);
+            }
+            DecrementReading::Excluded(reason) => {
+                if reason != "at_lower_bound" {
+                    undetermined.push(index);
+                }
+                excluded.push(NewtonDecrementExclusion {
+                    index,
+                    reason: reason.to_string(),
+                });
+            }
+        }
+    }
+
+    let eager = if !undetermined.is_empty() {
+        NewtonDecrementEstimate {
+            variant: NewtonDecrementVariant::Diagonal,
+            verdict: NewtonDecrementVerdict::NotAssessed,
+            objective_gap: None,
+            reason: Some(format!(
+                "no determined gradient/curvature reading for free parameter(s) {}",
+                undetermined
+                    .iter()
+                    .map(|index| index.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        }
+    } else {
+        let diagonal_term = |position: usize| gradient[position].powi(2) / curvature[position];
+        let block = beta_hessian.and_then(|hessian| {
+            beta_block_decrement(hessian, &parameter_indices, &gradient, &curvature, n_beta)
+        });
+        let (variant, decrement) = match block {
+            Some(beta_part) => {
+                let theta_part = (0..parameter_indices.len())
+                    .filter(|&position| parameter_indices[position] >= n_beta)
+                    .map(diagonal_term)
+                    .sum::<f64>();
+                (
+                    NewtonDecrementVariant::BetaBlockThetaDiagonal,
+                    beta_part + theta_part,
+                )
+            }
+            None => (
+                NewtonDecrementVariant::Diagonal,
+                (0..parameter_indices.len()).map(diagonal_term).sum::<f64>(),
+            ),
+        };
+        newton_decrement_estimate(variant, decrement, gap_tolerance)
+    };
+
+    NewtonDecrementEvidence {
+        gap_tolerance,
+        parameter_indices,
+        gradient,
+        excluded,
+        eager,
+        full: None,
+    }
+}
+
+/// `g_βᵀ H_ββ⁻¹ g_β` from the working fixed-effect Hessian, or `None` when
+/// the block cannot be used: a fixed effect is missing a determined reading,
+/// the block is not positive definite, or its diagonal disagrees with the
+/// finite-difference curvature by more than
+/// [`DECREMENT_CURVATURE_AGREEMENT_RATIO`] (the working Hessian is then not a
+/// trustworthy stand-in for the objective's curvature).
+fn beta_block_decrement(
+    hessian: &DMatrix<f64>,
+    parameter_indices: &[usize],
+    gradient: &[f64],
+    curvature: &[f64],
+    n_beta: usize,
+) -> Option<f64> {
+    if n_beta == 0 || hessian.nrows() != n_beta || hessian.ncols() != n_beta {
+        return None;
+    }
+    if parameter_indices.len() < n_beta
+        || parameter_indices[..n_beta] != (0..n_beta).collect::<Vec<_>>()[..]
+    {
+        return None;
+    }
+    for index in 0..n_beta {
+        let working = hessian[(index, index)];
+        let probed = curvature[index];
+        if !(working.is_finite() && working > 0.0)
+            || working.max(probed) > DECREMENT_CURVATURE_AGREEMENT_RATIO * working.min(probed)
+        {
+            return None;
+        }
+    }
+    let symmetric = 0.5 * (hessian + hessian.transpose());
+    let cholesky = symmetric.cholesky()?;
+    let g_beta = DVector::from_column_slice(&gradient[..n_beta]);
+    let solved = cholesky.solve(&g_beta);
+    let value = g_beta.dot(&solved);
+    (value.is_finite() && value >= 0.0).then_some(value)
+}
+
+/// Estimate record for a decrement `λ²` (the estimate is `λ²/2`).
+pub(crate) fn newton_decrement_estimate(
+    variant: NewtonDecrementVariant,
+    decrement: f64,
+    gap_tolerance: f64,
+) -> NewtonDecrementEstimate {
+    let gap = 0.5 * decrement;
+    if !gap.is_finite() || gap < 0.0 {
+        return NewtonDecrementEstimate {
+            variant,
+            verdict: NewtonDecrementVerdict::NotAssessed,
+            objective_gap: None,
+            reason: Some(format!(
+                "decrement is not a finite non-negative number ({decrement})"
+            )),
+        };
+    }
+    NewtonDecrementEstimate {
+        variant,
+        verdict: if gap <= gap_tolerance {
+            NewtonDecrementVerdict::WithinTolerance
+        } else {
+            NewtonDecrementVerdict::ExceedsTolerance
+        },
+        objective_gap: Some(gap),
+        reason: None,
+    }
+}
+
+/// Full Newton decrement `gᵀH⁻¹g` over the active indices of a
+/// finite-difference Hessian, from the eager decrement's gradient readings.
+/// Not assessed when an active coordinate has no determined gradient reading
+/// or the Hessian is not positive definite (reported, never regularized).
+pub(crate) fn full_newton_decrement_estimate(
+    evidence: &NewtonDecrementEvidence,
+    hessian: &DMatrix<f64>,
+    active_indices: &[usize],
+) -> NewtonDecrementEstimate {
+    let not_assessed = |reason: String| NewtonDecrementEstimate {
+        variant: NewtonDecrementVariant::Full,
+        verdict: NewtonDecrementVerdict::NotAssessed,
+        objective_gap: None,
+        reason: Some(reason),
+    };
+    if hessian.nrows() != active_indices.len() || hessian.ncols() != active_indices.len() {
+        return not_assessed(format!(
+            "Hessian shape {}x{} does not match {} active parameters",
+            hessian.nrows(),
+            hessian.ncols(),
+            active_indices.len()
+        ));
+    }
+    let mut g = DVector::zeros(active_indices.len());
+    for (position, index) in active_indices.iter().enumerate() {
+        match evidence
+            .parameter_indices
+            .iter()
+            .position(|candidate| candidate == index)
+        {
+            Some(slot) => g[position] = evidence.gradient[slot],
+            None => {
+                return not_assessed(format!(
+                    "no determined gradient reading for active parameter {index}"
+                ))
+            }
+        }
+    }
+    if !matrix_is_finite_local(hessian) {
+        return not_assessed("Hessian contains non-finite entries".to_string());
+    }
+    let symmetric = 0.5 * (hessian + hessian.transpose());
+    let min_eigenvalue = SymmetricEigen::new(symmetric.clone())
+        .eigenvalues
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min);
+    let Some(cholesky) = (min_eigenvalue > 0.0)
+        .then(|| symmetric.cholesky())
+        .flatten()
+    else {
+        return not_assessed(format!(
+            "Hessian is not positive definite (min eigenvalue {min_eigenvalue:.6e}); the decrement is undefined"
+        ));
+    };
+    let solved = cholesky.solve(&g);
+    newton_decrement_estimate(
+        NewtonDecrementVariant::Full,
+        g.dot(&solved),
+        evidence.gap_tolerance,
     )
 }

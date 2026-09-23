@@ -4032,6 +4032,13 @@ pub struct OptimizerCertificate {
     /// populated substitution as "the requested estimator did not certify".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimator_substitution: Option<EstimatorSubstitution>,
+    /// Scale-free stationarity evidence: the Newton-decrement estimate of how
+    /// far the objective sits above its local optimum. Populated by
+    /// estimators whose certificate probes carry curvature (currently the
+    /// joint Laplace/AGQ GLMM); absent elsewhere. The raw gradient evidence
+    /// (`free_gradient_norm`, `evidence.gradient`) is reported alongside it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stationarity_decrement: Option<NewtonDecrementEvidence>,
     pub free_gradient_norm: Option<f64>,
     pub projected_gradient_norm: Option<f64>,
     pub hessian_eigen_min: Option<f64>,
@@ -4180,6 +4187,87 @@ pub struct EstimatorSubstitution {
     pub reason: String,
 }
 
+/// Newton-decrement stationarity evidence for a fitted objective.
+///
+/// For a gradient `g` and positive-definite Hessian `H` over the free
+/// parameters, `λ² = gᵀH⁻¹g` and `λ²/2` estimates the objective gap between
+/// the fitted point and the local optimum, in the objective's own units
+/// (deviance for GLMMs). Unlike a gradient norm it does not depend on how the
+/// parameters are scaled, so one tolerance applies to every coordinate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NewtonDecrementEvidence {
+    /// Largest estimated objective gap that counts as stationary.
+    pub gap_tolerance: f64,
+    /// Zero-based indices, into the optimizer's parameter vector, of the free
+    /// coordinates whose gradient readings enter the decrement. Coordinates at
+    /// a bound and coordinates without a determined reading are listed in
+    /// `excluded` instead.
+    pub parameter_indices: Vec<usize>,
+    /// Gradient readings used for the decrement, aligned with
+    /// `parameter_indices`.
+    pub gradient: Vec<f64>,
+    /// Coordinates left out of the decrement, with the reason.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded: Vec<NewtonDecrementExclusion>,
+    /// Estimate available when the fit was certified, from the certificate's
+    /// own finite-difference probes. It decides the stationarity verdict.
+    pub eager: NewtonDecrementEstimate,
+    /// Estimate from the full finite-difference Hessian, recorded when that
+    /// Hessian is computed (joint-Laplace fixed-effect inference). Evidence
+    /// only: it does not revise the fit status decided by `eager`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub full: Option<NewtonDecrementEstimate>,
+}
+
+/// One coordinate left out of a Newton decrement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NewtonDecrementExclusion {
+    /// Zero-based parameter index.
+    pub index: usize,
+    /// Stable reason code: `at_lower_bound` (checked by the one-sided
+    /// boundary KKT rule instead), `one_sided_probe`,
+    /// `nonpositive_curvature`, `curvature_ill_determined`,
+    /// `gradient_ill_determined`, or `non_finite_reading`.
+    pub reason: String,
+}
+
+/// One Newton-decrement estimate of the objective gap.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NewtonDecrementEstimate {
+    /// Which curvature the estimate used.
+    pub variant: NewtonDecrementVariant,
+    /// Verdict of `objective_gap` against the gap tolerance.
+    pub verdict: NewtonDecrementVerdict,
+    /// Estimated objective gap `λ²/2`; absent when not assessed.
+    pub objective_gap: Option<f64>,
+    /// Why the estimate is not assessed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Curvature used by a Newton-decrement estimate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NewtonDecrementVariant {
+    /// Diagonal finite-difference curvature: `Σ g_i² / H_ii`.
+    Diagonal,
+    /// Fixed-effect block from the working (penalized least-squares)
+    /// Hessian, diagonal finite-difference curvature for the covariance
+    /// parameters; cross terms between the two blocks are ignored.
+    BetaBlockThetaDiagonal,
+    /// Full finite-difference Hessian over the active parameters.
+    Full,
+}
+
+/// Verdict of a Newton-decrement estimate against its gap tolerance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NewtonDecrementVerdict {
+    WithinTolerance,
+    ExceedsTolerance,
+    NotAssessed,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConvergenceVerification {
     pub status: ConvergenceVerificationStatus,
@@ -4263,6 +4351,7 @@ impl OptimizerCertificate {
             optimizer_control: OptimizerControlEvidence::default(),
             verification: None,
             estimator_substitution: None,
+            stationarity_decrement: None,
             free_gradient_norm: None,
             projected_gradient_norm: None,
             hessian_eigen_min: None,
@@ -4311,6 +4400,7 @@ impl OptimizerCertificate {
                 optimizer_control: OptimizerControlEvidence::from_opt_summary(optsum),
                 verification: None,
                 estimator_substitution: None,
+            stationarity_decrement: None,
                 free_gradient_norm: None,
                 projected_gradient_norm: None,
                 hessian_eigen_min: None,
@@ -4510,6 +4600,7 @@ impl OptimizerCertificate {
             optimizer_control: OptimizerControlEvidence::from_opt_summary(optsum),
             verification: None,
             estimator_substitution: None,
+            stationarity_decrement: None,
             free_gradient_norm: None,
             projected_gradient_norm: None,
             hessian_eigen_min: None,

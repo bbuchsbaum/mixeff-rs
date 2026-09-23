@@ -12,6 +12,47 @@ vs. `unstable-internals` surface inventory.
 
 ## [Unreleased]
 
+### Changed (certification labels)
+
+- Joint Laplace/AGQ GLMM stationarity is judged by a Newton-decrement
+  estimate of the objective gap (`λ²/2`, deviance units) instead of the raw
+  finite-difference gradient norm against 2e-2 whenever the estimate is
+  assessed; tolerance 1e-6. The estimate uses the certificate's existing
+  probes (central second differences) plus the fixed-effect block of the
+  working PLS Hessian, so it costs no extra objective evaluations; a stop it
+  would reject first has its single-probe covariance-parameter curvatures
+  confirmed at the escalated steps (four evaluations each). The
+  pure-diagonal fallback (no usable working block) is recorded but does not
+  decide. Gradient
+  magnitudes depend on parameter scaling; the gap does not. On a calibration
+  set of premature stops (contraception, cbpp, culcita; Laplace and AGQ) the
+  estimate tracks the true gap within a factor of 1.5, while the raw
+  gradient certified stops up to 1.6e-3 above the optimum and rejected
+  stops 5e-7 above it. Fitted values are unchanged; only `fit_status` and
+  the labels that follow it can move:
+  - `converged_interior` → `not_optimized` for stops whose estimated gap
+    exceeds 1e-6 although the raw gradient passed (for example the
+    no-`nlopt` TrustBQ joint AGQ fit of the rare-event Bernoulli set, 1e-6
+    above the optimum). Such a fit is then returned as the labelled
+    uncertified joint candidate, or as the labelled fast-PIRLS fallback when
+    the joint fit did not improve on its start.
+  - `not_optimized` / `not_assessed` → `converged_interior` for stops whose
+    raw gradient exceeded 2e-2 only along stiff directions (grouseticks joint
+    Laplace, whose `cHEIGHT` curvature is 1.7e5; the no-`nlopt` contraception
+    random-slope fit).
+  - `not_assessed` → `not_optimized` when the decrement assesses a gap the
+    noise-aware gradient could not (no-`nlopt` contraception joint fits,
+    1.05e-4 above the optimum).
+  When the decrement cannot be assessed (a coordinate without a determined
+  gradient or positive curvature), the previous gradient rule decides.
+- `OptimizerCertificate` gains an optional `stationarity_decrement` field
+  (`NewtonDecrementEvidence`: gap tolerance, the gradient readings used,
+  excluded coordinates with reason codes, the eager estimate and verdict,
+  and a `full` estimate from the finite-difference joint Hessian when
+  joint-Laplace inference is computed). The field is omitted when absent, so
+  existing artifacts serialize unchanged; the certificate lives in the
+  `unstable-internals` compiled-artifact schema.
+
 ## [1.0.0-rc.3] - 2026-09-23
 
 Documentation-only release: no code, API, or numerical changes from
