@@ -191,6 +191,20 @@ function fit_mmjl(spec)
     println("  \"status\": ", json_string(status), ",")
     println("  \"warnings\": ", json_string_array(warning_text), ",")
     println("  \"converged\": ", status == "ok" ? "true" : "false", ",")
+    if spec["stratum"] == "reduced-rank"
+        # The reduced-rank data are exactly rank-1 with zero residual noise, so
+        # the REML objective is unbounded below along θ[1] = θ[2] → ∞, σ → 0
+        # (it falls ~81.8 per doubling of θ). The optimizer stop is arbitrary
+        # and platform-dependent (θ ≈ 3.5e3 on macOS, 7e3–8.2e3 on Linux), so
+        # the drift gate checks the pathology signature, not digits
+        # (scripts/check_pathology_signature.py; VERSIONING.md §3.1). This
+        # fixture is comparison data for tests/cross_engine_scoreboard.rs.
+        println("  \"parity_check\": \"behavioural\",")
+        println("  \"parity_note\": ", json_string(
+            "Unbounded REML objective (exact rank-1 data, zero residual noise): no reproducible optimum. " *
+            "Drift gate checks the pathology signature (scripts/check_pathology_signature.py), not digits; " *
+            "numbers are cross-engine comparison data for tests/cross_engine_scoreboard.rs."), ",")
+    end
     if status == "ok"
         println("  \"objective\": ", json_num(objective(model)), ",")
         println("  \"theta\": ", json_array(getproperty(model, :theta)), ",")

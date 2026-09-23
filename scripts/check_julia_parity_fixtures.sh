@@ -96,7 +96,14 @@ fi
 failed=()
 compare_fixture() {
   local fixture="$1"
-  if [[ "$fixture" == tests/fixtures/pathology_corpus/* ]]; then
+  if [[ "$fixture" == tests/fixtures/pathology_corpus/reduced_rank_unit_correlation/parity/mmjl.json ]]; then
+    # Named exception (VERSIONING.md section 3.1): unbounded REML objective, so
+    # there is no reproducible optimum; check the pathology signature and the
+    # identity fields instead of digits. Keyed to this exact path only.
+    python scripts/check_pathology_signature.py \
+      --lme4=tests/fixtures/pathology_corpus/reduced_rank_unit_correlation/parity/lme4.json \
+      "$fixture" "$tmp_dir/$fixture"
+  elif [[ "$fixture" == tests/fixtures/pathology_corpus/* ]]; then
     python scripts/compare_json_tolerant.py --abs-tol=1e-7 --rel-tol=1e-8 --ignore=/runtime_ms "$fixture" "$tmp_dir/$fixture"
   elif [[ "$fixture" == tests/fixtures/parity/glmm_fast_oracles.json ]]; then
     # generated_at is the regeneration date; optimizer feval counts are

@@ -219,6 +219,21 @@ This is exactly the tolerance the Julia drift gate already enforces
 public guarantee and the CI gate are the **same number** by construction. No
 new machinery is introduced — the guarantee is the test that already runs.
 
+**Named exception — `reduced_rank_unit_correlation` MixedModels.jl reference**
+(`tests/fixtures/pathology_corpus/reduced_rank_unit_correlation/parity/mmjl.json`).
+The data are exactly rank-1 with zero residual noise, so the REML objective is
+unbounded below (θ₁ = θ₂ → ∞, σ → 0; it falls ~81.8 per doubling of θ). There
+is no optimum, hence no reproducible reference: MixedModels.jl stops at an
+arbitrary, platform-dependent point (θ ≈ 3.5e3 on macOS, 7.0e3–8.2e3 on Linux).
+The fixture is cross-engine comparison data for
+`tests/cross_engine_scoreboard.rs` (a documented divergence, §2.E), not a
+parity oracle. For this one path the drift gate compares the identity fields
+exactly and checks the pathology signature with
+`scripts/check_pathology_signature.py` (θ₁, θ₂ > 1e3 and equal to 1e-4
+relative; σ < 1e-3; objective < −500 and more than 1 away from lme4's;
+objective = −2·loglik) instead of θ/β/σ/objective/loglik digits. The exception
+is keyed to that exact path; every other fixture stays on the band above.
+
 Bit-for-bit reproducibility is **explicitly not promised.** It is infeasible
 for an iterative optimizer (BOBYQA/NEWUOA/COBYLA/TrustBQ) whose path depends on
 LLVM codegen, FMA contraction, BLAS kernels, and platform math libraries.

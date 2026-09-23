@@ -8,10 +8,12 @@
   "status": "ok",
   "warnings": [],
   "converged": true,
+  "parity_check": "behavioural",
+  "parity_note": "Unbounded REML objective (exact rank-1 data, zero residual noise): no reproducible optimum. Drift gate checks the pathology signature (scripts/check_pathology_signature.py), not digits; numbers are cross-engine comparison data for tests/cross_engine_scoreboard.rs.",
   "objective": -916.60759171810037,
   "theta": [3497.2271206944788, 3497.227010868166, 0.00057128558390349667],
   "beta": [2.0170461624683913, 1.0170461607853793],
   "sigma": 7.9186658544090811e-05,
   "loglik": 458.30379585905018,
-  "runtime_ms": 4148.4839916229248
+  "runtime_ms": 4008.497953414917
 }
