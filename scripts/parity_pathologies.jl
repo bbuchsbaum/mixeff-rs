@@ -85,7 +85,76 @@ function deterministic_data(spec)
     return df
 end
 
-json_string(x) = "\"" * replace(String(x), "\\" => "\\\\", "\"" => "\\\"") * "\""
+# Dense REML profiled objective of a fitted LinearMixedModel at θ, evaluated in
+# the element type of θ. Mathematically identical to MixedModels' `objective`:
+#   logdet(I + ZΛΛ'Z') + logdet(X'M⁻¹X) + (n-p)(1 + log(2π pwrss/(n-p))).
+function dense_reml_objective(model, θ::AbstractVector{T}) where {T}
+    X = T.(Matrix(model.X))
+    y = T.(model.y)
+    n, p = size(X)
+    blocks = Matrix{T}[]
+    for (k, re) in enumerate(model.reterms)
+        s = size(re.λ, 1)
+        lambda = zeros(T, s, s)
+        for (index, (term, row, col)) in enumerate(model.parmap)
+            term == k && (lambda[row, col] = θ[index])
+        end
+        push!(blocks, T.(Matrix(re)) * kron(Matrix{T}(I, length(re.levels), length(re.levels)), lambda))
+    end
+    ZL = hcat(blocks...)
+    C = cholesky(Symmetric(Matrix{T}(I, n, n) + ZL * ZL'))
+    XtMiX = X' * (C \ X)
+    β = XtMiX \ (X' * (C \ y))
+    r = y - X * β
+    pwrss = dot(r, C \ r)
+    return logdet(C) + logdet(cholesky(Symmetric(XtMiX))) +
+           (n - p) * (1 + log(2 * T(pi) * pwrss / (n - p)))
+end
+
+# The easy-stratum data are nearly noiseless (σ ≈ 0.02), so the Float64
+# profiled objective carries ~1e-9 of cancellation noise against a smallest
+# θ-Hessian eigenvalue of ~0.06: any Float64 optimizer stop is determined only
+# to ~2e-4 in θ, and Linux and macOS stop at different points. Polish the
+# MixedModels optimum by Newton steps on the same objective in 256-bit BigFloat
+# (MPFR is correctly rounded, hence platform-independent) and re-evaluate the
+# model at the polished θ.
+function polish_theta!(model)
+    fitted_objective = objective(model)
+    theta0 = collect(model.θ)
+    theta = setprecision(BigFloat, 256) do
+        f(t) = dense_reml_objective(model, t)
+        θ = big.(theta0)
+        n = length(θ)
+        h = big"1e-25"
+        unit(k) = (v = zeros(BigFloat, n); v[k] = one(BigFloat); v)
+        converged = false
+        for _ in 1:50
+            g = [(f(θ + h * unit(i)) - f(θ - h * unit(i))) / (2h) for i in 1:n]
+            H = [
+                (f(θ + h * unit(i) + h * unit(j)) - f(θ + h * unit(i) - h * unit(j)) -
+                 f(θ - h * unit(i) + h * unit(j)) + f(θ - h * unit(i) - h * unit(j))) / (4h^2)
+                for i in 1:n, j in 1:n
+            ]
+            isposdef(Symmetric(H)) || error("θ polish: Hessian is not positive definite")
+            step = H \ g
+            θ -= step
+            if maximum(abs, step) < big"1e-40"
+                converged = true
+                break
+            end
+        end
+        converged || error("θ polish: Newton iteration did not converge")
+        Float64.(θ)
+    end
+    maximum(abs, theta .- theta0) < 1e-2 ||
+        error("θ polish moved θ implausibly far from the MixedModels optimum")
+    updateL!(MixedModels.setθ!(model, theta))
+    objective(model) <= fitted_objective + 1e-8 ||
+        error("θ polish: MixedModels objective worsened at the polished θ")
+    return model
+end
+
+json_string(x) ="\"" * replace(String(x), "\\" => "\\\\", "\"" => "\\\"") * "\""
 json_num(x) = isfinite(Float64(x)) ? @sprintf("%.17g", Float64(x)) : "null"
 json_array(xs) = "[" * join(json_num.(collect(xs)), ", ") * "]"
 json_string_array(xs) = "[" * join(json_string.(collect(xs)), ", ") * "]"
@@ -108,6 +177,9 @@ function fit_mmjl(spec)
         err = sprint(showerror, e)
     end
     runtime_ms = (time() - t0) * 1000
+    # Only the well-posed easy stratum has an interior optimum to polish; a
+    # failed polish is an error, not a silent fallback to the raw fit.
+    status == "ok" && spec["stratum"] == "easy" && polish_theta!(model)
 
     println("{")
     println("  \"schema_version\": \"1.0.0\",")
@@ -119,6 +191,20 @@ function fit_mmjl(spec)
     println("  \"status\": ", json_string(status), ",")
     println("  \"warnings\": ", json_string_array(warning_text), ",")
     println("  \"converged\": ", status == "ok" ? "true" : "false", ",")
+    if spec["stratum"] == "reduced-rank"
+        # The reduced-rank data are exactly rank-1 with zero residual noise, so
+        # the REML objective is unbounded below along θ[1] = θ[2] → ∞, σ → 0
+        # (it falls ~81.8 per doubling of θ). The optimizer stop is arbitrary
+        # and platform-dependent (θ ≈ 3.5e3 on macOS, 7e3–8.2e3 on Linux), so
+        # the drift gate checks the pathology signature, not digits
+        # (scripts/check_pathology_signature.py; VERSIONING.md §3.1). This
+        # fixture is comparison data for tests/cross_engine_scoreboard.rs.
+        println("  \"parity_check\": \"behavioural\",")
+        println("  \"parity_note\": ", json_string(
+            "Unbounded REML objective (exact rank-1 data, zero residual noise): no reproducible optimum. " *
+            "Drift gate checks the pathology signature (scripts/check_pathology_signature.py), not digits; " *
+            "numbers are cross-engine comparison data for tests/cross_engine_scoreboard.rs."), ",")
+    end
     if status == "ok"
         println("  \"objective\": ", json_num(objective(model)), ",")
         println("  \"theta\": ", json_array(getproperty(model, :theta)), ",")

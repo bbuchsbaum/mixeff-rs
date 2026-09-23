@@ -158,22 +158,31 @@ impl GeneralizedLinearMixedModel {
         self.lmm.optsum.optimizer = Optimizer::NloptBobyqa;
         self.lmm.optsum.backend = Optimizer::NloptBobyqa.canonical_backend();
         self.lmm.optsum.finitial = profiled_start_objective;
+        // Stopping tolerances follow MixedModels.jl's `OptSummary` defaults
+        // for the fast = false joint fit (ftol_rel 1e-12, ftol_abs 1e-8; no
+        // xtol_abs, which Julia only applies when its length matches θ).
         let ftol_rel = if self.lmm.optsum.caller_set_field("ftol_rel") {
             self.lmm.optsum.ftol_rel
         } else {
-            1e-10
+            JOINT_NLOPT_BOBYQA_FTOL_REL
         };
         let ftol_abs = if self.lmm.optsum.caller_set_field("ftol_abs") {
             self.lmm.optsum.ftol_abs
         } else {
-            1e-7
+            JOINT_NLOPT_BOBYQA_FTOL_ABS
         };
         let xtol_rel = self
             .lmm
             .optsum
             .caller_set_field("xtol_rel")
             .then_some(self.lmm.optsum.xtol_rel);
-        let mut initial_step = vec![0.1; n_beta];
+        // NLopt's BOBYQA rescales the parameters so the initial steps are
+        // equal, so the β steps set the conditioning of the β block. One
+        // profiled (fast-PIRLS) standard error per coefficient makes that
+        // block roughly a correlation matrix; a flat 0.1 step leaves it as
+        // ill-conditioned as the covariates' scales (contraception's `age`
+        // coefficient has ~1/19 the SE of the intercept).
+        let mut initial_step = self.joint_nlopt_bobyqa_beta_steps();
         if self.lmm.optsum.caller_set_field("initial_step") {
             initial_step.extend(self.lmm.optsum.initial_step.clone());
         } else {
@@ -194,26 +203,121 @@ impl GeneralizedLinearMixedModel {
             });
             objective
         };
-
-        let mut optimizer = Nlopt::new(
-            NloptAlgorithm::Bobyqa,
-            n_params,
-            obj_fn,
-            NloptTarget::Minimize,
-            (),
-        );
-        optimizer.set_lower_bounds(&lower_bounds).ok();
-        optimizer.set_ftol_rel(ftol_rel).ok();
-        optimizer.set_ftol_abs(ftol_abs).ok();
-        if let Some(xtol_rel) = xtol_rel {
-            optimizer.set_xtol_rel(xtol_rel).ok();
-        }
-        optimizer.set_maxeval(maxeval).ok();
-        optimizer.set_initial_step(&initial_step).ok();
+        let run_bobyqa = |params: &mut Vec<f64>, steps: &[f64], budget: u32| {
+            let mut optimizer = Nlopt::new(
+                NloptAlgorithm::Bobyqa,
+                n_params,
+                &obj_fn,
+                NloptTarget::Minimize,
+                (),
+            );
+            optimizer.set_lower_bounds(&lower_bounds).ok();
+            optimizer.set_ftol_rel(ftol_rel).ok();
+            optimizer.set_ftol_abs(ftol_abs).ok();
+            if let Some(xtol_rel) = xtol_rel {
+                optimizer.set_xtol_rel(xtol_rel).ok();
+            }
+            optimizer.set_maxeval(budget.max(1)).ok();
+            optimizer.set_initial_step(steps).ok();
+            optimizer.optimize(params)
+        };
 
         let mut params = initial;
-        let nlopt_result = optimizer.optimize(&mut params);
-        drop(optimizer);
+        let mut nlopt_result = run_bobyqa(&mut params, &initial_step, maxeval);
+        // NLopt's BOBYQA declares FTOL_REACHED on the first accepted step
+        // whose improvement is below the tolerance, whatever the trust-region
+        // radius; it is not a contraction test (the analogue of TrustBQ's
+        // `ftol_requires_local_radius`). A step that happens to gain little
+        // on a still-large radius therefore stops the fit well short of the
+        // optimum, and which step does so is decided by last-bit rounding
+        // (contraception stopped 9.2e-5 above the optimum on Linux, 1e-6 on
+        // macOS). Confirm every FTOL stop by restarting from the incumbent
+        // with a fresh, 10x smaller interpolation set: the stop stands only
+        // once a restart gains no more than the tolerance.
+        //
+        // A restart needs 2n + 1 evaluations just to build its interpolation
+        // model, and a confirming restart then takes a few trust-region steps
+        // at the reduced radius; one launched with less than twice the model
+        // size cannot finish either, so it is not started and the stop is
+        // recorded as unconfirmed.
+        let min_restart_budget = 2 * (2 * n_params as u32 + 1);
+        let mut confirmation = JointFtolConfirmation::NotNeeded;
+        let mut restarts = 0usize;
+        while matches!(nlopt_result, Ok((nlopt::SuccessState::FtolReached, _))) {
+            let incumbent = match &nlopt_result {
+                Ok((_, fmin)) | Err((_, fmin)) => *fmin,
+            };
+            if restarts == JOINT_NLOPT_BOBYQA_MAX_CONFIRMATION_RESTARTS {
+                confirmation = JointFtolConfirmation::Unconfirmed {
+                    reason: "restart_cap_reached",
+                    restarts,
+                    last_gain: None,
+                };
+                break;
+            }
+            let used = u32::try_from(feval_count.get()).unwrap_or(u32::MAX);
+            let remaining = maxeval.saturating_sub(used);
+            if remaining < min_restart_budget {
+                confirmation = JointFtolConfirmation::Unconfirmed {
+                    reason: "insufficient_evaluation_budget",
+                    restarts,
+                    last_gain: None,
+                };
+                break;
+            }
+            let steps = joint_restart_steps(&initial_step, &params, &lower_bounds);
+            let mut candidate = params.clone();
+            let result = run_bobyqa(&mut candidate, &steps, remaining);
+            restarts += 1;
+            let (restart_ok, best) = match &result {
+                Ok((_, fmin)) => (true, *fmin),
+                Err((_, fmin)) => (false, *fmin),
+            };
+            // The restart starts at the incumbent (its steps keep NLopt from
+            // shifting it off a bound), so a best value above the incumbent
+            // means the incumbent was not reproduced.
+            if !best.is_finite()
+                || best > incumbent
+                || !candidate.iter().all(|value| value.is_finite())
+            {
+                confirmation = JointFtolConfirmation::Unconfirmed {
+                    reason: "restart_did_not_reproduce_incumbent",
+                    restarts,
+                    last_gain: None,
+                };
+                break;
+            }
+            let gain = incumbent - best;
+            params = candidate;
+            if gain <= ftol_abs.max(ftol_rel * incumbent.abs()) {
+                // Confirmed: the stop stands with its FTOL label whatever
+                // code the confirming restart itself returned (a budget or
+                // roundoff stop after gaining nothing does not unconfirm it).
+                nlopt_result = Ok((nlopt::SuccessState::FtolReached, best));
+                confirmation = JointFtolConfirmation::Confirmed;
+                break;
+            }
+            if !restart_ok {
+                // Keep the better point, but a restart that failed after a
+                // material gain confirms nothing; the label stays the first
+                // pass's FTOL stop and the gap is recorded.
+                nlopt_result = Ok((nlopt::SuccessState::FtolReached, best));
+                confirmation = JointFtolConfirmation::Unconfirmed {
+                    reason: "restart_failed_after_material_gain",
+                    restarts,
+                    last_gain: Some(gain),
+                };
+                break;
+            }
+            // A material gain: the restart's own stop is the new incumbent
+            // status (FTOL loops to be confirmed again; XTOL/SUCCESS are
+            // BOBYQA's native radius convergence; MAXEVAL is an honest
+            // budget stop).
+            nlopt_result = result;
+            if !matches!(nlopt_result, Ok((nlopt::SuccessState::FtolReached, _))) {
+                confirmation = JointFtolConfirmation::NotNeeded;
+            }
+        }
 
         let me = model.into_inner();
         let final_objective = me.joint_glmm_deviance_at_params(&params, n_beta, n_agq);
@@ -273,6 +377,7 @@ impl GeneralizedLinearMixedModel {
             &certification_gradient,
             2.0e-2,
         );
+        record_joint_ftol_confirmation(&mut certificate, &confirmation);
         if joint_certificate_requires_fallback(&certificate)
             && joint_candidate_materially_improves_profiled_start(&me.lmm.optsum)
         {
@@ -560,6 +665,37 @@ impl GeneralizedLinearMixedModel {
         me.refresh_binomial_separation_diagnostics();
         me.refresh_near_unit_random_effect_correlation_diagnostics();
         Ok(me)
+    }
+
+    /// NLopt BOBYQA initial steps for the joint β block: one profiled
+    /// (fast-PIRLS) standard error per coefficient where that covariance is
+    /// available and finite, else a flat default step.
+    ///
+    /// Each step is capped at `max(1, |β_j|)`. An SE above that means the
+    /// profiled Hessian is nearly singular in that coordinate (typically
+    /// near-separation in a binomial model, SE 1e2–1e4); a step that size
+    /// would put BOBYQA's first interpolation points deep in a saturated
+    /// logistic tail where the deviance is flat and carries no curvature
+    /// information. `|β_j|` is NLopt's own default step (what MixedModels.jl
+    /// uses), and the floor of 1 keeps near-zero coefficients movable.
+    #[cfg(feature = "nlopt")]
+    fn joint_nlopt_bobyqa_beta_steps(&self) -> Vec<f64> {
+        let n_beta = self.beta.len();
+        let mut steps = vec![JOINT_NLOPT_BOBYQA_DEFAULT_BETA_STEP; n_beta];
+        // The profiled covariance is in the unpivoted coefficient order;
+        // active coefficient `i` is full coefficient `piv[i]`.
+        let piv = &self.lmm.feterm.piv;
+        if let Some(covariance) = self.profiled_glmm_fixed_effect_covariance() {
+            for (index, (step, &full)) in steps.iter_mut().zip(piv).enumerate() {
+                if full < covariance.nrows() && full < covariance.ncols() {
+                    let se = covariance[(full, full)].sqrt();
+                    if se.is_finite() && se > 0.0 {
+                        *step = se.min(self.beta[index].abs().max(1.0));
+                    }
+                }
+            }
+        }
+        steps
     }
 
     pub(super) fn joint_glmm_deviance_at_params(
@@ -1137,6 +1273,113 @@ impl GeneralizedLinearMixedModel {
     }
 }
 
+/// MixedModels.jl `OptSummary` default `ftol_rel`, used by its joint
+/// (`fast = false`) GLMM fit.
+#[cfg(feature = "nlopt")]
+const JOINT_NLOPT_BOBYQA_FTOL_REL: f64 = 1.0e-12;
+/// MixedModels.jl `OptSummary` default `ftol_abs`.
+#[cfg(feature = "nlopt")]
+const JOINT_NLOPT_BOBYQA_FTOL_ABS: f64 = 1.0e-8;
+/// Initial-step factor for the restarts that confirm an NLopt BOBYQA
+/// FTOL stop, relative to the first pass's initial steps.
+#[cfg(feature = "nlopt")]
+const JOINT_NLOPT_BOBYQA_RESTART_STEP_FACTOR: f64 = 0.1;
+/// Cap on FTOL-confirmation restarts; each is also bounded by the remaining
+/// evaluation budget.
+#[cfg(feature = "nlopt")]
+const JOINT_NLOPT_BOBYQA_MAX_CONFIRMATION_RESTARTS: usize = 20;
+/// Outcome of confirming an NLopt BOBYQA FTOL stop by restarting.
+#[cfg(feature = "nlopt")]
+enum JointFtolConfirmation {
+    /// The final stop was not an FTOL stop (native radius convergence, a
+    /// budget stop, or a failure), so there was nothing to confirm.
+    NotNeeded,
+    /// A restart from the incumbent gained no more than the tolerance.
+    Confirmed,
+    /// Confirmation could not be completed; the fit keeps its best point and
+    /// FTOL label, and this is recorded on the certificate.
+    Unconfirmed {
+        reason: &'static str,
+        restarts: usize,
+        last_gain: Option<f64>,
+    },
+}
+
+/// Initial steps for a confirming restart: the first pass's steps scaled by
+/// [`JOINT_NLOPT_BOBYQA_RESTART_STEP_FACTOR`], shrunk for any component that
+/// lies strictly inside its lower bound by less than the step. NLopt's
+/// BOBYQA moves such a start to `lb + step` (bobyqa.c, "components of X
+/// that become within distance RHOBEG from their bounds"), which would start
+/// the restart away from the incumbent it is meant to confirm; half the
+/// distance to the bound keeps the start in place. A component exactly on
+/// its bound is left on it by BOBYQA and keeps the scaled step.
+#[cfg(feature = "nlopt")]
+fn joint_restart_steps(initial_step: &[f64], params: &[f64], lower_bounds: &[f64]) -> Vec<f64> {
+    initial_step
+        .iter()
+        .zip(params)
+        .zip(lower_bounds)
+        .map(|((&step, &value), &lower)| {
+            let step = step * JOINT_NLOPT_BOBYQA_RESTART_STEP_FACTOR;
+            let gap = value - lower;
+            if lower.is_finite() && gap > 0.0 && gap <= step && 0.5 * gap > 0.0 {
+                0.5 * gap
+            } else {
+                step
+            }
+        })
+        .collect()
+}
+
+/// Records an FTOL stop whose confirmation could not be completed, so the
+/// certificate never implies a confirmation that did not happen.
+#[cfg(feature = "nlopt")]
+fn record_joint_ftol_confirmation(
+    certificate: &mut OptimizerCertificate,
+    confirmation: &JointFtolConfirmation,
+) {
+    let JointFtolConfirmation::Unconfirmed {
+        reason,
+        restarts,
+        last_gain,
+    } = confirmation
+    else {
+        return;
+    };
+    let mut diagnostic = Diagnostic::new(
+        DiagnosticCode::OptimizerRecovery,
+        DiagnosticSeverity::Warning,
+        DiagnosticStage::Certification,
+        "joint GLMM NLopt BOBYQA FTOL stop could not be confirmed by a restart from the incumbent; the reported optimum may be short of the true optimum",
+    )
+    .with_suggested_actions(vec![
+        "raise max_feval (or leave it at the default) so the FTOL stop can be confirmed".to_string(),
+    ]);
+    diagnostic
+        .payload
+        .insert("fit_mode".to_string(), serde_json::json!("joint_glmm"));
+    diagnostic.payload.insert(
+        "ftol_confirmation".to_string(),
+        serde_json::json!("unconfirmed"),
+    );
+    diagnostic
+        .payload
+        .insert("reason".to_string(), serde_json::json!(reason));
+    diagnostic
+        .payload
+        .insert("restarts".to_string(), serde_json::json!(restarts));
+    if let Some(gain) = last_gain {
+        diagnostic
+            .payload
+            .insert("last_restart_gain".to_string(), serde_json::json!(gain));
+    }
+    certificate.diagnostics.push(diagnostic);
+}
+
+/// β initial step when no profiled standard error is available.
+#[cfg(feature = "nlopt")]
+const JOINT_NLOPT_BOBYQA_DEFAULT_BETA_STEP: f64 = 0.1;
+
 pub(crate) fn default_joint_glmm_optimizer() -> Optimizer {
     #[cfg(feature = "nlopt")]
     {
@@ -1158,8 +1401,12 @@ pub(crate) fn trust_bq_joint_glmm_default_maxeval(n_params: usize) -> u32 {
 
 pub(crate) fn joint_glmm_default_maxeval_for(optimizer: Optimizer, n_params: usize) -> u32 {
     match optimizer {
-        Optimizer::TrustBq => trust_bq_joint_glmm_default_maxeval(n_params),
-        Optimizer::NloptBobyqa => 200,
+        // MixedModels.jl runs its joint fit without an evaluation cap; NLopt
+        // BOBYQA's FTOL-confirmation restarts need the same room as TrustBQ
+        // rather than a single-pass budget.
+        Optimizer::TrustBq | Optimizer::NloptBobyqa => {
+            trust_bq_joint_glmm_default_maxeval(n_params)
+        }
         _ => trust_bq_joint_glmm_default_maxeval(n_params),
     }
 }

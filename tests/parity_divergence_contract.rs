@@ -500,7 +500,7 @@ fn mixedmodels_fast_oracle_scope_is_explicit_for_large_profiled_rows() {
     let fixture = read_json("tests/fixtures/parity/glmm_fast_oracles.json");
     assert_eq!(
         fixture.get("reference_engine").and_then(Value::as_str),
-        Some("MixedModels.jl 5.3.0")
+        Some("MixedModels.jl 5.9.0")
     );
     assert_eq!(
         fixture.get("fit_mode").and_then(Value::as_str),

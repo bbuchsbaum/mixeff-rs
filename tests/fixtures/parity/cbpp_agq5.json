@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0.0",
-  "source": "MixedModels.jl 5.3.0 fast=true",
+  "source": "MixedModels.jl 5.9.0 fast=true",
   "id": "cbpp_agq5",
   "formula": "proportion ~ 1 + period + (1 | herd)",
   "family": "binomial",
@@ -8,10 +8,10 @@
   "n_agq": 5,
   "nobs": 56,
   "dof": 5,
-  "theta": [0.6469217879306205],
-  "beta": [-1.3613317765367858, -0.97526322830609113, -1.110189757216425, -1.5586373754577729],
+  "theta": [0.6469217874996126],
+  "beta": [-1.361331776464517, -0.9752632283826973, -1.1101897572907531, -1.5586373755451852],
   "objective": 100.06655883011796,
-  "deviance_laplace": 100.15269376325398,
+  "deviance_laplace": 100.15269376311763,
   "deviance_agq": 100.06655883011796,
   "loglik": -50.033279415058978
 }

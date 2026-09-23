@@ -115,14 +115,14 @@
       ]
     },
     {
-      "aic": 194.05256539929854,
+      "aic": 194.05256373024386,
       "beta": [
-        -1.3985135992930473,
-        -0.9922667181529413,
-        -1.128719195063808,
-        -1.5808164085419951
+        -1.3985311000169274,
+        -0.992331343862592,
+        -1.1286650427378782,
+        -1.5803170486097455
       ],
-      "bic": 204.17932385297428,
+      "bic": 204.17932218391962,
       "coef_names": [
         "(Intercept)",
         "period: 2",
@@ -133,40 +133,40 @@
       "error": null,
       "estimator": "Laplace",
       "family": "Binomial",
-      "fit_time_ms": 5.704917,
-      "fit_time_ms_min": 5.637917,
+      "fit_time_ms": 2.165542,
+      "fit_time_ms_min": 2.1,
       "fit_time_ms_repeats": 3,
       "formula": "incidence / size ~ 1 + period + (1 | herd)",
       "is_singular": false,
       "link": "Logit",
-      "loglik": -92.02628269964927,
+      "loglik": -92.02628186512193,
       "n_obs": 56,
-      "objective": 184.05256539929854,
+      "objective": 184.05256373024386,
       "objective_definition": "joint_glmm_laplace_deviance",
       "optimizer": "bobyqa",
       "optimizer_backend": "nlopt",
-      "optimizer_fevals": 98,
-      "optimizer_fmin": 184.05256539929854,
-      "optimizer_max_fevals": 200,
+      "optimizer_fevals": 95,
+      "optimizer_fmin": 184.05256373024386,
+      "optimizer_max_fevals": 900,
       "optimizer_return_code": "JOINT_LAPLACE:FTOL_REACHED",
       "response_constants": "included",
       "sigma": 1.0,
       "status": "ok",
       "theta": [
-        0.6422138435719573
+        0.6422610575148819
       ]
     },
     {
-      "aic": 2427.6164622899537,
+      "aic": 2427.6164607096907,
       "beta": [
-        0.38842094557118795,
-        -0.026594486329621827,
-        -1.3452344078368261,
-        0.03132077463625327,
-        -0.23602585124007372,
-        -0.7329502843774964
+        0.38848984650688867,
+        -0.026592998167105662,
+        -1.3452068425668648,
+        0.031180295873537208,
+        -0.2360264796834676,
+        -0.7329839500870184
       ],
-      "bic": 2466.5878820220464,
+      "bic": 2466.5878804417835,
       "coef_names": [
         "(Intercept)",
         "age",
@@ -179,27 +179,27 @@
       "error": null,
       "estimator": "Laplace",
       "family": "Binomial",
-      "fit_time_ms": 104.28675,
-      "fit_time_ms_min": 103.94487500000001,
+      "fit_time_ms": 129.178167,
+      "fit_time_ms_min": 128.996958,
       "fit_time_ms_repeats": 3,
       "formula": "use ~ 1 + age + livch + urban + (1 | dist)",
       "is_singular": false,
       "link": "Logit",
-      "loglik": -1206.8082311449768,
+      "loglik": -1206.8082303548454,
       "n_obs": 1934,
-      "objective": 2413.6164622899537,
+      "objective": 2413.6164607096907,
       "objective_definition": "joint_glmm_laplace_deviance",
       "optimizer": "bobyqa",
       "optimizer_backend": "nlopt",
-      "optimizer_fevals": 169,
-      "optimizer_fmin": 2413.6164622899537,
-      "optimizer_max_fevals": 200,
+      "optimizer_fevals": 242,
+      "optimizer_fmin": 2413.6164607096907,
+      "optimizer_max_fevals": 1060,
       "optimizer_return_code": "JOINT_LAPLACE:FTOL_REACHED",
       "response_constants": "included",
       "sigma": 1.0,
       "status": "ok",
       "theta": [
-        0.46086244315267944
+        0.4608582849583179
       ]
     },
     {
@@ -251,14 +251,14 @@
       ]
     },
     {
-      "aic": 70.70584129673875,
+      "aic": 70.70584123451043,
       "beta": [
-        5.0957008745205945,
-        -3.8421086031207934,
-        -4.430886751620132,
-        -5.5989605355256415
+        5.096097098171122,
+        -3.8423321492227425,
+        -4.43115295195744,
+        -5.599238669851465
       ],
-      "bic": 82.61597447010816,
+      "bic": 82.61597440787983,
       "coef_names": [
         "(Intercept)",
         "ttt: crabs",
@@ -269,38 +269,38 @@
       "error": null,
       "estimator": "Laplace",
       "family": "Binomial",
-      "fit_time_ms": 7.398916,
-      "fit_time_ms_min": 7.283125,
+      "fit_time_ms": 3.4085840000000003,
+      "fit_time_ms_min": 3.3918749999999998,
       "fit_time_ms_repeats": 3,
       "formula": "predation ~ ttt + (1 | block)",
       "is_singular": false,
       "link": "Logit",
-      "loglik": -30.352920648369377,
+      "loglik": -30.352920617255215,
       "n_obs": 80,
-      "objective": 60.705841296738754,
+      "objective": 60.70584123451043,
       "objective_definition": "joint_glmm_laplace_deviance",
       "optimizer": "bobyqa",
       "optimizer_backend": "nlopt",
-      "optimizer_fevals": 73,
-      "optimizer_fmin": 60.705841296738754,
-      "optimizer_max_fevals": 200,
+      "optimizer_fevals": 94,
+      "optimizer_fmin": 60.70584123451043,
+      "optimizer_max_fevals": 900,
       "optimizer_return_code": "JOINT_LAPLACE:FTOL_REACHED",
       "response_constants": "included",
       "sigma": 1.0,
       "status": "ok",
       "theta": [
-        3.436698934006344
+        3.4368488920020623
       ]
     },
     {
-      "aic": 70.32988200110753,
+      "aic": 70.32988189497017,
       "beta": [
-        4.99765491043794,
-        -3.74358801617106,
-        -4.352686664559525,
-        -5.537312747346107
+        4.997179667791448,
+        -3.7433267851056478,
+        -4.352298567421871,
+        -5.536930189379676
       ],
-      "bic": 82.24001517447695,
+      "bic": 82.24001506833957,
       "coef_names": [
         "(Intercept)",
         "ttt: crabs",
@@ -311,27 +311,27 @@
       "error": null,
       "estimator": "AGQ",
       "family": "Binomial",
-      "fit_time_ms": 5.074833,
-      "fit_time_ms_min": 4.9385,
+      "fit_time_ms": 5.574125,
+      "fit_time_ms_min": 5.209625,
       "fit_time_ms_repeats": 3,
       "formula": "predation ~ ttt + (1 | block)",
       "is_singular": false,
       "link": "Logit",
-      "loglik": -30.16494100055377,
+      "loglik": -30.164940947485086,
       "n_obs": 80,
-      "objective": 60.32988200110754,
+      "objective": 60.32988189497017,
       "objective_definition": "joint_glmm_agq_deviance",
       "optimizer": "bobyqa",
       "optimizer_backend": "nlopt",
-      "optimizer_fevals": 55,
-      "optimizer_fmin": 60.32988200110754,
-      "optimizer_max_fevals": 200,
+      "optimizer_fevals": 131,
+      "optimizer_fmin": 60.32988189497017,
+      "optimizer_max_fevals": 900,
       "optimizer_return_code": "JOINT_AGQ:FTOL_REACHED",
       "response_constants": "included",
       "sigma": 1.0,
       "status": "ok",
       "theta": [
-        3.482013313437893
+        3.482093863803772
       ]
     },
     {
@@ -559,7 +559,7 @@
       "sigma": 1.0,
       "status": "ok",
       "theta": [
-        7.500000000000005e-8
+        7.500000000000005e-08
       ]
     },
     {
@@ -964,7 +964,7 @@
       "optimizer_max_fevals": -1,
       "optimizer_return_code": "SUCCESS",
       "response_constants": "not_applicable",
-      "sigma": 2.921049069415355e-7,
+      "sigma": 2.921049069415355e-07,
       "status": "ok",
       "theta": [
         1222766.4283917549,
@@ -1003,7 +1003,7 @@
       "optimizer_max_fevals": -1,
       "optimizer_return_code": "SUCCESS",
       "response_constants": "not_applicable",
-      "sigma": 2.921049069415355e-7,
+      "sigma": 2.921049069415355e-07,
       "status": "ok",
       "theta": [
         1222766.4283917549,
@@ -1409,7 +1409,7 @@
       "status": "ok",
       "theta": [
         1.0012469485015683,
-        0.00008545430094548065,
+        8.545430094548065e-05,
         -0.011988988626769129,
         0.016691723296822735,
         -0.028230393842740883,
@@ -1442,7 +1442,7 @@
         0.04368639530539872,
         -0.003042336224313513,
         0.0004957632727326911,
-        -0.000023502888750188332,
+        -2.3502888750188332e-05,
         0.0
       ]
     },
@@ -1721,7 +1721,7 @@
         0.0,
         0.24512729116404197,
         0.22592017022921554,
-        0.000059308918041924695
+        5.9308918041924695e-05
       ]
     },
     {

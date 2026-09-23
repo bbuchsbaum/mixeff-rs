@@ -30,12 +30,12 @@
     {
       "engine": "MixedModels.jl",
       "status": "fit",
-      "version": "MixedModels 5.3.0; Julia 1.12.4; DataFrames 1.8.1; GLM 1.9.3",
-      "beta": [1.2801536880402493, 0.25004743032368409],
+      "version": "MixedModels 5.9.0; Julia 1.12.4; DataFrames 1.8.2; GLM 1.9.5",
+      "beta": [1.2801500995982817, 0.25006238693497651],
       "theta": [0],
-      "dispersion": 0.25576343915283301,
-      "objective": 1.0302950556972217,
-      "loglik": -23.893604960025016,
+      "dispersion": 0.2557648022364562,
+      "objective": 1.0302950465115657,
+      "loglik": -23.893604870104106,
       "verdict": "parity_reference",
       "note": "Matches the Rust profiled objective and fixed effects at fixture tolerance; MixedModels.jl warns that dispersion-family GLMM results are not yet reliable."
     },

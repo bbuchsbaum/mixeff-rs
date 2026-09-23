@@ -52,15 +52,23 @@ else
   echo "keeping regenerated fixtures in $tmp_dir"
 fi
 
-echo "regenerating Julia parity fixtures into $tmp_dir"
-julia scripts/regenerate_julia_parity_fixtures.jl --out-dir="$tmp_dir"
+# The parity reference is pinned: scripts/julia/{Project,Manifest}.toml fix the
+# exact MixedModels.jl (and transitive) versions, and the Manifest records the
+# Julia version the checked-in provenance strings were generated with.
+# Override JULIA_PARITY_PROJECT only for deliberate reference upgrades.
+julia_project="${JULIA_PARITY_PROJECT:-$repo_root/scripts/julia}"
+julia_cmd=(julia --project="$julia_project")
+"${julia_cmd[@]}" -e 'using Pkg; Pkg.instantiate()'
+
+echo "regenerating Julia parity fixtures into $tmp_dir (project: $julia_project)"
+"${julia_cmd[@]}" scripts/regenerate_julia_parity_fixtures.jl --out-dir="$tmp_dir"
 
 mkdir -p "$tmp_dir/tests/fixtures/pathology_corpus/easy_full_rank/parity"
 mkdir -p "$tmp_dir/tests/fixtures/pathology_corpus/reduced_rank_unit_correlation/parity"
-julia scripts/parity_pathologies.jl \
+"${julia_cmd[@]}" scripts/parity_pathologies.jl \
   --fixture=tests/fixtures/pathology_corpus/easy.toml \
   --out="$tmp_dir/tests/fixtures/pathology_corpus/easy_full_rank/parity/mmjl.json"
-julia scripts/parity_pathologies.jl \
+"${julia_cmd[@]}" scripts/parity_pathologies.jl \
   --fixture=tests/fixtures/pathology_corpus/reduced_rank.toml \
   --out="$tmp_dir/tests/fixtures/pathology_corpus/reduced_rank_unit_correlation/parity/mmjl.json"
 
@@ -83,9 +91,19 @@ if [[ "$accept" -eq 1 ]]; then
   exit 0
 fi
 
-for fixture in "${fixtures[@]}"; do
-  echo "checking $fixture"
-  if [[ "$fixture" == tests/fixtures/pathology_corpus/* ]]; then
+# Check every fixture and report all drifts before failing, so one drifting
+# fixture does not mask drift in the fixtures after it.
+failed=()
+compare_fixture() {
+  local fixture="$1"
+  if [[ "$fixture" == tests/fixtures/pathology_corpus/reduced_rank_unit_correlation/parity/mmjl.json ]]; then
+    # Named exception (VERSIONING.md section 3.1): unbounded REML objective, so
+    # there is no reproducible optimum; check the pathology signature and the
+    # identity fields instead of digits. Keyed to this exact path only.
+    python scripts/check_pathology_signature.py \
+      --lme4=tests/fixtures/pathology_corpus/reduced_rank_unit_correlation/parity/lme4.json \
+      "$fixture" "$tmp_dir/$fixture"
+  elif [[ "$fixture" == tests/fixtures/pathology_corpus/* ]]; then
     python scripts/compare_json_tolerant.py --abs-tol=1e-7 --rel-tol=1e-8 --ignore=/runtime_ms "$fixture" "$tmp_dir/$fixture"
   elif [[ "$fixture" == tests/fixtures/parity/glmm_fast_oracles.json ]]; then
     # generated_at is the regeneration date; optimizer feval counts are
@@ -100,6 +118,19 @@ for fixture in "${fixtures[@]}"; do
   else
     python scripts/compare_json_tolerant.py --abs-tol=1e-7 --rel-tol=1e-8 "$fixture" "$tmp_dir/$fixture"
   fi
+}
+
+for fixture in "${fixtures[@]}"; do
+  echo "checking $fixture"
+  if ! compare_fixture "$fixture"; then
+    failed+=("$fixture")
+  fi
 done
+
+if [[ "${#failed[@]}" -gt 0 ]]; then
+  echo "Julia parity drift in ${#failed[@]} of ${#fixtures[@]} fixtures:" >&2
+  printf '  %s\n' "${failed[@]}" >&2
+  exit 1
+fi
 
 echo "Julia parity fixtures match checked-in references"

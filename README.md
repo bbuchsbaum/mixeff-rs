@@ -35,7 +35,7 @@ matrix, formula DSL, inference paths, and out-of-scope items — see
 
 ## Installation
 
-The crate is staged for first crates.io publication as `1.0.0-rc.1`. Until
+The crate is staged for first crates.io publication as `1.0.0-rc.2`. Until
 that release appears on crates.io, use the Git dependency:
 
 ```toml
@@ -43,11 +43,11 @@ that release appears on crates.io, use the Git dependency:
 mixeff-rs = { git = "https://github.com/bbuchsbaum/mixeff-rs", branch = "main" }
 ```
 
-After `1.0.0-rc.1` is published, pin the release candidate exactly:
+After `1.0.0-rc.2` is published, pin the release candidate exactly:
 
 ```toml
 [dependencies]
-mixeff-rs = "=1.0.0-rc.1"
+mixeff-rs = "=1.0.0-rc.2"
 ```
 
 The default build enables the NLopt optimizer backend for fast BOBYQA/NEWUOA
@@ -155,7 +155,7 @@ inheriting whatever this crate's default becomes in a later release:
 
 ## Status
 
-Release candidate (`1.0.0-rc.1`). The numerical core — PLS/PIRLS, the blocked
+Release candidate (`1.0.0-rc.2`). The numerical core — PLS/PIRLS, the blocked
 Cholesky update, and the profiled (RE)ML objective — is stable and
 parity-tested against MixedModels.jl; the public API and wire-contract surface
 are in final soak before `1.0.0`. Pin the exact pre-release version when

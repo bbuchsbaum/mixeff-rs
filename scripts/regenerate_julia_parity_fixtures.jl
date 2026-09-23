@@ -3,6 +3,7 @@
 using CategoricalArrays
 using DataFrames
 using Dates
+using LinearAlgebra
 using MixedModels
 using Printf
 using Statistics
@@ -183,6 +184,75 @@ function kb07_style_data()
     return DataFrame(y=y, x=x, subj=categorical(subj), item=categorical(item))
 end
 
+# Dense REML profiled objective of `y ~ 1 + x + (1 + x | subj) + (1 | item)`
+# on the kb07-style data, evaluated in the element type of θ. Mathematically
+# identical to MixedModels' `objective` for this model:
+#   logdet(I + ZΛΛ'Z') + logdet(X'M⁻¹X) + (n-p)(1 + log(2π pwrss/(n-p))).
+function kb07_reml_objective(θ::AbstractVector{T}, df) where {T}
+    n = nrow(df)
+    p = 2
+    y = T.(df.y)
+    X = hcat(ones(T, n), T.(df.x))
+    lambda = [θ[1] zero(T); θ[2] θ[3]]
+    S = lambda * lambda'
+    M = Matrix{T}(LinearAlgebra.I, n, n)
+    for i in 1:n, j in 1:n
+        zi = T[1, df.x[i]]
+        zj = T[1, df.x[j]]
+        df.subj[i] == df.subj[j] && (M[i, j] += LinearAlgebra.dot(zi, S * zj))
+        df.item[i] == df.item[j] && (M[i, j] += θ[4]^2)
+    end
+    C = LinearAlgebra.cholesky(LinearAlgebra.Symmetric(M))
+    XtMiX = X' * (C \ X)
+    β = XtMiX \ (X' * (C \ y))
+    r = y - X * β
+    pwrss = LinearAlgebra.dot(r, C \ r)
+    return LinearAlgebra.logdet(C) +
+           LinearAlgebra.logdet(LinearAlgebra.cholesky(LinearAlgebra.Symmetric(XtMiX))) +
+           (n - p) * (1 + log(2 * T(pi) * pwrss / (n - p)))
+end
+
+# The kb07-style data are nearly noiseless (σ ≈ 0.05 against y ≈ 20), so the
+# Float64 profiled objective carries ~5e-9 of cancellation noise while the
+# smallest Hessian eigenvalue in θ is ~0.03: any Float64 optimizer stop is only
+# determined to ~sqrt(2·5e-9/0.03) ≈ 5e-4 in θ, and Linux and macOS land at
+# different points of that noise ball. Tightening NLopt tolerances cannot fix
+# this, so polish MixedModels' optimum with Newton steps on the same objective
+# in 256-bit BigFloat (MPFR is correctly rounded, so the result is
+# platform-independent), then evaluate everything else with MixedModels at the
+# polished θ.
+function kb07_polish_theta(theta0, df)
+    setprecision(BigFloat, 256) do
+        f(θ) = kb07_reml_objective(θ, df)
+        θ = big.(theta0)
+        n = length(θ)
+        h = big"1e-25"
+        unit(k) = (v = zeros(BigFloat, n); v[k] = one(BigFloat); v)
+        converged = false
+        for _ in 1:50
+            g = [(f(θ + h * unit(i)) - f(θ - h * unit(i))) / (2h) for i in 1:n]
+            H = [
+                (f(θ + h * unit(i) + h * unit(j)) - f(θ + h * unit(i) - h * unit(j)) -
+                 f(θ - h * unit(i) + h * unit(j)) + f(θ - h * unit(i) - h * unit(j))) / (4h^2)
+                for i in 1:n, j in 1:n
+            ]
+            LinearAlgebra.isposdef(LinearAlgebra.Symmetric(H)) ||
+                error("kb07 polish: Hessian in θ is not positive definite")
+            step = H \ g
+            θ -= step
+            if maximum(abs, step) < big"1e-40"
+                converged = true
+                break
+            end
+        end
+        converged || error("kb07 polish: Newton iteration did not converge")
+        all(θ[[1, 3, 4]] .> 0) || error("kb07 polish: optimum is not interior")
+        maximum(abs, Float64.(θ) .- theta0) < 1e-2 ||
+            error("kb07 polish moved θ implausibly far from the MixedModels optimum")
+        return Float64.(θ)
+    end
+end
+
 function kb07_ranef_fixture()
     df = kb07_style_data()
     model = fit(
@@ -192,6 +262,13 @@ function kb07_ranef_fixture()
         REML=true,
         progress=false,
     )
+    fitted_objective = objective(model)
+    theta = kb07_polish_theta(collect(model.θ), df)
+    updateL!(MixedModels.setθ!(model, theta))
+    # The polished point must be at least as good as the optimizer stop, up to
+    # the Float64 evaluation noise of the objective.
+    objective(model) <= fitted_objective + 1e-8 ||
+        error("kb07 polish: MixedModels objective worsened at the polished θ")
     return JObj([
         "schema_version" => "1.0.0",
         "source" => source_version(),
@@ -305,6 +382,55 @@ function gamma_log_data()
     return DataFrame(y=y, x=x, group=categorical(group))
 end
 
+# The Gamma-log fit is singular: the optimum is θ = 0 exactly. The joint
+# (fast=false) BOBYQA stop only lands near it, and the stopping point differs
+# across platforms (macOS θ = 0, Linux θ = -6.2e-7, β drifting by 1.5e-5), so
+# the reference is pinned to the exact boundary optimum instead. At θ = 0 the
+# Laplace objective is the summed Gamma unit deviance (Λ = 0, u = 0), whose
+# minimiser over β is the GLM MLE; solve its score equations by Newton in
+# 256-bit BigFloat (platform-independent), verify the boundary really is the
+# optimum, and leave `model` evaluated by MixedModels at (β*, θ = 0).
+function gamma_pin_boundary_optimum!(model, df)
+    fitted_objective = objective(model)
+    maximum(abs, model.θ) < 1e-4 ||
+        error("gamma fixture: MixedModels fit is not at the θ = 0 boundary (θ = $(model.θ))")
+    beta = setprecision(BigFloat, 256) do
+        X = hcat(ones(BigFloat, nrow(df)), big.(df.x))
+        y = big.(df.y)
+        β = big.(collect(model.β))
+        converged = false
+        for _ in 1:100
+            μ = exp.(X * β)
+            score = X' * (1 .- y ./ μ)
+            info = X' * (Diagonal(y ./ μ) * X)
+            step = info \ score
+            β -= step
+            if maximum(abs, step) < big"1e-60"
+                converged = true
+                break
+            end
+        end
+        converged || error("gamma fixture: BigFloat GLM Newton iteration did not converge")
+        Float64.(β)
+    end
+    boundary_objective() = (MixedModels.setβθ!(model, vcat(beta, 0.0)); deviance(pirls!(model, false), 1))
+    f0 = boundary_objective()
+    f0 <= fitted_objective + 1e-8 ||
+        error("gamma fixture: objective at θ = 0 ($f0) exceeds the MixedModels optimum ($fitted_objective)")
+    # The objective is even in θ, so the outward (one-sided) derivative is in
+    # θ²: moving into the interior, with β re-optimised by PIRLS, must increase
+    # the objective at a stable positive rate.
+    for δ in (1e-3, 1e-2)
+        MixedModels.setθ!(model, [δ])
+        copyto!(model.β, beta)
+        rate = (deviance(pirls!(model, true), 1) - f0) / δ^2
+        rate > 1e-3 ||
+            error("gamma fixture: objective does not increase away from θ = 0 (rate $rate at δ = $δ)")
+    end
+    boundary_objective()
+    return model
+end
+
 function gamma_glmm_engines_fixture()
     df = gamma_log_data()
     model = fit(
@@ -317,6 +443,7 @@ function gamma_glmm_engines_fixture()
         nAGQ=1,
         progress=false,
     )
+    gamma_pin_boundary_optimum!(model, df)
     return JObj([
         "schema_version" => "1.0.0",
         "source" => "Deterministic Gamma-log GLMM fixture cross-checked against MixedModels.jl 5.3.0 and lme4 2.0-1 on 2026-04-29. rust_reference.loglik updated 2026-05-18 (mote bd-01KRXCQ85SAMGEAH3HBZESJ16H, B1): MixedModelFit::loglikelihood now reports the full normalized -2logLik scale (response/dispersion constants retained) instead of -objective/2; the corrected value -23.9751 sits ~0.3% from the independent MixedModels.jl engine reference (-23.8936), the residual being the documented dispersion-family scale divergence — the prior -0.5151 was off the Julia oracle by ~46x. beta/theta/objective are unchanged by B1.",

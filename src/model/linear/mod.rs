@@ -1667,10 +1667,6 @@ impl LinearMixedModel {
         &self.dims
     }
 
-    /// Borrow the optimization summary.
-    ///
-    /// Read-only mirror of [`MixedModelFit::opt_summary`]; mutating optimizer
-    /// state after a fit invalidates convergence diagnostics.
     /// Wall-clock split of the most recent fit into optimizer search and
     /// post-optimizer finalization, or `None` before any fit. Diagnostic
     /// only (benchmarks and profiling); it is not part of any parity or
@@ -1679,6 +1675,10 @@ impl LinearMixedModel {
         self.fit_phase_timings
     }
 
+    /// Borrow the optimization summary.
+    ///
+    /// Read-only mirror of [`MixedModelFit::opt_summary`]; mutating optimizer
+    /// state after a fit invalidates convergence diagnostics.
     pub fn optsum(&self) -> &OptSummary {
         &self.optsum
     }
@@ -2052,7 +2052,8 @@ impl LinearMixedModel {
         if weighted_dense {
             let wtxy = &self.xy_mat.wtxy;
             for j in 0..k {
-                let block = MatrixBlock::Dense(compute_wtxy_re_cross_product(wtxy, &self.reterms[j]));
+                let block =
+                    MatrixBlock::Dense(compute_wtxy_re_cross_product(wtxy, &self.reterms[j]));
                 self.a_blocks[idx] = finalize_fixed_re_block(block, k);
                 idx += 1;
             }

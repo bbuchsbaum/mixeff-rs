@@ -111,7 +111,7 @@ fi
 #       belongs here.
 
 if have julia && [[ -f scripts/regenerate_julia_parity_fixtures.jl ]]; then
-    run julia --project=MixedModels.jl scripts/regenerate_julia_parity_fixtures.jl --out-dir="$REPO_ROOT"
+    run julia --project=scripts/julia scripts/regenerate_julia_parity_fixtures.jl --out-dir="$REPO_ROOT"
 fi
 
 # ---- 6. Backfill any provenance siblings that are missing -------------
