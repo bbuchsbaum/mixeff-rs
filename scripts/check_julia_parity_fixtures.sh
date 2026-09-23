@@ -52,15 +52,23 @@ else
   echo "keeping regenerated fixtures in $tmp_dir"
 fi
 
-echo "regenerating Julia parity fixtures into $tmp_dir"
-julia scripts/regenerate_julia_parity_fixtures.jl --out-dir="$tmp_dir"
+# The parity reference is pinned: scripts/julia/{Project,Manifest}.toml fix the
+# exact MixedModels.jl (and transitive) versions, and the Manifest records the
+# Julia version the checked-in provenance strings were generated with.
+# Override JULIA_PARITY_PROJECT only for deliberate reference upgrades.
+julia_project="${JULIA_PARITY_PROJECT:-$repo_root/scripts/julia}"
+julia_cmd=(julia --project="$julia_project")
+"${julia_cmd[@]}" -e 'using Pkg; Pkg.instantiate()'
+
+echo "regenerating Julia parity fixtures into $tmp_dir (project: $julia_project)"
+"${julia_cmd[@]}" scripts/regenerate_julia_parity_fixtures.jl --out-dir="$tmp_dir"
 
 mkdir -p "$tmp_dir/tests/fixtures/pathology_corpus/easy_full_rank/parity"
 mkdir -p "$tmp_dir/tests/fixtures/pathology_corpus/reduced_rank_unit_correlation/parity"
-julia scripts/parity_pathologies.jl \
+"${julia_cmd[@]}" scripts/parity_pathologies.jl \
   --fixture=tests/fixtures/pathology_corpus/easy.toml \
   --out="$tmp_dir/tests/fixtures/pathology_corpus/easy_full_rank/parity/mmjl.json"
-julia scripts/parity_pathologies.jl \
+"${julia_cmd[@]}" scripts/parity_pathologies.jl \
   --fixture=tests/fixtures/pathology_corpus/reduced_rank.toml \
   --out="$tmp_dir/tests/fixtures/pathology_corpus/reduced_rank_unit_correlation/parity/mmjl.json"
 

@@ -1667,10 +1667,6 @@ impl LinearMixedModel {
         &self.dims
     }
 
-    /// Borrow the optimization summary.
-    ///
-    /// Read-only mirror of [`MixedModelFit::opt_summary`]; mutating optimizer
-    /// state after a fit invalidates convergence diagnostics.
     /// Wall-clock split of the most recent fit into optimizer search and
     /// post-optimizer finalization, or `None` before any fit. Diagnostic
     /// only (benchmarks and profiling); it is not part of any parity or
@@ -1679,6 +1675,10 @@ impl LinearMixedModel {
         self.fit_phase_timings
     }
 
+    /// Borrow the optimization summary.
+    ///
+    /// Read-only mirror of [`MixedModelFit::opt_summary`]; mutating optimizer
+    /// state after a fit invalidates convergence diagnostics.
     pub fn optsum(&self) -> &OptSummary {
         &self.optsum
     }

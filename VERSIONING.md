@@ -178,7 +178,12 @@ checked-in fixtures under `tests/fixtures/parity/` and the drift gate
 
 - The parity contract is pinned to a **specific `MixedModels.jl` version**,
   recorded in the fixture provenance. That pinned version is part of the
-  release notes for any parity-sensitive release.
+  release notes for any parity-sensitive release. The pin is enforced by the
+  committed Julia environment `scripts/julia/Project.toml` +
+  `scripts/julia/Manifest.toml` (currently `MixedModels.jl 5.9.0` on Julia
+  `1.12.4`), which the drift gate and both CI workflows run with
+  `--project=scripts/julia`; CI pins `setup-julia` to the Manifest's
+  `julia_version` so provenance strings match exactly.
 - Tracking an **upstream `MixedModels.jl` bug fix** that moves our output to
   match a corrected reference is a crate **PATCH** (it makes a wrong number
   right), even though fixtures are regenerated.

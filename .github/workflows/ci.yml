@@ -134,16 +134,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # Pinned: the fixture provenance strings record the exact Julia and
+      # MixedModels.jl versions, and scripts/julia/Manifest.toml is resolved
+      # for this Julia. Bump both together (see VERSIONING.md §2.E).
       - uses: julia-actions/setup-julia@v2
         with:
-          version: "1"
-      - name: Install Julia parity dependencies
-        run: julia -e 'using Pkg; Pkg.add(["MixedModels", "DataFrames", "JSON3", "CategoricalArrays"])'
+          version: "1.12.4"
+      - name: Install Julia parity dependencies (pinned Manifest)
+        run: julia --project=scripts/julia -e 'using Pkg; Pkg.instantiate()'
       - name: Check Julia parity fixtures
         run: bash scripts/check_julia_parity_fixtures.sh
       - name: Record engine provenance
         if: always()
-        run: julia -e 'using Pkg; Pkg.status(["MixedModels", "DataFrames", "JSON3", "CategoricalArrays"])'
+        run: julia --project=scripts/julia -e 'using Pkg; Pkg.status(["MixedModels", "DataFrames", "JSON3", "CategoricalArrays"])'
 
   lme4-parity:
     name: lme4 comparison refresh (scheduled)

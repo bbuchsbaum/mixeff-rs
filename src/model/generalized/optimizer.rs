@@ -43,7 +43,7 @@ impl GeneralizedLinearMixedModel {
     /// [`RefitStart::Initial`] is [`refit`](Self::refit). [`RefitStart::Fitted`]
     /// starts θ at the current optimum and keeps the current conditional
     /// modes and fixed effects as the first PIRLS start, with the optimizer's
-    /// first step contracted to [`WARM_REFIT_INITIAL_STEP`], because a
+    /// first step contracted to [`WARM_REFIT_INITIAL_STEP`](crate::model::linear::WARM_REFIT_INITIAL_STEP), because a
     /// simulated or resampled response's optimum is expected nearby;
     /// [`RefitStart::From`] does the same from a caller-supplied θ.
     pub fn refit_with_start(&mut self, new_y: &[f64], start: RefitStart) -> Result<&mut Self> {

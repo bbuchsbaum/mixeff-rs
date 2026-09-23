@@ -1644,9 +1644,76 @@ mod tests {
         df
     }
 
-    /// Compare the dense reference against the certificate's finite
-    /// differences at `theta`, and its objective against the fit path.
-    fn check_at(model: &LinearMixedModel, theta: &[f64], reml: bool, tol: f64, label: &str) {
+    /// Richardson-extrapolated finite-difference gradient used as the
+    /// reference in `check_at`.
+    ///
+    /// Error analysis (crossed 9-θ fit, objective ≈ 1.3e3): perturbing θ by
+    /// 1e-13 moves the profiled objective by ±5e-11..2e-10 (hundreds of ulps,
+    /// on both gemm backends), so a central difference carries ≈ σ_f/h of
+    /// rounding error — ≈ 1e-5 at the certificate's h = 1e-5, as large as the
+    /// gradient at an optimum. `R = D(h) + (D(h) − D(2h))/3` cancels the h²
+    /// truncation term, which lets the central step grow to h = 1e-3
+    /// (rounding ≈ 1e-7, O(h⁴) remainder negligible).
+    ///
+    /// Coordinates within 2h of their lower bound use the second-order
+    /// one-sided difference `(−3f₀ + 4f(θ+h) − f(θ+2h))/2h` (also h²-leading,
+    /// so the same extrapolation applies) at h = 1e-4: near θ = 0 its
+    /// higher-order remainder grows fast with h (≈ 6e-5 at h = 1e-3 on the
+    /// sleepstudy slope), so the smaller step trades truncation for rounding.
+    ///
+    /// Observed |analytic − R| ≤ 6e-7 at every optimum below, on both the
+    /// nalgebra and faer gemm backends.
+    fn richardson_gradient(model: &LinearMixedModel, theta: &[f64]) -> Vec<f64> {
+        const H_CENTRAL: f64 = 1e-3;
+        const H_ONE_SIDED: f64 = 1e-4;
+        let lower = model.lower_bounds();
+        let mut probe = model.clone();
+        let mut f = |t: &[f64]| {
+            probe
+                .objective_at(t)
+                .expect("objective for finite differences")
+        };
+        let f0 = f(theta);
+        (0..theta.len())
+            .map(|k| {
+                let central = !lower[k].is_finite() || theta[k] - 2.0 * H_CENTRAL >= lower[k];
+                let mut diff = |h: f64| {
+                    let mut plus = theta.to_vec();
+                    plus[k] += h;
+                    if central {
+                        let mut minus = theta.to_vec();
+                        minus[k] -= h;
+                        (f(&plus) - f(&minus)) / (2.0 * h)
+                    } else {
+                        let mut plus2 = theta.to_vec();
+                        plus2[k] += 2.0 * h;
+                        (-3.0 * f0 + 4.0 * f(&plus) - f(&plus2)) / (2.0 * h)
+                    }
+                };
+                let h = if central { H_CENTRAL } else { H_ONE_SIDED };
+                let (d_h, d_2h) = (diff(h), diff(2.0 * h));
+                d_h + (d_h - d_2h) / 3.0
+            })
+            .collect()
+    }
+
+    /// Compare the dense reference against a Richardson-extrapolated finite
+    /// difference at `theta`, and its objective against the fit path.
+    ///
+    /// Away from an optimum the gradient tolerance is `tol · max(|R|, 1)`.
+    /// At a fitted optimum (`at_optimum`), where the true gradient is ~0 and
+    /// the `max(·, 1)` scale would make the check vacuous, it is
+    /// `max(tol · |R|, 2e-6)`: the floor is about 3× the extrapolated
+    /// reference's worst observed error (≈ 6e-7, see `richardson_gradient`).
+    fn check_at(
+        model: &LinearMixedModel,
+        theta: &[f64],
+        reml: bool,
+        tol: f64,
+        at_optimum: bool,
+        label: &str,
+    ) {
+        const OPTIMUM_ABS_FLOOR: f64 = 2e-6;
         let mut probe = model.clone();
         probe.optsum.reml = reml;
         let reference = probe
@@ -1662,16 +1729,17 @@ mod tests {
             "{label}: reference objective {} vs fit path {fit_path}",
             reference.objective
         );
-        let lower = probe.lower_bounds();
-        let fd = probe
-            .finite_difference_optimizer_derivatives(theta, &lower)
-            .expect("finite differences");
-        assert_eq!(fd.gradient.len(), reference.gradient.len());
-        for (k, (analytic, numeric)) in reference.gradient.iter().zip(&fd.gradient).enumerate() {
-            let scale = numeric.abs().max(1.0);
+        let numeric = richardson_gradient(&probe, theta);
+        assert_eq!(numeric.len(), reference.gradient.len());
+        for (k, (analytic, numeric)) in reference.gradient.iter().zip(&numeric).enumerate() {
+            let bound = if at_optimum {
+                (tol * numeric.abs()).max(OPTIMUM_ABS_FLOOR)
+            } else {
+                tol * numeric.abs().max(1.0)
+            };
             assert!(
-                (analytic - numeric).abs() <= tol * scale,
-                "{label}: gradient[{k}] analytic {analytic} vs finite-difference {numeric} (theta {theta:?})"
+                (analytic - numeric).abs() <= bound,
+                "{label}: gradient[{k}] analytic {analytic} vs Richardson finite-difference {numeric} (bound {bound:e}, theta {theta:?})"
             );
         }
     }
@@ -1688,9 +1756,9 @@ mod tests {
         for reml in [true, false] {
             let model = fitted("reaction ~ 1 + days + (1 + days | subj)", &data, reml);
             let theta = model.theta();
-            check_at(&model, &theta, reml, 1e-5, "vector optimum");
+            check_at(&model, &theta, reml, 1e-5, true, "vector optimum");
             let away: Vec<f64> = theta.iter().map(|t| t + 0.15).collect();
-            check_at(&model, &away, reml, 1e-5, "vector interior");
+            check_at(&model, &away, reml, 1e-5, false, "vector interior");
         }
     }
 
@@ -1698,8 +1766,8 @@ mod tests {
     fn dense_reference_matches_finite_differences_on_scalar_and_weighted_fits() {
         let data = sleepstudy_like(24, 8, 7);
         let model = fitted("reaction ~ 1 + days + (1 | subj)", &data, true);
-        check_at(&model, &model.theta(), true, 1e-5, "scalar optimum");
-        check_at(&model, &[0.3], true, 1e-5, "scalar interior");
+        check_at(&model, &model.theta(), true, 1e-5, true, "scalar optimum");
+        check_at(&model, &[0.3], true, 1e-5, false, "scalar interior");
 
         let weights: Vec<f64> = (0..data.nrow())
             .map(|i| 0.5 + (i % 3) as f64 * 0.75)
@@ -1716,10 +1784,11 @@ mod tests {
             &weighted.theta(),
             false,
             1e-5,
+            true,
             "weighted ML optimum",
         );
         let away: Vec<f64> = weighted.theta().iter().map(|t| t + 0.2).collect();
-        check_at(&weighted, &away, false, 1e-5, "weighted ML interior");
+        check_at(&weighted, &away, false, 1e-5, false, "weighted ML interior");
     }
 
     #[test]
@@ -1730,14 +1799,14 @@ mod tests {
             &data,
             true,
         );
-        check_at(&model, &model.theta(), true, 1e-5, "crossed optimum");
+        check_at(&model, &model.theta(), true, 1e-5, true, "crossed optimum");
         let away: Vec<f64> = model
             .theta()
             .iter()
             .enumerate()
             .map(|(k, t)| t + 0.1 + 0.02 * k as f64)
             .collect();
-        check_at(&model, &away, true, 1e-5, "crossed interior");
+        check_at(&model, &away, true, 1e-5, false, "crossed interior");
     }
 
     /// The blocked gradient must reproduce the dense reference to rounding.
@@ -1839,13 +1908,14 @@ mod tests {
     fn dense_reference_matches_one_sided_finite_differences_at_the_boundary() {
         let data = sleepstudy_like(18, 10, 42);
         let model = fitted("reaction ~ 1 + days + (1 + days | subj)", &data, true);
-        // Put the slope variance on its lower bound; the certificate uses
-        // one-sided differences there, so the tolerance is O(h) looser.
+        // Put the slope variance on its lower bound; the reference uses
+        // one-sided differences there, whose higher-order remainder is
+        // larger near θ = 0, so the tolerance is looser.
         let mut theta = model.theta();
         theta[2] = 0.0;
-        check_at(&model, &theta, true, 1e-3, "boundary slope");
+        check_at(&model, &theta, true, 1e-3, false, "boundary slope");
         let zero = vec![0.0; theta.len()];
-        check_at(&model, &zero, true, 1e-3, "all boundary");
+        check_at(&model, &zero, true, 1e-3, false, "all boundary");
     }
 }
 

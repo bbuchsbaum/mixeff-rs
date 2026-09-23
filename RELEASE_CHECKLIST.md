@@ -8,8 +8,9 @@ See `VERSIONING.md` for what bump a change requires.
 - [ ] On `main`, `git pull`, working tree clean (`git status` empty).
 - [ ] You can `git tag -s` (GPG key configured).
 - [ ] `CARGO_REGISTRY_TOKEN` secret set in GitHub Actions (publish is CI-driven).
-- [ ] Julia available locally with `MixedModels`, `DataFrames`, `JSON3`
-      (for the local parity gate; CI also runs it on the tag).
+- [ ] Julia 1.12.4 available locally (the version recorded in
+      `scripts/julia/Manifest.toml`); the parity gate instantiates the pinned
+      `scripts/julia` environment itself (CI also runs it on the tag).
 - [ ] PRIMA C library available if running the PRIMA feature gate locally:
       `PRIMA_DIR` points to the install prefix containing `lib/libprimac`.
       If the local machine lacks PRIMA, use the Linux CI `prima` leg as the

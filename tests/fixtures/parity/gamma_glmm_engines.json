@@ -30,7 +30,7 @@
     {
       "engine": "MixedModels.jl",
       "status": "fit",
-      "version": "MixedModels 5.3.0; Julia 1.12.4; DataFrames 1.8.1; GLM 1.9.3",
+      "version": "MixedModels 5.9.0; Julia 1.12.4; DataFrames 1.8.2; GLM 1.9.5",
       "beta": [1.2801536880402493, 0.25004743032368409],
       "theta": [0],
       "dispersion": 0.25576343915283301,

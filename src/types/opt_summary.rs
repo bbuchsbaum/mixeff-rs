@@ -491,7 +491,7 @@ impl OptSummary {
                 "|                          |                   |\n",
                 "|:------------------------ |:----------------- |\n",
                 "| **Initialization**       |                   |\n",
-                "| Initial parameter vector | {} |\n",
+                "| Initial parameter vector | {:?} |\n",
                 "| Initial objective value  | {} |\n",
                 "| **Optimizer settings**   |                   |\n",
                 "| Optimizer                | `{}` |\n",
@@ -501,11 +501,11 @@ impl OptSummary {
                 "| ftol_zero_abs            | {} |\n",
                 "| **Result**               |                   |\n",
                 "| Function evaluations     | {} |\n",
-                "| Final parameter vector   | {} |\n",
+                "| Final parameter vector   | {:?} |\n",
                 "| Final objective value    | {} |\n",
                 "| Return code              | `{}` |\n"
             ),
-            format!("{:?}", self.initial),
+            self.initial,
             self.finitial,
             self.optimizer_code(),
             self.backend_name(),
@@ -513,7 +513,7 @@ impl OptSummary {
             self.xtol_zero_abs,
             self.ftol_zero_abs,
             self.feval,
-            format!("{:?}", self.final_params),
+            self.final_params,
             self.fmin,
             self.return_value
         )

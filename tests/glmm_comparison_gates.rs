@@ -683,7 +683,7 @@ fn glmm_fast_path_gaps_match_mixedmodels_jl_fast_oracle() {
     );
     assert_eq!(
         fixture.get("reference_engine").and_then(Value::as_str),
-        Some("MixedModels.jl 5.3.0")
+        Some("MixedModels.jl 5.9.0")
     );
     assert_eq!(
         fixture.get("fit_mode").and_then(Value::as_str),

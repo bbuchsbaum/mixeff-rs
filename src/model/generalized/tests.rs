@@ -4436,8 +4436,11 @@ fn deferred_joint_laplace_inference_matches_eager_path() {
 /// BOBYQA stops at a slightly different point on other platforms (Linux
 /// x86_64 cbpp objective differs by 3e-9 relative), so the objective is held
 /// to the documented parity band and the finite-difference standard errors
-/// to a looser coordinate tolerance. Deferred-vs-eager equality is checked
-/// exactly, on one platform, by the tests above.
+/// to a looser coordinate tolerance: Linux stops ~2e-4 away in β, and the
+/// finite-difference Hessian evaluated there moves the SEs by ~7e-5
+/// relative, so 1e-3 still catches any real Hessian regression.
+/// Deferred-vs-eager equality is checked exactly, on one platform, by the
+/// tests above.
 #[cfg(feature = "nlopt")]
 #[test]
 fn deferred_joint_laplace_inference_matches_pinned_eager_values() {
@@ -4487,11 +4490,11 @@ fn deferred_joint_laplace_inference_matches_pinned_eager_values() {
         let se = MixedModelFit::stderror(&model);
         assert_eq!(se.len(), stderror.len());
         for (actual, expected) in se.iter().zip(stderror) {
-            assert_relative_eq!(*actual, *expected, max_relative = 1e-5);
+            assert_relative_eq!(*actual, *expected, max_relative = 1e-3);
         }
         let vcov = MixedModelFit::vcov(&model);
         for (index, expected) in stderror.iter().enumerate() {
-            assert_relative_eq!(vcov[(index, index)].sqrt(), *expected, max_relative = 1e-5);
+            assert_relative_eq!(vcov[(index, index)].sqrt(), *expected, max_relative = 1e-3);
         }
         assert!(matches!(
             model
