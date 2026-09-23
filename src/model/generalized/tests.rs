@@ -4481,11 +4481,15 @@ fn deferred_joint_laplace_inference_matches_pinned_eager_values() {
     for (name, objective, stderror) in pinned {
         let model = joint_laplace_fit(name);
         assert!(model.joint_inference_pending);
-        assert_relative_eq!(
-            MixedModelFit::objective(&model),
-            objective,
-            epsilon = 1e-7,
-            max_relative = 1e-8
+        let optsum = model.opt_summary();
+        let actual = MixedModelFit::objective(&model);
+        assert!(
+            (actual - objective).abs() <= 1e-7_f64.max(1e-8 * objective.abs()),
+            "{name}: objective {actual:.12} vs pinned {objective:.12} \
+             (feval {} of max {}, return {})",
+            optsum.feval,
+            optsum.max_feval,
+            optsum.return_value
         );
         let se = MixedModelFit::stderror(&model);
         assert_eq!(se.len(), stderror.len());
