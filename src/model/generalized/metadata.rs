@@ -452,6 +452,22 @@ impl GeneralizedLinearMixedModel {
             }
         };
         self.joint_inference_pending = false;
+        // The Hessian also completes the certificate's full Newton
+        // decrement; copy that evidence back with the inference fields.
+        let full_decrement = completed
+            .optimizer_certificate
+            .as_ref()
+            .and_then(|certificate| certificate.stationarity_decrement.as_ref())
+            .and_then(|evidence| evidence.full.clone());
+        if let Some(evidence) = self
+            .lmm
+            .compiler_artifact
+            .optimizer_certificate
+            .as_mut()
+            .and_then(|certificate| certificate.stationarity_decrement.as_mut())
+        {
+            evidence.full = full_decrement;
+        }
         self.lmm
             .compiler_artifact
             .model_boundary

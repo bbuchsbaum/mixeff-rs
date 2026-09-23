@@ -1305,6 +1305,8 @@ impl GeneralizedLinearMixedModel {
             probe_gradient,
             escalated_indices,
             unassessable_indices,
+            base_objective: f64::NAN,
+            curvature_probes: Vec::new(),
         }
     }
 

@@ -352,7 +352,7 @@ impl GeneralizedLinearMixedModel {
             &lower_bounds,
             Some(me.lmm.dims.n),
         );
-        let certification_gradient = me.joint_laplace_certification_gradient(
+        let mut certification_gradient = me.joint_laplace_certification_gradient(
             &me.lmm.optsum.final_params.clone(),
             n_beta,
             n_agq,
@@ -369,6 +369,15 @@ impl GeneralizedLinearMixedModel {
             2.0e-2,
             1.0e-6,
         );
+        let beta_hessian = me.joint_working_beta_hessian();
+        me.confirm_decrement_curvature(
+            &mut certification_gradient,
+            &me.lmm.optsum.final_params.clone(),
+            n_beta,
+            n_agq,
+            &lower_bounds,
+            beta_hessian.as_ref(),
+        );
         annotate_glmm_covariance_status(
             &mut certificate,
             &me.lmm.optsum.final_params,
@@ -376,6 +385,7 @@ impl GeneralizedLinearMixedModel {
             &lower_bounds,
             &certification_gradient,
             2.0e-2,
+            beta_hessian.as_ref(),
         );
         record_joint_ftol_confirmation(&mut certificate, &confirmation);
         if joint_certificate_requires_fallback(&certificate)
@@ -582,6 +592,9 @@ impl GeneralizedLinearMixedModel {
             &lower_bounds,
             2.0e-2,
         );
+        // Read at the certified point: the probes' last evaluation restores
+        // it, and a rejected polish below would leave the state elsewhere.
+        let mut beta_hessian = me.joint_working_beta_hessian();
         // trust_bq's derivative-free ftol stop can rest a steep, narrow
         // valley's width (~1e-3 deviance) short of the stationary point, where
         // the *assessed* gradient is genuinely above tolerance even though the
@@ -621,6 +634,7 @@ impl GeneralizedLinearMixedModel {
                         &lower_bounds,
                         2.0e-2,
                     );
+                    beta_hessian = me.joint_working_beta_hessian();
                 }
             }
         }
@@ -634,6 +648,14 @@ impl GeneralizedLinearMixedModel {
             2.0e-2,
             1.0e-6,
         );
+        me.confirm_decrement_curvature(
+            &mut certification_gradient,
+            &me.lmm.optsum.final_params.clone(),
+            n_beta,
+            n_agq,
+            &lower_bounds,
+            beta_hessian.as_ref(),
+        );
         annotate_glmm_covariance_status(
             &mut certificate,
             &me.lmm.optsum.final_params,
@@ -641,6 +663,7 @@ impl GeneralizedLinearMixedModel {
             &lower_bounds,
             &certification_gradient,
             2.0e-2,
+            beta_hessian.as_ref(),
         );
         if joint_certificate_requires_fallback(&certificate)
             && joint_candidate_materially_improves_profiled_start(&me.lmm.optsum)
@@ -755,31 +778,32 @@ impl GeneralizedLinearMixedModel {
         }
     }
 
-    fn joint_laplace_finite_difference_gradient(
+    /// Default-step central-difference probes of every coordinate, plus the
+    /// objective at `params` itself (evaluated last, which also restores the
+    /// fitted PIRLS state). The base value is what turns each central pair
+    /// into a diagonal curvature reading at no extra cost.
+    fn joint_laplace_finite_difference_probes(
         &mut self,
         params: &[f64],
         n_beta: usize,
         n_agq: usize,
         lower_bounds: &[f64],
-    ) -> Vec<f64> {
-        let gradient = (0..params.len())
+    ) -> (Vec<JointFdProbe>, f64) {
+        let probes = (0..params.len())
             .map(|index| {
                 let h = JOINT_LAPLACE_FD_RELATIVE_STEP * params[index].abs().max(1.0);
-                self.joint_laplace_fd_gradient_component(
-                    params,
-                    index,
-                    h,
-                    n_beta,
-                    n_agq,
-                    lower_bounds,
-                )
+                self.joint_laplace_fd_probe(params, index, h, n_beta, n_agq, lower_bounds)
             })
             .collect();
-        let _ = self.joint_glmm_deviance_at_params(params, n_beta, n_agq);
-        gradient
+        let base = self.joint_glmm_deviance_at_params(params, n_beta, n_agq);
+        (probes, base)
     }
 
-    fn joint_laplace_fd_gradient_component(
+    /// One finite-difference probe of coordinate `index` at step `h`:
+    /// central when `value - h` stays above the lower bound, forward
+    /// otherwise. A forward probe needs the objective at `params` and
+    /// evaluates it; a central probe does not.
+    fn joint_laplace_fd_probe(
         &mut self,
         params: &[f64],
         index: usize,
@@ -787,7 +811,7 @@ impl GeneralizedLinearMixedModel {
         n_beta: usize,
         n_agq: usize,
         lower_bounds: &[f64],
-    ) -> f64 {
+    ) -> JointFdProbe {
         let value = params[index];
         let lower = lower_bounds
             .get(index)
@@ -795,15 +819,15 @@ impl GeneralizedLinearMixedModel {
             .unwrap_or(f64::NEG_INFINITY);
         let mut plus = params.to_vec();
         plus[index] = value + h;
-        let fp = self.joint_glmm_deviance_at_params(&plus, n_beta, n_agq);
+        let f_plus = self.joint_glmm_deviance_at_params(&plus, n_beta, n_agq);
         if value - h > lower {
             let mut minus = params.to_vec();
             minus[index] = value - h;
-            let fm = self.joint_glmm_deviance_at_params(&minus, n_beta, n_agq);
-            (fp - fm) / (2.0 * h)
+            let f_minus = self.joint_glmm_deviance_at_params(&minus, n_beta, n_agq);
+            JointFdProbe::central(h, f_plus, f_minus)
         } else {
             let base = self.joint_glmm_deviance_at_params(params, n_beta, n_agq);
-            (fp - base) / h
+            JointFdProbe::forward(h, f_plus, base)
         }
     }
 
@@ -821,7 +845,11 @@ impl GeneralizedLinearMixedModel {
     /// (which may still fail the tolerance — a genuine non-stationarity). If
     /// they disagree, the component cannot be assessed at any trusted step and
     /// is reported as such rather than as a failure.
-    fn joint_laplace_certification_gradient(
+    ///
+    /// The central probes also carry diagonal curvature readings, from which
+    /// the result's [`JointLaplaceCertificationGradient::newton_decrement`]
+    /// estimates the objective gap without further evaluations.
+    pub(super) fn joint_laplace_certification_gradient(
         &mut self,
         params: &[f64],
         n_beta: usize,
@@ -829,9 +857,14 @@ impl GeneralizedLinearMixedModel {
         lower_bounds: &[f64],
         gradient_tolerance: f64,
     ) -> JointLaplaceCertificationGradient {
-        let probe_gradient =
-            self.joint_laplace_finite_difference_gradient(params, n_beta, n_agq, lower_bounds);
+        let (probes, base_objective) =
+            self.joint_laplace_finite_difference_probes(params, n_beta, n_agq, lower_bounds);
+        let probe_gradient = probes
+            .iter()
+            .map(|probe| probe.gradient)
+            .collect::<Vec<_>>();
         let mut gradient = probe_gradient.clone();
+        let mut curvature_probes = probes.iter().map(|probe| vec![*probe]).collect::<Vec<_>>();
         let mut escalated_indices = Vec::new();
         let mut unassessable_indices = Vec::new();
         for (index, &value) in params.iter().enumerate() {
@@ -841,7 +874,7 @@ impl GeneralizedLinearMixedModel {
             }
             let scale = value.abs().max(1.0);
             let estimates = JOINT_LAPLACE_CERT_FD_ESCALATED_RELATIVE_STEPS.map(|step| {
-                self.joint_laplace_fd_gradient_component(
+                self.joint_laplace_fd_probe(
                     params,
                     index,
                     step * scale,
@@ -850,10 +883,13 @@ impl GeneralizedLinearMixedModel {
                     lower_bounds,
                 )
             });
-            let consistent = estimates.iter().all(|estimate| estimate.is_finite())
-                && (estimates[0] - estimates[1]).abs() <= gradient_tolerance;
+            curvature_probes[index].extend(estimates);
+            let consistent = estimates
+                .iter()
+                .all(|estimate| estimate.gradient.is_finite())
+                && (estimates[0].gradient - estimates[1].gradient).abs() <= gradient_tolerance;
             if consistent {
-                gradient[index] = estimates[1];
+                gradient[index] = estimates[1].gradient;
                 escalated_indices.push(index);
             } else {
                 unassessable_indices.push(index);
@@ -867,7 +903,123 @@ impl GeneralizedLinearMixedModel {
             probe_gradient,
             escalated_indices,
             unassessable_indices,
+            base_objective,
+            curvature_probes,
         }
+    }
+
+    /// Before a decrement above tolerance can demote a stop, confirm the
+    /// curvature of every interior covariance parameter read from a single
+    /// default-step probe: its second difference `(f+ + f- - 2 f0) / h^2`
+    /// divides PIRLS stopping noise by `h^2 = 1e-10`, so a spuriously small
+    /// positive reading would inflate `g^2 / H`. The escalated probes are
+    /// added to `curvature_probes` only (the reported gradient and its
+    /// escalation record are untouched), so [`decrement_reading`] then needs
+    /// agreeing escalated curvatures and a gap-unit-consistent gradient.
+    /// Fixed effects need no confirmation: the β-block estimate takes their
+    /// curvature from the working Hessian after checking it against the
+    /// probes. Costs four evaluations per such parameter, only on stops the
+    /// eager estimate would reject; fitted state is restored.
+    fn confirm_decrement_curvature(
+        &mut self,
+        certification: &mut JointLaplaceCertificationGradient,
+        params: &[f64],
+        n_beta: usize,
+        n_agq: usize,
+        lower_bounds: &[f64],
+        beta_hessian: Option<&DMatrix<f64>>,
+    ) {
+        let preliminary = joint_newton_decrement(
+            certification,
+            params,
+            lower_bounds,
+            n_beta,
+            beta_hessian,
+            JOINT_STATIONARITY_GAP_TOLERANCE,
+        );
+        if preliminary.eager.verdict != crate::compiler::NewtonDecrementVerdict::ExceedsTolerance {
+            return;
+        }
+        let mut probed = false;
+        for &index in &preliminary.parameter_indices {
+            if index < n_beta || certification.curvature_probes[index].len() != 1 {
+                continue;
+            }
+            let scale = params[index].abs().max(1.0);
+            let probes = JOINT_LAPLACE_CERT_FD_ESCALATED_RELATIVE_STEPS.map(|step| {
+                self.joint_laplace_fd_probe(
+                    params,
+                    index,
+                    step * scale,
+                    n_beta,
+                    n_agq,
+                    lower_bounds,
+                )
+            });
+            certification.curvature_probes[index].extend(probes);
+            probed = true;
+        }
+        if probed {
+            let _ = self.joint_glmm_deviance_at_params(params, n_beta, n_agq);
+        }
+    }
+
+    /// Record the full Newton decrement `gᵀH⁻¹g` on the optimizer
+    /// certificate's stationarity evidence once the joint Hessian exists
+    /// (or why it could not be formed). Evidence only: the fit status stays
+    /// the one the eager decrement decided at fit time, so it cannot depend
+    /// on whether or when inference was inspected.
+    fn record_full_newton_decrement(
+        &mut self,
+        hessian: std::result::Result<&DMatrix<f64>, &String>,
+        active_indices: &[usize],
+    ) {
+        let Some(evidence) = self
+            .lmm
+            .compiler_artifact
+            .optimizer_certificate
+            .as_mut()
+            .and_then(|certificate| certificate.stationarity_decrement.as_mut())
+        else {
+            return;
+        };
+        evidence.full = Some(match hessian {
+            Ok(hessian) => full_newton_decrement_estimate(evidence, hessian, active_indices),
+            Err(reason) => crate::compiler::NewtonDecrementEstimate {
+                variant: crate::compiler::NewtonDecrementVariant::Full,
+                verdict: crate::compiler::NewtonDecrementVerdict::NotAssessed,
+                objective_gap: None,
+                reason: Some(format!("joint Hessian unavailable: {reason}")),
+            },
+        });
+    }
+
+    /// Fixed-effect block of the working penalized-least-squares Hessian of
+    /// the deviance at the current PIRLS state, in the optimizer's β order:
+    /// `2 Cov⁻¹` for the working fixed-effect covariance (the deviance is
+    /// `-2 log L`). It is the β-β curvature of the Laplace deviance up to the
+    /// β-dependence of the log-determinant term, and costs no objective
+    /// evaluations. PIRLS weights are the expected (Fisher) weights, so for a
+    /// non-canonical link this is the expected rather than the observed
+    /// curvature, and for `n_agq > 1` it is the Laplace rather than the AGQ
+    /// curvature; the decrement uses it only when its diagonal agrees with
+    /// the probed curvature within a factor of two. `None` when the
+    /// covariance is unavailable or singular.
+    pub(super) fn joint_working_beta_hessian(&self) -> Option<DMatrix<f64>> {
+        let covariance = self.profiled_glmm_fixed_effect_covariance()?;
+        let piv = &self.lmm.feterm.piv;
+        let p = self.beta.len();
+        if piv.len() < p {
+            return None;
+        }
+        let mut active = DMatrix::zeros(p, p);
+        for i in 0..p {
+            for j in 0..p {
+                active[(i, j)] = *covariance.get((piv[i], piv[j]))?;
+            }
+        }
+        let inverse = active.cholesky()?.inverse();
+        matrix_is_finite_local(&inverse).then(|| 2.0 * inverse)
     }
 
     pub(super) fn glmm_joint_laplace_fixed_effect_inference_artifacts(
@@ -911,7 +1063,9 @@ impl GeneralizedLinearMixedModel {
             &lower_bounds,
             &active_indices,
             true,
-        )?;
+        );
+        self.record_full_newton_decrement(hessian.as_ref(), &active_indices);
+        let hessian = hessian?;
         let certification = certify_glmm_joint_hessian(&hessian, "joint-laplace GLMM Hessian")?;
         let beta_covariance = 2.0 * certification.inverse.view((0, 0), (p, p)).into_owned();
         if !matrix_is_finite_local(&beta_covariance) {
@@ -999,7 +1153,7 @@ impl GeneralizedLinearMixedModel {
         })
     }
 
-    fn finite_difference_joint_laplace_hessian(
+    pub(super) fn finite_difference_joint_laplace_hessian(
         &mut self,
         params: &[f64],
         lower_bounds: &[f64],
