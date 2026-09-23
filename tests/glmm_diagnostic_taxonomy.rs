@@ -204,7 +204,11 @@ fn response_constant_convention_is_a_mode_not_a_failure() {
                 && r.get("formula").and_then(Value::as_str) == Some(formula)
         })
         .collect::<Vec<_>>();
-    assert_eq!(matches.len(), 1, "exactly one contraception random-slope Laplace row");
+    assert_eq!(
+        matches.len(),
+        1,
+        "exactly one contraception random-slope Laplace row"
+    );
     let rust_row = matches[0];
     assert_eq!(
         rust_row.get("response_constants").and_then(Value::as_str),

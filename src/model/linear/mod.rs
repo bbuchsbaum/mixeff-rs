@@ -2052,7 +2052,8 @@ impl LinearMixedModel {
         if weighted_dense {
             let wtxy = &self.xy_mat.wtxy;
             for j in 0..k {
-                let block = MatrixBlock::Dense(compute_wtxy_re_cross_product(wtxy, &self.reterms[j]));
+                let block =
+                    MatrixBlock::Dense(compute_wtxy_re_cross_product(wtxy, &self.reterms[j]));
                 self.a_blocks[idx] = finalize_fixed_re_block(block, k);
                 idx += 1;
             }

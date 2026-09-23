@@ -642,14 +642,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 print!("fitting {name} :: {} [{}] ... ", fit.formula, fit.estimator);
                 fit_lmm(&df, &fit.formula, reml)
             } else {
-                let fast_glmm =
-                    use_fast_glmm_comparison_path(
-                        &name,
-                        &fit.formula,
-                        &fit.estimator,
-                        &fit.family,
-                        n_obs,
-                    );
+                let fast_glmm = use_fast_glmm_comparison_path(
+                    &name,
+                    &fit.formula,
+                    &fit.estimator,
+                    &fit.family,
+                    n_obs,
+                );
                 let glmm_mode = if fast_glmm { "fast" } else { "joint" };
                 print!(
                     "fitting {name} :: {} [{} {}/{} {glmm_mode}] ... ",

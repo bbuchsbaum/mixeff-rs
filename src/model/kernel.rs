@@ -511,7 +511,8 @@ mod gradient_oracle_tests {
             let kernel = LmmObjectiveKernel::from_model(&model);
             let kernel = kernel.unwrap();
             let mut workspace = kernel.workspace();
-            let y = DMatrix::from_column_slice(model.response().len(), 1, model.response().as_slice());
+            let y =
+                DMatrix::from_column_slice(model.response().len(), 1, model.response().as_slice());
             for theta in [
                 model.theta(),
                 model.theta().iter().map(|t| t + 0.2).collect::<Vec<_>>(),
