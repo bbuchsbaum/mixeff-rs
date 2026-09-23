@@ -1,106 +1,51 @@
 # mixeff-rs
 
-Mixed-effects models in Rust — fitting linear and generalized linear
-mixed-effects models. The implementation is developed against Julia's
-[MixedModels.jl](https://github.com/JuliaStats/MixedModels.jl) as its
-reference and parity target: it follows the same PLS/PIRLS formulation and is
-cross-checked numerically against it, but it is an **independent
-implementation** that diverges where pragmatic (notably optimizer selection
-and the fallback strategy, which have no direct Julia analogue) rather than a
-line-for-line port. This crate is the numerical engine behind the `mixeff` R
-package.
+[API docs](https://docs.rs/mixeff-rs) · [Guide](docs/guide/) · [Changelog](CHANGELOG.md) · [crates.io](https://crates.io/crates/mixeff-rs)
 
-## Features
+mixeff-rs is a Rust library for fitting linear and generalized linear
+mixed-effects models from lme4-style formulas. Give it a data frame and a
+formula such as `y ~ 1 + x + (1 + x | subject)`, and it returns fixed effects,
+variance components, standard errors, and Wald and likelihood-ratio tests. When
+a model is on a boundary, rank-deficient, or poorly identified, it tells you so
+instead of returning numbers that look ordinary.
 
-- **Linear mixed models** (`LinearMixedModel`): profiled (RE)ML via a blocked
-  Cholesky PLS step, with automatic optimizer selection.
-- **Generalized linear mixed models** (`GeneralizedLinearMixedModel`): PIRLS
-  for the conditional modes with optional adaptive Gauss-Hermite quadrature.
-- **lme4-style formulas**: `y ~ 1 + x + (1 + x | g)`, including `||`
-  zero-correlation, nested, and interaction grouping terms.
-- **Post-fit inference**: variance components, coefficient tables, likelihood
-  ratio tests, profile-likelihood and bootstrap confidence intervals — with
-  explicit, typed refusals rather than fabricated statistics.
-- **Difficult-model diagnostics**: boundary, reduced-rank, weak-identification,
-  optimizer-exhaustion, and GLMM approximation-gap cases are reported as
-  certified fits or precise diagnostics, not blanket claims of superiority over
-  `lme4` or MixedModels.jl.
-- **Ergonomic API**: a `prelude`, fluent `LinearMixedModelBuilder` /
-  `GeneralizedLinearMixedModelBuilder` with `FitOptions`, built-in contrast
-  constructors, and a re-exported `nalgebra` so callers don't pin our version.
+It is a native Rust implementation of the penalized-least-squares formulation
+(with PIRLS for GLMMs) that lme4 and MixedModels.jl also use, and its results
+are tested against both on shared reference problems. It is also the numerical engine
+behind the [mixeff](https://github.com/bbuchsbaum/mixeff) R package.
 
-For a concrete, current-as-of-the-tip inventory — supported family/link
-matrix, formula DSL, inference paths, and out-of-scope items — see
-[`guide::what_is_supported`](docs/guide/05_what_is_supported.md).
+> **Status:** release candidate `1.0.0-rc.2`. The numerical core is stable; the
+> public API is in its final soak before 1.0.0, so pin the exact version.
 
 ## Installation
-
-The crate is staged for first crates.io publication as `1.0.0-rc.2`. Until
-that release appears on crates.io, use the Git dependency:
-
-```toml
-[dependencies]
-mixeff-rs = { git = "https://github.com/bbuchsbaum/mixeff-rs", branch = "main" }
-```
-
-After `1.0.0-rc.2` is published, pin the release candidate exactly:
 
 ```toml
 [dependencies]
 mixeff-rs = "=1.0.0-rc.2"
 ```
 
-The default build enables the NLopt optimizer backend for fast BOBYQA/NEWUOA
-fits. Use `default-features = false` for a dependency-light native build that
-uses TrustBQ for multi-theta LMMs. See [Cargo features](#cargo-features) for
-details.
-
-The native TrustBQ profile is useful for downstream packages, binary
-distribution, embedded use, and build systems that prefer to avoid additional C
-dependencies. NLopt-backed builds remain the default performance path.
-The experimental `faer-backend` feature is an opt-in acceleration profile, not
-part of the default feature set.
-
-## API documentation
-
-The rustdoc surface is intentionally centered on the stable fitting API:
-`prelude`, `formula`, `model`, `stats`, `error`, and the small support surface
-under `types`. Advanced implementation modules such as compiler artifacts,
-pathology internals, bundled datasets, response-matrix batch helpers, and
-fixed-design backends are either behind `unstable-internals` or hidden from
-the primary `model::*` barrel until their contracts are ready for SemVer
-protection. The current public-surface inventory is summarized by this README,
-the Cargo feature list below, and the rustdoc module visibility. The guide
-source is tracked under [`docs/guide`](docs/guide/) so it is visible on GitHub;
-the same pages render under the `guide` module on docs.rs after crates.io
-publication.
-
-New to the crate? The [`guide`](docs/guide/) module is a short, doctested
-tutorial: getting started, reading results, GLMMs, and the refusal contract.
+The default build includes the NLopt optimizers and needs CMake and a C/C++
+toolchain. For a pure-Rust build with no C dependencies, use
+`default-features = false`. See [Cargo features](#cargo-features).
 
 ## Quick start
 
-The `prelude` pulls in the common types; the builder collapses construction and
-the ML/REML choice into one chain:
+Fit a random-intercept model to eight groups of simulated data:
 
 ```rust
-use mixeff_rs::prelude::*;
 use mixeff_rs::model::{FitOptions, LinearMixedModelBuilder};
+use mixeff_rs::prelude::*;
 
 fn main() -> Result<()> {
-    // Balanced toy data: 8 groups, clear fixed slope + group intercepts.
-    let group_offsets = [-3.0, -1.5, 0.5, 2.0, -2.0, 1.0, 3.0, -0.5];
-    let jitter = [0.12, -0.20, 0.05, 0.17, -0.09, 0.22];
-
-    let mut y = Vec::new();
-    let mut x = Vec::new();
-    let mut g = Vec::new();
-    for (gi, off) in group_offsets.iter().enumerate() {
-        for (k, j) in jitter.iter().enumerate() {
-            let xv = k as f64;
-            x.push(xv);
-            y.push(2.0 + 1.5 * xv + off + j);
-            g.push(format!("g{gi}"));
+    // 8 groups x 6 observations: y = 2 + 1.5x + group offset + noise.
+    let offsets = [-3.0, -1.5, 0.5, 2.0, -2.0, 1.0, 3.0, -0.5];
+    let noise = [0.12, -0.20, 0.05, 0.17, -0.09, 0.22];
+    let (mut y, mut x, mut g) = (vec![], vec![], vec![]);
+    for (i, off) in offsets.iter().enumerate() {
+        for (k, e) in noise.iter().enumerate() {
+            x.push(k as f64);
+            y.push(2.0 + 1.5 * k as f64 + off + e);
+            g.push(format!("g{i}"));
         }
     }
 
@@ -109,87 +54,116 @@ fn main() -> Result<()> {
     df.add_numeric("x", x)?;
     df.add_categorical("g", g)?;
 
-    let model = LinearMixedModelBuilder::new(parse_formula("y ~ 1 + x + (1 | g)")?, &df)
-        .fit(FitOptions::reml())?; // or FitOptions::ml()
+    let formula = parse_formula("y ~ 1 + x + (1 | g)")?;
+    let model = LinearMixedModelBuilder::new(formula, &df).fit(FitOptions::reml())?;
 
-    println!("fixed effects: {:?}", model.coef()); // ~[2.0, 1.5]
+    println!("{}", model.summary_markdown());
     Ok(())
 }
 ```
 
-The lower-level form (`LinearMixedModel::new(formula, &df, None)?` then
-`model.fit(false)`) remains available; the builder is purely additive.
+```text
+|             |   Est. |     SE |      z |      p |    σ_g |
+|:----------- | ------:| ------:| ------:| ------:| ------:|
+| (Intercept) | 1.9146 | 0.7292 |   2.63 | 0.0086 | 2.0595 |
+| x           | 1.5271 | 0.0131 | 116.51 | <1e-99 |        |
+| Residual    | 0.1551 |        |        |        |        |
+```
+
+The fit recovers the simulated intercept (2) and slope (1.5), a between-group
+standard deviation of about 2, and the small residual noise. Use
+`FitOptions::ml()` for maximum likelihood. The
+[getting-started guide](docs/guide/01_getting_started.md) walks through the
+same model and how to read each part of the result.
+
+## What it covers
+
+- **Linear mixed models:** REML or ML fits for crossed, nested, and correlated
+  random effects. The optimizer is selected automatically.
+- **Generalized linear mixed models:** Bernoulli, binomial, Poisson, negative
+  binomial, Gamma, and inverse Gaussian families, with Laplace or adaptive
+  Gauss–Hermite quadrature.
+- **lme4 formula syntax:** `*`, `:`, `/`, `(x | g)`, zero-correlation
+  `(x || g)`, and interaction groupings `(1 | g1 & g2)`.
+- **Inference:** coefficient tables, variance components, likelihood-ratio
+  tests, and profile-likelihood and bootstrap confidence intervals. Unsupported
+  inference returns a typed refusal, not a made-up statistic.
+- **Diagnostics for difficult models:** boundary fits, reduced-rank covariance,
+  weak identification, and an exhausted optimizer budget are detected and
+  reported with a specific diagnostic rather than returned silently.
+
+The [supported-features page](docs/guide/05_what_is_supported.md) has the full
+matrix of families, links, formula features, and inference methods.
+
+## Scope and limitations
+
+mixeff-rs fits models with a single response. Multivariate responses
+(`cbind(y1, y2) ~ …`), GLMM profile likelihood, and general formula
+transformations (`I()`, …) are not covered yet.
+
+Its guarantee is not speed or convergence rate on every problem, but that every
+fit either passes its convergence checks or comes with a specific diagnostic.
+The [guide](docs/guide/) explains how to read those results and refusals.
+
+**GLMM estimation.** The default, `GlmmFitOptions::fast_laplace()`, profiles out
+the fixed effects for speed. It is a different approximation from
+`lme4::glmer`'s joint Laplace fit and can be less accurate for inference on
+overdispersed models or models with an observation-level random effect.
+`GlmmFitOptions::joint_laplace()` optimizes all parameters jointly; adding
+`.with_n_agq(n)` switches it to adaptive quadrature for models with a single
+scalar random effect. Each fit records which method actually ran, including any
+fallback. See the [GLMM guide](docs/guide/03_glmms.md).
+
+## How results are checked
+
+Results are tested against two reference implementations:
+
+- **MixedModels.jl** (Julia): Rust fits are compared with checked-in reference
+  fixtures, using per-test tolerances (typically 1e-6 to 1e-10). CI regenerates
+  the fixtures with a pinned Julia environment to catch changes in the
+  reference itself.
+- **lme4** (R): a comparison suite of benchmark datasets. Each row is
+  classified in a scorecard as parity or a documented divergence, and the
+  release gate re-runs lme4 and checks those classifications. The current
+  results are in [comparison/REPORT.md](comparison/REPORT.md).
+
+[VERSIONING.md](VERSIONING.md) defines what counts as a breaking change to
+numerical output.
 
 ## Cargo features
 
-- `default`: enables `nlopt`, the release optimizer path for fast BOBYQA /
-  NEWUOA LMM fits and optional GLMM optimizer parity. Requires CMake plus a
-  C/C++ toolchain at build time.
-- `nlopt`: enables NLopt explicitly. Downstream packagers that cannot carry
-  NLopt can use `default-features = false` to keep the native TrustBQ LMM path
-  and native GLMM fallbacks.
-- `prima`: routes bounded LMM θ optimization through the PRIMA C library
-  (BOBYQA). Expects a system PRIMA library visible to the linker; if it is
-  installed under a custom prefix, set `PRIMA_DIR` to that prefix.
-- `unstable-internals`: exposes the in-flux internal surface (`compiler`,
-  `datasets`, `pathology`) as public modules. **Not** covered by the SemVer
-  guarantee — opt in only if you need it; it may change in any release.
-- `faer-backend` (experimental): routes the hot blocked-Cholesky gemm
-  downdates through [faer](https://crates.io/crates/faer) instead of
-  nalgebra/matrixmultiply. Measured ~15–24% faster profiled-objective
-  evaluations on crossed-design models, but objectives drift at rounding
-  level versus the certified default backend, so parity fixtures and the
-  performance gate are pinned to the default. Benchmark before adopting.
+| Feature | Default | What it does |
+| --- | :---: | --- |
+| `nlopt` | ✓ | NLopt BOBYQA/NEWUOA optimizers, the fastest path. Needs CMake and a C/C++ toolchain. |
+| `prima` | | Routes bounded LMM optimization through the PRIMA C library. Set `PRIMA_DIR` if it is installed under a custom prefix. |
+| `faer-backend` | | Experimental: faster blocked-Cholesky updates via [faer](https://crates.io/crates/faer) on crossed designs. Results differ at rounding level; benchmark before adopting. |
+| `rayon` | | Opt-in parallel execution for batch fitting of many responses. |
+| `unstable-internals` | | Exposes internal modules (`compiler`, `datasets`, `pathology`). Not covered by SemVer. |
 
-Downstream wrappers should pin the feature set they intend to ship instead of
-inheriting whatever this crate's default becomes in a later release:
+With `default-features = false`, the crate builds in pure Rust and uses its
+own TrustBQ optimizer. This suits restricted build systems and binary
+distribution. Wrappers should pin their feature set explicitly rather than
+inherit the defaults:
 
-| Consumer profile | Recommended features | Packaging intent |
-| --- | --- | --- |
-| Rust default | `default` (`nlopt`) | Main performance-oriented Rust profile. |
-| Rust dependency-light | `default-features = false` | Pure-Rust/native TrustBQ profile for restricted build systems. |
-| Rust fast gemm experiment | `features = ["nlopt", "faer-backend"]` | Opt-in acceleration profile; benchmark and parity-check locally. |
-| R wrapper initial CRAN profile | `default-features = false` | Avoid extra compiled dependency surface for the first CRAN path. |
-| R wrapper performance builds | explicit `nlopt`; optional `faer-backend` only after wrapper CI evidence | R-universe/GitHub/local builds may choose heavier performance profiles. |
-| Future Python wrapper | explicit feature pin | Match the wheel/source-build policy; do not inherit defaults accidentally. |
+| Consumer | Recommended features |
+| --- | --- |
+| Rust application | default (`nlopt`) |
+| Restricted or pure-Rust builds | `default-features = false` |
+| R package, CRAN build | `default-features = false` |
+| R package, performance build | explicit `nlopt`, adding `faer-backend` only after wrapper CI evidence |
 
-## Status
+## Documentation
 
-Release candidate (`1.0.0-rc.2`). The numerical core — PLS/PIRLS, the blocked
-Cholesky update, and the profiled (RE)ML objective — is stable and
-parity-tested against MixedModels.jl; the public API and wire-contract surface
-are in final soak before `1.0.0`. Pin the exact pre-release version when
-testing an RC. The stable vs. explicitly-unstable surface and the practical
-breaking-change boundary are described in this README and in the rustdoc API
-surface; [`CHANGELOG.md`](CHANGELOG.md) records release notes. After crates.io
-publication, the API reference is available on
-[docs.rs](https://docs.rs/mixeff-rs).
-
-**Scope.** Single-response models only. Multivariate response
-(`cbind(y1, y2) ~ …`), GLMM profile likelihood, InverseGaussian /
-Normal-as-GLMM bootstrap, and the full `I()` / formula-transformation surface
-are out of scope for the current line and tracked as later work.
-
-**Difficult models.** The release claim is "certified fit or precise
-diagnostic", not "always faster" or "always more convergent" than other
-engines. Boundary and reduced-rank LMMs are interpreted through optimizer
-certificates and covariance KKT checks; GLMM rows marked as documented
-divergence remain non-parity claims until their scorecard row and tests are
-promoted together. The
-[`guide`](docs/guide/) explains how to read results and typed refusals.
-
-**GLMM estimation semantics.** The default GLMM path is `fast=true`: profiled
-fast-PIRLS estimation with Laplace/AGQ approximation metadata carried in the
-fit summary and compiler artifact. It is intentionally not the same
-statistical approximation as `lme4::glmer`'s joint Laplace fit, and it can be
-less accurate for inference on overdispersed or observation-level-random-effect
-models. `fast=false` selects a labelled joint path: Laplace for `n_agq <= 1`,
-and AGQ for valid single-scalar random-effect GLMMs with `n_agq > 1`. NLopt
-builds use BOBYQA; dependency-light builds use the native TrustBQ joint path
-with `max_feval` honored for bounded audit runs. Any joint attempt or
-fast-PIRLS fallback is labelled in optimizer status and diagnostics rather
-than silently presented as ordinary `lme4` parity.
+- [Guide](docs/guide/): getting started, reading results, GLMMs, typed
+  refusals, and the supported-features matrix. Rendered as the `guide` module
+  on [docs.rs](https://docs.rs/mixeff-rs/latest/mixeff_rs/guide/).
+- [API reference](https://docs.rs/mixeff-rs): the stable surface is `prelude`,
+  `formula`, `model`, `stats`, `error`, and `types`.
+- [CHANGELOG.md](CHANGELOG.md): release notes, including upgrade notes between
+  release candidates.
+- [VERSIONING.md](VERSIONING.md): SemVer policy for the API, numerical output,
+  formula syntax, and JSON schemas.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).

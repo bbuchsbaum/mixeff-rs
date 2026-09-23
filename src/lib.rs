@@ -209,3 +209,9 @@ pub mod prelude {
         MixedModelFit,
     };
 }
+
+// Compile and run the README's Rust examples as doctests so the quick start
+// cannot drift from the public API.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
