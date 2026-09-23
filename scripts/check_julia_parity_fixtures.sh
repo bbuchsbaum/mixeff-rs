@@ -91,8 +91,11 @@ if [[ "$accept" -eq 1 ]]; then
   exit 0
 fi
 
-for fixture in "${fixtures[@]}"; do
-  echo "checking $fixture"
+# Check every fixture and report all drifts before failing, so one drifting
+# fixture does not mask drift in the fixtures after it.
+failed=()
+compare_fixture() {
+  local fixture="$1"
   if [[ "$fixture" == tests/fixtures/pathology_corpus/* ]]; then
     python scripts/compare_json_tolerant.py --abs-tol=1e-7 --rel-tol=1e-8 --ignore=/runtime_ms "$fixture" "$tmp_dir/$fixture"
   elif [[ "$fixture" == tests/fixtures/parity/glmm_fast_oracles.json ]]; then
@@ -108,6 +111,19 @@ for fixture in "${fixtures[@]}"; do
   else
     python scripts/compare_json_tolerant.py --abs-tol=1e-7 --rel-tol=1e-8 "$fixture" "$tmp_dir/$fixture"
   fi
+}
+
+for fixture in "${fixtures[@]}"; do
+  echo "checking $fixture"
+  if ! compare_fixture "$fixture"; then
+    failed+=("$fixture")
+  fi
 done
+
+if [[ "${#failed[@]}" -gt 0 ]]; then
+  echo "Julia parity drift in ${#failed[@]} of ${#fixtures[@]} fixtures:" >&2
+  printf '  %s\n' "${failed[@]}" >&2
+  exit 1
+fi
 
 echo "Julia parity fixtures match checked-in references"
