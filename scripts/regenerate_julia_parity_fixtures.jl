@@ -382,6 +382,55 @@ function gamma_log_data()
     return DataFrame(y=y, x=x, group=categorical(group))
 end
 
+# The Gamma-log fit is singular: the optimum is θ = 0 exactly. The joint
+# (fast=false) BOBYQA stop only lands near it, and the stopping point differs
+# across platforms (macOS θ = 0, Linux θ = -6.2e-7, β drifting by 1.5e-5), so
+# the reference is pinned to the exact boundary optimum instead. At θ = 0 the
+# Laplace objective is the summed Gamma unit deviance (Λ = 0, u = 0), whose
+# minimiser over β is the GLM MLE; solve its score equations by Newton in
+# 256-bit BigFloat (platform-independent), verify the boundary really is the
+# optimum, and leave `model` evaluated by MixedModels at (β*, θ = 0).
+function gamma_pin_boundary_optimum!(model, df)
+    fitted_objective = objective(model)
+    maximum(abs, model.θ) < 1e-4 ||
+        error("gamma fixture: MixedModels fit is not at the θ = 0 boundary (θ = $(model.θ))")
+    beta = setprecision(BigFloat, 256) do
+        X = hcat(ones(BigFloat, nrow(df)), big.(df.x))
+        y = big.(df.y)
+        β = big.(collect(model.β))
+        converged = false
+        for _ in 1:100
+            μ = exp.(X * β)
+            score = X' * (1 .- y ./ μ)
+            info = X' * (Diagonal(y ./ μ) * X)
+            step = info \ score
+            β -= step
+            if maximum(abs, step) < big"1e-60"
+                converged = true
+                break
+            end
+        end
+        converged || error("gamma fixture: BigFloat GLM Newton iteration did not converge")
+        Float64.(β)
+    end
+    boundary_objective() = (MixedModels.setβθ!(model, vcat(beta, 0.0)); deviance(pirls!(model, false), 1))
+    f0 = boundary_objective()
+    f0 <= fitted_objective + 1e-8 ||
+        error("gamma fixture: objective at θ = 0 ($f0) exceeds the MixedModels optimum ($fitted_objective)")
+    # The objective is even in θ, so the outward (one-sided) derivative is in
+    # θ²: moving into the interior, with β re-optimised by PIRLS, must increase
+    # the objective at a stable positive rate.
+    for δ in (1e-3, 1e-2)
+        MixedModels.setθ!(model, [δ])
+        copyto!(model.β, beta)
+        rate = (deviance(pirls!(model, true), 1) - f0) / δ^2
+        rate > 1e-3 ||
+            error("gamma fixture: objective does not increase away from θ = 0 (rate $rate at δ = $δ)")
+    end
+    boundary_objective()
+    return model
+end
+
 function gamma_glmm_engines_fixture()
     df = gamma_log_data()
     model = fit(
@@ -394,6 +443,7 @@ function gamma_glmm_engines_fixture()
         nAGQ=1,
         progress=false,
     )
+    gamma_pin_boundary_optimum!(model, df)
     return JObj([
         "schema_version" => "1.0.0",
         "source" => "Deterministic Gamma-log GLMM fixture cross-checked against MixedModels.jl 5.3.0 and lme4 2.0-1 on 2026-04-29. rust_reference.loglik updated 2026-05-18 (mote bd-01KRXCQ85SAMGEAH3HBZESJ16H, B1): MixedModelFit::loglikelihood now reports the full normalized -2logLik scale (response/dispersion constants retained) instead of -objective/2; the corrected value -23.9751 sits ~0.3% from the independent MixedModels.jl engine reference (-23.8936), the residual being the documented dispersion-family scale divergence — the prior -0.5151 was off the Julia oracle by ~46x. beta/theta/objective are unchanged by B1.",
