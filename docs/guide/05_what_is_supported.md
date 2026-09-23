@@ -33,19 +33,22 @@ mixed model, so use
 | `Bernoulli` | `Logit`, `Probit`, `Cloglog` | `Logit` |
 | `Binomial` | `Logit`, `Probit`, `Cloglog` | `Logit` |
 | `Poisson` | `Log`, `Sqrt` | `Log` |
+| `NegativeBinomial` (NB2) | `Log` | `Log` |
 | `Gamma` | `Log`, `Inverse` | `Inverse` |
 | `InverseGaussian` | `Log`, `Inverse` | `Inverse` |
 | `Normal` (as GLMM) | `Log`, `Inverse`, `Sqrt` | — (use LMM for Identity) |
 
-The variant lists are intentionally enumerable from the public types, so this
-table cannot drift silently:
+The variants below compile against the public types. Both enums are
+`#[non_exhaustive]`, so a newly added variant does not break this example;
+update the table when one is added:
 
 ```rust
 use mixeff_rs::model::{Family, LinkFunction};
 # fn main() {
 let _families = [
     Family::Normal, Family::Bernoulli, Family::Binomial,
-    Family::Poisson, Family::Gamma, Family::InverseGaussian,
+    Family::Poisson, Family::NegativeBinomial, Family::Gamma,
+    Family::InverseGaussian,
 ];
 let _links = [
     LinkFunction::Identity, LinkFunction::Log, LinkFunction::Logit,
@@ -126,7 +129,7 @@ GLMM `fast=true` default is **not** the same statistical approximation as
 | Wald CIs ([`CoefTable::wald_confint`](crate::stats::CoefTable::wald_confint)) | ✓ | ✓ | Stable |
 | Satterthwaite / Kenward-Roger df rows in [`CoefTable`](crate::stats::CoefTable) | ✓ | — | Stable for Gaussian REML LMMs with iid Gaussian residuals; crossed/nested certification is fixture-driven and expanding |
 | Profile-likelihood CIs ([`crate::stats::profile`](mod@crate::stats::profile)) — `σ`, `θ`, ML `β` | ✓ | — | Stable for LMM; GLMM out of scope |
-| Parametric bootstrap ([`parametricbootstrap`](crate::model::parametricbootstrap), [`parametricbootstrap_glmm`](crate::stats::bootstrap::parametricbootstrap_glmm)) | ✓ | ✓ | Stable for LMM; stable for Bernoulli, Binomial, Poisson, and Gamma GLMMs. InverseGaussian and Normal-as-GLMM bootstrap are refused |
+| Parametric bootstrap ([`parametricbootstrap`](crate::model::parametricbootstrap), [`parametricbootstrap_glmm`](crate::stats::bootstrap::parametricbootstrap_glmm)) | ✓ | ✓ | Stable for LMM; stable for Bernoulli, Binomial, Poisson, NegativeBinomial, and Gamma GLMMs. InverseGaussian and Normal-as-GLMM bootstrap are refused |
 | Likelihood-ratio tests ([`LikelihoodRatioTest`](crate::stats::LikelihoodRatioTest), [`BoundaryLikelihoodRatioTest`](crate::stats::BoundaryLikelihoodRatioTest), [`ModelComparisonTable`](crate::stats::ModelComparisonTable)) | ✓ | ✓ | Stable, with a typed taxonomy and stable reason codes |
 
 ## Refusals

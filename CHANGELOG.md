@@ -12,6 +12,27 @@ vs. `unstable-internals` surface inventory.
 
 ## [Unreleased]
 
+## [1.0.0-rc.3] - 2026-09-23
+
+Documentation-only release: no code, API, or numerical changes from
+1.0.0-rc.2. It exists so crates.io and docs.rs carry the corrected README and
+crate description. The RC soak clock is not reset.
+
+### Documentation
+
+- README rewritten for clarity. It describes mixeff-rs as a native Rust
+  implementation of the penalized-least-squares/PIRLS formulation, tested
+  against lme4 and MixedModels.jl. It names GLMM options by the Rust API, says
+  precisely what each parity gate checks, and its quick start runs as a
+  doctest.
+- Crate description (crates.io) updated to match.
+- VERSIONING.md §3.1 separates the two guarantees that were conflated: Rust
+  output is "within band" when every Rust parity test passes at its committed
+  tolerance; the abs 1e-7 / rel 1e-8 drift-gate band applies to the
+  MixedModels.jl reference fixtures themselves. §2.E, §3.2 and §3.4 follow.
+- Supported-features guide lists `NegativeBinomial` (NB2, `Log` link) and its
+  parametric bootstrap support.
+
 ## [1.0.0-rc.2] - 2026-09-22
 
 Second 1.0 release candidate. Corrects the Type III term hypothesis, the
@@ -326,6 +347,7 @@ API framing, the inference surface, and release infrastructure.
   GLMM profile likelihood are explicitly **out of scope for 1.0** and tracked
   as post-1.0 work.
 
-[Unreleased]: https://github.com/bbuchsbaum/mixeff-rs/compare/v1.0.0-rc.2...HEAD
+[Unreleased]: https://github.com/bbuchsbaum/mixeff-rs/compare/v1.0.0-rc.3...HEAD
+[1.0.0-rc.3]: https://github.com/bbuchsbaum/mixeff-rs/compare/v1.0.0-rc.2...v1.0.0-rc.3
 [1.0.0-rc.2]: https://github.com/bbuchsbaum/mixeff-rs/compare/3332f3e2bd06a21d67bb519860475cdcec0ac9c1...v1.0.0-rc.2
 [1.0.0-rc.1]: https://github.com/bbuchsbaum/mixeff-rs/tree/3332f3e2bd06a21d67bb519860475cdcec0ac9c1
