@@ -12,6 +12,63 @@ vs. `unstable-internals` surface inventory.
 
 ## [Unreleased]
 
+### Fixed (numerical)
+
+- No-`nlopt` builds (`--no-default-features`, the native TrustBQ joint GLMM
+  driver) now carry joint Laplace/AGQ fits to the optimum. The certified
+  joint fit of contraception `use ~ 1 + age + livch + urban + (1 | dist)`
+  stopped 1.05e-4 above it (2413.6165678658): TrustBQ's trust region and
+  axis-sampled interpolation model worked in raw coordinates, where a radius
+  that is local for the intercept (SE 0.149) spans 2.6 standard errors of
+  `age` (SE 0.0079), and the model's truncation error there hid an `age`
+  gradient of 2.6 when the FTOL stop fired. The driver now follows the
+  NLopt BOBYQA fix (e774238):
+  - it optimizes in coordinates `x = x0 + T z`: the β block of `T` is one
+    profiled standard error per coefficient (capped at `max(1, |β|)`, as for
+    NLopt's steps) times the Cholesky factor of the profiled fixed-effect
+    correlation matrix, or the standard errors alone when that factor has a
+    diagonal entry below 1e-3 (variance inflation above 1e6: collinear
+    covariates, quasi-separation); each θ is scaled by the caller's
+    `initial_step` when set (as for NLopt), else by 0.5, NLopt's θ step. The
+    initial radius is one unit;
+  - MixedModels.jl tolerances (ftol_abs 1e-8, ftol_rel 1e-12) replace the
+    1e-7 / 1e-10 floors;
+  - every FTOL or stagnation stop is confirmed by restarting from the
+    incumbent at a tenth of the initial radius, with four interpolation
+    models' worth of evaluations per restart, until a restart gains no more
+    than the tolerance (at most 20 restarts within the budget). A stop that
+    cannot be confirmed is recorded on the certificate;
+  - the full quadratic model (all cross terms), the FTOL-band stall stop and
+    the stationarity polish apply to joint spaces of up to 12 parameters
+    (previously 5 to 8). Below 5 the diagonal model and 1e-6 stall band
+    stopped the three-parameter rare-event Bernoulli AGQ5 fit 5.4e-7 high
+    even under the tighter tolerances.
+
+  Perturbation study (β/θ perturbed 1e-8..1e-5 relative, 28 starts per row):
+  contraception, cbpp and culcita Laplace and cbpp, culcita and rare-event
+  Bernoulli AGQ5 now all land within 1e-9 of the NLopt-path optimum (before:
+  contraception 1.07e-4 and rare-event AGQ5 9.0e-7 high on every start) and
+  certify `converged_interior`. Contraception reaches 2413.6164606930
+  (NLopt path 2413.6164607097, Julia fast = false 2413.6164609); grouseticks
+  joint Laplace, which exhausted its budget 5.2e-2 above the optimum, now
+  converges to it. The labels follow: the no-`nlopt` contraception
+  `(1 | dist)` and rare-event AGQ5 joint fits are certified
+  `converged_interior` joint fits instead of the uncertified joint candidate
+  or fast-PIRLS fallback that the Newton-decrement certificate (below)
+  assigned them. Contraception now takes 825 evaluations (was 360), about
+  0.4 s in a release build. In the default build, joint fits with the
+  default NLopt BOBYQA optimizer are bit-identical; `nlopt` builds that
+  select `Optimizer::TrustBq` explicitly (for example through
+  `GlmmFitOptions::with_optimizer`, warm-started refits, custom-θ fits or
+  batch fits that go through `fit_joint_glmm_from_start`) change as above. Not yet robust: the nine-parameter contraception
+  random-slope joint fit certifies from its default start but stops about
+  1.4e-6 above the optimum from perturbed starts (before: up to 3.9e-6), and
+  those fits are labelled uncertified candidates.
+- Joint GLMM fits (both drivers) no longer swallow a host interrupt raised
+  from the inner PIRLS progress report of an objective evaluation. It was
+  read as an infinite objective and the fit carried on; it now stops the fit
+  with `MixedModelError::Interrupted`, as interrupts elsewhere do.
+
 ### Changed (certification labels)
 
 - Joint Laplace/AGQ GLMM stationarity is judged by a Newton-decrement
