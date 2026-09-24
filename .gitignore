@@ -17,3 +17,9 @@ Cargo.toml.orig
 docs/*.md
 !docs/guide/
 !docs/guide/**
+
+# parity_pathologies.jl writes a provenance sidecar next to each pathology
+# reference; these fixtures carry their provenance inline, so the sidecar is
+# not tracked (fixture_hygiene.rs requires sidecars only for
+# compiler_contract/ and parity/).
+tests/fixtures/pathology_corpus/**/*.provenance.json

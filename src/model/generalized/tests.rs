@@ -4585,6 +4585,115 @@ fn joint_laplace_nlopt_stop_is_robust_to_start_perturbations() {
     }
 }
 
+/// Asserts a no-`nlopt` joint fit reached `pinned` within the parity band
+/// with a certified interior optimum and a confirmed stop.
+#[cfg(not(feature = "nlopt"))]
+fn assert_trust_bq_joint_optimum(model: &GeneralizedLinearMixedModel, label: &str, pinned: f64) {
+    let optsum = model.opt_summary();
+    let objective = MixedModelFit::objective(model);
+    assert_eq!(optsum.optimizer, Optimizer::TrustBq, "{label}");
+    assert!(
+        (objective - pinned).abs() <= 1e-7,
+        "{label}: objective {objective:.10} vs pinned {pinned:.10} \
+         (feval {} of max {}, return {})",
+        optsum.feval,
+        optsum.max_feval,
+        optsum.return_value
+    );
+    let certificate = model
+        .compiler_artifact()
+        .optimizer_certificate
+        .as_ref()
+        .unwrap();
+    assert_eq!(
+        certificate.status,
+        crate::compiler::FitStatus::ConvergedInterior,
+        "{label}: return {}",
+        optsum.return_value
+    );
+    assert!(
+        !certificate
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.payload.contains_key("ftol_confirmation")),
+        "{label}: unconfirmed FTOL stop"
+    );
+}
+
+/// The no-`nlopt` joint driver (TrustBQ) stopped 1.05e-4 above the
+/// contraception `(1 | dist)` optimum: in raw coordinates its axis stencil,
+/// sized for the intercept, spans 2.6 standard errors of `age` and hid an
+/// `age` gradient of 2.6. It now works in profiled-covariance coordinates,
+/// under MixedModels.jl tolerances, with confirmed FTOL stops, and must reach
+/// the NLopt-path optimum (Julia fast = false 2413.6164609) with a certified
+/// interior stop. The rare-event Bernoulli AGQ5 fit (1e-6 high before, with a
+/// diagonal model and a loose stall band) is held to its NLopt optimum too.
+#[cfg(not(feature = "nlopt"))]
+#[test]
+fn joint_trust_bq_reaches_the_nlopt_optimum() {
+    let model = joint_laplace_fit("contraception");
+    assert!(model.lmm.optsum.return_value.starts_with("JOINT_LAPLACE:"));
+    assert_trust_bq_joint_optimum(&model, "contraception", 2413.6164607096907);
+
+    let (data, _) = crate::datasets::load("rare_event_bernoulli").unwrap();
+    let formula = parse_formula("y ~ 1 + exposure + (1 | group)").unwrap();
+    let mut rare =
+        GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+    rare.fit_with_options(false, 5, false).unwrap();
+    assert!(rare.lmm.optsum.return_value.starts_with("JOINT_AGQ:"));
+    assert_trust_bq_joint_optimum(&rare, "rare-event AGQ5", 67.4708483512);
+}
+
+/// Mirror of `joint_laplace_nlopt_stop_is_robust_to_start_perturbations` for
+/// the no-`nlopt` TrustBQ joint driver: starts perturbed at 1e-7..1e-5
+/// relative must all land within the parity band of the NLopt-path optimum,
+/// certified. Contraception takes one start per level (three starts, about
+/// 10 s each in a debug build); the release-build study behind the fix ran
+/// 28 starts per row from 1e-8 to 1e-5.
+#[cfg(not(feature = "nlopt"))]
+#[test]
+fn joint_trust_bq_stop_is_robust_to_start_perturbations() {
+    for (name, pinned, starts) in [
+        ("contraception", 2413.6164607096907, 1),
+        ("cbpp", 184.05256373024386, 3),
+    ] {
+        let mut profiled = joint_laplace_row(name);
+        profiled.fit_with_options(true, 1, false).unwrap();
+        let start_beta = profiled.beta.as_slice().to_vec();
+        let start_theta = profiled.theta.clone();
+        let mut rng = rand::rngs::StdRng::seed_from_u64(20260924);
+        for eps in [1e-7, 1e-6, 1e-5] {
+            for _ in 0..starts {
+                let mut perturb = |value: f64| {
+                    let r: f64 = rand::Rng::gen_range(&mut rng, -1.0..1.0);
+                    value + eps * r * value.abs().max(1e-3)
+                };
+                let beta = start_beta.iter().map(|&v| perturb(v)).collect::<Vec<_>>();
+                let theta = start_theta
+                    .iter()
+                    .map(|&v| perturb(v).max(0.0))
+                    .collect::<Vec<_>>();
+                let mut model = profiled.clone();
+                let start_objective = model.deviance_with_response_constants(1);
+                model.lmm.optsum.optimizer = Optimizer::TrustBq;
+                let maxeval =
+                    joint_glmm_default_maxeval_for(Optimizer::TrustBq, beta.len() + theta.len());
+                model
+                    .fit_joint_glmm_from_start(
+                        beta,
+                        theta,
+                        start_objective,
+                        1,
+                        maxeval,
+                        Some(profiled.clone()),
+                    )
+                    .unwrap();
+                assert_trust_bq_joint_optimum(&model, &format!("{name} eps {eps:e}"), pinned);
+            }
+        }
+    }
+}
+
 /// A tight evaluation budget must not turn a confirmed or unconfirmable
 /// FTOL stop into a budget stop. A confirming restart that gains nothing
 /// keeps the FTOL label even if it then exhausts the budget, and a restart
@@ -5743,4 +5852,444 @@ fn joint_glmm_diagonal_decrement_is_evidence_only() {
         NewtonDecrementVerdict::WithinTolerance
     );
     assert_eq!(certificate.status, crate::compiler::FitStatus::NotOptimized);
+}
+
+fn synthetic_trust_bq_result(
+    fmin: f64,
+    fevals: usize,
+    stop_reason: TrustBqStopReason,
+) -> crate::optimizer::trust_bq::TrustBqResult {
+    crate::optimizer::trust_bq::TrustBqResult {
+        x: vec![fmin],
+        fmin,
+        fevals,
+        iterations: 1,
+        final_radius: 1.0e-2,
+        stop_reason,
+        last_model_sample_count: 0,
+    }
+}
+
+fn synthetic_restart_plan(maxeval: usize) -> JointRestartPlan {
+    JointRestartPlan {
+        maxeval,
+        min_restart_budget: 20,
+        restart_budget: 40,
+        max_restarts: 3,
+        ftol_abs: 1.0e-8,
+        ftol_rel: 0.0,
+    }
+}
+
+/// The TrustBQ joint FTOL-confirmation rules, on scripted restarts: a
+/// no-gain restart confirms and keeps the first stop's label whatever the
+/// restart returned; a material gain is confirmed in turn; a restart that
+/// exhausts only its own allowance is not a stop, one that exhausts the fit's
+/// budget is; the budget floor, the restart cap and a failed restart leave
+/// the stop unconfirmed; radius stops need no confirmation.
+#[test]
+fn joint_trust_bq_confirmation_rules() {
+    use TrustBqStopReason::*;
+    let first = || synthetic_trust_bq_result(10.0, 100, ObjectiveStagnation);
+
+    // No gain: confirmed, label kept although the restart hit its allowance.
+    let (result, fevals, outcome) = confirm_joint_trust_bq_stop(
+        first(),
+        100,
+        &synthetic_restart_plan(1000),
+        |x, budget, spent| {
+            assert_eq!(x, &[10.0]);
+            assert_eq!(budget, 40);
+            (
+                Ok(synthetic_trust_bq_result(10.0, 40, MaxEvaluations)),
+                spent + 40,
+            )
+        },
+    )
+    .unwrap();
+    assert_eq!(outcome, JointFtolConfirmation::Confirmed);
+    assert_eq!(
+        (result.stop_reason, result.fmin, fevals),
+        (ObjectiveStagnation, 10.0, 140)
+    );
+
+    // Material gain (own allowance spent), then a confirming restart.
+    let mut script = vec![(9.0, MaxEvaluations), (9.0 - 5.0e-9, RadiusBelowTolerance)].into_iter();
+    let (result, fevals, outcome) = confirm_joint_trust_bq_stop(
+        first(),
+        100,
+        &synthetic_restart_plan(1000),
+        |_, budget, spent| {
+            let (fmin, stop) = script.next().unwrap();
+            (
+                Ok(synthetic_trust_bq_result(fmin, budget, stop)),
+                spent + budget,
+            )
+        },
+    )
+    .unwrap();
+    assert_eq!(outcome, JointFtolConfirmation::Confirmed);
+    assert_eq!(
+        (result.stop_reason, result.fmin, fevals),
+        (ObjectiveStagnation, 9.0 - 5.0e-9, 180)
+    );
+
+    // Material gain that spends the fit's budget: an honest budget stop.
+    let (result, fevals, outcome) = confirm_joint_trust_bq_stop(
+        first(),
+        100,
+        &synthetic_restart_plan(130),
+        |_, budget, spent| {
+            assert_eq!(budget, 30);
+            (
+                Ok(synthetic_trust_bq_result(9.0, budget, MaxEvaluations)),
+                spent + budget,
+            )
+        },
+    )
+    .unwrap();
+    assert_eq!(outcome, JointFtolConfirmation::NotNeeded);
+    assert_eq!((result.stop_reason, fevals), (MaxEvaluations, 130));
+
+    // Material gain ending in a native radius stop: that stop stands.
+    let (result, _, outcome) = confirm_joint_trust_bq_stop(
+        first(),
+        100,
+        &synthetic_restart_plan(1000),
+        |_, _, spent| {
+            (
+                Ok(synthetic_trust_bq_result(9.0, 30, RadiusBelowTolerance)),
+                spent + 30,
+            )
+        },
+    )
+    .unwrap();
+    assert_eq!(outcome, JointFtolConfirmation::NotNeeded);
+    assert_eq!(result.stop_reason, RadiusBelowTolerance);
+
+    // Too little budget left: no restart, recorded as unconfirmed.
+    let (result, fevals, outcome) =
+        confirm_joint_trust_bq_stop(first(), 100, &synthetic_restart_plan(119), |_, _, _| {
+            panic!("no restart may be launched")
+        })
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        JointFtolConfirmation::Unconfirmed {
+            reason: "insufficient_evaluation_budget",
+            restarts: 0,
+            ..
+        }
+    ));
+    assert_eq!((result.stop_reason, fevals), (ObjectiveStagnation, 100));
+
+    // Every restart gains: the cap stops the loop, unconfirmed.
+    let mut fmin = 10.0;
+    let (_, _, outcome) = confirm_joint_trust_bq_stop(
+        first(),
+        100,
+        &synthetic_restart_plan(10_000),
+        |_, budget, spent| {
+            fmin -= 1.0;
+            (
+                Ok(synthetic_trust_bq_result(fmin, budget, ObjectiveTolerance)),
+                spent + budget,
+            )
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        outcome,
+        JointFtolConfirmation::Unconfirmed {
+            reason: "restart_cap_reached",
+            restarts: 3,
+            ..
+        }
+    ));
+
+    // A failed restart is unconfirmed, and its evaluations still count.
+    let (_, fevals, outcome) = confirm_joint_trust_bq_stop(
+        first(),
+        100,
+        &synthetic_restart_plan(1000),
+        |_, _, spent| {
+            (
+                Err(MixedModelError::Optimization("boom".to_string())),
+                spent + 7,
+            )
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        outcome,
+        JointFtolConfirmation::Unconfirmed {
+            reason: "restart_failed",
+            restarts: 1,
+            ..
+        }
+    ));
+    assert_eq!(fevals, 107);
+
+    // A host interrupt during a restart stops the fit.
+    let error = confirm_joint_trust_bq_stop(
+        first(),
+        100,
+        &synthetic_restart_plan(1000),
+        |_, _, spent| {
+            (
+                Err(MixedModelError::Interrupted("host".to_string())),
+                spent + 3,
+            )
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "interrupted");
+
+    // A radius stop is native convergence: nothing to confirm.
+    let (result, _, outcome) = confirm_joint_trust_bq_stop(
+        synthetic_trust_bq_result(10.0, 100, RadiusBelowTolerance),
+        100,
+        &synthetic_restart_plan(1000),
+        |_, _, _| panic!("no restart for a radius stop"),
+    )
+    .unwrap();
+    assert_eq!(outcome, JointFtolConfirmation::NotNeeded);
+    assert_eq!(result.stop_reason, RadiusBelowTolerance);
+}
+
+/// Host interrupts raised from the inner PIRLS progress report of a joint
+/// objective evaluation used to be swallowed as an infinite objective, and
+/// the fit carried on. Interrupting on every PIRLS event past the ones the
+/// profiled start uses (and, for TrustBQ, on the last joint-optimizer event,
+/// which falls in a confirmation restart) must return the interrupt, for
+/// both joint drivers.
+#[test]
+fn joint_fit_propagates_host_interrupts_after_the_profiled_start() {
+    let fit = |optimizer: Optimizer, callback: FitProgressCallback| {
+        let mut model = joint_laplace_row("cbpp");
+        model
+            .fit_with_glmm_options(
+                GlmmFitOptions::joint_laplace()
+                    .with_optimizer(optimizer)
+                    .with_progress_callback(callback),
+            )
+            .map(|model| model.opt_summary().clone())
+    };
+    let counting = |phase: FitProgressPhase, counter: Arc<AtomicUsize>| {
+        FitProgressCallback::new(move |progress| {
+            if progress.phase == phase {
+                counter.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        })
+    };
+    let interrupting = |phase: FitProgressPhase, at: usize| {
+        let seen = Arc::new(AtomicUsize::new(0));
+        FitProgressCallback::new(move |progress| {
+            if progress.phase == phase && seen.fetch_add(1, Ordering::SeqCst) + 1 == at {
+                return Err(MixedModelError::Interrupted("test interrupt".to_string()));
+            }
+            Ok(())
+        })
+    };
+    // PIRLS events of the profiled start alone.
+    let profiled_events = Arc::new(AtomicUsize::new(0));
+    let mut profiled = joint_laplace_row("cbpp");
+    profiled
+        .fit_with_glmm_options(GlmmFitOptions::default().with_progress_callback(counting(
+            FitProgressPhase::Pirls,
+            Arc::clone(&profiled_events),
+        )))
+        .unwrap();
+    let profiled_events = profiled_events.load(Ordering::SeqCst);
+
+    #[allow(unused_mut, reason = "NLopt BOBYQA is added when the feature is on")]
+    let mut optimizers = vec![Optimizer::TrustBq];
+    #[cfg(feature = "nlopt")]
+    optimizers.push(Optimizer::NloptBobyqa);
+    for optimizer in optimizers {
+        let joint_pirls = Arc::new(AtomicUsize::new(0));
+        fit(
+            optimizer,
+            counting(FitProgressPhase::Pirls, Arc::clone(&joint_pirls)),
+        )
+        .unwrap();
+        let joint_pirls = joint_pirls.load(Ordering::SeqCst);
+        assert!(joint_pirls > profiled_events + 10, "{optimizer:?}");
+        for at in [
+            profiled_events + 1,
+            (profiled_events + joint_pirls) / 2,
+            joint_pirls,
+        ] {
+            let error = fit(optimizer, interrupting(FitProgressPhase::Pirls, at)).unwrap_err();
+            assert_eq!(
+                error.code(),
+                "interrupted",
+                "{optimizer:?} PIRLS event {at}"
+            );
+        }
+    }
+
+    let optimizer_events = Arc::new(AtomicUsize::new(0));
+    let model = fit(
+        Optimizer::TrustBq,
+        counting(
+            FitProgressPhase::JointGlmmOptimizer,
+            Arc::clone(&optimizer_events),
+        ),
+    )
+    .unwrap();
+    let last = optimizer_events.load(Ordering::SeqCst);
+    assert!(last > 1 && model.return_value.ends_with("FTOL_REACHED"));
+    let error = fit(
+        Optimizer::TrustBq,
+        interrupting(FitProgressPhase::JointGlmmOptimizer, last),
+    )
+    .unwrap_err();
+    assert_eq!(error.code(), "interrupted");
+}
+
+#[test]
+fn joint_trust_bq_transform_decorrelates_only_well_conditioned_blocks() {
+    let factor = |r: f64| {
+        DMatrix::from_row_slice(2, 2, &[1.0, r, r, 1.0])
+            .cholesky()
+            .unwrap()
+            .l()
+    };
+    // 1 - r^2 = 1e-4: L_22 = 1e-2, decorrelated.
+    assert!(well_conditioned_correlation_factor(factor((1.0f64 - 1.0e-4).sqrt())).is_some());
+    // 1 - r^2 = 1e-8: L_22 = 1e-4, SE scaling only.
+    assert!(well_conditioned_correlation_factor(factor((1.0f64 - 1.0e-8).sqrt())).is_none());
+
+    // A model whose two covariates are collinear to 1e-5: its profiled
+    // correlation factor fails the guard, so the transform's β block is
+    // diagonal (standard errors only), and the joint fit still converges.
+    let mut data = DataFrame::new();
+    let (mut y, mut x1, mut x2, mut group) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for g in 0..8 {
+        for j in 0..12 {
+            let x = (j as f64 - 5.5) / 3.0 + 0.1 * g as f64;
+            let jitter = 1.0e-5 * (((7 * g + 3 * j) % 11) as f64 - 5.0);
+            let eta = -0.3 + 0.6 * x + 0.3 * ((g % 3) as f64 - 1.0);
+            y.push(
+                if ((g * 12 + j) * 37 % 100) as f64 / 100.0 < 1.0 / (1.0 + (-eta).exp()) {
+                    1.0
+                } else {
+                    0.0
+                },
+            );
+            x1.push(x);
+            x2.push(x + jitter);
+            group.push(format!("g{g}"));
+        }
+    }
+    data.add_numeric("y", y).unwrap();
+    data.add_numeric("x1", x1).unwrap();
+    data.add_numeric("x2", x2).unwrap();
+    data.add_categorical("group", group).unwrap();
+    let formula = parse_formula("y ~ 1 + x1 + x2 + (1 | group)").unwrap();
+    let mut model =
+        GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+    model.fit_with_options(true, 1, false).unwrap();
+    assert_eq!(model.beta.len(), 3, "collinear pair kept at full rank");
+    let raw = model.joint_beta_correlation_factor().unwrap();
+    assert!(raw.diagonal().min() < 1.0e-3, "fixture is collinear: {raw}");
+    let transform = model.joint_trust_bq_transform(model.theta.len());
+    for i in 0..3 {
+        for j in 0..i {
+            assert_eq!(transform[(i, j)], 0.0);
+        }
+    }
+
+    // A caller-set initial step scales θ, as for NLopt.
+    model.lmm.optsum.initial_step = vec![0.2];
+    model
+        .lmm
+        .optsum
+        .caller_set_fields
+        .push("initial_step".to_string());
+    let transform = model.joint_trust_bq_transform(1);
+    assert_eq!(transform[(3, 3)], 0.2);
+}
+
+/// Mirror of `joint_laplace_nlopt_ftol_confirmation_respects_tight_budgets`
+/// for TrustBQ. Sweeping the budget across cbpp's first-pass stop and its
+/// confirming restart: a confirming restart that gains nothing keeps the
+/// FTOL label even when it spends the last evaluation; a stop with fewer
+/// evaluations left than two models is recorded as unconfirmed; a budget stop
+/// has moved past every FTOL stop reached under a smaller budget.
+#[cfg(not(feature = "nlopt"))]
+#[test]
+fn joint_trust_bq_ftol_confirmation_respects_tight_budgets() {
+    let pinned = 184.05256373024386;
+    let mut profiled = joint_laplace_row("cbpp");
+    profiled.fit_with_options(true, 1, false).unwrap();
+    let n_params = profiled.beta.len() + profiled.theta.len();
+    // Five parameters: full model of 2n + n(n-1)/2 samples.
+    let min_restart_budget = 2 * (2 * n_params + n_params * (n_params - 1) / 2 + 1) as i64;
+    let mut ftol_objectives: Vec<f64> = Vec::new();
+    let (mut saw_unconfirmed, mut saw_confirmed, mut saw_confirmed_at_budget) =
+        (false, false, false);
+    for maxeval in (250..=430u32).step_by(3) {
+        let mut model = profiled.clone();
+        let start_objective = model.deviance_with_response_constants(1);
+        model.lmm.optsum.optimizer = Optimizer::TrustBq;
+        model
+            .fit_joint_glmm_from_start(
+                profiled.beta.as_slice().to_vec(),
+                profiled.theta.clone(),
+                start_objective,
+                1,
+                maxeval,
+                Some(profiled.clone()),
+            )
+            .unwrap();
+        let optsum = model.opt_summary().clone();
+        let objective = MixedModelFit::objective(&model);
+        let label = optsum.return_value.as_str();
+        assert!(
+            label == "JOINT_LAPLACE:FTOL_REACHED" || label == "JOINT_LAPLACE:MAXEVAL_REACHED",
+            "max {maxeval}: unexpected return {label}"
+        );
+        assert!(optsum.feval <= i64::from(maxeval));
+        let unconfirmed = model
+            .compiler_artifact()
+            .optimizer_certificate
+            .as_ref()
+            .is_some_and(|certificate| {
+                certificate
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.payload.contains_key("ftol_confirmation"))
+            });
+        if label.ends_with("MAXEVAL_REACHED") {
+            assert!(
+                ftol_objectives.iter().all(|&f| objective < f - 1e-12),
+                "max {maxeval}: MAXEVAL at objective {objective:.12} already reached by an FTOL stop"
+            );
+            assert!(
+                !unconfirmed,
+                "max {maxeval}: budget stop marked unconfirmed"
+            );
+        } else {
+            ftol_objectives.push(objective);
+            if unconfirmed {
+                saw_unconfirmed = true;
+                assert!(
+                    i64::from(maxeval) - optsum.feval < min_restart_budget,
+                    "max {maxeval}: unconfirmed although {} evaluations remained",
+                    i64::from(maxeval) - optsum.feval
+                );
+            } else {
+                saw_confirmed = true;
+                saw_confirmed_at_budget |= optsum.feval == i64::from(maxeval);
+                assert!(
+                    objective <= pinned + 1e-7,
+                    "max {maxeval}: confirmed FTOL stop at {objective:.12}, pinned {pinned:.12}"
+                );
+            }
+        }
+    }
+    assert!(saw_unconfirmed && saw_confirmed && saw_confirmed_at_budget);
 }
