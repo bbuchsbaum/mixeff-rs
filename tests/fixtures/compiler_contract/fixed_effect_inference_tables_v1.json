@@ -1,6 +1,6 @@
 {
   "dyestuff2_boundary": {
-    "crate_version": "1.0.0-rc.3",
+    "crate_version": "1.0.0-rc.4",
     "rows": [
       {
         "covariance_method": "model_based",
@@ -37,7 +37,7 @@
     "schema_version": "1.2.0"
   },
   "penicillin_confirmatory": {
-    "crate_version": "1.0.0-rc.3",
+    "crate_version": "1.0.0-rc.4",
     "rows": [
       {
         "covariance_method": "model_based",
@@ -74,7 +74,7 @@
     "schema_version": "1.2.0"
   },
   "rank_deficient_fixed_effect": {
-    "crate_version": "1.0.0-rc.3",
+    "crate_version": "1.0.0-rc.4",
     "rows": [
       {
         "covariance_method": "model_based",
@@ -168,7 +168,7 @@
     "schema_version": "1.2.0"
   },
   "rank_mixture_reduced_rank": {
-    "crate_version": "1.0.0-rc.3",
+    "crate_version": "1.0.0-rc.4",
     "rows": [
       {
         "covariance_method": "model_based",
@@ -235,7 +235,7 @@
     "schema_version": "1.2.0"
   },
   "regularized_fit_intent": {
-    "crate_version": "1.0.0-rc.3",
+    "crate_version": "1.0.0-rc.4",
     "rows": [
       {
         "covariance_method": "model_based",
@@ -296,7 +296,7 @@
     "schema_version": "1.2.0"
   },
   "selection_time_reduction": {
-    "crate_version": "1.0.0-rc.3",
+    "crate_version": "1.0.0-rc.4",
     "rows": [
       {
         "covariance_method": "model_based",
@@ -357,7 +357,7 @@
     "schema_version": "1.2.0"
   },
   "sleepstudy_confirmatory": {
-    "crate_version": "1.0.0-rc.3",
+    "crate_version": "1.0.0-rc.4",
     "rows": [
       {
         "covariance_method": "model_based",
@@ -424,7 +424,7 @@
     "schema_version": "1.2.0"
   },
   "unavailable_standard_error": {
-    "crate_version": "1.0.0-rc.3",
+    "crate_version": "1.0.0-rc.4",
     "rows": [
       {
         "covariance_method": "unavailable",
