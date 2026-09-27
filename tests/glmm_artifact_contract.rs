@@ -363,7 +363,7 @@ fn native_glmm_artifact_records_support_contract_metadata() {
         covariance
             .reason
             .as_deref()
-            .is_some_and(|reason| reason.contains("not certified for Wald inference")),
+            .is_some_and(|reason| reason.contains("this engine does not implement Wald inference")),
         "noninferential covariance payload must say why it is not the inference surface"
     );
     assert_eq!(covariance.reliability, ReliabilityGrade::Moderate);
@@ -397,6 +397,10 @@ fn native_glmm_artifact_records_support_contract_metadata() {
         assert_eq!(row.status, FixedEffectInferenceStatus::Unsupported);
         assert_eq!(row.reliability, ReliabilityGrade::NotAvailable);
         assert!(row.std_error.is_none());
+        assert_eq!(
+            row.covariance_method,
+            mixeff_rs::stats::InferenceCovarianceMethod::Unavailable
+        );
         assert!(row.statistic.is_none());
         assert!(row.p_value.is_none());
         assert!(row
@@ -567,6 +571,10 @@ fn joint_laplace_glmm_artifact_reports_certified_wald_rows_when_hessian_passes()
     ];
     for row in &inference.rows {
         assert_eq!(row.method, FixedEffectInferenceMethod::AsymptoticWaldZ);
+        assert_eq!(
+            row.covariance_method,
+            mixeff_rs::stats::InferenceCovarianceMethod::JointLaplaceActiveHessian
+        );
         assert_eq!(row.status, FixedEffectInferenceStatus::Available);
         assert_eq!(row.reliability, ReliabilityGrade::Moderate);
         assert_eq!(
@@ -743,6 +751,10 @@ fn joint_laplace_glmm_wald_rows_match_glmer_on_correlated_random_slopes() {
     ];
     for row in &inference.rows {
         assert_eq!(row.method, FixedEffectInferenceMethod::AsymptoticWaldZ);
+        assert_eq!(
+            row.covariance_method,
+            mixeff_rs::stats::InferenceCovarianceMethod::JointLaplaceActiveHessian
+        );
         assert_eq!(row.status, FixedEffectInferenceStatus::Available);
         assert_eq!(row.reliability, ReliabilityGrade::Moderate);
         assert_eq!(
@@ -873,6 +885,10 @@ fn joint_laplace_glmm_wald_rows_match_glmer_on_osf_study1b_correlated_slopes() {
     assert_eq!(inference.rows.len(), lme4_reference.len());
     for row in &inference.rows {
         assert_eq!(row.method, FixedEffectInferenceMethod::AsymptoticWaldZ);
+        assert_eq!(
+            row.covariance_method,
+            mixeff_rs::stats::InferenceCovarianceMethod::JointLaplaceActiveHessian
+        );
         assert_eq!(row.status, FixedEffectInferenceStatus::Available);
         assert_eq!(row.reliability, ReliabilityGrade::Moderate);
         assert_eq!(
@@ -944,6 +960,10 @@ fn binomial_separation_keeps_glmm_wald_rows_unavailable_with_reason() {
         assert_eq!(row.status, FixedEffectInferenceStatus::NotAssessed);
         assert_eq!(row.reliability, ReliabilityGrade::NotAvailable);
         assert!(row.std_error.is_none());
+        assert_eq!(
+            row.covariance_method,
+            mixeff_rs::stats::InferenceCovarianceMethod::Unavailable
+        );
         assert!(row.statistic.is_none());
         assert!(row.p_value.is_none());
         assert!(row
@@ -1035,6 +1055,10 @@ fn joint_laplace_glmm_boundary_theta_still_certifies_fixed_effect_rows() {
     assert_eq!(inference.rows.len(), 2);
     for row in &inference.rows {
         assert_eq!(row.method, FixedEffectInferenceMethod::AsymptoticWaldZ);
+        assert_eq!(
+            row.covariance_method,
+            mixeff_rs::stats::InferenceCovarianceMethod::JointLaplaceActiveHessian
+        );
         assert_eq!(row.status, FixedEffectInferenceStatus::Available);
         assert_eq!(row.reliability, ReliabilityGrade::Moderate);
         assert_eq!(

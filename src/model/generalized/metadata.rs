@@ -4,6 +4,7 @@
 //! (bd-01KWHYQSTWK60P6HA4S4B2K99P). No logic changes.
 
 use super::*;
+use crate::compiler::{IncompleteCheckEvidence, IncompleteCheckStatus};
 use crate::model::linear::WARM_REFIT_INITIAL_STEP;
 
 impl GeneralizedLinearMixedModel {
@@ -514,9 +515,11 @@ impl GeneralizedLinearMixedModel {
         // the LMM path uses, and `complete_pirls_certificate` produces
         // exactly the eager outcome, diagnostic and evidence.
         if let Some(optimizer_certificate) = &mut self.lmm.compiler_artifact.optimizer_certificate {
-            optimizer_certificate.mark_derivative_checks_not_assessed(
+            optimizer_certificate.mark_derivative_checks_incomplete(IncompleteCheckEvidence::new(
+                "derivative_inspection",
+                IncompleteCheckStatus::Deferred,
                 LinearMixedModel::DEFERRED_DERIVATIVE_EVIDENCE_REASON,
-            );
+            ));
         }
         self.pirls_certificate_diagnostic_slot = self.lmm.compiler_artifact.diagnostics.len();
         self.pirls_certificate_pending = true;
@@ -586,10 +589,36 @@ impl GeneralizedLinearMixedModel {
                         );
                     }
                 }
-                Err(reason) => {
-                    optimizer_certificate.mark_derivative_checks_not_assessed(format!(
-                        "profiled-optimum certificate not issued: {reason}"
-                    ));
+                Err(error) => {
+                    let reason = format!("profiled-optimum certificate not issued: {error}");
+                    let status = match error {
+                        ProfiledCertificateError::Skipped(_) => IncompleteCheckStatus::Skipped,
+                        _ => IncompleteCheckStatus::Unavailable,
+                    };
+                    optimizer_certificate.mark_derivative_checks_incomplete(
+                        IncompleteCheckEvidence::new(
+                            "derivative_inspection",
+                            status,
+                            reason.clone(),
+                        ),
+                    );
+                    if matches!(error, ProfiledCertificateError::Failed(_)) {
+                        // A computed check rejected its predicate. Preserve the
+                        // optimizer stop; do not turn this into a skipped check.
+                        optimizer_certificate.checks.retain(|check| {
+                            !matches!(check,
+                            crate::compiler::CertificateCheck::Incomplete { evidence }
+                                if evidence.check_name == "derivative_inspection")
+                        });
+                        optimizer_certificate.checks.push(
+                            crate::compiler::CertificateCheck::Failed {
+                                code: "profiled_optimum".to_string(),
+                                message: reason.clone(),
+                            },
+                        );
+                        optimizer_certificate.evidence.certification_quality =
+                            crate::compiler::EvidenceQuality::Failed { reason };
+                    }
                 }
             }
         }
@@ -645,14 +674,14 @@ impl GeneralizedLinearMixedModel {
             Err(reason) => {
                 diagnostic
                     .payload
-                    .insert("reason".to_string(), serde_json::json!(reason));
+                    .insert("reason".to_string(), serde_json::json!(reason.to_string()));
             }
         }
         self.lmm
             .compiler_artifact
             .diagnostics
             .insert(diagnostic_slot, diagnostic);
-        self.pirls_profiled_optimum_certificate = Some(outcome);
+        self.pirls_profiled_optimum_certificate = Some(outcome.map_err(|error| error.to_string()));
     }
 
     pub(super) fn record_negative_binomial_theta_estimation_metadata(

@@ -1,3 +1,4 @@
+use crate::stats::InferenceCovarianceMethod;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -31,7 +32,8 @@ pub const FIXED_EFFECT_INFERENCE_TABLE_SCHEMA: &str = "mixedmodels.fixed_effect_
 // value `fixed-effect term test type: coefficient_block`); `type_i` rows
 // sequence terms by interaction order (R `terms()` convention) instead of
 // literal formula-expansion order.
-pub const FIXED_EFFECT_INFERENCE_TABLE_SCHEMA_VERSION: &str = "1.1.0";
+// 1.2.0: each inference row records the covariance actually used.
+pub const FIXED_EFFECT_INFERENCE_TABLE_SCHEMA_VERSION: &str = "1.2.0";
 pub const FIXED_EFFECT_INFERENCE_TABLE_NAME: &str = "fixed_effect_inference";
 pub const FIXED_EFFECT_COVARIANCE_MATRIX_SCHEMA: &str =
     "mixedmodels.fixed_effect_covariance_matrix";
@@ -440,8 +442,10 @@ impl FixedEffectCovarianceMatrix {
         payload.status = FixedEffectCovarianceStatus::AvailableNoninferential;
         payload.reason = Some(
             "working-Hessian covariance is recorded for covariance geometry \
-             (vcov/prediction/diagnostics), not certified for Wald inference; \
-             the fixed_effect_inference_table is the inference arbiter"
+             (vcov/prediction/diagnostics); this engine does not implement Wald inference \
+             from that approximation. This support policy does not establish that \
+             working-Hessian or RX standard errors are invalid; read fixed_effect_inference_table \
+             for the supported inference result"
                 .to_string(),
         );
         payload
@@ -497,8 +501,9 @@ pub enum FixedEffectCovarianceMethod {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FixedEffectCovarianceStatus {
-    /// Recorded and certified for the inference backend named on the
-    /// matching `fixed_effect_inference_table` rows.
+    /// Recorded and accepted by the numerical gates of the inference backend
+    /// named on matching `fixed_effect_inference_table` rows. This does not
+    /// establish scientific validity or model adequacy.
     Available,
     /// Recorded as usable covariance geometry (vcov/prediction/diagnostics)
     /// for an estimator whose Wald inference is not certified; consumers must
@@ -531,6 +536,9 @@ pub struct FixedEffectInferenceRow {
     pub statistic_name: Option<FixedEffectStatisticName>,
     pub p_value: Option<f64>,
     pub method: FixedEffectInferenceMethod,
+    /// Actual SE/statistic covariance; distinct from the requested method.
+    #[serde(default)]
+    pub covariance_method: InferenceCovarianceMethod,
     pub status: FixedEffectInferenceStatus,
     pub reliability: ReliabilityGrade,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2203,6 +2211,7 @@ mod tests {
         let mut artifact = CompiledModelArtifact::new(formula.to_string(), semantic);
         artifact.fixed_effect_inference_table = Some(FixedEffectInferenceTable::new(vec![
             FixedEffectInferenceRow {
+                covariance_method: InferenceCovarianceMethod::ModelBased,
                 label: "x".to_string(),
                 kind: FixedEffectInferenceRowKind::Coefficient,
                 estimate: Some(1.25),

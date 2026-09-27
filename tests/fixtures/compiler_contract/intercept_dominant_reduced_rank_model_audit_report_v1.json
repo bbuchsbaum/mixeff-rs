@@ -238,8 +238,8 @@
         },
         {
           "label": "certification quality",
-          "status": "info",
-          "detail": "approximate (optimizer stop accepted; derivative KKT/Hessian inspection skipped: boundary fit, not by itself an optimizer failure)"
+          "status": "not_assessed",
+          "detail": "not_assessed (boundary fit, not by itself an optimizer failure)"
         },
         {
           "label": "convergence next steps",
@@ -249,7 +249,12 @@
         {
           "label": "derivative checks",
           "status": "not_assessed",
-          "detail": "0 failed; 0 mismatch; 3 not assessed"
+          "detail": "0 failed; 0 mismatch; 1 not assessed"
+        },
+        {
+          "label": "derivative_inspection",
+          "status": "not_assessed",
+          "detail": "skipped: boundary fit, not by itself an optimizer failure"
         },
         {
           "label": "convergence verification",

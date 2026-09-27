@@ -1,3 +1,4 @@
+use crate::stats::InferenceCovarianceMethod;
 use serde::{Deserialize, Serialize};
 
 use nalgebra::{DMatrix, DVector};
@@ -474,6 +475,8 @@ pub struct FixedEffectTest {
     pub denominator_df: Option<f64>,
     pub p_values: Vec<Option<f64>>,
     pub method: InferenceMethod,
+    #[serde(default)]
+    pub covariance_method: InferenceCovarianceMethod,
     pub reliability: ReliabilityGrade,
     pub status: InferenceStatus,
     pub estimability: FixedContrastEstimability,
@@ -481,6 +484,11 @@ pub struct FixedEffectTest {
 }
 
 impl FixedEffectTest {
+    pub(crate) fn with_covariance_method(mut self, method: InferenceCovarianceMethod) -> Self {
+        self.covariance_method = method;
+        self
+    }
+
     pub fn p_value_unavailable_reason(&self) -> Option<&str> {
         match &self.status {
             InferenceStatus::PValueUnavailable { reason }

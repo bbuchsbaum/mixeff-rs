@@ -4,6 +4,7 @@
 //! distance. Moved verbatim from the former single-file `linear.rs`.
 
 use super::*;
+use crate::stats::InferenceCovarianceMethod;
 
 impl LinearMixedModel {
     /// Coefficient table for the fixed effects.
@@ -27,6 +28,7 @@ impl LinearMixedModel {
             std_errors,
             self.fixed_effect_p_value_policy(),
         )
+        .with_covariance_method(InferenceCovarianceMethod::ModelBased)
     }
 
     /// Coefficient table using a degrees-of-freedom-based inference method
@@ -81,7 +83,7 @@ impl LinearMixedModel {
             }
         }
 
-        CoefTable::from_df_inference(
+        let mut coefficients = CoefTable::from_df_inference(
             names,
             estimates,
             std_errors,
@@ -91,7 +93,10 @@ impl LinearMixedModel {
             df,
             fixed_effect_statistic_name_label(resolved_stat),
             fixed_effect_inference_method_label(resolved_method),
-        )
+        );
+        coefficients.covariance_methods =
+            table.rows.iter().map(|row| row.covariance_method).collect();
+        coefficients
     }
 
     /// Build one zero-valued single-coefficient hypothesis per fixed effect.
@@ -151,6 +156,7 @@ impl LinearMixedModel {
         let estimability = assess_fixed_contrast_estimability(&hypothesis, &beta, &vcov);
         if estimability.status == EstimabilityStatus::NotEstimable {
             return FixedEffectTest {
+                covariance_method: InferenceCovarianceMethod::ModelBased,
                 hypothesis,
                 estimates,
                 standard_errors,
@@ -179,6 +185,7 @@ impl LinearMixedModel {
                 "multi-df asymptotic Wald contrast tests are not implemented in this scaffold"
                     .to_string();
             return FixedEffectTest {
+                covariance_method: InferenceCovarianceMethod::ModelBased,
                 hypothesis,
                 estimates,
                 standard_errors,
@@ -322,6 +329,7 @@ impl LinearMixedModel {
         let estimability = assess_fixed_contrast_estimability(&hypothesis, &beta, &vcov);
         if estimability.status == EstimabilityStatus::NotEstimable {
             return FixedEffectTest {
+                covariance_method: InferenceCovarianceMethod::ModelBased,
                 hypothesis,
                 estimates,
                 standard_errors,
@@ -1294,6 +1302,7 @@ impl LinearMixedModel {
             notes.extend(vcov_varpar.notes);
 
             return FixedEffectTest {
+                covariance_method: InferenceCovarianceMethod::ModelBased,
                 hypothesis,
                 estimates,
                 standard_errors,
@@ -1404,6 +1413,7 @@ impl LinearMixedModel {
         notes.extend(vcov_varpar.notes);
 
         FixedEffectTest {
+            covariance_method: InferenceCovarianceMethod::ModelBased,
             hypothesis,
             estimates,
             standard_errors,
@@ -1492,7 +1502,7 @@ impl LinearMixedModel {
                 estimability,
                 "Kenward-Roger fixed-effect inference produced a non-finite adjusted contrast covariance"
                     .to_string(),
-            );
+            ).with_covariance_method(InferenceCovarianceMethod::KenwardRogerAdjusted);
         }
 
         let mut notes = vec![
@@ -1513,7 +1523,7 @@ impl LinearMixedModel {
                     estimability,
                     "Kenward-Roger fixed-effect inference requires an available adjusted standard error"
                         .to_string(),
-                );
+                ).with_covariance_method(InferenceCovarianceMethod::KenwardRogerAdjusted);
             };
             let var_con = std_error * std_error;
             if !var_con.is_finite() || var_con <= 0.0 {
@@ -1526,7 +1536,7 @@ impl LinearMixedModel {
                     estimability,
                     "Kenward-Roger fixed-effect inference requires a finite positive adjusted contrast variance"
                         .to_string(),
-                );
+                ).with_covariance_method(InferenceCovarianceMethod::KenwardRogerAdjusted);
             }
             let statistic = estimates[0] / std_error;
             let p_value = match StudentsT::new(0.0, 1.0, lbddf.denominator_df) {
@@ -1542,10 +1552,11 @@ impl LinearMixedModel {
                         format!(
                             "Kenward-Roger fixed-effect inference could not construct Student-t distribution: {error}"
                         ),
-                    );
+                    ).with_covariance_method(InferenceCovarianceMethod::KenwardRogerAdjusted);
                 }
             };
             return FixedEffectTest {
+                covariance_method: InferenceCovarianceMethod::KenwardRogerAdjusted,
                 hypothesis,
                 estimates,
                 standard_errors: adjusted_standard_errors,
@@ -1575,7 +1586,8 @@ impl LinearMixedModel {
                 estimability,
                 "Kenward-Roger fixed-effect inference produced a non-finite F quadratic form"
                     .to_string(),
-            );
+            )
+            .with_covariance_method(InferenceCovarianceMethod::KenwardRogerAdjusted);
         }
         let f_statistic = quadratic / q as f64;
         if !f_statistic.is_finite() || f_statistic < 0.0 {
@@ -1588,7 +1600,8 @@ impl LinearMixedModel {
                 estimability,
                 "Kenward-Roger fixed-effect inference produced a non-finite F statistic"
                     .to_string(),
-            );
+            )
+            .with_covariance_method(InferenceCovarianceMethod::KenwardRogerAdjusted);
         }
         let p_value = match FisherSnedecor::new(q as f64, lbddf.denominator_df) {
             Ok(f_dist) => Some(1.0 - f_dist.cdf(f_statistic)),
@@ -1603,7 +1616,7 @@ impl LinearMixedModel {
                     format!(
                         "Kenward-Roger fixed-effect inference could not construct F distribution: {error}"
                     ),
-                );
+                ).with_covariance_method(InferenceCovarianceMethod::KenwardRogerAdjusted);
             }
         };
         notes.push(
@@ -1612,6 +1625,7 @@ impl LinearMixedModel {
         );
 
         FixedEffectTest {
+            covariance_method: InferenceCovarianceMethod::KenwardRogerAdjusted,
             hypothesis,
             estimates,
             standard_errors: adjusted_standard_errors,
@@ -1888,6 +1902,7 @@ impl LinearMixedModel {
         notes.extend(payload.metadata.notes.clone());
 
         FixedEffectTest {
+            covariance_method: InferenceCovarianceMethod::ModelBased,
             hypothesis,
             estimates,
             standard_errors,
@@ -2745,6 +2760,7 @@ pub(super) fn fixed_effect_test_to_inference_row(
     let reliability_reason = fixed_effect_reliability_reason(&test);
     let details = fixed_effect_details_for_test(kind, &test, statistic_name);
     FixedEffectInferenceRow {
+        covariance_method: test.covariance_method,
         label: test.hypothesis.label.clone(),
         kind,
         estimate: finite_option(test.estimates.first().copied()),
@@ -2990,6 +3006,7 @@ fn fixed_effect_test_asymptotic_wald_z(
         .collect::<Vec<_>>();
     let p_value_available = p_values.iter().all(Option::is_some);
     FixedEffectTest {
+        covariance_method: InferenceCovarianceMethod::ModelBased,
         hypothesis,
         estimates,
         standard_errors,
@@ -3023,6 +3040,7 @@ fn fixed_effect_test_p_value_unavailable(
     reason: String,
 ) -> FixedEffectTest {
     FixedEffectTest {
+        covariance_method: InferenceCovarianceMethod::ModelBased,
         hypothesis,
         estimates,
         standard_errors,
@@ -3051,6 +3069,7 @@ fn fixed_effect_test_not_assessed_with_method(
 ) -> FixedEffectTest {
     let n = hypothesis.n_contrasts();
     FixedEffectTest {
+        covariance_method: InferenceCovarianceMethod::ModelBased,
         hypothesis,
         estimates,
         standard_errors,
@@ -3082,6 +3101,7 @@ fn fixed_effect_test_unavailable(
         | InferenceStatus::Unsupported { reason } => reason.clone(),
     };
     FixedEffectTest {
+        covariance_method: InferenceCovarianceMethod::Unavailable,
         hypothesis,
         estimates: vec![f64::NAN; n],
         standard_errors: vec![None; n],

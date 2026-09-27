@@ -3,6 +3,7 @@
     "crate_version": "1.0.0-rc.3",
     "rows": [
       {
+        "covariance_method": "model_based",
         "denominator_df": null,
         "estimability": {
           "assessment": {
@@ -33,12 +34,13 @@
       }
     ],
     "schema_name": "mixedmodels.fixed_effect_inference_table",
-    "schema_version": "1.1.0"
+    "schema_version": "1.2.0"
   },
   "penicillin_confirmatory": {
     "crate_version": "1.0.0-rc.3",
     "rows": [
       {
+        "covariance_method": "model_based",
         "denominator_df": null,
         "estimability": {
           "assessment": {
@@ -69,12 +71,13 @@
       }
     ],
     "schema_name": "mixedmodels.fixed_effect_inference_table",
-    "schema_version": "1.1.0"
+    "schema_version": "1.2.0"
   },
   "rank_deficient_fixed_effect": {
     "crate_version": "1.0.0-rc.3",
     "rows": [
       {
+        "covariance_method": "model_based",
         "denominator_df": null,
         "estimability": {
           "assessment": {
@@ -104,6 +107,7 @@
         "std_error": null
       },
       {
+        "covariance_method": "model_based",
         "denominator_df": null,
         "estimability": {
           "assessment": {
@@ -130,6 +134,7 @@
         "std_error": null
       },
       {
+        "covariance_method": "model_based",
         "denominator_df": null,
         "estimability": {
           "assessment": {
@@ -160,12 +165,13 @@
       }
     ],
     "schema_name": "mixedmodels.fixed_effect_inference_table",
-    "schema_version": "1.1.0"
+    "schema_version": "1.2.0"
   },
   "rank_mixture_reduced_rank": {
     "crate_version": "1.0.0-rc.3",
     "rows": [
       {
+        "covariance_method": "model_based",
         "denominator_df": null,
         "estimability": {
           "assessment": {
@@ -195,6 +201,7 @@
         "std_error": 0.04340586141371627
       },
       {
+        "covariance_method": "model_based",
         "denominator_df": null,
         "estimability": {
           "assessment": {
@@ -225,12 +232,13 @@
       }
     ],
     "schema_name": "mixedmodels.fixed_effect_inference_table",
-    "schema_version": "1.1.0"
+    "schema_version": "1.2.0"
   },
   "regularized_fit_intent": {
     "crate_version": "1.0.0-rc.3",
     "rows": [
       {
+        "covariance_method": "model_based",
         "denominator_df": null,
         "estimability": {
           "assessment": {
@@ -257,6 +265,7 @@
         "std_error": 9.746722639863895
       },
       {
+        "covariance_method": "model_based",
         "denominator_df": null,
         "estimability": {
           "assessment": {
@@ -284,12 +293,13 @@
       }
     ],
     "schema_name": "mixedmodels.fixed_effect_inference_table",
-    "schema_version": "1.1.0"
+    "schema_version": "1.2.0"
   },
   "selection_time_reduction": {
     "crate_version": "1.0.0-rc.3",
     "rows": [
       {
+        "covariance_method": "model_based",
         "denominator_df": null,
         "estimability": {
           "assessment": {
@@ -316,6 +326,7 @@
         "std_error": 9.746722639863895
       },
       {
+        "covariance_method": "model_based",
         "denominator_df": null,
         "estimability": {
           "assessment": {
@@ -343,12 +354,13 @@
       }
     ],
     "schema_name": "mixedmodels.fixed_effect_inference_table",
-    "schema_version": "1.1.0"
+    "schema_version": "1.2.0"
   },
   "sleepstudy_confirmatory": {
     "crate_version": "1.0.0-rc.3",
     "rows": [
       {
+        "covariance_method": "model_based",
         "denominator_df": null,
         "estimability": {
           "assessment": {
@@ -378,6 +390,7 @@
         "std_error": 9.746722639863895
       },
       {
+        "covariance_method": "model_based",
         "denominator_df": null,
         "estimability": {
           "assessment": {
@@ -408,12 +421,13 @@
       }
     ],
     "schema_name": "mixedmodels.fixed_effect_inference_table",
-    "schema_version": "1.1.0"
+    "schema_version": "1.2.0"
   },
   "unavailable_standard_error": {
     "crate_version": "1.0.0-rc.3",
     "rows": [
       {
+        "covariance_method": "unavailable",
         "denominator_df": null,
         "estimability": {
           "assessment": {
@@ -444,6 +458,6 @@
       }
     ],
     "schema_name": "mixedmodels.fixed_effect_inference_table",
-    "schema_version": "1.1.0"
+    "schema_version": "1.2.0"
   }
 }

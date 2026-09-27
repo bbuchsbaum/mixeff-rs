@@ -1429,20 +1429,20 @@ impl GeneralizedLinearMixedModel {
     /// interior-theta Hessian.
     fn certify_pirls_profiled_optimum(
         &mut self,
-    ) -> std::result::Result<PirlsProfiledOptimumCertificate, String> {
+    ) -> std::result::Result<PirlsProfiledOptimumCertificate, ProfiledCertificateError> {
         let theta = self.lmm.optsum.final_params.clone();
         if theta.len() != self.theta.len() {
-            return Err(format!(
+            return Err(ProfiledCertificateError::Unavailable(format!(
                 "profiled fast-PIRLS final parameter vector has length {}, expected {} covariance parameters",
                 theta.len(),
                 self.theta.len()
-            ));
+            )));
         }
         if theta.len() > PIRLS_PROFILED_CERTIFICATE_MAX_THETA {
-            return Err(format!(
+            return Err(ProfiledCertificateError::Skipped(format!(
                 "profiled-optimum certificate skipped: {} covariance parameters exceed the certification budget of {PIRLS_PROFILED_CERTIFICATE_MAX_THETA}",
                 theta.len()
-            ));
+            )));
         }
         let n_agq = self.lmm.optsum.n_agq.max(1);
         let lower_bounds = self.lmm.lower_bounds();
@@ -1460,7 +1460,7 @@ impl GeneralizedLinearMixedModel {
         theta: &[f64],
         n_agq: usize,
         lower_bounds: &[f64],
-    ) -> std::result::Result<PirlsProfiledOptimumCertificate, String> {
+    ) -> std::result::Result<PirlsProfiledOptimumCertificate, ProfiledCertificateError> {
         let mut boundary_theta_indices = Vec::new();
         let mut interior_indices = Vec::new();
         for (index, &value) in theta.iter().enumerate() {
@@ -1488,17 +1488,17 @@ impl GeneralizedLinearMixedModel {
                 .map(|index| (index + 1).to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
-            return Err(format!(
+            return Err(ProfiledCertificateError::Unavailable(format!(
                 "profiled fast-PIRLS stationarity is not assessable for covariance parameter(s) {labels}: escalated finite-difference readings disagreed"
-            ));
+            )));
         }
         let mut gradient_max_abs = 0.0_f64;
         for (index, &value) in certification.gradient.iter().enumerate() {
             if !value.is_finite() {
-                return Err(format!(
+                return Err(ProfiledCertificateError::Unavailable(format!(
                     "profiled fast-PIRLS stationarity gradient is non-finite for covariance parameter {}",
                     index + 1
-                ));
+                )));
             }
             let boundary = boundary_theta_indices.contains(&(index + 1));
             let fails = if boundary {
@@ -1510,23 +1510,22 @@ impl GeneralizedLinearMixedModel {
                 value.abs() > PIRLS_PROFILED_CERTIFICATE_GRADIENT_TOLERANCE
             };
             if fails {
-                return Err(format!(
+                return Err(ProfiledCertificateError::Failed(format!(
                     "profiled fast-PIRLS stationarity gradient {value:.6e} for covariance parameter {} exceeds tolerance {PIRLS_PROFILED_CERTIFICATE_GRADIENT_TOLERANCE:.1e}",
                     index + 1
-                ));
+                )));
             }
             gradient_max_abs = gradient_max_abs.max(value.abs());
         }
 
         if interior_indices.is_empty() {
-            return Err(
-                "all covariance parameters sit at their lower bounds; the profiled curvature certificate is not assessable for a fully boundary optimum"
-                    .to_string(),
-            );
+            return Err(ProfiledCertificateError::Skipped("all covariance parameters sit at their lower bounds; the profiled curvature certificate is not assessable for a fully boundary optimum"
+                    .to_string()));
         }
         let hessian =
             self.finite_difference_pirls_profiled_hessian(theta, &interior_indices, n_agq)?;
-        let curvature = certify_glmm_joint_hessian(&hessian, "profiled fast-PIRLS theta Hessian")?;
+        let curvature = certify_glmm_joint_hessian(&hessian, "profiled fast-PIRLS theta Hessian")
+            .map_err(ProfiledCertificateError::Failed)?;
 
         Ok(PirlsProfiledOptimumCertificate {
             gradient_max_abs,
@@ -1618,6 +1617,7 @@ impl GeneralizedLinearMixedModel {
             .into_iter()
             .enumerate()
             .map(|(index, label)| FixedEffectInferenceRow {
+                covariance_method: crate::stats::InferenceCovarianceMethod::Unavailable,
                 label: label.clone(),
                 kind: FixedEffectInferenceRowKind::Coefficient,
                 estimate: estimates

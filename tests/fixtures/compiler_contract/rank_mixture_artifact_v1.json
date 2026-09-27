@@ -23,7 +23,7 @@
   },
   "fixed_effect_inference_table": {
     "schema_name": "mixedmodels.fixed_effect_inference_table",
-    "schema_version": "1.1.0",
+    "schema_version": "1.2.0",
     "crate_version": "1.0.0-rc.3",
     "rows": [
       {
@@ -37,6 +37,7 @@
         "statistic_name": "z",
         "p_value": 0.0,
         "method": "asymptotic_wald_z",
+        "covariance_method": "model_based",
         "status": "available",
         "reliability": "low",
         "reliability_reason": "asymptotic_wald_z_fallback",
@@ -66,6 +67,7 @@
         "statistic_name": "z",
         "p_value": 0.0,
         "method": "asymptotic_wald_z",
+        "covariance_method": "model_based",
         "status": "available",
         "reliability": "low",
         "reliability_reason": "asymptotic_wald_z_fallback",
@@ -795,8 +797,8 @@
         "rank": null
       },
       "certification_quality": {
-        "approximate": {
-          "reason": "optimizer stop accepted; derivative KKT/Hessian inspection skipped: one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged"
+        "not_assessed": {
+          "reason": "one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged"
         }
       }
     },
@@ -877,18 +879,12 @@
     "information_rank": null,
     "checks": [
       {
-        "not_assessed": {
-          "reason": "free-gradient KKT check skipped: one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged"
-        }
-      },
-      {
-        "not_assessed": {
-          "reason": "projected boundary-gradient KKT check skipped: one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged"
-        }
-      },
-      {
-        "not_assessed": {
-          "reason": "active-subspace Hessian check skipped: one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged"
+        "incomplete": {
+          "evidence": {
+            "check_name": "derivative_inspection",
+            "status": "skipped",
+            "reason": "one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged"
+          }
         }
       }
     ],

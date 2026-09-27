@@ -1318,6 +1318,8 @@ impl GeneralizedLinearMixedModel {
                 let statistic = estimate.zip(std_error).map(|(estimate, se)| estimate / se);
                 let p_value = statistic.map(|z| 2.0 * (1.0 - normal.cdf(z.abs())));
                 FixedEffectInferenceRow {
+                    covariance_method:
+                        crate::stats::InferenceCovarianceMethod::JointLaplaceActiveHessian,
                     label: label.clone(),
                     kind: FixedEffectInferenceRowKind::Coefficient,
                     estimate,

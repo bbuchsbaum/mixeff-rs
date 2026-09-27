@@ -6,6 +6,7 @@
 //! `linear.rs`.
 
 use super::*;
+use crate::compiler::{IncompleteCheckEvidence, IncompleteCheckStatus};
 
 #[derive(Debug, Clone)]
 struct KktBoundaryRestartCandidate {
@@ -384,7 +385,11 @@ impl LinearMixedModel {
         self.derivative_evidence_pending = false;
         if certificate.evidence.optimizer_stop.acceptable_stop {
             if let Some(reason) = self.derivative_certificate_skip_reason(&certificate) {
-                certificate.mark_derivative_checks_not_assessed(reason);
+                certificate.mark_derivative_checks_incomplete(IncompleteCheckEvidence::new(
+                    "derivative_inspection",
+                    IncompleteCheckStatus::Skipped,
+                    reason,
+                ));
             } else {
                 // The finite-difference gradient/Hessian evidence costs about
                 // 2·d² objective evaluations, often a quarter of a fit's wall
@@ -394,8 +399,11 @@ impl LinearMixedModel {
                 // (`inspection_artifact`) or before any mutation
                 // (`ensure_derivative_evidence`); every accessor therefore
                 // still reports exactly the evidence the eager path produced.
-                certificate
-                    .mark_derivative_checks_not_assessed(Self::DEFERRED_DERIVATIVE_EVIDENCE_REASON);
+                certificate.mark_derivative_checks_incomplete(IncompleteCheckEvidence::new(
+                    "derivative_inspection",
+                    IncompleteCheckStatus::Deferred,
+                    Self::DEFERRED_DERIVATIVE_EVIDENCE_REASON,
+                ));
                 self.derivative_evidence_pending = true;
             }
         }
@@ -427,6 +435,12 @@ impl LinearMixedModel {
                 gradient_tolerance,
                 hessian_tolerance,
             );
+        } else {
+            certificate.mark_derivative_checks_incomplete(IncompleteCheckEvidence::new(
+                "derivative_inspection",
+                IncompleteCheckStatus::Unavailable,
+                "neither analytic nor finite-difference derivative evidence could be computed",
+            ));
         }
     }
 
@@ -455,8 +469,8 @@ impl LinearMixedModel {
     /// is never "completed" with the wrong model's derivatives.
     pub(crate) fn certificate_derivatives_deferred(certificate: &OptimizerCertificate) -> bool {
         certificate.checks.iter().any(|check| {
-            matches!(check, CertificateCheck::NotAssessed { reason }
-                if reason.contains(Self::DEFERRED_DERIVATIVE_EVIDENCE_REASON))
+            matches!(check, CertificateCheck::Incomplete { evidence }
+                if evidence.status == IncompleteCheckStatus::Deferred && evidence.check_name == "derivative_inspection")
         })
     }
 

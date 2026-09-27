@@ -273,8 +273,9 @@ fn test_lmm_optimizer_certificate_records_boundary_fit() {
     assert_eq!(certificate.evidence.hessian.rank, None);
     assert!(certificate.checks.iter().any(|check| matches!(
         check,
-        CertificateCheck::NotAssessed { reason }
-            if reason.contains("boundary-gradient KKT check skipped")
+        CertificateCheck::Incomplete { evidence }
+            if evidence.status == mixeff_rs::compiler::IncompleteCheckStatus::Skipped
+                && evidence.reason.contains("variance-component boundary")
     )));
     assert!(certificate
         .diagnostics

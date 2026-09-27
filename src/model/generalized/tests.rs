@@ -682,12 +682,21 @@ fn profiled_glmm_certificate_records_first_order_evidence_or_explicit_skip() {
         );
     } else {
         assert!(
-            certificate.checks.iter().any(|check| matches!(
-                check,
-                crate::compiler::CertificateCheck::NotAssessed { reason }
-                    if reason.contains("profiled-optimum certificate not issued")
-            )),
-            "a skipped profiled-optimum certificate must leave an explicit not-assessed reason"
+            certificate.checks.iter().any(|check| match check {
+                crate::compiler::CertificateCheck::Incomplete { evidence } =>
+                    matches!(
+                        evidence.status,
+                        crate::compiler::IncompleteCheckStatus::Skipped
+                            | crate::compiler::IncompleteCheckStatus::Unavailable
+                    ) && evidence
+                        .reason
+                        .contains("profiled-optimum certificate not issued"),
+                crate::compiler::CertificateCheck::Failed { code, message } =>
+                    code == "profiled_optimum"
+                        && message.contains("profiled-optimum certificate not issued"),
+                _ => false,
+            }),
+            "an incomplete or failed profiled-optimum certificate must record its actual outcome"
         );
     }
 }
@@ -3997,12 +4006,21 @@ fn glmm_native_uncertified_profiled_optimum_leaves_explicit_skip_reason() {
         .expect("fitted GLMM carries an optimizer certificate");
     assert!(certificate.free_gradient_norm.is_none());
     assert!(
-        certificate.checks.iter().any(|check| matches!(
-            check,
-            crate::compiler::CertificateCheck::NotAssessed { reason }
-                if reason.contains("profiled-optimum certificate not issued")
-        )),
-        "uncertified profiled optimum must leave an explicit not-assessed reason"
+        certificate.checks.iter().any(|check| match check {
+            crate::compiler::CertificateCheck::Incomplete { evidence } =>
+                matches!(
+                    evidence.status,
+                    crate::compiler::IncompleteCheckStatus::Skipped
+                        | crate::compiler::IncompleteCheckStatus::Unavailable
+                ) && evidence
+                    .reason
+                    .contains("profiled-optimum certificate not issued"),
+            crate::compiler::CertificateCheck::Failed { code, message } =>
+                code == "profiled_optimum"
+                    && message.contains("profiled-optimum certificate not issued"),
+            _ => false,
+        }),
+        "uncertified profiled optimum must record its actual execution outcome"
     );
 }
 
@@ -4108,12 +4126,12 @@ fn deferred_pirls_certificate_matches_in_place_completion() {
         .checks
         .iter()
         .filter(|check| {
-            matches!(check, crate::compiler::CertificateCheck::NotAssessed { reason }
-                if reason.contains("deferred"))
+            matches!(check, crate::compiler::CertificateCheck::Incomplete { evidence }
+                if evidence.status == crate::compiler::IncompleteCheckStatus::Deferred)
         })
         .count();
     assert_eq!(
-        deferred_checks, 3,
+        deferred_checks, 1,
         "deferred marker on the stored certificate"
     );
 
@@ -4143,8 +4161,8 @@ fn deferred_pirls_certificate_matches_in_place_completion() {
         .as_ref()
         .unwrap();
     assert!(!certificate.checks.iter().any(|check| {
-        matches!(check, crate::compiler::CertificateCheck::NotAssessed { reason }
-            if reason.contains("deferred"))
+        matches!(check, crate::compiler::CertificateCheck::Incomplete { evidence }
+            if evidence.status == crate::compiler::IncompleteCheckStatus::Deferred)
     }));
     assert!(completed
         .compiler_artifact()

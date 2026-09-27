@@ -871,6 +871,29 @@ impl JointFdProbe {
     }
 }
 
+#[derive(Debug)]
+pub(super) enum ProfiledCertificateError {
+    Unavailable(String),
+    Skipped(String),
+    Failed(String),
+}
+
+impl From<String> for ProfiledCertificateError {
+    fn from(reason: String) -> Self {
+        Self::Unavailable(reason)
+    }
+}
+
+impl std::fmt::Display for ProfiledCertificateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable(reason) | Self::Skipped(reason) | Self::Failed(reason) => {
+                f.write_str(reason)
+            }
+        }
+    }
+}
+
 /// Evidence that a profiled fast-PIRLS fit sits at a certified optimum of its
 /// own objective: assessed stationarity over theta plus positive-definite,
 /// well-conditioned curvature over the interior theta coordinates. Beta is
@@ -1109,7 +1132,9 @@ pub(crate) fn glmm_fixed_effect_inference_unsupported_reason(estimation_method: 
         "certified GLMM fixed-effect Wald inference is not implemented for {estimation_method}; \
          fast-PIRLS/profiled covariance geometry remains a working-Hessian payload, while only \
          joint-laplace fits with a passing certified active-subspace Hessian over active beta plus \
-         interior theta parameters can report Wald SE/z/p/confint"
+         interior theta parameters can report Wald SE/z/p/confint in this engine. \
+         This is an inference-support policy, not evidence that RX or working-Hessian \
+         standard errors are invalid; passing numerical checks does not establish scientific adequacy"
     )
 }
 

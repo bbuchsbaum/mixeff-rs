@@ -174,6 +174,7 @@ fn selection_time_fixed_effect_inference_table() -> FixedEffectInferenceTable {
 
 fn unavailable_se_fixed_effect_inference_table() -> FixedEffectInferenceTable {
     FixedEffectInferenceTable::new(vec![FixedEffectInferenceRow {
+        covariance_method: mixeff_rs::stats::InferenceCovarianceMethod::Unavailable,
         label: "x".to_string(),
         kind: FixedEffectInferenceRowKind::Coefficient,
         estimate: Some(1.0),
@@ -1237,9 +1238,14 @@ fn rank_mixture_audit_report_matches_wire_fixture() {
         .as_str()
         .unwrap()
         .contains("inspect Effective Covariance"));
-    assert_eq!(optimizer["lines"][12]["label"], "convergence verification");
+    let verification = optimizer["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|line| line["label"] == "convergence verification")
+        .expect("verification must remain visible alongside incomplete derivative checks");
     assert!(
-        ["warning", "error"].contains(&optimizer["lines"][12]["status"].as_str().unwrap()),
+        ["warning", "error"].contains(&verification["status"].as_str().unwrap()),
         "rank_mixture convergence verification should remain visibly non-ok"
     );
     assert_wire_fixture(

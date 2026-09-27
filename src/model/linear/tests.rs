@@ -7144,3 +7144,76 @@ fn type_i_sequences_terms_by_interaction_order() {
         }
     }
 }
+
+#[test]
+fn inference_covariance_provenance_survives_tables_and_legacy_json() {
+    use crate::stats::InferenceCovarianceMethod as Cov;
+    let data = sleepstudy_fixture();
+    let formula = parse_formula("reaction ~ 1 + days + (days | subj)").unwrap();
+    let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+    model.fit(true).unwrap();
+    let hypothesis = FixedEffectHypothesis::single_coefficient("days", 1, 2).unwrap();
+    let ordinary = model.fixed_effect_contrast_inference_table(
+        vec![hypothesis.clone()],
+        FixedEffectTestMethod::Satterthwaite,
+    );
+    assert_eq!(ordinary.rows[0].covariance_method, Cov::ModelBased);
+    let kr = model.fixed_effect_contrast_inference_table(
+        vec![hypothesis.clone()],
+        FixedEffectTestMethod::KenwardRoger,
+    );
+    assert_eq!(
+        kr.rows[0].status,
+        crate::compiler::FixedEffectInferenceStatus::Available
+    );
+    assert_eq!(kr.rows[0].covariance_method, Cov::KenwardRogerAdjusted);
+    let adjusted = model.kenward_roger_adjusted_vcov().unwrap();
+    assert_relative_eq!(
+        kr.rows[0].std_error.unwrap().powi(2),
+        adjusted.adjusted_vcov[(1, 1)],
+        epsilon = 1e-9
+    );
+    let terms = model.fixed_effect_term_inference_table(FixedEffectTestMethod::KenwardRoger);
+    assert!(terms
+        .rows
+        .iter()
+        .all(|row| row.covariance_method == Cov::KenwardRogerAdjusted));
+    let coefficients = model.coeftable_with_method(FixedEffectTestMethod::KenwardRoger);
+    assert!(coefficients
+        .covariance_methods
+        .iter()
+        .all(|method| *method == Cov::KenwardRogerAdjusted));
+    assert!(coefficients.to_string().contains("kenward_roger_adjusted"));
+    assert!(crate::stats::coeftable_to_markdown(&coefficients).contains("kenward_roger_adjusted"));
+    let mut legacy = serde_json::to_value(&ordinary).unwrap();
+    legacy["schema_version"] = serde_json::json!("1.1.0");
+    legacy["rows"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("covariance_method");
+    let decoded: crate::compiler::FixedEffectInferenceTable =
+        serde_json::from_value(legacy).unwrap();
+    assert_eq!(decoded.rows[0].covariance_method, Cov::NotRecorded);
+    let summary = crate::stats::FitSummaryPayload::from_linear_model(&model);
+    assert_eq!(summary.coefficients.covariance_method(0), Cov::ModelBased);
+    assert_eq!(summary.summary.rows[0].covariance_method, Cov::ModelBased);
+    assert!(summary
+        .summary
+        .to_markdown()
+        .contains("Covariance: model_based"));
+
+    // A rejected KR request retains ordinary SEs: do not label them adjusted.
+    let formula = parse_formula("reaction ~ 1 + days + (days | subj)").unwrap();
+    let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+    model.fit(false).unwrap();
+    let refused = model.fixed_effect_contrast_inference_table(
+        vec![hypothesis],
+        FixedEffectTestMethod::KenwardRoger,
+    );
+    assert_eq!(
+        refused.rows[0].status,
+        crate::compiler::FixedEffectInferenceStatus::NotAssessed
+    );
+    assert_eq!(refused.rows[0].covariance_method, Cov::ModelBased);
+    assert!(refused.rows[0].std_error.is_some());
+}

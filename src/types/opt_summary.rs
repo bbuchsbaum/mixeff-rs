@@ -131,8 +131,9 @@ pub struct FitLogEntry {
 #[non_exhaustive]
 pub enum ConvergenceStatus {
     /// Stopped at a genuine convergence criterion (objective/parameter
-    /// tolerance, trust radius, or target value reached). The returned
-    /// parameters are a verified local optimum to the requested tolerance.
+    /// tolerance, trust radius, or target value reached). This classifies
+    /// optimizer termination only; stationarity, curvature, numerical stability,
+    /// and scientific adequacy require their own evidence.
     Converged,
     /// An evaluation/time/iteration budget was hit before a convergence
     /// criterion. The returned parameters are the best seen so far but are

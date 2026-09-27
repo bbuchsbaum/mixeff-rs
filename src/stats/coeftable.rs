@@ -11,6 +11,41 @@ use statrs::distribution::{ContinuousCDF, Normal};
 
 use crate::stats::profile::ConfintRow;
 
+/// Covariance actually used for an inferential row's SE or test statistic.
+/// This is independent of the requested inference method or its availability.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum InferenceCovarianceMethod {
+    /// Gaussian LMM fixed-effect covariance, optionally projected to a contrast.
+    ModelBased,
+    /// Kenward-Roger adjusted fixed-effect covariance.
+    KenwardRogerAdjusted,
+    /// GLMM joint Laplace Hessian over beta and interior covariance parameters;
+    /// covariance parameters fixed at their boundary are excluded.
+    JointLaplaceActiveHessian,
+    /// No covariance was used to produce inference for this row.
+    Unavailable,
+    /// This row has no fixed-effect inference (e.g. a residual-scale summary).
+    NotApplicable,
+    /// Legacy or caller-constructed output supplied no covariance provenance.
+    #[default]
+    NotRecorded,
+}
+
+impl InferenceCovarianceMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ModelBased => "model_based",
+            Self::KenwardRogerAdjusted => "kenward_roger_adjusted",
+            Self::JointLaplaceActiveHessian => "joint_laplace_active_hessian",
+            Self::Unavailable => "unavailable",
+            Self::NotApplicable => "not_applicable",
+            Self::NotRecorded => "not_recorded",
+        }
+    }
+}
+
 /// Policy for fixed-effect coefficient p-values in [`CoefTable`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -63,6 +98,10 @@ pub struct CoefTable {
     /// Per-row denominator degrees of freedom. `None` for asymptotic
     /// methods (Wald-z); `Some(df)` for Satterthwaite/Kenward-Roger.
     pub df: Vec<Option<f64>>,
+    /// Actual covariance source, aligned with `names`. Legacy missing entries
+    /// are explicitly `NotRecorded` through `covariance_method`.
+    #[serde(default)]
+    pub covariance_methods: Vec<InferenceCovarianceMethod>,
 }
 
 impl CoefTable {
@@ -138,6 +177,7 @@ impl CoefTable {
 
         let df = vec![None; n];
         CoefTable {
+            covariance_methods: vec![InferenceCovarianceMethod::NotRecorded; n],
             names,
             estimates,
             std_errors,
@@ -174,6 +214,7 @@ impl CoefTable {
         debug_assert_eq!(p_value_reasons.len(), n);
         debug_assert_eq!(df.len(), n);
         CoefTable {
+            covariance_methods: vec![InferenceCovarianceMethod::NotRecorded; n],
             names,
             estimates,
             std_errors,
@@ -184,6 +225,31 @@ impl CoefTable {
             method: method.into(),
             df,
         }
+    }
+
+    /// Actual covariance source for one row; never infer it from the method label.
+    pub fn covariance_method(&self, row: usize) -> InferenceCovarianceMethod {
+        self.covariance_methods
+            .get(row)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn with_covariance_method(mut self, method: InferenceCovarianceMethod) -> Self {
+        self.covariance_methods = vec![method; self.len()];
+        self
+    }
+
+    pub(crate) fn covariance_label(&self) -> String {
+        if (0..self.len()).all(|i| self.covariance_method(i) == self.covariance_method(0)) {
+            return self.covariance_method(0).as_str().to_string();
+        }
+        self.names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| format!("{name}={}", self.covariance_method(i).as_str()))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// Number of rows (fixed-effects terms).
@@ -246,6 +312,7 @@ impl fmt::Display for CoefTable {
         let stat_col = format!("{stat} value");
         let p_col = format!("Pr(>|{stat}|)");
         writeln!(f, "Method: {}", self.method)?;
+        writeln!(f, "Covariance: {}", self.covariance_label())?;
         writeln!(
             f,
             "{:<20} {:>12} {:>12} {:>10} {:>10} {:>12}",
@@ -278,6 +345,7 @@ pub fn coeftable_to_markdown(ct: &CoefTable) -> String {
     let stat = &ct.statistic_name;
     let mut out = String::new();
     out.push_str(&format!("*Method: {}*\n\n", ct.method));
+    out.push_str(&format!("*Covariance: {}*\n\n", ct.covariance_label()));
     out.push_str(&format!(
         "| Name | Estimate | Std.Error | df | {stat} | Pr(>|{stat}|) |\n"
     ));
@@ -443,5 +511,21 @@ mod tests {
         );
         let p = ct.p_values[0];
         assert!(p < 1e-10, "p-value should be near 0, got {}", p);
+    }
+    #[test]
+    fn caller_and_legacy_tables_do_not_guess_covariance_provenance() {
+        let table = CoefTable::new(vec!["x".to_string()], vec![1.0], vec![0.5]);
+        assert_eq!(
+            table.covariance_method(0),
+            InferenceCovarianceMethod::NotRecorded
+        );
+        let mut legacy = serde_json::to_value(&table).unwrap();
+        legacy.as_object_mut().unwrap().remove("covariance_methods");
+        let decoded: CoefTable = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            decoded.covariance_method(0),
+            InferenceCovarianceMethod::NotRecorded
+        );
+        assert!(coeftable_to_markdown(&decoded).contains("not_recorded"));
     }
 }

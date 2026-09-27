@@ -50,11 +50,12 @@ pub use audit::{
     DesignAudit, EmptyCellAudit, EstimatorSubstitution, EvidenceMethod, EvidenceQuality, FitAudit,
     FixedEffectAudit, FixedEffectColumnAudit, FixedEffectColumnKind, FixedEffectTermAudit,
     FixedEffectTermStatus, GradientEvidence, GroupingAudit, HessianEvidence,
-    InformationBudgetStatus, MissingDependencePathAudit, NewtonDecrementEstimate,
-    NewtonDecrementEvidence, NewtonDecrementExclusion, NewtonDecrementVariant,
-    NewtonDecrementVerdict, OptimizerCertificate, OptimizerDerivativeEvidence,
-    OptimizerStopEvidence, ParameterSpaceEvidence, RandomEffectEffectiveNReport,
-    RandomEffectInformationBudget, RandomTermAudit, RankAssessment, RankStatus, SampleSizeContext,
+    IncompleteCheckEvidence, IncompleteCheckStatus, InformationBudgetStatus,
+    MissingDependencePathAudit, NewtonDecrementEstimate, NewtonDecrementEvidence,
+    NewtonDecrementExclusion, NewtonDecrementVariant, NewtonDecrementVerdict, OptimizerCertificate,
+    OptimizerDerivativeEvidence, OptimizerStopEvidence, ParameterSpaceEvidence,
+    RandomEffectEffectiveNReport, RandomEffectInformationBudget, RandomTermAudit, RankAssessment,
+    RankStatus, SampleSizeContext,
 };
 pub use diagnostics::{Diagnostic, DiagnosticCode, DiagnosticSeverity, DiagnosticStage, FitStatus};
 pub use estimability::{

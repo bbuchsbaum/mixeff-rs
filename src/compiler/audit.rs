@@ -4327,6 +4327,10 @@ pub enum CertificateCheck {
     NotAssessed {
         reason: String,
     },
+    /// A check without a numerical verdict. This never means a passed check.
+    Incomplete {
+        evidence: IncompleteCheckEvidence,
+    },
     DerivativeMismatch {
         kind: String,
         observed: Option<f64>,
@@ -4338,6 +4342,49 @@ pub enum CertificateCheck {
         code: String,
         message: String,
     },
+}
+
+/// Why a check has no numerical verdict, independently of optimizer stopping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncompleteCheckStatus {
+    NotAssessed,
+    Skipped,
+    Unavailable,
+    Deferred,
+    TimedOut,
+}
+
+/// Execution evidence supplied by the engine or the host running an audit.
+/// A timeout must come from an observed attempt, never from an absent result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IncompleteCheckEvidence {
+    pub check_name: String,
+    pub status: IncompleteCheckStatus,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elapsed_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_seconds: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<String>,
+}
+
+impl IncompleteCheckEvidence {
+    pub fn new(
+        check_name: impl Into<String>,
+        status: IncompleteCheckStatus,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            check_name: check_name.into(),
+            status,
+            reason: reason.into(),
+            elapsed_seconds: None,
+            budget_seconds: None,
+            receipt: None,
+        }
+    }
 }
 
 impl OptimizerCertificate {
@@ -4621,6 +4668,11 @@ impl OptimizerCertificate {
             return;
         }
 
+        self.mark_derivative_checks_incomplete(IncompleteCheckEvidence::new(
+            "derivative_inspection",
+            IncompleteCheckStatus::Unavailable,
+            "new derivative evidence has not passed dimensional validation",
+        ));
         let n_theta = self.evidence.parameter_space.n_theta;
         if derivatives.gradient.len() != n_theta {
             self.checks.push(CertificateCheck::DerivativeMismatch {
@@ -4633,7 +4685,7 @@ impl OptimizerCertificate {
                     derivatives.gradient.len()
                 ),
             });
-            self.evidence.certification_quality = EvidenceQuality::Approximate {
+            self.evidence.certification_quality = EvidenceQuality::Unavailable {
                 reason: "derivative certificate dimensions did not match theta".to_string(),
             };
             return;
@@ -4838,7 +4890,13 @@ impl OptimizerCertificate {
                     condition_number: None,
                     rank: None,
                 };
-                self.checks.push(CertificateCheck::NotAssessed { reason });
+                self.checks.push(CertificateCheck::Incomplete {
+                    evidence: IncompleteCheckEvidence::new(
+                        "active_subspace_hessian_psd",
+                        IncompleteCheckStatus::Unavailable,
+                        reason,
+                    ),
+                });
             }
         }
 
@@ -4851,7 +4909,12 @@ impl OptimizerCertificate {
         } else {
             &derivatives.hessian_method
         };
-        self.evidence.certification_quality = if failures.is_empty() {
+        self.evidence.certification_quality = if matches!(
+            self.evidence.hessian.quality,
+            EvidenceQuality::Unavailable { .. }
+        ) {
+            EvidenceQuality::Unavailable { reason: "Hessian evidence unavailable; gradient checks alone do not complete derivative certification".to_string() }
+        } else if failures.is_empty() {
             approximate_or_certified_quality(
                 certifying_method,
                 if gradient_exact {
@@ -4895,22 +4958,43 @@ impl OptimizerCertificate {
         }
     }
 
+    /// Record genuinely unassessed evidence without calling it a deliberate skip.
     pub fn mark_derivative_checks_not_assessed(&mut self, reason: impl Into<String>) {
-        let reason = reason.into();
-        remove_derivative_not_assessed_checks(&mut self.checks);
-        self.checks.push(CertificateCheck::NotAssessed {
-            reason: format!("free-gradient KKT check skipped: {reason}"),
-        });
-        self.checks.push(CertificateCheck::NotAssessed {
-            reason: format!("projected boundary-gradient KKT check skipped: {reason}"),
-        });
-        self.checks.push(CertificateCheck::NotAssessed {
-            reason: format!("active-subspace Hessian check skipped: {reason}"),
-        });
-        self.evidence.gradient = GradientEvidence {
-            method: EvidenceMethod::NotAssessed {
+        self.mark_derivative_checks_incomplete(IncompleteCheckEvidence::new(
+            "derivative_inspection",
+            IncompleteCheckStatus::NotAssessed,
+            reason,
+        ));
+    }
+
+    /// Replace derivative evidence with an explicit incomplete execution outcome.
+    /// The optimizer stop and boundary classification are preserved. The host may
+    /// attach elapsed time, budget and an attempt receipt when an audit times out.
+    pub fn mark_derivative_checks_incomplete(&mut self, mut evidence: IncompleteCheckEvidence) {
+        remove_derivative_checks(&mut self.checks);
+        evidence.check_name = "derivative_inspection".to_string();
+        let unavailable = matches!(
+            evidence.status,
+            IncompleteCheckStatus::Unavailable | IncompleteCheckStatus::TimedOut
+        );
+        let reason = evidence.reason.clone();
+        let method = if unavailable {
+            EvidenceMethod::NotAvailable {
                 reason: reason.clone(),
-            },
+            }
+        } else {
+            EvidenceMethod::NotAssessed {
+                reason: reason.clone(),
+            }
+        };
+        self.stationarity_decrement = None;
+        self.free_gradient_norm = None;
+        self.projected_gradient_norm = None;
+        self.hessian_eigen_min = None;
+        self.hessian_rank = None;
+        self.information_rank = None;
+        self.evidence.gradient = GradientEvidence {
+            method: method.clone(),
             raw_gradient_norm: None,
             scaled_gradient_norm: None,
             free_gradient_norm: None,
@@ -4918,23 +5002,22 @@ impl OptimizerCertificate {
             kkt_boundary_gradient_max: None,
         };
         self.evidence.hessian = HessianEvidence {
-            method: EvidenceMethod::NotAssessed {
-                reason: reason.clone(),
-            },
-            quality: EvidenceQuality::NotAssessed {
-                reason: reason.clone(),
+            method,
+            quality: if unavailable {
+                EvidenceQuality::Unavailable {
+                    reason: reason.clone(),
+                }
+            } else {
+                EvidenceQuality::NotAssessed {
+                    reason: reason.clone(),
+                }
             },
             min_eigenvalue: None,
             condition_number: None,
             rank: None,
         };
-        if self.evidence.optimizer_stop.acceptable_stop {
-            self.evidence.certification_quality = EvidenceQuality::Approximate {
-                reason: format!(
-                    "optimizer stop accepted; derivative KKT/Hessian inspection skipped: {reason}"
-                ),
-            };
-        }
+        self.evidence.certification_quality = EvidenceQuality::NotAssessed { reason };
+        self.checks.push(CertificateCheck::Incomplete { evidence });
     }
 
     /// Populate gradient and curvature evidence from a passing profiled
@@ -5223,12 +5306,39 @@ fn boundary_parameter_indices(
 
 fn remove_derivative_not_assessed_checks(checks: &mut Vec<CertificateCheck>) {
     checks.retain(|check| match check {
+        CertificateCheck::Incomplete { evidence } => !is_derivative_check(&evidence.check_name),
         CertificateCheck::NotAssessed { reason } => {
             !(reason.contains("gradient")
                 || reason.contains("Hessian")
                 || reason.contains("derivative"))
         }
         _ => true,
+    });
+}
+
+fn is_derivative_check(name: &str) -> bool {
+    matches!(
+        name,
+        "derivative_inspection"
+            | "free_gradient_kkt"
+            | "boundary_gradient_kkt"
+            | "active_subspace_hessian_psd"
+            | "active_subspace_hessian_rank"
+    )
+}
+
+fn remove_derivative_checks(checks: &mut Vec<CertificateCheck>) {
+    remove_derivative_not_assessed_checks(checks);
+    checks.retain(|check| {
+        !matches!(check, CertificateCheck::Failed { code, .. } if code == "profiled_optimum")
+            && !matches!(
+                check,
+                CertificateCheck::FreeGradientOk { .. }
+                    | CertificateCheck::BoundaryGradientOk { .. }
+                    | CertificateCheck::HessianPsdOnActiveSubspace { .. }
+                    | CertificateCheck::RankOk { .. }
+                    | CertificateCheck::DerivativeMismatch { .. }
+            )
     });
 }
 

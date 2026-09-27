@@ -1593,7 +1593,13 @@ fn optimizer_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
     let not_assessed = certificate
         .checks
         .iter()
-        .filter(|check| matches!(check, super::audit::CertificateCheck::NotAssessed { .. }))
+        .filter(|check| {
+            matches!(
+                check,
+                super::audit::CertificateCheck::NotAssessed { .. }
+                    | super::audit::CertificateCheck::Incomplete { .. }
+            )
+        })
         .count();
     let failed = certificate
         .checks
@@ -1618,13 +1624,22 @@ fn optimizer_section(artifact: &CompiledModelArtifact) -> AuditReportSection {
             AuditReportStatus::Warning
         } else if mismatched > 0 {
             AuditReportStatus::Info
-        } else if not_assessed == 0 {
+        } else if not_assessed == 0 && !certificate.checks.is_empty() {
             AuditReportStatus::Ok
         } else {
             AuditReportStatus::NotAssessed
         },
         detail: format!("{failed} failed; {mismatched} mismatch; {not_assessed} not assessed"),
     });
+    for check in &certificate.checks {
+        if let super::audit::CertificateCheck::Incomplete { evidence } = check {
+            lines.push(AuditReportLine {
+                label: evidence.check_name.clone(),
+                status: AuditReportStatus::NotAssessed,
+                detail: incomplete_check_detail(evidence),
+            });
+        }
+    }
     lines.push(convergence_verification_line(certificate));
 
     dedup_boundary_skip_reason(certificate, &mut lines);
@@ -1728,6 +1743,8 @@ pub struct ConvergenceVerdictEvidence {
     pub status: ConvergenceTestStatus,
     pub detail: String,
     pub doc_anchor: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<super::audit::IncompleteCheckEvidence>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1769,6 +1786,9 @@ pub enum ConvergenceTestStatus {
     Passed,
     Failed,
     Skipped,
+    Unavailable,
+    Deferred,
+    TimedOut,
     NotAssessed,
     Informational,
 }
@@ -1780,6 +1800,9 @@ pub enum ConvergenceNextAction {
     IncreaseBudgetOrAlternateOptimizer,
     VerifyConvergence,
     GateInferenceOnDerivativeEvidence,
+    RetryTimedOutCheck,
+    CompleteDeferredCheck,
+    InspectUnavailableCheck,
     GateWeakIdentification,
     RescaleOrSimplifyRandomEffects,
     InspectEffectiveCovariance,
@@ -1838,6 +1861,7 @@ impl ConvergenceVerdict {
             source: ConvergenceSource::NotAssessed,
             headline: "model is not fitted".to_string(),
             evidence: vec![ConvergenceVerdictEvidence {
+                execution: None,
                 test_name: "fit_state".to_string(),
                 observed: None,
                 threshold: None,
@@ -1970,6 +1994,9 @@ enum NextActionKind {
     SuggestVerify,
     /// "gate inference on derivative-backed or finite-difference stationarity evidence"
     GateInferenceOnDerivative,
+    RetryTimedOutCheck,
+    CompleteDeferredCheck,
+    InspectUnavailableCheck,
     /// "gate weak-identification claims until Hessian evidence is available"
     GateWeakIdentification,
     /// "consider scaling predictors, simplifying the random-effects structure, or collecting more grouping levels"
@@ -1992,8 +2019,11 @@ impl NextActionKind {
                 "verify convergence to compare restart and alternate-optimizer agreement (verify_convergence, where the host exposes it)"
             }
             NextActionKind::GateInferenceOnDerivative => {
-                "gate inference on derivative-backed or finite-difference stationarity evidence"
+                "inspect the recorded covariance method and complete missing numerical checks; incomplete evidence does not establish invalid standard errors"
             }
+            NextActionKind::RetryTimedOutCheck => "inspect the audit receipt and retry the timed-out check with an explicit budget; optimizer termination is a separate result",
+            NextActionKind::CompleteDeferredCheck => "inspect the model to complete its deferred numerical checks",
+            NextActionKind::InspectUnavailableCheck => "inspect why derivative evidence is unavailable and assess stability with supported checks or refits",
             NextActionKind::GateWeakIdentification => {
                 "gate weak-identification claims until Hessian evidence is available"
             }
@@ -2020,6 +2050,9 @@ impl NextActionKind {
             NextActionKind::BudgetOrAlternate
                 | NextActionKind::SuggestVerify
                 | NextActionKind::GateInferenceOnDerivative
+                | NextActionKind::RetryTimedOutCheck
+                | NextActionKind::CompleteDeferredCheck
+                | NextActionKind::InspectUnavailableCheck
         )
     }
 
@@ -2035,6 +2068,9 @@ impl NextActionKind {
     fn priority(self) -> u8 {
         match self {
             NextActionKind::BudgetOrAlternate => 0,
+            NextActionKind::RetryTimedOutCheck
+            | NextActionKind::CompleteDeferredCheck
+            | NextActionKind::InspectUnavailableCheck => 0,
             NextActionKind::InspectEffectiveCovariance => 1,
             NextActionKind::SuggestVerify => 2,
             NextActionKind::GateInferenceOnDerivative => 3,
@@ -2051,6 +2087,11 @@ impl From<NextActionKind> for ConvergenceNextAction {
         match value {
             NextActionKind::BudgetOrAlternate => {
                 ConvergenceNextAction::IncreaseBudgetOrAlternateOptimizer
+            }
+            NextActionKind::RetryTimedOutCheck => ConvergenceNextAction::RetryTimedOutCheck,
+            NextActionKind::CompleteDeferredCheck => ConvergenceNextAction::CompleteDeferredCheck,
+            NextActionKind::InspectUnavailableCheck => {
+                ConvergenceNextAction::InspectUnavailableCheck
             }
             NextActionKind::SuggestVerify => ConvergenceNextAction::VerifyConvergence,
             NextActionKind::GateInferenceOnDerivative => {
@@ -2146,18 +2187,43 @@ fn optimizer_summary(
             | super::audit::EvidenceMethod::NotAssessed { .. }
     ) {
         bump(&mut level, ConvergenceLevel::Caution);
-        let regime = convergence_regime(certificate, derivative_nparmax);
-        if matches!(
-            certificate.evidence.gradient.method,
-            super::audit::EvidenceMethod::NotAssessed { .. }
-        ) && matches!(
-            regime,
-            ConvergenceRegime::BoundaryTheta | ConvergenceRegime::LargeTheta
-        ) {
-            clauses.push("derivative inspection skipped by regime".to_string());
-        } else {
-            clauses.push("derivative inspection not assessed".to_string());
+        if !certificate
+            .checks
+            .iter()
+            .any(|c| matches!(c, super::audit::CertificateCheck::Incomplete { .. }))
+        {
+            clauses.push(
+                match certificate.evidence.gradient.method {
+                    super::audit::EvidenceMethod::NotAvailable { .. } => {
+                        "derivative evidence unavailable"
+                    }
+                    _ => "derivative inspection not assessed",
+                }
+                .to_string(),
+            );
             actions.push(NextActionKind::GateInferenceOnDerivative);
+        }
+    }
+    for check in &certificate.checks {
+        if let super::audit::CertificateCheck::Incomplete { evidence } = check {
+            bump(&mut level, ConvergenceLevel::Caution);
+            clauses.push(format!(
+                "{} {}",
+                evidence.check_name,
+                incomplete_status_label(evidence.status)
+            ));
+            match evidence.status {
+                super::audit::IncompleteCheckStatus::TimedOut => {
+                    actions.push(NextActionKind::RetryTimedOutCheck)
+                }
+                super::audit::IncompleteCheckStatus::Deferred => {
+                    actions.push(NextActionKind::CompleteDeferredCheck)
+                }
+                super::audit::IncompleteCheckStatus::Unavailable => {
+                    actions.push(NextActionKind::InspectUnavailableCheck)
+                }
+                _ => {}
+            }
         }
     }
     if has_derivative_mismatch(certificate) {
@@ -2241,17 +2307,48 @@ fn optimizer_summary(
     }
 }
 
+fn incomplete_status_label(status: super::audit::IncompleteCheckStatus) -> &'static str {
+    match status {
+        super::audit::IncompleteCheckStatus::NotAssessed => "not assessed",
+        super::audit::IncompleteCheckStatus::Skipped => "skipped",
+        super::audit::IncompleteCheckStatus::Unavailable => "unavailable",
+        super::audit::IncompleteCheckStatus::Deferred => "deferred",
+        super::audit::IncompleteCheckStatus::TimedOut => "timed out",
+    }
+}
+
+fn incomplete_check_detail(evidence: &super::audit::IncompleteCheckEvidence) -> String {
+    let mut detail = format!(
+        "{}: {}",
+        incomplete_status_label(evidence.status),
+        evidence.reason
+    );
+    if let Some(seconds) = evidence.elapsed_seconds {
+        detail.push_str(&format!("; elapsed={seconds}s"));
+    }
+    if let Some(seconds) = evidence.budget_seconds {
+        detail.push_str(&format!("; budget={seconds}s"));
+    }
+    if let Some(receipt) = &evidence.receipt {
+        detail.push_str(&format!("; receipt={receipt}"));
+    }
+    detail
+}
+
 fn optimizer_verdict_evidence(
     certificate: &super::audit::OptimizerCertificate,
     derivative_nparmax: usize,
 ) -> Vec<ConvergenceVerdictEvidence> {
     let mut evidence = Vec::new();
     evidence.push(ConvergenceVerdictEvidence {
+        execution: None,
         test_name: "optimizer_stop".to_string(),
         observed: None,
         threshold: None,
         regime: ConvergenceRegime::OptimizerStop,
-        status: if certificate.evidence.optimizer_stop.acceptable_stop {
+        status: if certificate.evidence.optimizer_stop.return_code.is_none() {
+            ConvergenceTestStatus::NotAssessed
+        } else if certificate.evidence.optimizer_stop.acceptable_stop {
             ConvergenceTestStatus::Passed
         } else {
             ConvergenceTestStatus::Failed
@@ -2261,6 +2358,7 @@ fn optimizer_verdict_evidence(
     });
 
     evidence.push(ConvergenceVerdictEvidence {
+        execution: None,
         test_name: "theta_regime".to_string(),
         observed: Some(certificate.evidence.parameter_space.n_theta as f64),
         threshold: Some(derivative_nparmax as f64),
@@ -2274,6 +2372,7 @@ fn optimizer_verdict_evidence(
         match check {
             super::audit::CertificateCheck::FreeGradientOk { tolerance, value } => {
                 evidence.push(ConvergenceVerdictEvidence {
+                    execution: None,
                     test_name: "free_gradient_kkt".to_string(),
                     observed: Some(*value),
                     threshold: Some(*tolerance),
@@ -2285,6 +2384,7 @@ fn optimizer_verdict_evidence(
             }
             super::audit::CertificateCheck::BoundaryGradientOk { tolerance, value } => {
                 evidence.push(ConvergenceVerdictEvidence {
+                    execution: None,
                     test_name: "boundary_gradient_kkt".to_string(),
                     observed: Some(*value),
                     threshold: Some(*tolerance),
@@ -2298,6 +2398,7 @@ fn optimizer_verdict_evidence(
             }
             super::audit::CertificateCheck::HessianPsdOnActiveSubspace { min_eigenvalue } => {
                 evidence.push(ConvergenceVerdictEvidence {
+                    execution: None,
                     test_name: "active_subspace_hessian_psd".to_string(),
                     observed: Some(*min_eigenvalue),
                     threshold: Some(0.0),
@@ -2311,6 +2412,7 @@ fn optimizer_verdict_evidence(
             }
             super::audit::CertificateCheck::RankOk { rank, expected } => {
                 evidence.push(ConvergenceVerdictEvidence {
+                    execution: None,
                     test_name: "active_subspace_hessian_rank".to_string(),
                     observed: Some(*rank as f64),
                     threshold: Some(*expected as f64),
@@ -2322,13 +2424,44 @@ fn optimizer_verdict_evidence(
             }
             super::audit::CertificateCheck::NotAssessed { reason } => {
                 evidence.push(ConvergenceVerdictEvidence {
+                    execution: None,
                     test_name: not_assessed_test_name(reason).to_string(),
                     observed: skipped_observed(certificate, reason),
                     threshold: skipped_threshold(derivative_nparmax, reason),
                     regime: skipped_regime(certificate, derivative_nparmax, reason),
-                    status: ConvergenceTestStatus::Skipped,
+                    status: ConvergenceTestStatus::NotAssessed,
                     detail: reason.clone(),
                     doc_anchor: skipped_doc_anchor(reason).to_string(),
+                });
+            }
+            super::audit::CertificateCheck::Incomplete {
+                evidence: incomplete,
+            } => {
+                evidence.push(ConvergenceVerdictEvidence {
+                    test_name: incomplete.check_name.clone(),
+                    observed: None,
+                    threshold: None,
+                    regime: convergence_regime(certificate, derivative_nparmax),
+                    status: match incomplete.status {
+                        super::audit::IncompleteCheckStatus::NotAssessed => {
+                            ConvergenceTestStatus::NotAssessed
+                        }
+                        super::audit::IncompleteCheckStatus::Skipped => {
+                            ConvergenceTestStatus::Skipped
+                        }
+                        super::audit::IncompleteCheckStatus::Unavailable => {
+                            ConvergenceTestStatus::Unavailable
+                        }
+                        super::audit::IncompleteCheckStatus::Deferred => {
+                            ConvergenceTestStatus::Deferred
+                        }
+                        super::audit::IncompleteCheckStatus::TimedOut => {
+                            ConvergenceTestStatus::TimedOut
+                        }
+                    },
+                    detail: incomplete_check_detail(incomplete),
+                    doc_anchor: "docs/compiler_verdicts.md#derivative-inspection".to_string(),
+                    execution: Some(incomplete.clone()),
                 });
             }
             super::audit::CertificateCheck::DerivativeMismatch {
@@ -2339,6 +2472,7 @@ fn optimizer_verdict_evidence(
                 message,
             } => {
                 evidence.push(ConvergenceVerdictEvidence {
+                    execution: None,
                     test_name: kind.clone(),
                     observed: *observed,
                     threshold: *tolerance,
@@ -2352,6 +2486,7 @@ fn optimizer_verdict_evidence(
             }
             super::audit::CertificateCheck::Failed { code, message } => {
                 evidence.push(ConvergenceVerdictEvidence {
+                    execution: None,
                     test_name: code.clone(),
                     observed: failed_check_observed(certificate, code),
                     threshold: None,
@@ -2372,6 +2507,7 @@ fn optimizer_verdict_evidence(
 
     if let Some(verification) = &certificate.verification {
         evidence.push(ConvergenceVerdictEvidence {
+            execution: None,
             test_name: "convergence_verification".to_string(),
             observed: Some(verification.runs.iter().filter(|run| run.agrees).count() as f64),
             threshold: Some(verification.runs.len() as f64),
@@ -2707,6 +2843,7 @@ fn structural_verdict_evidence(findings: &[StructuralFinding]) -> Vec<Convergenc
     findings
         .iter()
         .map(|finding| ConvergenceVerdictEvidence {
+            execution: None,
             test_name: "structural_design".to_string(),
             observed: None,
             threshold: None,
@@ -3019,6 +3156,23 @@ fn convergence_next_steps_line(
                 kinds.push(NextActionKind::CompareVerificationRuns);
             }
             super::audit::ConvergenceVerificationStatus::NotRun => {}
+        }
+    }
+
+    for check in &certificate.checks {
+        if let super::audit::CertificateCheck::Incomplete { evidence } = check {
+            match evidence.status {
+                super::audit::IncompleteCheckStatus::TimedOut => {
+                    kinds.push(NextActionKind::RetryTimedOutCheck)
+                }
+                super::audit::IncompleteCheckStatus::Deferred => {
+                    kinds.push(NextActionKind::CompleteDeferredCheck)
+                }
+                super::audit::IncompleteCheckStatus::Unavailable => {
+                    kinds.push(NextActionKind::InspectUnavailableCheck)
+                }
+                _ => {}
+            }
         }
     }
 
@@ -4087,6 +4241,15 @@ mod tests {
         cert.evidence.hessian.method = EvidenceMethod::Exact;
         cert.evidence.hessian.quality = EvidenceQuality::Certified;
         cert.evidence.certification_quality = EvidenceQuality::Certified;
+        cert.checks = vec![
+            crate::compiler::CertificateCheck::FreeGradientOk {
+                tolerance: 1e-4,
+                value: 0.0,
+            },
+            crate::compiler::CertificateCheck::HessianPsdOnActiveSubspace {
+                min_eigenvalue: 1.0,
+            },
+        ];
         cert
     }
 
@@ -4531,5 +4694,150 @@ mod tests {
         // and the boundary/reduced-rank hint must be present.
         assert!(line.detail.contains("Effective Covariance"));
         assert!(line.detail.contains("verify_convergence"));
+    }
+    #[test]
+    fn incomplete_checks_preserve_execution_state_and_optimizer_success() {
+        use crate::compiler::{IncompleteCheckEvidence, IncompleteCheckStatus};
+        for (status, expected) in [
+            (
+                IncompleteCheckStatus::NotAssessed,
+                ConvergenceTestStatus::NotAssessed,
+            ),
+            (
+                IncompleteCheckStatus::Skipped,
+                ConvergenceTestStatus::Skipped,
+            ),
+            (
+                IncompleteCheckStatus::Unavailable,
+                ConvergenceTestStatus::Unavailable,
+            ),
+            (
+                IncompleteCheckStatus::Deferred,
+                ConvergenceTestStatus::Deferred,
+            ),
+            (
+                IncompleteCheckStatus::TimedOut,
+                ConvergenceTestStatus::TimedOut,
+            ),
+        ] {
+            let mut artifact = fitted_artifact_with_boundary(ModelBoundary::lmm());
+            let cert = artifact.optimizer_certificate.as_mut().unwrap();
+            cert.status = FitStatus::ConvergedBoundary;
+            cert.checks
+                .push(crate::compiler::CertificateCheck::FreeGradientOk {
+                    tolerance: 1e-4,
+                    value: 0.0,
+                });
+            let mut execution = IncompleteCheckEvidence::new(
+                "derivative_inspection",
+                status,
+                "audit evidence incomplete",
+            );
+            if status == IncompleteCheckStatus::TimedOut {
+                execution.elapsed_seconds = Some(900.0);
+                execution.budget_seconds = Some(900.0);
+                execution.receipt = Some("audit-attempt-1.json".to_string());
+            }
+            cert.mark_derivative_checks_incomplete(execution.clone());
+            let encoded = serde_json::to_string(cert).unwrap();
+            let decoded: OptimizerCertificate = serde_json::from_str(&encoded).unwrap();
+            let verdict = ConvergenceVerdict::compose(&decoded, &[]);
+            assert_eq!(decoded.status, FitStatus::ConvergedBoundary);
+            assert!(decoded.evidence.optimizer_stop.acceptable_stop);
+            assert!(decoded.free_gradient_norm.is_none());
+            assert!(verdict
+                .evidence
+                .iter()
+                .any(|e| e.test_name == "optimizer_stop"
+                    && e.status == ConvergenceTestStatus::Passed));
+            let check = verdict
+                .evidence
+                .iter()
+                .find(|e| e.test_name == "derivative_inspection")
+                .unwrap();
+            assert_eq!(check.status, expected);
+            assert_eq!(check.execution.as_ref(), Some(&execution));
+            assert!(!verdict
+                .evidence
+                .iter()
+                .any(|e| e.test_name == "free_gradient_kkt"
+                    && e.status == ConvergenceTestStatus::Passed));
+            let report = ModelAuditReport::from_artifact(&artifact);
+            let line = report
+                .sections
+                .iter()
+                .flat_map(|section| &section.lines)
+                .find(|line| line.label == "derivative checks")
+                .unwrap();
+            assert_ne!(line.status, AuditReportStatus::Ok);
+            assert!(report.to_text().contains(incomplete_status_label(status)));
+            if status == IncompleteCheckStatus::TimedOut {
+                assert_eq!(
+                    verdict.next_action,
+                    Some(ConvergenceNextAction::RetryTimedOutCheck)
+                );
+                assert!(report.to_text().contains("audit-attempt-1.json"));
+            }
+            let structural = vec![row_saturated_diag("(1 + x | g)")];
+            let structural_verdict = ConvergenceVerdict::compose(&decoded, &structural);
+            assert!(structural_verdict
+                .next_step
+                .unwrap()
+                .contains("optimizer tuning will not help"));
+            let next_steps = convergence_next_steps_line(&decoded, &structural);
+            assert!(!next_steps.detail.contains("retry the timed-out check"));
+            assert!(!next_steps.detail.contains("complete its deferred"));
+            assert!(!next_steps.detail.contains("inspect why derivative"));
+        }
+    }
+
+    #[test]
+    fn legacy_not_assessed_check_is_not_invented_as_a_policy_skip() {
+        let mut cert = clean_certificate();
+        cert.checks = vec![crate::compiler::CertificateCheck::NotAssessed {
+            reason: "legacy evidence has no execution record".to_string(),
+        }];
+        let verdict = ConvergenceVerdict::compose(&cert, &[]);
+        assert!(verdict
+            .evidence
+            .iter()
+            .any(|e| e.status == ConvergenceTestStatus::NotAssessed));
+        assert!(!verdict
+            .evidence
+            .iter()
+            .any(|e| e.status == ConvergenceTestStatus::Skipped));
+    }
+
+    #[test]
+    fn missing_hessian_does_not_certify_all_derivative_checks() {
+        let mut cert = clean_certificate();
+        cert.evidence.parameter_space.n_theta = 1;
+        cert.evidence.parameter_space.n_free = 1;
+        cert.apply_derivative_evidence(
+            crate::compiler::OptimizerDerivativeEvidence {
+                method: EvidenceMethod::Exact,
+                hessian_method: EvidenceMethod::Exact,
+                gradient: vec![0.0],
+                hessian: None,
+            },
+            1e-4,
+            1e-6,
+        );
+        assert!(cert.evidence.optimizer_stop.acceptable_stop);
+        assert!(matches!(
+            cert.evidence.certification_quality,
+            EvidenceQuality::Unavailable { .. }
+        ));
+        let verdict = ConvergenceVerdict::compose(&cert, &[]);
+        assert!(verdict
+            .evidence
+            .iter()
+            .any(|e| e.test_name == "active_subspace_hessian_psd"
+                && e.status == ConvergenceTestStatus::Unavailable));
+        assert!(!verdict
+            .evidence
+            .iter()
+            .any(|e| e.test_name == "active_subspace_hessian_psd"
+                && e.status == ConvergenceTestStatus::Passed));
     }
 }
