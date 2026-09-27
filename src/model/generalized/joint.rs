@@ -1508,7 +1508,7 @@ impl GeneralizedLinearMixedModel {
         Ok(hessian)
     }
 
-    fn polish_joint_laplace_stationarity(
+    pub(super) fn polish_joint_laplace_stationarity(
         &mut self,
         params: &[f64],
         lower_bounds: &[f64],
@@ -1522,6 +1522,7 @@ impl GeneralizedLinearMixedModel {
         if !current_objective.is_finite() {
             return None;
         }
+        let (ftol_abs, ftol_rel) = self.joint_ftol();
 
         for _ in 0..max_iterations {
             let certification = self.joint_laplace_certification_gradient(
@@ -1535,6 +1536,21 @@ impl GeneralizedLinearMixedModel {
             // noise-aware probe could not assess carry no usable descent
             // direction, and Newton steps on probe noise just burn a full
             // finite-difference Hessian before the line search rejects them.
+            let objective_tolerance = ftol_abs.max(ftol_rel * current_objective.abs());
+            // A small raw gradient can still leave a resolvable objective
+            // gap along a flat direction. Use the same scale-aware evidence
+            // as certification to decide whether a Newton step is useful,
+            // at the optimizer's tighter accuracy target.
+            let decrement = joint_newton_decrement(
+                &certification,
+                &current,
+                lower_bounds,
+                p,
+                self.joint_working_beta_hessian().as_ref(),
+                objective_tolerance,
+            );
+            let gap_exceeds_tolerance = decrement.eager.verdict
+                == crate::compiler::NewtonDecrementVerdict::ExceedsTolerance;
             let mut gradient = certification.gradient;
             for &index in &certification.unassessable_indices {
                 gradient[index] = 0.0;
@@ -1543,7 +1559,9 @@ impl GeneralizedLinearMixedModel {
                 .iter()
                 .map(|value| value.abs())
                 .fold(0.0_f64, f64::max);
-            if !free_gradient_norm.is_finite() || free_gradient_norm <= gradient_tolerance {
+            if !free_gradient_norm.is_finite()
+                || (free_gradient_norm <= gradient_tolerance && !gap_exceeds_tolerance)
+            {
                 break;
             }
 
@@ -1579,9 +1597,10 @@ impl GeneralizedLinearMixedModel {
                 }
                 let trial_objective = self.joint_glmm_deviance_at_params(&trial, p, n_agq);
                 if trial_objective.is_finite()
-                    && trial_objective
-                        < current_objective
-                            - (1.0e-9 * current_objective.abs().max(1.0)).max(1.0e-9)
+                    // The former 1e-9 relative floor rejected improvements
+                    // of 2.4e-6 on contraception, above both the residual
+                    // gap and the joint optimizer's 1e-8 absolute tolerance.
+                    && trial_objective < current_objective - objective_tolerance
                 {
                     accepted = Some((trial, trial_objective));
                     break;

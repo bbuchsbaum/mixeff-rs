@@ -4267,8 +4267,8 @@ fn glmm_refit_cost() {
     }
 }
 
-/// Joint Laplace rows used by the deferred-inference tests: cbpp grouped
-/// binomial, culcita Bernoulli and contraception `(1 | dist)`.
+/// Joint Laplace rows used by inference and optimizer tests: cbpp grouped
+/// binomial, culcita Bernoulli, and contraception intercept/slope models.
 fn joint_laplace_row(name: &str) -> GeneralizedLinearMixedModel {
     let (formula, data, family, weights) = match name {
         "cbpp" => {
@@ -4297,10 +4297,14 @@ fn joint_laplace_row(name: &str) -> GeneralizedLinearMixedModel {
                 None,
             )
         }
-        "contraception" => {
+        "contraception" | "contraception_slope" => {
             let (data, _) = crate::datasets::load("contraception").unwrap();
             (
-                "use ~ 1 + age + livch + urban + (1 | dist)",
+                if name == "contraception_slope" {
+                    "use ~ 1 + age + livch + urban + (1 + urban | dist)"
+                } else {
+                    "use ~ 1 + age + livch + urban + (1 | dist)"
+                },
                 data,
                 Family::Binomial,
                 None,
@@ -4635,6 +4639,11 @@ fn joint_trust_bq_reaches_the_nlopt_optimum() {
     assert!(model.lmm.optsum.return_value.starts_with("JOINT_LAPLACE:"));
     assert_trust_bq_joint_optimum(&model, "contraception", 2413.6164607096907);
 
+    // Independent MixedModels.jl 5.9.0 / Julia 1.12.4 fit with ftol_abs=1e-12 and
+    // ftol_rel=1e-14 (2026-09-27); the ordinary Julia stop is 5.6e-6 higher.
+    let slope = joint_laplace_fit("contraception_slope");
+    assert_trust_bq_joint_optimum(&slope, "contraception_slope", 2399.0171950823055);
+
     let (data, _) = crate::datasets::load("rare_event_bernoulli").unwrap();
     let formula = parse_formula("y ~ 1 + exposure + (1 | group)").unwrap();
     let mut rare =
@@ -4646,16 +4655,16 @@ fn joint_trust_bq_reaches_the_nlopt_optimum() {
 
 /// Mirror of `joint_laplace_nlopt_stop_is_robust_to_start_perturbations` for
 /// the no-`nlopt` TrustBQ joint driver: starts perturbed at 1e-7..1e-5
-/// relative must all land within the parity band of the NLopt-path optimum,
-/// certified. Contraception takes one start per level (three starts, about
-/// 10 s each in a debug build); the release-build study behind the fix ran
-/// 28 starts per row from 1e-8 to 1e-5.
+/// relative must all land within 1e-7 of the reference optimum, certified.
+/// Both contraception models take one start per level; the random-slope
+/// row covers a nine-parameter fit with correlated covariance parameters.
 #[cfg(not(feature = "nlopt"))]
 #[test]
 fn joint_trust_bq_stop_is_robust_to_start_perturbations() {
     for (name, pinned, starts) in [
         ("contraception", 2413.6164607096907, 1),
         ("cbpp", 184.05256373024386, 3),
+        ("contraception_slope", 2399.0171950823055, 1),
     ] {
         let mut profiled = joint_laplace_row(name);
         profiled.fit_with_options(true, 1, false).unwrap();
@@ -4671,7 +4680,8 @@ fn joint_trust_bq_stop_is_robust_to_start_perturbations() {
                 let beta = start_beta.iter().map(|&v| perturb(v)).collect::<Vec<_>>();
                 let theta = start_theta
                     .iter()
-                    .map(|&v| perturb(v).max(0.0))
+                    .zip(profiled.lmm.lower_bounds())
+                    .map(|(&v, lower)| perturb(v).max(lower))
                     .collect::<Vec<_>>();
                 let mut model = profiled.clone();
                 let start_objective = model.deviance_with_response_constants(1);
@@ -4692,6 +4702,56 @@ fn joint_trust_bq_stop_is_robust_to_start_perturbations() {
             }
         }
     }
+}
+
+/// A covariance displacement leaves a resolvable objective gap with every
+/// raw gradient below 0.02. The former polish stopped at that threshold and
+/// also rejected every gain below 1e-9 times the objective (~2.4e-6 here).
+/// This endpoint test isolates both cutoffs from platform-dependent changes
+/// in the derivative-free optimizer's trajectory.
+#[cfg(not(feature = "nlopt"))]
+#[test]
+fn joint_trust_bq_polish_resolves_small_gradient_gap() {
+    let mut model = joint_laplace_row("contraception_slope");
+    // A stationary point in optimizer order; its objective agrees within
+    // 8e-9 with the independent tightened Julia fit pinned above.
+    let mut params = vec![
+        0.45822329006150314,
+        -0.026519224579353476,
+        -1.3547894778871892,
+        0.013539306388126646,
+        -0.22909102450955046,
+        -0.8152842251981027,
+        0.4831117324841304,
+        -0.5113571114204088,
+        0.6168095824417931,
+    ];
+    params[7] -= 2e-4;
+    let n_beta = model.beta.len();
+    let mut lower_bounds = vec![f64::NEG_INFINITY; n_beta];
+    lower_bounds.extend(model.lmm.lower_bounds());
+    model.lmm.optsum.n_agq = 1;
+    let pinned = 2399.0171950823055;
+    let before = model.joint_glmm_deviance_at_params(&params, n_beta, 1);
+    assert!(before - pinned > 1e-7 && before - pinned < 1e-9 * before);
+    let certification =
+        model.joint_laplace_certification_gradient(&params, n_beta, 1, &lower_bounds, 0.02);
+    assert!(certification.unassessable_indices.is_empty());
+    let gradient_norm = certification
+        .gradient
+        .iter()
+        .map(|g| g.abs())
+        .fold(0.0_f64, f64::max);
+    assert!(gradient_norm < 0.02, "gradient norm {gradient_norm}");
+    let polished = model
+        .polish_joint_laplace_stationarity(&params, &lower_bounds, 4, 0.02)
+        .unwrap();
+    let after = model.joint_glmm_deviance_at_params(&polished, n_beta, 1);
+    assert!(
+        (after - pinned).abs() <= 1e-7,
+        "polish left objective {after:.12}; reference {pinned:.12}; initial gap {:.3e}",
+        before - pinned,
+    );
 }
 
 /// A tight evaluation budget must not turn a confirmed or unconfirmable

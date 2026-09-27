@@ -200,11 +200,18 @@ fn dense_oracle_matches_crossed_random_intercepts_ml() {
     let site = vec![0, 0, 0, 1, 1, 1, 2, 2, 2];
     let item = vec![0, 1, 2, 0, 1, 2, 0, 1, 2];
     let x = vec![-1.0, 0.0, 1.0, -0.5, 0.5, 1.5, -1.5, -0.25, 0.75];
+    // A non-additive residual keeps sigma away from zero. Without it y is
+    // exactly in span([X Z]): the likelihood is unbounded as sigma -> 0,
+    // theta -> infinity, and the dense covariance becomes ill-conditioned.
+    let residual = [0.07, -0.04, 0.02, -0.02, 0.08, -0.05, 0.03, -0.06, 0.01];
     let y = site
         .iter()
         .zip(item.iter())
         .zip(x.iter())
-        .map(|((&s, &i), &xv)| 1.5 + 0.4 * xv + [-0.3, 0.15, 0.25][s] + [0.2, -0.1, 0.05][i])
+        .zip(residual)
+        .map(|(((&s, &i), &xv), eps)| {
+            1.5 + 0.4 * xv + [-0.3, 0.15, 0.25][s] + [0.2, -0.1, 0.05][i] + eps
+        })
         .collect::<Vec<_>>();
     let mut data = DataFrame::new();
     data.add_numeric("y", y.clone()).unwrap();
@@ -214,53 +221,40 @@ fn dense_oracle_matches_crossed_random_intercepts_ml() {
     data.add_categorical("item", item.iter().map(|g| format!("i{g}")).collect())
         .unwrap();
     let xmat = DMatrix::from_fn(y.len(), 2, |row, col| if col == 0 { 1.0 } else { x[row] });
-    let model = fit(&data, "y ~ 1 + x + (1 | site) + (1 | item)", false);
-    let objective_site_item = dense_profile_objective(
-        &DVector::from_vec(y),
-        &xmat,
-        &[
-            DenseRandomTerm::Scalar {
-                group: &site,
-                theta_index: 0,
+    let mut model = fit(&data, "y ~ 1 + x + (1 | site) + (1 | item)", false);
+    let terms = model
+        .reterms()
+        .iter()
+        .enumerate()
+        .map(|(theta_index, term)| DenseRandomTerm::Scalar {
+            group: match term.fname() {
+                "site" => &site,
+                "item" => &item,
+                name => panic!("unexpected grouping factor {name}"),
             },
-            DenseRandomTerm::Scalar {
-                group: &item,
-                theta_index: 1,
-            },
-        ],
-        &model.theta(),
-        model.sigma(),
-        false,
-    )
-    .unwrap();
-    let objective_item_site = dense_profile_objective(
-        model.response(),
-        &xmat,
-        &[
-            DenseRandomTerm::Scalar {
-                group: &item,
-                theta_index: 0,
-            },
-            DenseRandomTerm::Scalar {
-                group: &site,
-                theta_index: 1,
-            },
-        ],
-        &model.theta(),
-        model.sigma(),
-        false,
-    )
-    .unwrap();
-    let delta_site_item = (model.objective() - objective_site_item).abs();
-    let delta_item_site = (model.objective() - objective_item_site).abs();
-    // The no-default native optimizer can stop farther from the tiny crossed
-    // optimum than the nlopt-backed default path. Keep this crossed case as a
-    // smoke oracle, while scalar and slope cases above enforce exact agreement.
-    let tolerance = if cfg!(feature = "nlopt") { 2e-2 } else { 2.0 };
-    assert!(
-        delta_site_item.min(delta_item_site) <= tolerance,
-        "crossed dense oracle mismatch: formula-order delta {delta_site_item}, optimizer-order delta {delta_item_site}"
-    );
+            theta_index,
+        })
+        .collect::<Vec<_>>();
+    // Agreement is required at the same theta, independently of optimizer
+    // convergence. Include asymmetric and boundary points as well as the fit.
+    for theta in [
+        model.theta(),
+        vec![0.7, 1.3],
+        vec![2.0, 0.1],
+        vec![0.0, 0.0],
+    ] {
+        let blocked = model.objective_at(&theta).unwrap();
+        let dense = dense_profile_objective(
+            model.response(),
+            &xmat,
+            &terms,
+            &theta,
+            model.sigma(),
+            false,
+        )
+        .unwrap();
+        assert_relative_eq!(blocked, dense, epsilon = 1e-6, max_relative = 1e-8);
+    }
 }
 
 #[test]

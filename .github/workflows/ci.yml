@@ -38,6 +38,9 @@ jobs:
           - name: no-default-features
             os: ubuntu-latest
             command: cargo test --no-default-features
+          - name: no-default+unstable
+            os: ubuntu-latest
+            command: cargo test --no-default-features --features unstable-internals
           - name: faer-backend
             os: ubuntu-latest
             command: cargo test --features faer-backend
@@ -63,7 +66,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install NLopt build prerequisites
-        if: matrix.name != 'no-default-features' && matrix.name != 'prima' && runner.os == 'Linux'
+        if: matrix.name != 'no-default-features' && matrix.name != 'no-default+unstable' && matrix.name != 'prima' && runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y cmake g++
       - name: Install PRIMA C library
         if: matrix.name == 'prima' && runner.os == 'Linux'

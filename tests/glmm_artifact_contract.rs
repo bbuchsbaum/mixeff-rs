@@ -560,7 +560,7 @@ fn joint_laplace_glmm_artifact_reports_certified_wald_rows_when_hessian_passes()
         ),
         (
             "x",
-            0.2005181662023690,
+            0.200_518_166_202_369,
             0.002706648896103688,
             74.08355272492919,
         ),
@@ -732,7 +732,7 @@ fn joint_laplace_glmm_wald_rows_match_glmer_on_correlated_random_slopes() {
             "(Intercept)",
             1.3403253125885581,
             0.08232432213402913,
-            16.281036731847301,
+            16.281_036_731_847_3,
         ),
         (
             "x",
@@ -856,14 +856,14 @@ fn joint_laplace_glmm_wald_rows_match_glmer_on_osf_study1b_correlated_slopes() {
         (
             "(Intercept)",
             -1.6946010298834349,
-            0.37647010448086149,
-            -4.5012897696623950,
+            0.376_470_104_480_861_5,
+            -4.501_289_769_662_395,
         ),
         (
             "Enjoyment_centered",
-            1.0296271533640451,
-            0.10953315541246519,
-            9.4001414410715540,
+            1.029_627_153_364_045,
+            0.109_533_155_412_465_2,
+            9.400_141_441_071_554,
         ),
     ];
     let inference = artifact
