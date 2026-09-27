@@ -12,6 +12,57 @@ vs. `unstable-internals` surface inventory.
 
 ## [Unreleased]
 
+## [1.0.0-rc.4] - 2026-09-27
+
+Fourth 1.0 release candidate. Includes native joint-GLMM optimizer corrections,
+more explicit numerical-check outcomes, and covariance provenance in inference
+outputs. This starts a new RC soak period; it is not the final 1.0 release.
+
+### Changed (diagnostics and wire contracts)
+
+- Optimizer termination, boundary status, derivative checks, and restart
+  verification remain separate evidence. Incomplete checks now distinguish
+  `skipped`, `unavailable`, `deferred`, `timed_out`, and `not_assessed`; a timeout
+  may carry host-recorded elapsed time, budget, and an attempt receipt. A missing
+  result does not imply a timeout or a passed check. Computed profiled-GLMM
+  checks that reject their predicate are recorded as failed.
+- Replacing derivative evidence clears stale passed checks and derivative
+  summaries. A passed gradient with an unavailable Hessian no longer certifies
+  the combined derivative inspection. The optimizer's original return code is
+  preserved. `ConvergenceStatus::Converged` documents optimizer termination,
+  rather than claiming independent verification of a local optimum.
+- `mixedmodels.fixed_effect_inference_table` schema `1.1.0` -> `1.2.0`:
+  every row records the covariance actually used for its SE or statistic.
+  Sources include model-based LMM covariance, Kenward-Roger adjusted covariance,
+  and the joint-Laplace active Hessian. A rejected Kenward-Roger request that
+  retains ordinary SEs is labelled model-based. Withheld inference is labelled
+  unavailable. Missing provenance in legacy JSON defaults to `not_recorded`.
+- `mixedmodels.fit_summary` schema `1.0.0` -> `1.1.0`: coefficient tables and
+  summary rows carry covariance provenance, also displayed in standalone text,
+  Markdown, HTML, and LaTeX output. Consumers should accept the new defaulted
+  fields; consumers of unstable compiler diagnostics must handle the new
+  incomplete-check variant and execution statuses.
+- Working-Hessian Wald refusal messages explain this engine's inference-support
+  policy. They do not imply that another implementation's RX-based standard
+  errors are invalid. Passing numerical checks does not establish scientific
+  model adequacy. These diagnostic/provenance changes do not change covariance
+  estimators or numerical thresholds.
+
+### Known limitations
+
+- Existing `mixeff` R wrappers with an exact `fit_summary` schema `1.0.0`
+  check must accept the additive `1.1.0` format before updating their bundled
+  engine to this candidate. Building the bridge alone does not detect this
+  runtime parser incompatibility; test both LMM and GLMM fit/summary calls.
+- Generic GLMM `refit` still selects the fast estimator. Do not use it to
+  bootstrap a joint-Laplace template; explicitly reconstruct/refit the same
+  estimator instead. Estimator-preserving generic refits remain tracked for
+  follow-up (`bd-01KYZH0X2AKK1QD83YHSW46ZX1`).
+- Some two-sided Wald p-values use subtraction from the normal CDF, which can
+  round representable extreme tails to zero. A reported zero is not proof of
+  an exactly zero probability (`bd-01KYTJHA2CZJ0GCZ31WV5QQX4T`).
+- PoTeC cross-engine benchmark results are not part of this release's evidence.
+
 ### Fixed (numerical)
 
 - No-`nlopt` builds (`--no-default-features`, the native TrustBQ joint GLMM
@@ -445,7 +496,8 @@ API framing, the inference surface, and release infrastructure.
   GLMM profile likelihood are explicitly **out of scope for 1.0** and tracked
   as post-1.0 work.
 
-[Unreleased]: https://github.com/bbuchsbaum/mixeff-rs/compare/v1.0.0-rc.3...HEAD
+[Unreleased]: https://github.com/bbuchsbaum/mixeff-rs/compare/v1.0.0-rc.4...HEAD
+[1.0.0-rc.4]: https://github.com/bbuchsbaum/mixeff-rs/compare/v1.0.0-rc.3...v1.0.0-rc.4
 [1.0.0-rc.3]: https://github.com/bbuchsbaum/mixeff-rs/compare/v1.0.0-rc.2...v1.0.0-rc.3
 [1.0.0-rc.2]: https://github.com/bbuchsbaum/mixeff-rs/compare/3332f3e2bd06a21d67bb519860475cdcec0ac9c1...v1.0.0-rc.2
 [1.0.0-rc.1]: https://github.com/bbuchsbaum/mixeff-rs/tree/3332f3e2bd06a21d67bb519860475cdcec0ac9c1
