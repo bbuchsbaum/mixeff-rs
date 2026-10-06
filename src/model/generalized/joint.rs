@@ -7,6 +7,10 @@
 use super::*;
 use crate::optimizer::trust_bq::TrustBqResult;
 
+fn normal_wald_two_sided_p_value(normal: &Normal, z: f64) -> f64 {
+    2.0 * normal.sf(z.abs())
+}
+
 impl GeneralizedLinearMixedModel {
     /// Labelled joint GLMM Laplace fit.
     ///
@@ -32,6 +36,7 @@ impl GeneralizedLinearMixedModel {
         n_agq: usize,
         verbose: bool,
     ) -> Result<&mut Self> {
+        crate::model::snapshot::record_optimizer_entry();
         if self.lmm.optsum.feval > 0 {
             return Err(MixedModelError::AlreadyFitted);
         }
@@ -48,9 +53,10 @@ impl GeneralizedLinearMixedModel {
         // Use the supported fast path as the deterministic start. This keeps
         // the joint optimizer focused on whether [β; θ] can improve the same
         // included-constants objective for the requested approximation.
-        if self.lmm.optsum.caller_selected_optimizer().is_some() {
-            self.configure_profile_start_optimizer();
-        }
+        // Every conditional fit needs a fast-compatible prefit, including
+        // later estimated-NB iterations that still record the auto-selected
+        // joint backend from their previous iteration.
+        self.configure_profile_start_optimizer();
         self.fit_with_options_impl(n_agq, verbose)?;
         let fallback_fast_pirls = self.clone();
         let start_beta = self.beta.as_slice().to_vec();
@@ -137,6 +143,7 @@ impl GeneralizedLinearMixedModel {
         // a host interrupt on the model rather than failing; return it.
         let me = fitted?;
         me.take_pending_interrupt()?;
+        me.seal_fitted_state();
         Ok(me)
     }
 
@@ -1316,7 +1323,7 @@ impl GeneralizedLinearMixedModel {
                     .copied()
                     .filter(|value| value.is_finite() && *value > 0.0);
                 let statistic = estimate.zip(std_error).map(|(estimate, se)| estimate / se);
-                let p_value = statistic.map(|z| 2.0 * (1.0 - normal.cdf(z.abs())));
+                let p_value = statistic.map(|z| normal_wald_two_sided_p_value(&normal, z));
                 FixedEffectInferenceRow {
                     covariance_method:
                         crate::stats::InferenceCovarianceMethod::JointLaplaceActiveHessian,
@@ -2007,5 +2014,39 @@ pub(crate) fn solve_dense_upper_from_lower_transpose_against_rhs(
             sum -= l[(j, i)] * rhs[j];
         }
         rhs[i] = sum / l[(i, i)];
+    }
+}
+
+#[cfg(test)]
+mod wald_tail_tests {
+    use super::*;
+
+    #[test]
+    fn joint_wald_p_values_preserve_representable_normal_tails() {
+        // R oracle: 2 * pnorm(abs(z), lower.tail = FALSE).
+        let normal = Normal::new(0.0, 1.0).unwrap();
+        let cases = [
+            (0.0, 1.0),
+            (8.0, 1.244_192_114_854_357e-15),
+            (-8.0, 1.244_192_114_854_357e-15),
+            (10.727_955_489_07, 7.524_247_963_015_023e-27),
+            (-10.727_955_489_07, 7.524_247_963_015_023e-27),
+            (16.1155, 1.985_514_938_996_619e-58),
+            (-16.1155, 1.985_514_938_996_619e-58),
+            (40.0, 0.0),
+        ];
+
+        for (z, expected) in cases {
+            let actual = normal_wald_two_sided_p_value(&normal, z);
+            if expected == 0.0 {
+                assert_eq!(actual, 0.0, "z={z}");
+            } else {
+                assert!(actual > 0.0, "z={z} must not lose a representable tail");
+                assert!(
+                    (actual - expected).abs() / expected < 1e-9,
+                    "z={z}: expected {expected:e}, got {actual:e}"
+                );
+            }
+        }
     }
 }

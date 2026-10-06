@@ -81,6 +81,7 @@ pub use bootstrap::{
 use bootstrap::{quantile_sorted, validate_level};
 
 mod predict;
+mod snapshot;
 
 pub(in crate::model) mod optimizer;
 use optimizer::*;
@@ -202,6 +203,9 @@ impl FitProgressCallback {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct LinearMixedModel {
+    /// Immutable construction inputs retained for durable restoration. Captured
+    /// before formula materialization and policy reductions.
+    pub(crate) training_recipe: std::sync::Arc<crate::model::snapshot::TrainingRecipe>,
     pub(crate) formula: Formula,
     pub(crate) reterms: Vec<ReMat>,
     pub(crate) xy_mat: FeMat,
@@ -1227,6 +1231,12 @@ impl LinearMixedModel {
         // seeing "a column by name"; the formula's term/response references
         // already carry the canonical labels. See
         // `docs/formula_transform_seam.md`.
+        let training_recipe = crate::model::snapshot::TrainingRecipe::new(
+            formula.clone(),
+            data,
+            compiler_policy.clone(),
+            weights.map(ToOwned::to_owned),
+        );
         let materialized = formula.materialize_cow(data)?;
         let data: &DataFrame = &materialized;
 
@@ -1384,6 +1394,7 @@ impl LinearMixedModel {
         let training_categorical = predict::snapshot_training_categorical(data);
 
         let mut model = LinearMixedModel {
+            training_recipe,
             formula: effective_formula,
             reterms,
             xy_mat,
@@ -1801,6 +1812,79 @@ impl LinearMixedModel {
             rt.set_theta(&theta[offset..offset + n])?;
             offset += n;
         }
+        Ok(())
+    }
+
+    /// Install recorded response and covariance state without optimizer
+    /// dispatch. This is used only by the snapshot restoration boundary.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the snapshot boundary names each independently validated recorded state component"
+    )]
+    pub(crate) fn restore_fixed_state(
+        &mut self,
+        observed_response: &[f64],
+        working_response: &[f64],
+        theta: &[f64],
+        sqrtwts: &[f64],
+        optsum: crate::types::OptSummary,
+        artifact: crate::compiler::CompiledModelArtifact,
+        residual_source: crate::model::summary_estimates::ResidualSource,
+    ) -> Result<()> {
+        if theta.len() != self.parmap.len()
+            || theta
+                .iter()
+                .zip(self.lower_bounds())
+                .any(|(&value, lower)| !value.is_finite() || value < lower)
+        {
+            return Err(MixedModelError::InvalidArgument(
+                "snapshot theta violates its covariance parameter bounds".to_string(),
+            ));
+        }
+        if observed_response.len() != self.dims.n
+            || working_response.len() != self.dims.n
+            || (!sqrtwts.is_empty() && sqrtwts.len() != self.dims.n)
+            || observed_response
+                .iter()
+                .chain(working_response)
+                .any(|v| !v.is_finite())
+            || sqrtwts.iter().any(|v| !v.is_finite() || *v < 0.0)
+        {
+            return Err(MixedModelError::InvalidArgument(
+                "snapshot response or working weights are invalid".to_string(),
+            ));
+        }
+        if residual_source == crate::model::summary_estimates::ResidualSource::FixedSamplingVariance
+            && optsum.sigma != Some(1.0)
+        {
+            return Err(MixedModelError::InvalidArgument(
+                "fixed sampling-variance snapshot must record sigma = 1".to_string(),
+            ));
+        }
+        // The recorded artifact can carry a final compiler policy different
+        // from construction metadata.  Basis reconstruction already used the
+        // recipe policy; factorization must use the recorded final policy.
+        self.compiler_artifact = artifact.clone();
+        let unit_weights;
+        let working_weights = if sqrtwts.is_empty() {
+            unit_weights = vec![1.0; self.dims.n];
+            &unit_weights
+        } else {
+            sqrtwts
+        };
+        self.apply_irls_weights(working_weights, working_response);
+        if sqrtwts.is_empty() {
+            self.sqrtwts.clear();
+        }
+        self.y = DVector::from_column_slice(observed_response);
+        self.recompute_a_blocks()?;
+        self.set_theta(theta)?;
+        self.update_l()?;
+        self.optsum = optsum;
+        self.compiler_artifact = artifact;
+        self.residual_source = residual_source;
+        self.derivative_evidence_pending = false;
+        self.inspection_artifact = std::sync::OnceLock::new();
         Ok(())
     }
 

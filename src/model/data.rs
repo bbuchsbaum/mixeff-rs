@@ -3,6 +3,7 @@
 use crate::error::{MixedModelError, Result};
 use indexmap::IndexMap;
 use nalgebra::DMatrix;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// A simple column-oriented table for feeding data to mixed models.
@@ -42,7 +43,7 @@ pub struct CategoricalColumn {
 }
 
 /// Stable source label for a categorical contrast basis.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ContrastSource {
     /// Treatment/dummy coding.
@@ -74,7 +75,7 @@ impl ContrastSource {
 }
 
 /// Categorical coding mode used when no explicit contrast basis is supplied.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum CategoricalCoding {
     /// Drop the first level as a reference category.
@@ -87,7 +88,7 @@ pub enum CategoricalCoding {
 ///
 /// Rows are in categorical level order and columns are the encoded basis
 /// columns used in fixed-effect and random-effect design construction.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct CategoricalContrast {
     /// Level order corresponding to matrix rows.
@@ -381,6 +382,65 @@ impl CategoricalColumn {
 }
 
 impl DataFrame {
+    pub(crate) fn snapshot_frame(&self) -> crate::model::snapshot::FrameSnapshot {
+        crate::model::snapshot::FrameSnapshot {
+            columns: self
+                .columns
+                .iter()
+                .map(|(name, column)| match column {
+                    Column::Numeric(values) => crate::model::snapshot::SnapshotColumn::Numeric {
+                        name: name.clone(),
+                        values: values.clone(),
+                    },
+                    Column::Categorical(cat) => {
+                        crate::model::snapshot::SnapshotColumn::Categorical {
+                            name: name.clone(),
+                            values: cat.values.clone(),
+                            levels: cat.levels.clone(),
+                            refs: cat.refs.clone(),
+                            contrast: cat.contrast.clone(),
+                        }
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    pub(crate) fn from_snapshot_frame(
+        frame: &crate::model::snapshot::FrameSnapshot,
+    ) -> Result<Self> {
+        let mut out = Self::new();
+        for column in &frame.columns {
+            match column {
+                crate::model::snapshot::SnapshotColumn::Numeric { name, values } => {
+                    out.add_numeric(name, values.clone())?;
+                }
+                crate::model::snapshot::SnapshotColumn::Categorical {
+                    name,
+                    values,
+                    levels,
+                    refs,
+                    contrast,
+                } => {
+                    let rebuilt = match contrast {
+                        Some(contrast) => CategoricalColumn::with_levels_and_contrast(
+                            values.clone(),
+                            levels.clone(),
+                            contrast.clone(),
+                        )?,
+                        None => CategoricalColumn::with_levels(values.clone(), levels.clone())?,
+                    };
+                    if rebuilt.refs != *refs {
+                        return Err(MixedModelError::InvalidArgument(format!("snapshot categorical column `{name}` has references inconsistent with values and levels")));
+                    }
+                    out.validate_new_column_len(name, rebuilt.values.len())?;
+                    out.columns
+                        .insert(name.clone(), Column::Categorical(rebuilt));
+                }
+            }
+        }
+        Ok(out)
+    }
     /// Create a new empty DataFrame.
     pub fn new() -> Self {
         DataFrame {

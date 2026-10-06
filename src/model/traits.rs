@@ -1,6 +1,7 @@
 //! Trait definitions for mixed models.
 
 use nalgebra::{DMatrix, DVector};
+use serde::{Deserialize, Serialize};
 
 use crate::types::{ConvergenceStatus, OptSummary};
 
@@ -14,7 +15,7 @@ pub struct RandomEffectTermInfo {
 }
 
 /// Distribution families for GLMMs.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Family {
     /// Gaussian response with constant variance.
@@ -34,7 +35,7 @@ pub enum Family {
 }
 
 /// Link functions for GLMMs.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum LinkFunction {
     /// Identity link, `g(mu) = mu`.

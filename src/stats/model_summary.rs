@@ -1,7 +1,7 @@
 //! Mixed-model summary tables used by MIME-style renderers.
 
 use serde::{Deserialize, Serialize};
-use statrs::distribution::{ChiSquared, ContinuousCDF};
+use statrs::distribution::{ContinuousCDF, Normal};
 use std::collections::BTreeMap;
 
 use crate::compiler::GlmmFitMetadata;
@@ -672,7 +672,7 @@ fn summary_from_parts_with_pvalues(
         })
         .collect::<Vec<_>>();
 
-    let chisq1 = ChiSquared::new(1.0).unwrap();
+    let normal = Normal::new(0.0, 1.0).unwrap();
     let mut rows = Vec::new();
 
     for (index, ((label, est), se)) in coef_names
@@ -692,7 +692,7 @@ fn summary_from_parts_with_pvalues(
             .or_else(|| {
                 pvalues
                     .is_none()
-                    .then(|| z.map(|zv| 1.0 - chisq1.cdf(zv * zv)))
+                    .then(|| z.map(|zv| 2.0 * normal.sf(zv.abs())))
                     .flatten()
             });
         rows.push(ModelSummaryRow {
@@ -902,6 +902,64 @@ mod tests {
             pvalue,
             sigma_values: sigma_values.to_vec(),
         }
+    }
+
+    #[test]
+    fn fallback_wald_p_values_preserve_representable_normal_tails() {
+        // R oracle: 2 * pnorm(abs(z), lower.tail = FALSE).
+        let cases = [
+            (0.0, 1.0),
+            (8.0, 1.244_192_114_854_357e-15),
+            (-8.0, 1.244_192_114_854_357e-15),
+            (10.727_955_489_07, 7.524_247_963_015_023e-27),
+            (-10.727_955_489_07, 7.524_247_963_015_023e-27),
+            (16.1155, 1.985_514_938_996_619e-58),
+            (-16.1155, 1.985_514_938_996_619e-58),
+            (40.0, 0.0),
+        ];
+        let summary = summary_from_parts_with_pvalues(
+            &(0..cases.len())
+                .map(|index| format!("z_{index}"))
+                .collect::<Vec<_>>(),
+            &cases.iter().map(|(z, _)| *z).collect::<Vec<_>>(),
+            &vec![1.0; cases.len()],
+            None,
+            &VarCorr {
+                components: Vec::new(),
+                residual_sd: None,
+                residual_source: crate::model::summary_estimates::ResidualSource::EstimatedSigma,
+            },
+            None,
+            None,
+        );
+
+        for (row, (z, expected)) in summary.rows.iter().zip(cases) {
+            let actual = row.pvalue.unwrap();
+            if expected == 0.0 {
+                assert_eq!(actual, 0.0, "z={z}");
+            } else {
+                assert!(actual > 0.0, "z={z} must not lose a representable tail");
+                assert!(
+                    (actual - expected).abs() / expected < 1e-9,
+                    "z={z}: expected {expected:e}, got {actual:e}"
+                );
+            }
+        }
+
+        let unavailable = summary_from_parts_with_pvalues(
+            &["bad_se".to_string()],
+            &[1.0],
+            &[0.0],
+            None,
+            &VarCorr {
+                components: Vec::new(),
+                residual_sd: None,
+                residual_source: crate::model::summary_estimates::ResidualSource::EstimatedSigma,
+            },
+            None,
+            None,
+        );
+        assert_eq!(unavailable.rows[0].pvalue, None);
     }
 
     #[test]

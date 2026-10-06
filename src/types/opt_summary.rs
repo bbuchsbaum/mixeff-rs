@@ -5,10 +5,13 @@
 //! model-fitting options (REML, adaptive Gauss-Hermite quadrature,
 //! known σ).
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
+mod extended_float;
+
 /// Choice of optimizer algorithm.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Optimizer {
     /// COBYLA — Constrained Optimization By Linear Approximations.
@@ -41,7 +44,7 @@ pub enum Optimizer {
 /// backend for any `Optimizer::Nlopt*` variant. `Prima` is reserved for the
 /// PRIMA derivative-free family; `Optimizer::PrimaBobyqa` is wired for LMMs
 /// when the non-default `prima` Cargo feature is enabled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum OptimizerBackend {
     /// In-tree Rust optimizers and native fallback crates.
@@ -53,7 +56,7 @@ pub enum OptimizerBackend {
 }
 
 /// Source of the optimizer algorithm recorded in an [`OptSummary`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum OptimizerSource {
     /// The fit driver selected the optimizer automatically.
@@ -109,11 +112,12 @@ impl OptimizerBackend {
 
 /// One entry in the fit log, recording the parameter vector and the
 /// objective value at a particular evaluation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FitLogEntry {
     /// Parameter vector (θ) at this evaluation.
     pub theta: Vec<f64>,
     /// Objective function value (deviance or REML criterion).
+    #[serde(with = "extended_float")]
     pub objective: f64,
 }
 
@@ -127,7 +131,7 @@ pub struct FitLogEntry {
 /// budget-truncated (non-optimal) fit as if it were good. This enum is the
 /// single typed contract; prefer [`OptSummary::converged`] /
 /// [`OptSummary::convergence_status`] over inspecting the string.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ConvergenceStatus {
     /// Stopped at a genuine convergence criterion (objective/parameter
@@ -156,7 +160,7 @@ pub enum ConvergenceStatus {
 /// Stores initial and final parameter values, convergence information,
 /// tolerances, and a log of all function evaluations. The defaults
 /// match those in Julia's MixedModels.jl.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct OptSummary {
     // ---- Parameter values ----
@@ -164,6 +168,7 @@ pub struct OptSummary {
     pub initial: Vec<f64>,
 
     /// Objective value at the initial parameters.
+    #[serde(with = "extended_float")]
     pub finitial: f64,
 
     /// Final (optimised) parameter vector.

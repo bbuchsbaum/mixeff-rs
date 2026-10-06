@@ -8,6 +8,7 @@ use crate::compiler::{
     NewtonDecrementEstimate, NewtonDecrementEvidence, NewtonDecrementExclusion,
     NewtonDecrementVariant, NewtonDecrementVerdict,
 };
+use serde::{Deserialize, Serialize};
 
 pub(crate) fn joint_glmm_status_prefix(n_agq: usize) -> &'static str {
     if n_agq <= 1 {
@@ -871,7 +872,7 @@ impl JointFdProbe {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(super) enum ProfiledCertificateError {
     Unavailable(String),
     Skipped(String),
@@ -899,7 +900,7 @@ impl std::fmt::Display for ProfiledCertificateError {
 /// well-conditioned curvature over the interior theta coordinates. Beta is
 /// exactly minimized by the penalized least-squares step at every probed
 /// theta, so no separate beta-direction evidence is required.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct PirlsProfiledOptimumCertificate {
     /// Largest assessed absolute gradient component over theta.
     pub(crate) gradient_max_abs: f64,

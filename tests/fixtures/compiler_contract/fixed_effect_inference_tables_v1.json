@@ -1,6 +1,6 @@
 {
   "dyestuff2_boundary": {
-    "crate_version": "1.0.0-rc.4",
+    "crate_version": "1.0.0-rc.5",
     "rows": [
       {
         "covariance_method": "model_based",
@@ -23,7 +23,7 @@
           "asymptotic Wald z is a labeled fallback, not a finite-sample correction"
         ],
         "numerator_df": null,
-        "p_value": 0.0,
+        "p_value": 1.9907017448644866e-17,
         "reason": null,
         "reliability": "low",
         "reliability_reason": "asymptotic_wald_z_fallback",
@@ -37,7 +37,7 @@
     "schema_version": "1.2.0"
   },
   "penicillin_confirmatory": {
-    "crate_version": "1.0.0-rc.4",
+    "crate_version": "1.0.0-rc.5",
     "rows": [
       {
         "covariance_method": "model_based",
@@ -60,7 +60,7 @@
           "asymptotic Wald z is a labeled fallback, not a finite-sample correction"
         ],
         "numerator_df": null,
-        "p_value": 0.0,
+        "p_value": 1.4858238557128441e-177,
         "reason": null,
         "reliability": "low",
         "reliability_reason": "asymptotic_wald_z_fallback",
@@ -74,7 +74,7 @@
     "schema_version": "1.2.0"
   },
   "rank_deficient_fixed_effect": {
-    "crate_version": "1.0.0-rc.4",
+    "crate_version": "1.0.0-rc.5",
     "rows": [
       {
         "covariance_method": "model_based",
@@ -168,7 +168,7 @@
     "schema_version": "1.2.0"
   },
   "rank_mixture_reduced_rank": {
-    "crate_version": "1.0.0-rc.4",
+    "crate_version": "1.0.0-rc.5",
     "rows": [
       {
         "covariance_method": "model_based",
@@ -235,7 +235,7 @@
     "schema_version": "1.2.0"
   },
   "regularized_fit_intent": {
-    "crate_version": "1.0.0-rc.4",
+    "crate_version": "1.0.0-rc.5",
     "rows": [
       {
         "covariance_method": "model_based",
@@ -296,7 +296,7 @@
     "schema_version": "1.2.0"
   },
   "selection_time_reduction": {
-    "crate_version": "1.0.0-rc.4",
+    "crate_version": "1.0.0-rc.5",
     "rows": [
       {
         "covariance_method": "model_based",
@@ -357,7 +357,7 @@
     "schema_version": "1.2.0"
   },
   "sleepstudy_confirmatory": {
-    "crate_version": "1.0.0-rc.4",
+    "crate_version": "1.0.0-rc.5",
     "rows": [
       {
         "covariance_method": "model_based",
@@ -380,7 +380,7 @@
           "asymptotic Wald z is a labeled fallback, not a finite-sample correction"
         ],
         "numerator_df": null,
-        "p_value": 0.0,
+        "p_value": 1.0405004239124434e-146,
         "reason": null,
         "reliability": "low",
         "reliability_reason": "asymptotic_wald_z_fallback",
@@ -410,7 +410,7 @@
           "asymptotic Wald z is a labeled fallback, not a finite-sample correction"
         ],
         "numerator_df": null,
-        "p_value": 0.0,
+        "p_value": 9.997937942199149e-39,
         "reason": null,
         "reliability": "low",
         "reliability_reason": "asymptotic_wald_z_fallback",
@@ -424,7 +424,7 @@
     "schema_version": "1.2.0"
   },
   "unavailable_standard_error": {
-    "crate_version": "1.0.0-rc.4",
+    "crate_version": "1.0.0-rc.5",
     "rows": [
       {
         "covariance_method": "unavailable",

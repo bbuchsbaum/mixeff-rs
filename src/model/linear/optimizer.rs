@@ -2367,6 +2367,7 @@ impl LinearMixedModel {
         optimizer: Optimizer,
         return_value: Option<String>,
     ) -> Result<&mut Self> {
+        crate::model::snapshot::record_optimizer_entry();
         Self::rectify_theta_columns(&mut best_theta_val, &self.parmap, self.reterms.len());
         self.set_theta(&best_theta_val)?;
         self.update_l()?;
@@ -3759,6 +3760,7 @@ impl LinearMixedModel {
 
     /// Fit the model with explicit options.
     pub fn fit_with_options(&mut self, options: FitOptions) -> Result<&mut Self> {
+        crate::model::snapshot::record_optimizer_entry();
         if self.optsum.feval > 0 {
             return Err(MixedModelError::AlreadyFitted);
         }

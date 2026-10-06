@@ -3002,7 +3002,7 @@ fn fixed_effect_test_asymptotic_wald_z(
     let normal = Normal::new(0.0, 1.0).unwrap();
     let p_values = statistics
         .iter()
-        .map(|stat| stat.map(|z| 2.0 * (1.0 - normal.cdf(z.abs()))))
+        .map(|stat| stat.map(|z| 2.0 * normal.sf(z.abs())))
         .collect::<Vec<_>>();
     let p_value_available = p_values.iter().all(Option::is_some);
     FixedEffectTest {
@@ -3114,5 +3114,61 @@ fn fixed_effect_test_unavailable(
         status,
         estimability,
         notes: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn asymptotic_wald_helper_preserves_normal_tails_and_unavailability() {
+        // R oracle: 2 * pnorm(abs(z), lower.tail = FALSE). The final case
+        // is true f64 underflow, unlike the two preceding representable tails.
+        let cases = [
+            (0.0, 1.0),
+            (8.0, 1.244_192_114_854_357e-15),
+            (-8.0, 1.244_192_114_854_357e-15),
+            (10.727_955_489_07, 7.524_247_963_015_023e-27),
+            (-10.727_955_489_07, 7.524_247_963_015_023e-27),
+            (16.1155, 1.985_514_938_996_619e-58),
+            (-16.1155, 1.985_514_938_996_619e-58),
+            (40.0, 0.0),
+        ];
+
+        for (z, expected) in cases {
+            let hypothesis = FixedEffectHypothesis::single_coefficient("x", 0, 1).unwrap();
+            let test = fixed_effect_test_asymptotic_wald_z(
+                hypothesis,
+                vec![z],
+                vec![Some(1.0)],
+                vec![Some(z)],
+                FixedContrastEstimability::estimable("x", 1, 1),
+            );
+            let actual = test.p_values[0].unwrap();
+            if expected == 0.0 {
+                assert_eq!(actual, 0.0, "z={z}");
+            } else {
+                assert!(actual > 0.0, "z={z} must not lose a representable tail");
+                assert!(
+                    (actual - expected).abs() / expected < 1e-9,
+                    "z={z}: expected {expected:e}, got {actual:e}"
+                );
+            }
+            assert_eq!(test.status, InferenceStatus::Available);
+        }
+
+        let unavailable = fixed_effect_test_asymptotic_wald_z(
+            FixedEffectHypothesis::single_coefficient("x", 0, 1).unwrap(),
+            vec![0.0],
+            vec![None],
+            vec![None],
+            FixedContrastEstimability::estimable("x", 1, 1),
+        );
+        assert_eq!(unavailable.p_values, vec![None]);
+        assert!(matches!(
+            unavailable.status,
+            InferenceStatus::PValueUnavailable { .. }
+        ));
     }
 }

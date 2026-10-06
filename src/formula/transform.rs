@@ -36,6 +36,7 @@
 //! precedence requires them. Numeric literals print without a trailing `.0`
 //! for integral values (`I(x+1)`, not `I(x+1.0)`).
 
+use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 
 use super::parser::FormulaError;
@@ -43,7 +44,7 @@ use crate::error::{MixedModelError, Result};
 use crate::model::data::{Column, DataFrame};
 
 /// A whitelisted single-argument pointwise function.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransformFn {
     /// Natural logarithm.
     Ln,
@@ -97,7 +98,7 @@ impl TransformFn {
 }
 
 /// A binary arithmetic operator allowed inside `I(...)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BinOp {
     /// Addition (`+`).
     Add,
@@ -144,7 +145,7 @@ impl BinOp {
 }
 
 /// Stateless transform expression AST.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Expr {
     /// Numeric literal.
     Lit(f64),
@@ -165,7 +166,7 @@ pub enum Expr {
 /// synthetic column name, the coefficient name, and — when the response was
 /// transformed — the response name. `expr` is the closed-form recipe,
 /// re-evaluated verbatim on prediction `newdata`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DerivedColumn {
     /// Canonical R-style label (column name == coef name == response name).
     pub label: String,

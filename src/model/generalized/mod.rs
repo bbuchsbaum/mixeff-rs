@@ -54,6 +54,7 @@ pub(crate) use certify::*;
 pub(crate) use joint::*;
 pub(crate) use optimizer::*;
 pub(crate) use pirls::*;
+mod snapshot;
 // The predictive free helpers are only called from within `predictive` itself
 // in the library build; `tests.rs` still reaches them through `use super::*`.
 #[cfg(test)]
@@ -64,6 +65,10 @@ pub(crate) use predictive::*;
 #[non_exhaustive]
 #[allow(dead_code)] // beta0/u0 reserved for step-halving; devc/devc0/sd/mult reserved for AGQ
 pub struct GeneralizedLinearMixedModel {
+    /// Identity of the successful fitted state. Public response/family fields
+    /// can otherwise be edited directly after fitting; snapshots refuse such
+    /// stale state rather than certifying a contradictory payload.
+    fitted_state_seal: Option<snapshot::FittedStateSeal>,
     /// Internal linear mixed model (local Laplace approximation).
     pub(crate) lmm: LinearMixedModel,
 
@@ -834,6 +839,7 @@ impl GeneralizedLinearMixedModel {
         };
 
         let mut model = GeneralizedLinearMixedModel {
+            fitted_state_seal: None,
             lmm,
             beta: beta.clone(),
             beta0: beta,

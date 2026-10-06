@@ -27,6 +27,7 @@ pub mod fixed_design;
 pub mod generalized;
 pub(crate) mod kernel;
 pub mod linear;
+pub(crate) mod snapshot;
 pub mod summary_estimates;
 pub mod traits;
 

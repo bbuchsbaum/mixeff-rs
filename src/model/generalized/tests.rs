@@ -650,6 +650,18 @@ fn experimental_joint_failed_stop_returns_labelled_fast_pirls_fallback() {
         metadata.effective_method.as_deref(),
         Some("fast_pirls_profiled")
     );
+    let y = model.y.as_slice().to_vec();
+    model.refit(&y).unwrap();
+    assert_eq!(
+        model
+            .compiler_artifact()
+            .glmm_fit_metadata
+            .as_ref()
+            .unwrap()
+            .estimation_method,
+        "fast_pirls_profiled",
+        "a substituted template refits the effective estimator"
+    );
 }
 
 #[test]
@@ -4346,6 +4358,225 @@ fn joint_laplace_fit(name: &str) -> GeneralizedLinearMixedModel {
     model
 }
 
+#[test]
+fn joint_glmm_refit_retains_estimator_for_every_start_and_quadrature() {
+    use crate::model::linear::RefitStart;
+    for n_agq in [0, 1, 3] {
+        let mut template = joint_laplace_row("cbpp");
+        template.fit_with_options(false, n_agq, false).unwrap();
+        let y = template.y.as_slice().to_vec();
+        let expected = if n_agq <= 1 {
+            "joint_laplace"
+        } else {
+            "joint_agq"
+        };
+        assert_eq!(
+            template
+                .compiler_artifact()
+                .glmm_fit_metadata
+                .as_ref()
+                .unwrap()
+                .estimation_method,
+            expected
+        );
+        for start in [
+            RefitStart::Initial,
+            RefitStart::Fitted,
+            RefitStart::From(template.theta()),
+        ] {
+            let mut refit = template.clone();
+            refit.refit_with_start(&y, start).unwrap();
+            assert_eq!(
+                refit
+                    .compiler_artifact()
+                    .glmm_fit_metadata
+                    .as_ref()
+                    .unwrap()
+                    .estimation_method,
+                expected
+            );
+            assert_eq!(refit.opt_summary().n_agq, n_agq);
+            assert!((refit.objective() - template.objective()).abs() < 1e-5);
+        }
+        let mut refit = template.clone();
+        refit.refit_with_options(&y, n_agq, false).unwrap();
+        assert_eq!(
+            refit
+                .compiler_artifact()
+                .glmm_fit_metadata
+                .as_ref()
+                .unwrap()
+                .estimation_method,
+            expected
+        );
+    }
+}
+
+#[test]
+fn joint_glmm_refit_preserves_caller_optimizer_and_controls() {
+    let mut template = joint_laplace_row("cbpp");
+    let optimizer = default_joint_glmm_optimizer();
+    template
+        .fit_with_glmm_options(
+            GlmmFitOptions::joint_laplace().with_optimizer_control(
+                OptimizerControl::default()
+                    .with_optimizer(optimizer)
+                    .with_max_feval(4000),
+            ),
+        )
+        .unwrap();
+    let y = template.y.as_slice().to_vec();
+    template.refit(&y).unwrap();
+    assert_eq!(
+        template.opt_summary().caller_selected_optimizer(),
+        Some(optimizer)
+    );
+    assert!(template.opt_summary().caller_set_field("max_feval"));
+    assert_eq!(template.opt_summary().max_feval, 4000);
+    assert_eq!(
+        template
+            .compiler_artifact()
+            .glmm_fit_metadata
+            .as_ref()
+            .unwrap()
+            .estimation_method,
+        "joint_laplace"
+    );
+}
+
+#[test]
+fn joint_glmm_refit_interrupt_preserves_the_original_template() {
+    let mut model = small_joint_poisson_fixture();
+    let interrupt = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let callback_interrupt = Arc::clone(&interrupt);
+    let callback = FitProgressCallback::new(move |_| {
+        if callback_interrupt.load(Ordering::SeqCst) {
+            return Err(MixedModelError::Interrupted("refit interrupted".into()));
+        }
+        Ok(())
+    });
+    model
+        .fit_with_glmm_options(GlmmFitOptions::joint_laplace().with_progress_callback(callback))
+        .unwrap();
+    let original_y = model.y.clone();
+    let original_objective = model.objective();
+    let original_status = model.lmm.optsum.return_value.clone();
+    let new_y: Vec<_> = original_y.iter().map(|value| value + 1.0).collect();
+    interrupt.store(true, Ordering::SeqCst);
+    assert_eq!(model.refit(&new_y).unwrap_err().code(), "interrupted");
+    assert_eq!(model.y, original_y);
+    assert_eq!(model.objective(), original_objective);
+    assert_eq!(model.lmm.optsum.return_value, original_status);
+    interrupt.store(false, Ordering::SeqCst);
+    model.refit(original_y.as_slice()).unwrap();
+    assert!(glmm_objective_includes_response_constants(
+        &model.lmm.optsum.return_value
+    ));
+}
+
+#[test]
+fn joint_glmm_refit_refuses_estimator_substitution() {
+    let mut template = small_joint_poisson_fixture();
+    template.fit_with_options(false, 1, false).unwrap();
+    assert!(glmm_objective_includes_response_constants(
+        &template.opt_summary().return_value
+    ));
+    let y = template.y.as_slice().to_vec();
+    template.lmm.optsum.max_feval = 1;
+    let original_objective = template.objective();
+    let error = template
+        .refit(&y)
+        .expect_err("a fallback is not a joint refit");
+    assert!(
+        matches!(error, MixedModelError::Unsupported(ref reason) if reason.contains("template estimator"))
+    );
+    assert_eq!(
+        template
+            .compiler_artifact()
+            .glmm_fit_metadata
+            .as_ref()
+            .unwrap()
+            .estimation_method,
+        "joint_laplace"
+    );
+    assert_eq!(template.objective(), original_objective);
+    assert!(
+        template.refit(&y).is_err(),
+        "retry must still target the joint estimator"
+    );
+}
+
+#[test]
+fn joint_glmm_bootstrap_matches_explicit_joint_replicates() {
+    use rand::SeedableRng;
+    let template = joint_laplace_fit("cbpp");
+    let mut rng = rand::rngs::StdRng::seed_from_u64(81);
+    let bootstrap =
+        crate::stats::bootstrap::parametricbootstrap_glmm(&mut rng, 4, &template).unwrap();
+    let mut rng = rand::rngs::StdRng::seed_from_u64(81);
+    let mut successful = 0;
+    for replicate in &bootstrap.fits {
+        let y = template.simulate_response(&mut rng).unwrap();
+        let mut explicit = template.clone();
+        explicit
+            .reset_for_refit_with_start(Some(&y), Some(template.theta()))
+            .unwrap();
+        explicit.configure_profile_start_optimizer();
+        explicit.fit_with_options(false, 1, false).unwrap();
+        if glmm_objective_includes_response_constants(&explicit.opt_summary().return_value) {
+            successful += 1;
+            assert_eq!(replicate.objective, explicit.objective());
+            assert_eq!(replicate.beta, MixedModelFit::coef(&explicit));
+            assert_eq!(replicate.theta, explicit.theta());
+        } else {
+            // A fast fallback cannot count as a joint-bootstrap success.
+            assert!(replicate.objective.is_nan());
+            assert!(replicate.sigma.is_nan());
+            assert!(replicate.se.iter().all(|v| v.is_nan()));
+        }
+    }
+    assert!(
+        successful >= 2,
+        "expected successful joint replicates, got {successful}/4"
+    );
+}
+
+#[test]
+fn joint_glmm_estimated_negative_binomial_refit_runs_outer_iterations() {
+    let data = negative_binomial_fixture();
+    let mut model = GeneralizedLinearMixedModel::new_negative_binomial_estimated(
+        parse_formula("y ~ 1 + x + (1 | group)").unwrap(),
+        &data,
+        Some(0.8),
+        None,
+    )
+    .unwrap();
+    model.fit_with_options(false, 1, false).unwrap();
+    let metadata = model
+        .compiler_artifact()
+        .glmm_fit_metadata
+        .as_ref()
+        .unwrap();
+    assert_eq!(metadata.estimation_method, "joint_laplace");
+    assert!(metadata.family_parameters["negative_binomial_theta_outer_iterations"] > 1.0);
+    let original_objective = model.objective();
+    let y = model.y.as_slice().to_vec();
+    model.refit(&y).unwrap();
+    assert_eq!(
+        model
+            .compiler_artifact()
+            .glmm_fit_metadata
+            .as_ref()
+            .unwrap()
+            .estimation_method,
+        "joint_laplace"
+    );
+    assert!(model.negative_binomial_theta_estimated());
+    assert!(
+        (model.objective() - original_objective).abs() <= 1e-5 * (1.0 + original_objective.abs())
+    );
+}
+
 /// Everything a caller can read about a fitted model's inference, as JSON.
 fn joint_reported_results(model: &GeneralizedLinearMixedModel) -> serde_json::Value {
     let matrix = |m: DMatrix<f64>| {
@@ -4887,16 +5118,12 @@ fn deferred_joint_laplace_inference_across_verification_refit_and_stage_switch()
         eager_artifact
     );
 
-    // Refits (profiled) clear the joint deferral and defer their own
-    // certificate; the payloads are the profiled ones, not the joint ones.
+    // Generic refits retain the joint estimator and defer its own inference.
     let mut refit = joint_laplace_fit("cbpp");
     let y = refit.y.as_slice().to_vec();
-    // The joint stage's optimizer is recorded on the fit; dependency-light
-    // builds cannot run TrustBQ on the profiled path a refit takes.
-    refit.configure_profile_start_optimizer();
     refit.refit(&y).unwrap();
-    assert!(!refit.joint_inference_pending);
-    assert!(refit.pirls_certificate_pending);
+    assert!(refit.joint_inference_pending);
+    assert!(!refit.pirls_certificate_pending);
     let refit_artifact = refit.compiler_artifact();
     assert_eq!(
         refit_artifact
@@ -4904,12 +5131,8 @@ fn deferred_joint_laplace_inference_across_verification_refit_and_stage_switch()
             .as_ref()
             .unwrap()
             .estimation_method,
-        "fast_pirls_profiled"
+        "joint_laplace"
     );
-    assert!(matches!(
-        refit_artifact.model_boundary.inference_availability,
-        InferenceAvailability::Unsupported { .. }
-    ));
 
     // profiled -> joint -> profiled stage switches on one model.
     let mut model = joint_laplace_row("cbpp");

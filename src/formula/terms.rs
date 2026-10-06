@@ -4,6 +4,7 @@
 //! `y ~ 1 + x1 + x2 + (1 + x1 | group)`.  The design mirrors the term representation
 //! used by Julia's MixedModels.jl.
 
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::fmt;
 
@@ -23,7 +24,7 @@ use crate::model::data::DataFrame;
 /// If the fixed terms do not contain an explicit [`FixedTerm::Intercept`] or
 /// [`FixedTerm::NoIntercept`], an intercept is assumed to be present (the
 /// parser inserts one automatically).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Formula {
     /// Name of the response (outcome) variable.
     ///
@@ -47,7 +48,7 @@ pub struct Formula {
 }
 
 /// A single fixed-effect term.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum FixedTerm {
     /// Explicit intercept (`1`).
@@ -62,7 +63,7 @@ pub enum FixedTerm {
 
 /// A random-effect specification, corresponding to `(terms | grouping)` or
 /// `(terms || grouping)` in the formula string.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RandomTerm {
     /// The model terms inside the random-effect parentheses.
     pub terms: Vec<FixedTerm>,
@@ -82,7 +83,7 @@ pub struct RandomTerm {
 }
 
 /// Requested random-effect covariance family.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum RandomCovariance {
     /// Unstructured full lower-Cholesky covariance.
@@ -122,7 +123,7 @@ impl RandomCovariance {
 }
 
 /// The grouping factor for a random-effect term.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum GroupingFactor {
     /// A single grouping variable, e.g. `subject`.
@@ -134,7 +135,7 @@ pub enum GroupingFactor {
 }
 
 /// Source metadata for a parsed random-effect term.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RandomTermSource {
     /// Parenthesized source text exactly as written by the user, modulo
     /// leading/trailing formula whitespace.
@@ -144,7 +145,7 @@ pub struct RandomTermSource {
 }
 
 /// Parser-level canonicalization applied to a random-effect grouping form.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum RandomTermExpansion {
     /// `(b | a/b)` expanded to `(b | a) + (b | a:b)`.

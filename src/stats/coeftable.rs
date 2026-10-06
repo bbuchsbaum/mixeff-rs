@@ -158,7 +158,7 @@ impl CoefTable {
             z_values.push(z);
             match &policy {
                 CoefTablePValuePolicy::AsymptoticWaldZ if z.is_finite() => {
-                    p_values.push(2.0 * (1.0 - normal.cdf(z.abs())));
+                    p_values.push(2.0 * normal.sf(z.abs()));
                     p_value_reasons.push(None);
                 }
                 CoefTablePValuePolicy::AsymptoticWaldZ => {
@@ -406,6 +406,40 @@ mod tests {
             vec![1.0, 1.0],
         );
         assert_relative_eq!(ct.p_values[0], ct.p_values[1], epsilon = 1e-12);
+    }
+
+    #[test]
+    fn test_coeftable_wald_p_values_preserve_representable_normal_tails() {
+        // R oracle: 2 * pnorm(abs(z), lower.tail = FALSE). The last value
+        // genuinely underflows in f64, while the preceding tail values do not.
+        let cases = [
+            (0.0, 1.0),
+            (8.0, 1.244_192_114_854_357e-15),
+            (-8.0, 1.244_192_114_854_357e-15),
+            (10.727_955_489_07, 7.524_247_963_015_023e-27),
+            (-10.727_955_489_07, 7.524_247_963_015_023e-27),
+            (16.1155, 1.985_514_938_996_619e-58),
+            (-16.1155, 1.985_514_938_996_619e-58),
+            (40.0, 0.0),
+        ];
+        let ct = CoefTable::new(
+            (0..cases.len()).map(|index| format!("z_{index}")).collect(),
+            cases.iter().map(|(z, _)| *z).collect(),
+            vec![1.0; cases.len()],
+        );
+
+        for (index, (z, expected)) in cases.iter().enumerate() {
+            let actual = ct.p_values[index];
+            if *expected == 0.0 {
+                assert_eq!(actual, 0.0, "z={z}");
+            } else {
+                assert!(actual > 0.0, "z={z} must not lose a representable tail");
+                assert!(
+                    (actual - expected).abs() / expected < 1e-9,
+                    "z={z}: expected {expected:e}, got {actual:e}"
+                );
+            }
+        }
     }
 
     /// Zero SE → NaN z and p.

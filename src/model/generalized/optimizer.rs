@@ -17,9 +17,12 @@ impl GeneralizedLinearMixedModel {
     ///
     /// This mirrors Julia's `refit!` semantics for bootstrap and simulation
     /// workflows: the optimizer starts from `optsum.initial`, not from the
-    /// previous optimum.
+    /// previous optimum. The effective estimator and quadrature setting of
+    /// the template are retained, including for joint Laplace/AGQ fits.
+    /// A joint refit that substitutes fast PIRLS returns an error; it is not
+    /// a successful replicate of the joint estimator.
     pub fn refit(&mut self, new_y: &[f64]) -> Result<&mut Self> {
-        let n_agq = self.lmm.optsum.n_agq.max(1);
+        let n_agq = self.lmm.optsum.n_agq;
         self.refit_with_options(new_y, n_agq, false)
     }
 
@@ -34,8 +37,10 @@ impl GeneralizedLinearMixedModel {
             self.record_invalid_agq_diagnostic(n_agq, &error.to_string());
             return Err(error);
         }
+        let fast = !glmm_objective_includes_response_constants(&self.lmm.optsum.return_value);
+        let original = (!fast).then(|| self.clone());
         self.reset_for_refit(Some(new_y))?;
-        self.fit_with_options(true, n_agq, verbose)
+        self.fit_refit_estimator(fast, n_agq, verbose, original)
     }
 
     /// Refit to a new response with an explicit start (Phase 7 T7.3).
@@ -47,7 +52,7 @@ impl GeneralizedLinearMixedModel {
     /// simulated or resampled response's optimum is expected nearby;
     /// [`RefitStart::From`] does the same from a caller-supplied θ.
     pub fn refit_with_start(&mut self, new_y: &[f64], start: RefitStart) -> Result<&mut Self> {
-        let n_agq = self.lmm.optsum.n_agq.max(1);
+        let n_agq = self.lmm.optsum.n_agq;
         let start_theta = match start {
             RefitStart::Initial => None,
             RefitStart::Fitted => Some(self.theta.clone()),
@@ -72,8 +77,60 @@ impl GeneralizedLinearMixedModel {
                 ));
             }
         }
+        let fast = !glmm_objective_includes_response_constants(&self.lmm.optsum.return_value);
+        let original = (!fast).then(|| self.clone());
         self.reset_for_refit_with_start(Some(new_y), start_theta)?;
-        self.fit_with_options(true, n_agq, false)
+        self.fit_refit_estimator(fast, n_agq, false, original)
+    }
+
+    fn fit_refit_estimator(
+        &mut self,
+        fast: bool,
+        n_agq: usize,
+        verbose: bool,
+        original: Option<Self>,
+    ) -> Result<&mut Self> {
+        crate::model::snapshot::record_optimizer_entry();
+        // A joint fit records its final backend. The joint driver's prefit
+        // needs a fast-compatible backend, as in convergence verification.
+        // Explicit caller choices are retained and handled by the driver.
+        if self.lmm.optsum.caller_selected_optimizer().is_none() {
+            self.configure_profile_start_optimizer();
+        }
+        // Keep the template's caller controls and callback. Applying fresh
+        // default fit options here would erase the recorded caller choices.
+        self.pending_progress_error = None;
+        let outcome =
+            if self.family == Family::NegativeBinomial && self.negative_binomial_estimate_theta {
+                self.fit_negative_binomial_estimated_theta(fast, n_agq, verbose)
+                    .map(|_| ())
+            } else if fast {
+                self.fit_with_options_impl(n_agq, verbose).map(|_| ())
+            } else {
+                self.fit_joint_glmm_with_response_constants(n_agq, verbose)
+                    .map(|_| ())
+            };
+        if let Err(error) = outcome {
+            if let Some(original) = original {
+                *self = original;
+            }
+            return Err(error);
+        }
+        let fitted_fast =
+            !glmm_objective_includes_response_constants(&self.lmm.optsum.return_value);
+        if fitted_fast != fast {
+            // An errored attempt must not turn a reusable joint template
+            // into a fast template for its next refit.
+            if let Some(original) = original {
+                *self = original;
+            }
+            return Err(MixedModelError::Unsupported(
+                "joint GLMM refit substituted fast PIRLS; the template estimator was not retained"
+                    .to_string(),
+            ));
+        }
+        self.seal_fitted_state();
+        Ok(self)
     }
 
     /// Fit after first applying a compiler policy.
@@ -115,6 +172,7 @@ impl GeneralizedLinearMixedModel {
 
     /// Fit with explicit GLMM options.
     pub fn fit_with_glmm_options(&mut self, options: GlmmFitOptions) -> Result<&mut Self> {
+        crate::model::snapshot::record_optimizer_entry();
         let GlmmFitOptions {
             fast,
             n_agq,
@@ -135,13 +193,16 @@ impl GeneralizedLinearMixedModel {
         if let Some(start_theta) = &optimizer_control.start_theta {
             self.theta = start_theta.clone();
         }
-        if self.family == Family::NegativeBinomial && self.negative_binomial_estimate_theta {
-            return self.fit_negative_binomial_estimated_theta(fast, n_agq, verbose);
-        }
-        if !fast {
-            return self.fit_joint_glmm_with_response_constants(n_agq, verbose);
-        }
-        self.fit_with_options_impl(n_agq, verbose)
+        let fitted =
+            if self.family == Family::NegativeBinomial && self.negative_binomial_estimate_theta {
+                self.fit_negative_binomial_estimated_theta(fast, n_agq, verbose)
+            } else if !fast {
+                self.fit_joint_glmm_with_response_constants(n_agq, verbose)
+            } else {
+                self.fit_with_options_impl(n_agq, verbose)
+            }?;
+        fitted.seal_fitted_state();
+        Ok(fitted)
     }
 
     fn fit_negative_binomial_estimated_theta(

@@ -2,7 +2,7 @@
   "schema": {
     "schema_name": "mixedmodels.compiled_model_artifact",
     "schema_version": 1,
-    "crate_version": "1.0.0-rc.4"
+    "crate_version": "1.0.0-rc.5"
   },
   "model_boundary": {
     "model_kind": "linear_mixed_model",
@@ -24,7 +24,7 @@
   "fixed_effect_inference_table": {
     "schema_name": "mixedmodels.fixed_effect_inference_table",
     "schema_version": "1.2.0",
-    "crate_version": "1.0.0-rc.4",
+    "crate_version": "1.0.0-rc.5",
     "rows": [
       {
         "label": "(Intercept)",
@@ -35,7 +35,7 @@
         "denominator_df": null,
         "statistic": 15.554574217369451,
         "statistic_name": "z",
-        "p_value": 0.0,
+        "p_value": 1.4813710694410854e-54,
         "method": "asymptotic_wald_z",
         "covariance_method": "model_based",
         "status": "available",
@@ -65,7 +65,7 @@
         "denominator_df": null,
         "statistic": 28.981553729448247,
         "statistic_name": "z",
-        "p_value": 0.0,
+        "p_value": 1.1238843680594262e-184,
         "method": "asymptotic_wald_z",
         "covariance_method": "model_based",
         "status": "available",
@@ -91,7 +91,7 @@
   "fixed_effect_covariance_matrix": {
     "schema_name": "mixedmodels.fixed_effect_covariance_matrix",
     "schema_version": "1.1.0",
-    "crate_version": "1.0.0-rc.4",
+    "crate_version": "1.0.0-rc.5",
     "coef_names": [
       "(Intercept)",
       "x"

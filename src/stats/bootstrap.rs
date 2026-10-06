@@ -74,6 +74,9 @@ pub fn restore_replicates<R: Read>(
 /// A replicate whose refit fails numerically is recorded with `NaN`
 /// objective/σ/SE (matching the LMM [`parametricbootstrap`] convention) so
 /// downstream summaries can filter on finiteness.
+/// Refits retain the template's effective estimator and quadrature setting.
+/// A joint-template refit that substitutes fast PIRLS is a failed replicate,
+/// never a successful joint-bootstrap sample.
 pub fn parametricbootstrap_glmm<R: rand::Rng>(
     rng: &mut R,
     n_rep: usize,
@@ -446,6 +449,38 @@ mod tests {
         for r in &boot.fits {
             assert_eq!(r.beta.len(), 2, "intercept + x");
             assert_eq!(r.theta.len(), 1, "one (1|group) variance component");
+        }
+    }
+
+    #[test]
+    fn test_joint_gamma_glmm_parametricbootstrap_has_successful_replicates() {
+        let mut model = gamma_glmm_fixture();
+        model.fit_with_options(false, 1, false).unwrap();
+        assert_eq!(
+            model
+                .compiler_artifact()
+                .glmm_fit_metadata
+                .as_ref()
+                .unwrap()
+                .estimation_method,
+            "joint_laplace"
+        );
+        let mut rng = StdRng::seed_from_u64(20260429);
+        let bootstrap = parametricbootstrap_glmm(&mut rng, 4, &model).unwrap();
+        assert_eq!(bootstrap.fits.len(), 4);
+        let successful = bootstrap
+            .fits
+            .iter()
+            .filter(|row| row.objective.is_finite())
+            .count();
+        assert!(successful >= 2, "joint Gamma replicates: {successful}/4");
+        for row in bootstrap
+            .fits
+            .iter()
+            .filter(|row| row.objective.is_finite())
+        {
+            assert!(row.beta.iter().all(|value| value.is_finite()));
+            assert!(row.sigma.is_finite() && row.sigma > 0.0);
         }
     }
 }

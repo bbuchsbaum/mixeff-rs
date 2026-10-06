@@ -1,6 +1,6 @@
 [package]
 name = "mixeff-rs"
-version = "1.0.0-rc.4"
+version = "1.0.0-rc.5"
 edition = "2021"
 rust-version = "1.85"
 description = "Linear and generalized linear mixed-effects models (lme4-style formulas) in Rust, validated against lme4 and MixedModels.jl; engine for the mixeff R package"
@@ -38,7 +38,8 @@ statrs = "0.18"
 rand = "0.8"
 rand_distr = "0.4"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
+sha2 = "0.10"
 thiserror = "2"
 num-traits = "0.2"
 indexmap = "2"

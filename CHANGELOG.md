@@ -12,6 +12,38 @@ vs. `unstable-internals` surface inventory.
 
 ## [Unreleased]
 
+## [1.0.0-rc.5] - 2026-10-06
+
+Fifth 1.0 release candidate, prepared locally. Publication and downstream R
+snapshot adoption require their own release and integration checks.
+
+### Added
+
+- Engine-owned `snapshot_json` / `restore_json` methods for fitted LMMs and
+  GLMMs. The opaque `mixeff-rs.fitted-state` schema `1.0.0` retains construction
+  inputs, fitted state, working factors' inputs, and fit evidence. Restoration
+  checks compatibility and reconstructs at fixed parameters without optimizer
+  search or PIRLS. Payload checksums detect corruption; nonfinite fitted state
+  is refused, and initial/trial optimizer objectives use lossless encoding. See
+  [the snapshot contract](docs/guide/06_fitted_state_snapshots.md) for compatibility and
+  downstream adoption requirements. Existing reporting schema versions do not
+  change.
+
+### Fixed (numerical)
+
+- Two-sided normal Wald p-values use the survival function directly in LMM
+  inference, joint-GLMM inference, coefficient tables, and summary fallbacks.
+  Representable extreme tails no longer round to zero through CDF subtraction:
+  `z = 10.72795548907` now gives approximately `7.524247963e-27` instead of
+  `0.0`. Genuine floating-point underflow remains possible for larger z-values.
+- GLMM `refit`, `refit_with_options`, and `refit_with_start` preserve the
+  template's effective estimator, quadrature setting, and caller optimizer
+  controls. Joint Laplace/AGQ templates no longer silently switch to profiled
+  fast PIRLS. A joint refit that substitutes fast PIRLS returns an error, so
+  parametric bootstrap records it as a failed replicate rather than mixing
+  estimators. A template that already returned a labelled fast-PIRLS fallback
+  is refitted using that effective estimator.
+
 ## [1.0.0-rc.4] - 2026-09-27
 
 Fourth 1.0 release candidate. Includes native joint-GLMM optimizer corrections,
@@ -496,7 +528,8 @@ API framing, the inference surface, and release infrastructure.
   GLMM profile likelihood are explicitly **out of scope for 1.0** and tracked
   as post-1.0 work.
 
-[Unreleased]: https://github.com/bbuchsbaum/mixeff-rs/compare/v1.0.0-rc.4...HEAD
+[Unreleased]: https://github.com/bbuchsbaum/mixeff-rs/compare/v1.0.0-rc.5...HEAD
+[1.0.0-rc.5]: https://github.com/bbuchsbaum/mixeff-rs/compare/v1.0.0-rc.4...v1.0.0-rc.5
 [1.0.0-rc.4]: https://github.com/bbuchsbaum/mixeff-rs/compare/v1.0.0-rc.3...v1.0.0-rc.4
 [1.0.0-rc.3]: https://github.com/bbuchsbaum/mixeff-rs/compare/v1.0.0-rc.2...v1.0.0-rc.3
 [1.0.0-rc.2]: https://github.com/bbuchsbaum/mixeff-rs/compare/3332f3e2bd06a21d67bb519860475cdcec0ac9c1...v1.0.0-rc.2
