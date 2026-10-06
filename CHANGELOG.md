@@ -14,6 +14,18 @@ vs. `unstable-internals` surface inventory.
 
 ### Fixed
 
+- Native TrustBQ gradient-oracle steps minimize the original quadratic along
+  the feasible shifted-Newton direction when an indefinite Hessian requires
+  damping. This restores default-budget nested LMM REML parity without
+  disabling the analytic gradient oracle or changing interpolation steps.
+- Joint GLMM conditional solves minimize the conditional penalized likelihood,
+  require a finite mode score, and refresh working factors at the final modes.
+  Optimizer and derivative probes reject unfinished conditional solves. This
+  restores centered OSF coefficient parity and stationarity; fast profiled
+  PIRLS retains its existing fitting convention.
+- Negative-binomial conditional deviance uses stable logarithms near the
+  Poisson limit. Unavailable derivative probes are recorded without nonfinite
+  numeric measurements in optimizer certificates.
 - Fitted-state snapshots retain the TrustBQ start ladder, sample reuse,
   gradient oracle, and active-face refit strategies for both standalone LMMs
   and GLMM working LMMs. Restored templates preserve these controls on later

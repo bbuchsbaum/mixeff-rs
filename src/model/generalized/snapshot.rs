@@ -634,11 +634,7 @@ mod tests {
         .unwrap();
         model.fit_with_options(false, 1, false).unwrap();
         #[cfg(feature = "nlopt")]
-        assert!(model
-            .lmm
-            .optsum
-            .return_value
-            .contains("FALLBACK_FAST_PIRLS"));
+        assert!(model.lmm.optsum.return_value.starts_with("JOINT_LAPLACE:"));
         let expected_artifact = model.compiler_artifact().clone();
         let expected_certificate = model.pirls_profiled_optimum_certificate().clone();
         let expected_vcov = model.vcov();

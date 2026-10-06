@@ -1928,6 +1928,111 @@ mod oracle_fit {
     use crate::formula::parse_formula;
     use crate::model::data::DataFrame;
 
+    fn nested_adoption_model() -> LinearMixedModel {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/adoption/pw2_nested.json"
+        ))
+        .unwrap();
+        let mut data = DataFrame::new();
+        data.add_numeric(
+            "player_value",
+            serde_json::from_value(fixture["numeric_columns"]["player_value"].clone()).unwrap(),
+        )
+        .unwrap();
+        for name in ["team", "player_id"] {
+            data.add_categorical_with_levels(
+                name,
+                serde_json::from_value(fixture["categorical_values"][name].clone()).unwrap(),
+                serde_json::from_value(fixture["categorical_levels"][name].clone()).unwrap(),
+            )
+            .unwrap();
+        }
+        LinearMixedModel::new(
+            parse_formula(fixture["formula"].as_str().unwrap()).unwrap(),
+            &data,
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn nested_adoption_gradient_matches_dense_and_finite_differences() {
+        let mut model = nested_adoption_model();
+        model.optsum.reml = true;
+        for theta in [
+            [1.0, 1.0],
+            [3.0, 0.0],
+            [3.0083288316311525, 0.24661553029352495],
+            [17.512353066931897, 0.9829084808185913],
+        ] {
+            let dense = model.dense_reference_gradient(&theta, true).unwrap();
+            let (objective, gradient) = model.objective_and_gradient_at(&theta).unwrap();
+            assert!((objective - dense.objective).abs() < 1e-7);
+            for k in 0..2 {
+                let h = 1e-4 * theta[k].abs().max(1.0);
+                let mut plus = theta;
+                plus[k] += h;
+                let mut minus = theta;
+                minus[k] -= h;
+                let numeric = (model.objective_at(&plus).unwrap()
+                    - model.objective_at(&minus).unwrap())
+                    / (2.0 * h);
+                eprintln!(
+                    "theta={theta:?} axis={k} gradient={} dense={} numeric={numeric}",
+                    gradient[k], dense.gradient[k]
+                );
+                assert!((gradient[k] - dense.gradient[k]).abs() < 1e-7);
+                assert!((gradient[k] - numeric).abs() < 1e-5);
+            }
+        }
+    }
+
+    #[test]
+    fn nested_adoption_default_budget_reml_parity() {
+        let references: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/adoption/lme4_reference.json"
+        ))
+        .unwrap();
+        let reference = &references["lmm"];
+        let mut model = nested_adoption_model();
+        model.fit(true).unwrap();
+        eprintln!(
+            "theta={:?} beta={:?} sigma={} fmin={} feval={} status={}",
+            model.theta(),
+            model.coef(),
+            model.sigma(),
+            model.optsum.fmin,
+            model.optsum.feval,
+            model.optsum.return_value
+        );
+        assert!((model.coef()[0] - reference["beta"].as_f64().unwrap()).abs() < 1e-4);
+        assert!((model.sigma() - reference["sigma"].as_f64().unwrap()).abs() < 1e-3);
+        assert!((model.loglikelihood() - reference["loglik"].as_f64().unwrap()).abs() < 1e-3);
+        assert!((model.aic() - reference["aic"].as_f64().unwrap()).abs() < 1e-3);
+        for (actual, expected) in model
+            .fitted()
+            .iter()
+            .zip(reference["fitted"].as_array().unwrap())
+        {
+            assert!((actual - expected.as_f64().unwrap()).abs() < 5e-3);
+        }
+        for component in model.varcorr().components {
+            let reference_group = match component.group.as_str() {
+                "team & player_id" => "team:player_id",
+                group => group,
+            };
+            let expected = reference["std_dev"][reference_group]
+                .as_f64()
+                .unwrap_or_else(|| panic!("missing reference for {}", component.group));
+            assert!(
+                (component.std_dev[0] - expected).abs() < 5e-2,
+                "{}",
+                component.group
+            );
+        }
+        assert!(model.optsum.converged());
+    }
+
     fn fit_trust_bq(
         formula: &str,
         data: &DataFrame,

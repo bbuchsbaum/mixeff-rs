@@ -68,8 +68,15 @@ pub(crate) fn annotate_glmm_covariance_status(
     // direction (it is invariant to rescaling the parameters, not to
     // rotating them), so it is recorded as evidence and the raw gradient
     // rule decides, as it did before.
+    let gradient_unavailable =
+        certificate.free_gradient_norm.is_none() || gradient.iter().any(|value| !value.is_finite());
     let decrement_verdict = match decrement.eager.variant {
-        NewtonDecrementVariant::BetaBlockThetaDiagonal => decrement.eager.verdict,
+        NewtonDecrementVariant::BetaBlockThetaDiagonal
+            if !gradient_unavailable
+                || decrement.eager.verdict == NewtonDecrementVerdict::ExceedsTolerance =>
+        {
+            decrement.eager.verdict
+        }
         _ => NewtonDecrementVerdict::NotAssessed,
     };
     let decrement_gap = decrement.eager.objective_gap;
@@ -205,45 +212,53 @@ pub(crate) fn annotate_glmm_covariance_status(
         _ => {}
     }
 
-    if let Some(free_gradient_norm) = certificate.free_gradient_norm {
-        if decrement_verdict != NewtonDecrementVerdict::WithinTolerance
-            && (!free_gradient_norm.is_finite() || free_gradient_norm > gradient_tolerance)
-        {
-            // `apply_derivative_evidence` emits a generic convergence
-            // diagnostic before this GLMM-specific, noise-aware pass. Replace
-            // it here: the assembled reading may be an assessed failure or an
-            // explicitly unassessable noise-dominated probe, and reporting
-            // both would contradict the latter verdict.
-            certificate.diagnostics.retain(|diagnostic| {
-                !(diagnostic.code == DiagnosticCode::OptimizerNonconvergence
-                    && diagnostic.payload.contains_key("derivative_failures"))
+    if (gradient_unavailable || raw_gradient_fails)
+        && decrement_verdict != NewtonDecrementVerdict::WithinTolerance
+    {
+        let free_gradient_norm = certificate.free_gradient_norm;
+        // `apply_derivative_evidence` emits a generic convergence
+        // diagnostic before this GLMM-specific, noise-aware pass. Replace
+        // it here: the assembled reading may be an assessed failure or an
+        // explicitly unassessable noise-dominated probe, and reporting
+        // both would contradict the latter verdict.
+        certificate.diagnostics.retain(|diagnostic| {
+            !(diagnostic.code == DiagnosticCode::OptimizerNonconvergence
+                && diagnostic.payload.contains_key("derivative_failures"))
+        });
+        // The assembled gradient failed the free-component KKT check. A
+        // failure is only an *assessed* non-stationarity when some
+        // failing free component carries a trusted reading; if every
+        // failing component is one the noise-aware probe could not
+        // assess, the honest verdict is "not assessable", not "not
+        // optimized".
+        // An assessed decrement above tolerance is itself an assessed
+        // failure, whatever the per-component noise verdicts.
+        let assessed_failure = decrement_verdict == NewtonDecrementVerdict::ExceedsTolerance
+            || certification_gradient_assessed_free_failure(
+                certification,
+                params,
+                lower_bounds,
+                gradient_tolerance,
+            )
+            || gradient.iter().enumerate().any(|(index, value)| {
+                value.is_finite()
+                    && *value < -gradient_tolerance
+                    && !certification.unassessable_indices.contains(&index)
+                    && lower_bounds.get(index).is_some_and(|lower| {
+                        lower.is_finite() && params[index] <= lower + boundary_tolerance
+                    })
             });
-            // The assembled gradient failed the free-component KKT check. A
-            // failure is only an *assessed* non-stationarity when some
-            // failing free component carries a trusted reading; if every
-            // failing component is one the noise-aware probe could not
-            // assess, the honest verdict is "not assessable", not "not
-            // optimized".
-            // An assessed decrement above tolerance is itself an assessed
-            // failure, whatever the per-component noise verdicts.
-            let assessed_failure = decrement_verdict == NewtonDecrementVerdict::ExceedsTolerance
-                || certification_gradient_assessed_free_failure(
-                    certification,
-                    params,
-                    lower_bounds,
-                    gradient_tolerance,
-                );
-            if assessed_failure {
-                certificate.status = crate::compiler::FitStatus::NotOptimized;
-                if !certificate.diagnostics.iter().any(|diagnostic| {
-                    diagnostic.code == DiagnosticCode::OptimizerNonconvergence
-                        && diagnostic
-                            .payload
-                            .get("stationarity_check")
-                            .and_then(serde_json::Value::as_str)
-                            == Some("free_gradient_kkt")
-                }) {
-                    let mut diagnostic = Diagnostic::new(
+        if assessed_failure {
+            certificate.status = crate::compiler::FitStatus::NotOptimized;
+            if !certificate.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == DiagnosticCode::OptimizerNonconvergence
+                    && diagnostic
+                        .payload
+                        .get("stationarity_check")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("free_gradient_kkt")
+            }) {
+                let mut diagnostic = Diagnostic::new(
                         DiagnosticCode::OptimizerNonconvergence,
                         DiagnosticSeverity::Warning,
                         DiagnosticStage::Certification,
@@ -253,50 +268,12 @@ pub(crate) fn annotate_glmm_covariance_status(
                         "treat this joint GLMM result as not optimized until a tighter run or alternate optimizer certifies stationarity".to_string(),
                         "fall back to the labelled fast-PIRLS GLMM result when available rather than reporting a silent interior convergence".to_string(),
                     ]);
-                    diagnostic
-                        .payload
-                        .insert("fit_mode".to_string(), serde_json::json!("joint_glmm"));
-                    diagnostic.payload.insert(
-                        "stationarity_check".to_string(),
-                        serde_json::json!("free_gradient_kkt"),
-                    );
-                    diagnostic.payload.insert(
-                        "free_gradient_norm".to_string(),
-                        serde_json::json!(free_gradient_norm),
-                    );
-                    diagnostic.payload.insert(
-                        "gradient_tolerance".to_string(),
-                        serde_json::json!(gradient_tolerance),
-                    );
-                    if decrement_verdict == NewtonDecrementVerdict::ExceedsTolerance {
-                        insert_decrement_payload(&mut diagnostic);
-                    }
-                    insert_certification_gradient_payload(&mut diagnostic, certification);
-                    if let Some(return_code) = &certificate.evidence.optimizer_stop.return_code {
-                        diagnostic
-                            .payload
-                            .insert("return_code".to_string(), serde_json::json!(return_code));
-                    }
-                    certificate.diagnostics.push(diagnostic);
-                }
-            } else {
-                certificate.status = crate::compiler::FitStatus::NotAssessed;
-                let mut diagnostic = Diagnostic::new(
-                    DiagnosticCode::OptimizerNotAssessed,
-                    DiagnosticSeverity::Warning,
-                    DiagnosticStage::Certification,
-                    "GLMM joint stationarity could not be assessed: the finite-difference probe is noise-dominated on a flat deviance direction even at escalated steps",
-                )
-                .with_suggested_actions(vec![
-                    "treat this fit as an acceptable optimizer stop whose stationarity is unverifiable, not as an assessed optimization failure".to_string(),
-                    "certify externally (reference fit or refit with a tighter inner PIRLS tolerance) before promoting this row to strict parity".to_string(),
-                ]);
                 diagnostic
                     .payload
                     .insert("fit_mode".to_string(), serde_json::json!("joint_glmm"));
                 diagnostic.payload.insert(
                     "stationarity_check".to_string(),
-                    serde_json::json!("free_gradient_kkt_noise_dominated"),
+                    serde_json::json!("free_gradient_kkt"),
                 );
                 diagnostic.payload.insert(
                     "free_gradient_norm".to_string(),
@@ -306,6 +283,9 @@ pub(crate) fn annotate_glmm_covariance_status(
                     "gradient_tolerance".to_string(),
                     serde_json::json!(gradient_tolerance),
                 );
+                if decrement_verdict == NewtonDecrementVerdict::ExceedsTolerance {
+                    insert_decrement_payload(&mut diagnostic);
+                }
                 insert_certification_gradient_payload(&mut diagnostic, certification);
                 if let Some(return_code) = &certificate.evidence.optimizer_stop.return_code {
                     diagnostic
@@ -314,8 +294,42 @@ pub(crate) fn annotate_glmm_covariance_status(
                 }
                 certificate.diagnostics.push(diagnostic);
             }
-            return;
+        } else {
+            certificate.status = crate::compiler::FitStatus::NotAssessed;
+            let mut diagnostic = Diagnostic::new(
+                    DiagnosticCode::OptimizerNotAssessed,
+                    DiagnosticSeverity::Warning,
+                    DiagnosticStage::Certification,
+                    "GLMM joint stationarity could not be assessed: finite-difference probes are unavailable or remain noise-dominated at escalated steps",
+                )
+                .with_suggested_actions(vec![
+                    "treat this fit as an acceptable optimizer stop whose stationarity is unverifiable, not as an assessed optimization failure".to_string(),
+                    "certify externally (reference fit or refit with a tighter inner PIRLS tolerance) before promoting this row to strict parity".to_string(),
+                ]);
+            diagnostic
+                .payload
+                .insert("fit_mode".to_string(), serde_json::json!("joint_glmm"));
+            diagnostic.payload.insert(
+                "stationarity_check".to_string(),
+                serde_json::json!("free_gradient_kkt_noise_dominated"),
+            );
+            diagnostic.payload.insert(
+                "free_gradient_norm".to_string(),
+                serde_json::json!(free_gradient_norm),
+            );
+            diagnostic.payload.insert(
+                "gradient_tolerance".to_string(),
+                serde_json::json!(gradient_tolerance),
+            );
+            insert_certification_gradient_payload(&mut diagnostic, certification);
+            if let Some(return_code) = &certificate.evidence.optimizer_stop.return_code {
+                diagnostic
+                    .payload
+                    .insert("return_code".to_string(), serde_json::json!(return_code));
+            }
+            certificate.diagnostics.push(diagnostic);
         }
+        return;
     }
     let theta_params = &params[n_beta..];
     let theta_lower = lower_bounds.get(n_beta..).unwrap_or(&[]);
@@ -404,7 +418,8 @@ pub(crate) fn certification_gradient_assessed_free_failure(
                     && params.get(index).copied().unwrap_or(f64::NAN) <= lower + boundary_tolerance
             });
             !at_bound
-                && (!value.is_finite() || value.abs() > gradient_tolerance)
+                && value.is_finite()
+                && value.abs() > gradient_tolerance
                 && !certification.unassessable_indices.contains(&index)
         })
 }
@@ -420,10 +435,12 @@ pub(crate) fn insert_certification_gradient_payload(
         return;
     }
     let max_abs = |values: &[f64]| {
-        values
-            .iter()
-            .map(|value| value.abs())
-            .fold(0.0_f64, f64::max)
+        values.iter().all(|value| value.is_finite()).then(|| {
+            values
+                .iter()
+                .map(|value| value.abs())
+                .fold(0.0_f64, f64::max)
+        })
     };
     diagnostic.payload.insert(
         "probe_gradient_max_abs".to_string(),
@@ -783,14 +800,10 @@ pub(crate) const JOINT_LAPLACE_FD_RELATIVE_STEP: f64 = 1.0e-5;
 
 /// Escalated relative steps for the stationarity certification gradient.
 ///
-/// The inner PIRLS stopping rule leaves an O(1e-5) absolute error in the
-/// deviance, so a central difference at relative step `h` carries a noise
-/// term of roughly `1e-5 / h` in the gradient. Against the 2e-2 stationarity
-/// tolerance the default 1e-5 step is useless on flat directions (noise
-/// O(1)); these two steps put the noise term at roughly tolerance/2 and
-/// tolerance/8 while keeping the central-difference truncation error far
-/// below tolerance, and disagreement between them flags a component whose
-/// surface is too rough to assess at any trusted step.
+/// Even after conditional-mode convergence, floating-point deviance noise
+/// can dominate small-step differences on flat directions. These larger
+/// probes check agreement before trusting an escalated reading; disagreement
+/// leaves the component explicitly unassessable.
 pub(crate) const JOINT_LAPLACE_CERT_FD_ESCALATED_RELATIVE_STEPS: [f64; 2] = [1.0e-3, 4.0e-3];
 
 /// Stationarity tolerance for the post-fit profiled fast-PIRLS optimum

@@ -367,7 +367,16 @@ pub(crate) fn negative_binomial_deviance_component(y: f64, mu: f64, theta: f64) 
     let mu = mu.max(f64::MIN_POSITIVE);
     let theta = theta.max(f64::MIN_POSITIVE);
     let first = if y == 0.0 { 0.0 } else { y * (y / mu).ln() };
-    let second = (y + theta) * ((y + theta) / (mu + theta)).ln();
+    // At large shape the ratio rounds close to one, and multiplying its
+    // logarithm by shape amplifies that rounding into conditional-objective
+    // noise. Form the small relative difference before taking log1p.
+    let relative_difference = (y - mu) / (mu + theta);
+    let log_ratio = if relative_difference.abs() < 0.5 {
+        relative_difference.ln_1p()
+    } else {
+        ((y + theta) / (mu + theta)).ln()
+    };
+    let second = (y + theta) * log_ratio;
     2.0 * (first - second)
 }
 
@@ -742,7 +751,12 @@ impl GeneralizedLinearMixedModel {
         // A caller-driven PIRLS moves the fitted modes; deferred post-fit
         // evidence must be produced from the fitted state first.
         self.complete_deferred_inspection();
-        self.pirls_with_options(vary_beta, verbose, GLMM_PIRLS_MAX_ITER, true)
+        let max_iter = if vary_beta {
+            GLMM_PIRLS_MAX_ITER
+        } else {
+            GLMM_HESSIAN_PIRLS_MAX_ITER
+        };
+        self.pirls_with_options(vary_beta, verbose, max_iter, true)
     }
 
     fn pirls_with_options(
@@ -775,12 +789,10 @@ impl GeneralizedLinearMixedModel {
         max_iter: usize,
         reset_modes: bool,
     ) -> Result<bool> {
-        // Mirrors MixedModels.jl/src/generalizedlinearmixedmodel.jl pirls!
-        // (lines 614-669): step-halving toward the previous accepted iterate
-        // whenever a fresh IRLS step would worsen the Laplace objective. Keeps
-        // the outer optimizer's view of obj(θ) consistent across probes —
-        // without this, BOBYQA on multi-RE GLMM surfaces (e.g. grouseticks
-        // Poisson) sees noisy values and reports `RoundoffLimited`.
+        // The profiled fast path retains its Laplace-based halving rule.
+        // With beta fixed, solve the conditional penalized likelihood only:
+        // the Laplace determinant belongs to the outer objective, evaluated
+        // after the conditional modes and their weights have converged.
         let tol = 1.0e-5;
         let max_halvings = 10;
 
@@ -811,8 +823,16 @@ impl GeneralizedLinearMixedModel {
             "PIRLS current and previous random-effect blocks must stay aligned"
         );
         let mut beta_prev = self.beta.clone();
-        let mut obj0 = self.laplace_objective();
-        let mut halving_bound = obj0 * 1.0001;
+        let mut obj0 = if vary_beta {
+            self.laplace_objective()
+        } else {
+            self.conditional_objective()
+        };
+        let mut halving_bound = if vary_beta {
+            obj0 * 1.0001
+        } else {
+            obj0 + 64.0 * f64::EPSILON * obj0.abs().max(1.0)
+        };
 
         let mut sqrtwts = vec![0.0f64; n];
         let mut working_y = vec![0.0f64; n];
@@ -838,40 +858,10 @@ impl GeneralizedLinearMixedModel {
                     &mut last_progress,
                 )?;
             }
-            // --- Compute IRLS weights and working response ---
-            for obs in 0..n {
-                let mu_obs = self.mu[obs];
-                let eta_obs = self.eta[obs];
-                let y_obs = self.y[obs];
-
-                let case_w = if self.wt.is_empty() {
-                    1.0
-                } else {
-                    self.wt[obs]
-                };
-                (sqrtwts[obs], working_y[obs]) =
-                    pirls_working_observation_with_offset_and_family_parameters(
-                        self.family,
-                        self.link,
-                        self.negative_binomial_theta,
-                        y_obs,
-                        eta_obs,
-                        mu_obs,
-                        case_w,
-                        self.offset[obs],
-                    );
-            }
-
-            // --- Update the LMM with new IRLS weights ---
-            // With β fixed only the RE rows of A/L are read below (the
-            // conditional-mode solve and the log-determinant), so the
-            // `[X|y]` rows are left stale and refreshed once on exit.
-            if vary_beta {
-                self.lmm.update_irls_weights(&sqrtwts, &working_y)?;
-                self.lmm.update_l()?;
-            } else {
-                self.lmm.update_irls_weights_re_only(&sqrtwts, &working_y);
-                self.lmm.update_l_re_only()?;
+            self.update_pirls_working_state(vary_beta, &mut sqrtwts, &mut working_y)?;
+            if !vary_beta && self.conditional_mode_score_max_abs() <= 1e-8 {
+                converged = true;
+                break;
             }
 
             // --- Propose new β / u from the LMM solution ---
@@ -886,7 +876,11 @@ impl GeneralizedLinearMixedModel {
                 self.b[i] = &rt.lambda * &self.u[i];
             }
             self.update_eta_given_fixed(fixed_eta.as_ref());
-            let mut obj = self.laplace_objective();
+            let mut obj = if vary_beta {
+                self.laplace_objective()
+            } else {
+                self.conditional_objective()
+            };
 
             // --- Step-halving: average toward the previous accepted state
             //     until obj is no worse, up to `max_halvings` averagings. ---
@@ -907,14 +901,25 @@ impl GeneralizedLinearMixedModel {
                     self.b[i] = &rt.lambda * &self.u[i];
                 }
                 self.update_eta_given_fixed(fixed_eta.as_ref());
-                obj = self.laplace_objective();
+                obj = if vary_beta {
+                    self.laplace_objective()
+                } else {
+                    self.conditional_objective()
+                };
+            }
+
+            if !vary_beta && (!obj.is_finite() || obj > halving_bound) {
+                // A failed line search is not a small successful step.
+                self.u.clone_from(&u_prev);
+                self.update_eta_given_fixed(fixed_eta.as_ref());
+                break;
             }
 
             if verbose {
                 eprintln!("  PIRLS iter {iter}: obj = {obj:.6} (nhalf = {nhalf})");
             }
 
-            if pirls_converged(obj, obj0, tol) {
+            if vary_beta && pirls_converged(obj, obj0, tol) {
                 converged = true;
                 break;
             }
@@ -925,12 +930,108 @@ impl GeneralizedLinearMixedModel {
             }
             beta_prev = self.beta.clone();
             obj0 = obj;
-            halving_bound = obj;
+            halving_bound = if vary_beta {
+                obj
+            } else {
+                obj + 64.0 * f64::EPSILON * obj.abs().max(1.0)
+            };
         }
 
+        if !vary_beta {
+            // The Laplace determinant and AGQ scale must describe the final
+            // modes, including after an exhausted or failed conditional solve.
+            self.update_pirls_working_state(false, &mut sqrtwts, &mut working_y)?;
+            converged = self.conditional_mode_score_max_abs() <= 1e-8;
+        }
         self.refresh_dispersion();
 
         Ok(converged)
+    }
+
+    fn update_pirls_working_state(
+        &mut self,
+        vary_beta: bool,
+        sqrtwts: &mut [f64],
+        working_y: &mut [f64],
+    ) -> Result<()> {
+        for obs in 0..self.y.len() {
+            (sqrtwts[obs], working_y[obs]) =
+                pirls_working_observation_with_offset_and_family_parameters(
+                    self.family,
+                    self.link,
+                    self.negative_binomial_theta,
+                    self.y[obs],
+                    self.eta[obs],
+                    self.mu[obs],
+                    self.case_weight(obs),
+                    self.offset[obs],
+                );
+        }
+        if vary_beta {
+            self.lmm.update_irls_weights(sqrtwts, working_y)?;
+            self.lmm.update_l()
+        } else {
+            self.lmm.update_irls_weights_re_only(sqrtwts, working_y);
+            self.lmm.update_l_re_only()
+        }
+    }
+
+    /// Score of half the conditional deviance plus the standard-normal
+    /// random-effect penalty. Evaluate the actual mean/link, not the bounded
+    /// working approximation; invalid derivatives cannot certify convergence.
+    fn conditional_mode_score_max_abs(&self) -> f64 {
+        let mut score = self.u.clone();
+        for obs in 0..self.y.len() {
+            let mu = self.mu[obs];
+            if !mu.is_finite() || !self.eta[obs].is_finite() {
+                return f64::INFINITY;
+            }
+            let in_domain = match self.family {
+                Family::Bernoulli | Family::Binomial => (0.0..=1.0).contains(&mu),
+                Family::Normal => true,
+                _ => mu > 0.0,
+            };
+            if !in_domain {
+                return f64::INFINITY;
+            }
+            let residual = match (self.family, self.link) {
+                (Family::Bernoulli | Family::Binomial, LinkFunction::Logit)
+                | (Family::Poisson, LinkFunction::Log)
+                | (Family::Normal, LinkFunction::Identity) => self.y[obs] - mu,
+                _ => {
+                    let variance = self.variance(mu);
+                    let derivative = self.link.mu_eta(self.eta[obs]);
+                    if !variance.is_finite()
+                        || variance <= 0.0
+                        || !derivative.is_finite()
+                        || derivative == 0.0
+                    {
+                        return f64::INFINITY;
+                    }
+                    (self.y[obs] - mu) * derivative / variance
+                }
+            } * self.case_weight(obs);
+            if !residual.is_finite() {
+                return f64::INFINITY;
+            }
+            for (term, block) in self.lmm.reterms.iter().zip(&mut score) {
+                let level = term.refs[obs] as usize;
+                for col in 0..term.vsize {
+                    let z_lambda: f64 = (0..term.vsize)
+                        .map(|row| term.z[(row, obs)] * term.lambda[(row, col)])
+                        .sum();
+                    block[(col, level)] -= z_lambda * residual;
+                }
+            }
+        }
+        let mut maximum = 0.0_f64;
+        for value in score.iter().flat_map(|block| block.iter()) {
+            if !value.is_finite() {
+                return f64::INFINITY;
+            }
+            maximum = maximum.max(value.abs());
+        }
+        maximum
     }
 
     /// Conditional modes of the random effects with β held fixed.
@@ -1050,6 +1151,10 @@ impl GeneralizedLinearMixedModel {
 
     /// Laplace approximation objective: deviance residuals + u penalty + log|L|.
     pub fn laplace_objective(&self) -> f64 {
+        self.conditional_objective() + self.lmm_logdet()
+    }
+
+    fn conditional_objective(&self) -> f64 {
         // For binomial-with-trials data the response is a per-trial proportion
         // and `wt[i]` is the trial count; weighting the per-observation
         // deviance contribution by `wt[i]` recovers the binomial deviance.
@@ -1061,7 +1166,7 @@ impl GeneralizedLinearMixedModel {
             .iter()
             .map(|u| u.iter().map(|x| x * x).sum::<f64>())
             .sum();
-        dev + u_penalty + self.lmm_logdet()
+        dev + u_penalty
     }
 
     fn u_penalty(&self) -> f64 {
@@ -1411,7 +1516,12 @@ impl GeneralizedLinearMixedModel {
 
     /// Returns whether the inner PIRLS converged (see [`Self::pirls`]).
     pub(super) fn update_pirls_at_theta(&mut self, theta: &[f64], vary_beta: bool) -> Result<bool> {
-        self.update_pirls_at_theta_with_options(theta, vary_beta, GLMM_PIRLS_MAX_ITER, true)
+        let max_iter = if vary_beta {
+            GLMM_PIRLS_MAX_ITER
+        } else {
+            GLMM_HESSIAN_PIRLS_MAX_ITER
+        };
+        self.update_pirls_at_theta_with_options(theta, vary_beta, max_iter, true)
     }
 
     pub(super) fn update_pirls_at_theta_with_options(
@@ -1515,6 +1625,51 @@ mod nested_sparse_regression {
     use crate::model::generalized::GeneralizedLinearMixedModel;
     use crate::model::traits::{Family, LinkFunction, MixedModelFit};
     use crate::types::MatrixBlock;
+
+    #[test]
+    fn large_shape_negative_binomial_deviance_preserves_small_differences() {
+        // Independent 65-digit decimal logarithms of the NB unit deviance.
+        for (y, mu, expected) in [
+            (0.0, 3.2, 6.399999591624694),
+            (3.0, 3.001, 3.3325923789244125e-7),
+            (6.0, 2.1, 4.797864887403264),
+        ] {
+            let actual = super::negative_binomial_deviance_component(y, mu, 25074971.408206597);
+            assert!(
+                (actual - expected).abs() < 1e-13,
+                "y={y} mu={mu}: {actual} != {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_beta_pirls_refuses_invalid_gamma_mean_at_zero_theta() {
+        let mut data = crate::model::data::DataFrame::new();
+        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        data.add_categorical("g", vec!["a".into(), "a".into(), "b".into(), "b".into()])
+            .unwrap();
+        let mut model = GeneralizedLinearMixedModel::new(
+            parse_formula("y ~ 1 + (1 | g)").unwrap(),
+            &data,
+            Family::Gamma,
+            Some(LinkFunction::Inverse),
+        )
+        .unwrap();
+        model.beta.fill(-1.0);
+        assert!(!model
+            .update_pirls_at_theta_with_options(&[0.0], false, 2, true)
+            .unwrap());
+        assert!(model.mu.iter().all(|mu| *mu < 0.0));
+        assert!(model.conditional_mode_score_max_abs().is_infinite());
+        let initial = model.joint_glmm_deviance_at_params(&[-1.0, 0.0], 1, 1);
+        assert!(initial.is_infinite());
+        let error = model
+            .fit_joint_glmm_from_start(vec![-1.0], vec![0.0], initial, 1, 100, None)
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("starting conditional-mode solve did not converge"));
+    }
 
     /// grouseticks Poisson GLMM (INDEX ⊂ BROOD ⊂ LOCATION): pins the fit
     /// the sparse-aware blocked Cholesky produces and checks that the RE

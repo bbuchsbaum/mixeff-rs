@@ -188,6 +188,71 @@ fn joint_glmm_stationarity_failure_is_not_converged_interior() {
 }
 
 #[test]
+fn joint_glmm_unavailable_gradient_preserves_assessed_failures() {
+    for theta in [0.0, 0.5] {
+        for other_gradient in [0.0, 0.1, -0.1] {
+            for unavailable in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+                let params = vec![1.0, theta];
+                let lower_bounds = vec![f64::NEG_INFINITY, 0.0];
+                let mut optsum = OptSummary::new(params.clone());
+                optsum.return_value = "JOINT_LAPLACE:FTOL_REACHED".to_string();
+                optsum.finitial = 10.0;
+                optsum.fmin = 5.0;
+                optsum.feval = 20;
+                let mut certificate = OptimizerCertificate::from_opt_summary_with_context(
+                    &optsum,
+                    &params,
+                    &lower_bounds,
+                    Some(20),
+                );
+                let gradient = vec![unavailable, other_gradient];
+                let certification = JointLaplaceCertificationGradient {
+                    gradient: gradient.clone(),
+                    probe_gradient: gradient.clone(),
+                    escalated_indices: Vec::new(),
+                    unassessable_indices: vec![0],
+                    base_objective: 5.0,
+                    curvature_probes: Vec::new(),
+                };
+                certificate.apply_derivative_evidence(
+                    OptimizerDerivativeEvidence {
+                        method: EvidenceMethod::FiniteDifference,
+                        hessian_method: EvidenceMethod::FiniteDifference,
+                        gradient,
+                        hessian: None,
+                    },
+                    0.02,
+                    1e-6,
+                );
+                annotate_glmm_covariance_status(
+                    &mut certificate,
+                    &params,
+                    1,
+                    &lower_bounds,
+                    &certification,
+                    0.02,
+                    None,
+                );
+                let assessed_failure =
+                    other_gradient < -0.02 || (theta > 0.0 && other_gradient > 0.02);
+                assert_eq!(
+                    certificate.status,
+                    if assessed_failure {
+                        crate::compiler::FitStatus::NotOptimized
+                    } else {
+                        crate::compiler::FitStatus::NotAssessed
+                    }
+                );
+                assert!(certificate.evidence.optimizer_stop.acceptable_stop);
+                assert!(certificate.free_gradient_norm.is_none());
+                assert!(certificate.evidence.gradient.raw_gradient_norm.is_none());
+                assert!(crate::model::snapshot::encode_snapshot(&certificate).is_ok());
+            }
+        }
+    }
+}
+
+#[test]
 fn joint_glmm_noise_dominated_stationarity_is_not_assessed() {
     // Probe readings on the two theta components are pure inner-PIRLS
     // noise (bd-01KTQFTH6J0ZFGR5RMV28HAX44 measured 0.703/0.365 at a
@@ -650,6 +715,23 @@ fn experimental_joint_failed_stop_returns_labelled_fast_pirls_fallback() {
         metadata.effective_method.as_deref(),
         Some("fast_pirls_profiled")
     );
+    // Exercise the fallback snapshot path with a deliberately exhausted joint
+    // budget, rather than depending on an unrelated fit failing by accident.
+    let expected_artifact = model.compiler_artifact().clone();
+    let expected_certificate = model.pirls_profiled_optimum_certificate().clone();
+    let expected_vcov = model.vcov();
+    let json = model.snapshot_json().unwrap();
+    {
+        let guard = crate::model::snapshot::OptimizerEntryGuard::expect_none();
+        let restored = GeneralizedLinearMixedModel::restore_json(&json).unwrap();
+        assert_eq!(guard.entries_since(), 0);
+        assert_eq!(restored.compiler_artifact(), &expected_artifact);
+        assert_eq!(
+            restored.pirls_profiled_optimum_certificate(),
+            &expected_certificate
+        );
+        assert_relative_eq!(restored.vcov(), expected_vcov, epsilon = 1e-10);
+    }
     let y = model.y.as_slice().to_vec();
     model.refit(&y).unwrap();
     assert_eq!(

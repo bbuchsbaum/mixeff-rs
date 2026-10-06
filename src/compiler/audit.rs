@@ -3248,6 +3248,62 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_derivative_probes_do_not_become_nonfinite_measurements() {
+        let mut optsum = OptSummary::new(vec![0.5]);
+        optsum.return_value = "FTOL_REACHED".to_string();
+        optsum.finitial = 5.0;
+        optsum.fmin = 2.0;
+        optsum.feval = 4;
+        for value in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            for (in_hessian, finite_gradient) in [(false, 0.0), (true, 0.0), (true, 0.1)] {
+                let mut certificate =
+                    OptimizerCertificate::from_opt_summary(&optsum, &[0.5], &[0.0]);
+                certificate.apply_derivative_evidence(
+                    OptimizerDerivativeEvidence {
+                        method: EvidenceMethod::FiniteDifference,
+                        hessian_method: EvidenceMethod::FiniteDifference,
+                        gradient: vec![if in_hessian { finite_gradient } else { value }],
+                        hessian: Some(DMatrix::from_element(
+                            1,
+                            1,
+                            if in_hessian { value } else { 1.0 },
+                        )),
+                    },
+                    1e-3,
+                    1e-5,
+                );
+                assert!(certificate.evidence.optimizer_stop.acceptable_stop);
+                assert_eq!(
+                    certificate.free_gradient_norm,
+                    in_hessian.then_some(finite_gradient)
+                );
+                assert_eq!(
+                    certificate.evidence.gradient.raw_gradient_norm,
+                    in_hessian.then_some(finite_gradient)
+                );
+                assert!(certificate.hessian_eigen_min.is_none());
+                assert!(certificate.checks.iter().any(|check| matches!(check,
+                    CertificateCheck::Incomplete { evidence } if evidence.status == IncompleteCheckStatus::Unavailable)));
+                assert!(!certificate.checks.iter().any(|check| matches!(
+                    check,
+                    CertificateCheck::HessianPsdOnActiveSubspace { .. }
+                )));
+                assert_eq!(
+                    certificate
+                        .checks
+                        .iter()
+                        .any(|check| matches!(check, CertificateCheck::FreeGradientOk { .. })),
+                    in_hessian && finite_gradient == 0.0
+                );
+                if in_hessian && finite_gradient > 0.0 {
+                    assert_eq!(certificate.status, FitStatus::NotOptimized);
+                }
+                assert!(crate::model::snapshot::encode_snapshot(&certificate).is_ok());
+            }
+        }
+    }
+
+    #[test]
     fn design_audit_reports_full_rank_fixed_effects() {
         let formula = parse_formula("y ~ x + (1 | subject)").unwrap();
         let semantic = compile_formula_ir(&formula);
@@ -4660,7 +4716,7 @@ impl OptimizerCertificate {
 
     pub fn apply_derivative_evidence(
         &mut self,
-        derivatives: OptimizerDerivativeEvidence,
+        mut derivatives: OptimizerDerivativeEvidence,
         gradient_tolerance: f64,
         hessian_tolerance: f64,
     ) {
@@ -4689,6 +4745,24 @@ impl OptimizerCertificate {
                 reason: "derivative certificate dimensions did not match theta".to_string(),
             };
             return;
+        }
+
+        if derivatives.gradient.iter().any(|value| !value.is_finite()) {
+            self.mark_derivative_checks_incomplete(IncompleteCheckEvidence::new(
+                "derivative_inspection",
+                IncompleteCheckStatus::Unavailable,
+                "gradient probes returned nonfinite values; stationarity is unavailable",
+            ));
+            return;
+        }
+        // A failed curvature probe does not invalidate a finite gradient.
+        // Keep its stationarity evidence while recording the Hessian as unavailable.
+        if derivatives
+            .hessian
+            .as_ref()
+            .is_some_and(|h| h.iter().any(|value| !value.is_finite()))
+        {
+            derivatives.hessian = None;
         }
 
         remove_derivative_not_assessed_checks(&mut self.checks);

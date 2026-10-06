@@ -454,7 +454,7 @@ where
             });
         }
 
-        let step = trust_region_step(&model, &x, lower_bounds, upper_bounds, radius);
+        let step = trust_region_step(&model, &x, lower_bounds, upper_bounds, radius, false);
         let step_norm = norm(&step);
         if step_norm <= options.final_radius {
             radius *= options.shrink_factor;
@@ -777,6 +777,7 @@ fn trust_region_step(
     lower_bounds: &[f64],
     upper_bounds: &[f64],
     radius: f64,
+    refine_shifted_ray: bool,
 ) -> Vec<f64> {
     let n = x.len();
     if norm(model.gradient.as_slice()) <= MIN_STEP {
@@ -797,6 +798,27 @@ fn trust_region_step(
             let mut step = step_vec.iter().copied().collect::<Vec<_>>();
             bound_and_scale_step(&mut step, x, lower_bounds, upper_bounds, radius);
             if norm(&step) > MIN_STEP && model.predicted_reduction(&step) > 0.0 {
+                if refine_shifted_ray && shift > 0.0 {
+                    // Damping supplies a direction, but an arbitrary shift
+                    // must not force tiny steps while a secant Hessian stays
+                    // indefinite. Minimize the original quadratic along the
+                    // feasible ray, retaining its curvature-informed direction.
+                    let direction = DVector::from_column_slice(&step) / norm(&step);
+                    let curvature = direction.dot(&(&model.hessian * &direction));
+                    let limit =
+                        max_bound_step(x, direction.as_slice(), lower_bounds, upper_bounds, radius);
+                    let alpha = if curvature > 0.0 {
+                        (-model.gradient.dot(&direction) / curvature)
+                            .min(limit)
+                            .max(0.0)
+                    } else {
+                        limit
+                    };
+                    let ray: Vec<f64> = direction.iter().map(|v| alpha * v).collect();
+                    if model.predicted_reduction(&ray) > model.predicted_reduction(&step) {
+                        return ray;
+                    }
+                }
                 return step;
             }
         }
@@ -1197,7 +1219,7 @@ where
             hessian: hessian.clone(),
             sample_count: 0,
         };
-        let step = trust_region_step(&model, &x, lower_bounds, upper_bounds, radius);
+        let step = trust_region_step(&model, &x, lower_bounds, upper_bounds, radius, true);
         let step_norm = norm(&step);
         if step_norm <= options.final_radius {
             radius *= options.shrink_factor;
@@ -1398,8 +1420,8 @@ where
 }
 
 /// Secant update of the model Hessian: BFGS when the pair has positive
-/// curvature (`yᵀs > 0`), which keeps a positive-definite model whose
-/// predicted reductions the trust-region ratio test can trust, and SR1
+/// curvature (`yᵀs > 0`), which preserves positive definiteness when the
+/// current model is positive definite, and SR1
 /// otherwise, which lets the model record negative curvature instead of
 /// discarding the pair.
 fn secant_update(hessian: &mut DMatrix<f64>, s: &[f64], y: &[f64]) {
@@ -1450,6 +1472,34 @@ fn projected_gradient_norm(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indefinite_oracle_step_minimizes_its_feasible_ray() {
+        let model = QuadraticInterpolationModel {
+            gradient: DVector::from_vec(vec![-1.0, 0.0]),
+            hessian: DMatrix::from_diagonal(&DVector::from_vec(vec![-1.0, 2.0])),
+            sample_count: 0,
+        };
+        let (lower, upper) = unbounded(2);
+        for (radius, bound, expected_step) in
+            [(1.0, f64::INFINITY, 1.0), (1.0, 0.4, 0.4), (0.2, 0.4, 0.2)]
+        {
+            let mut upper = upper.clone();
+            upper[0] = bound;
+            let step = trust_region_step(&model, &[0.0, 0.0], &lower, &upper, radius, true);
+            assert!((step[0] - expected_step).abs() < 1e-12);
+            assert_eq!(step[1], 0.0);
+            // q(t) = -t - t^2/2 decreases along the entire feasible ray;
+            // the shifted Newton step alone would stop at t = 1/9.
+            assert!(
+                (model.predicted_reduction(&step)
+                    - expected_step
+                    - 0.5 * expected_step * expected_step)
+                    .abs()
+                    < 1e-12
+            );
+        }
+    }
 
     fn unbounded(n: usize) -> (Vec<f64>, Vec<f64>) {
         (vec![f64::NEG_INFINITY; n], vec![f64::INFINITY; n])

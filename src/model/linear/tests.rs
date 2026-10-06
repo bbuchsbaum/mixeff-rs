@@ -1224,7 +1224,7 @@ fn test_trust_bq_certificate_stop_accepts_scalar_interior() {
 
 #[test]
 fn deferred_certificate_evidence_matches_eager_completion() {
-    let data = shared_julia_parity_fixture();
+    let data = sleepstudy_fixture();
     let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
     let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
     model.fit(true).unwrap();
@@ -1269,7 +1269,7 @@ fn deferred_certificate_evidence_matches_eager_completion() {
 
 #[test]
 fn refit_resets_the_inspected_certificate() {
-    let data = shared_julia_parity_fixture();
+    let data = sleepstudy_fixture();
     let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
     let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
     model.fit(true).unwrap();
@@ -1282,6 +1282,25 @@ fn refit_resets_the_inspected_certificate() {
     assert_eq!(after.objective_value, Some(model.optsum().fmin));
     assert_ne!(after.objective_value, before);
     assert!(!LinearMixedModel::certificate_derivatives_deferred(after));
+}
+
+#[test]
+fn shared_parity_fixture_reaches_its_rank_deficient_reml_optimum() {
+    let data = shared_julia_parity_fixture();
+    let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+    let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+    model
+        .fit_with_options(FitOptions::reml().with_optimizer(Optimizer::TrustBq))
+        .unwrap();
+    // Independent dense-V REML minimization from three starts agrees here;
+    // this fixture is not an interior fit suitable for deferred-Hessian tests.
+    assert!((model.objective() - 223.735093518798).abs() < 1e-7);
+    assert_eq!(model.theta()[2], 0.0);
+    assert!(!model.derivative_evidence_pending);
+    assert_eq!(
+        model.optimizer_certificate().unwrap().status,
+        FitStatus::ConvergedReducedRank
+    );
 }
 
 #[test]

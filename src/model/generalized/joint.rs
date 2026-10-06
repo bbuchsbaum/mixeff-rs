@@ -61,7 +61,13 @@ impl GeneralizedLinearMixedModel {
         let fallback_fast_pirls = self.clone();
         let start_beta = self.beta.as_slice().to_vec();
         let start_theta = self.theta.clone();
-        let profiled_start_objective = self.deviance_with_response_constants(n_agq);
+        let mut start_params = start_beta.clone();
+        start_params.extend_from_slice(&start_theta);
+        // Compare every joint candidate against the same converged
+        // conditional objective, rather than the fast-PIRLS approximation.
+        let profiled_start_objective =
+            self.joint_glmm_deviance_at_params(&start_params, start_beta.len(), n_agq);
+        self.take_pending_interrupt()?;
         let n_joint_params = start_beta.len() + start_theta.len();
         self.lmm.optsum.optimizer = joint_optimizer;
         self.lmm.optsum.backend = joint_optimizer.canonical_backend();
@@ -88,6 +94,11 @@ impl GeneralizedLinearMixedModel {
         maxeval: u32,
         fallback_fast_pirls: Option<Self>,
     ) -> Result<&mut Self> {
+        if !profiled_start_objective.is_finite() {
+            return Err(MixedModelError::Optimization(
+                "joint GLMM starting conditional-mode solve did not converge".to_string(),
+            ));
+        }
         let optimizer = self
             .lmm
             .optsum
@@ -931,7 +942,7 @@ impl GeneralizedLinearMixedModel {
         self.beta = DVector::from_column_slice(&params[..n_beta]);
         let theta = &params[n_beta..];
         match self.update_pirls_at_theta(theta, false) {
-            Ok(_) => {
+            Ok(true) => {
                 let deviance = self.deviance_with_response_constants(n_agq);
                 if deviance.is_finite() {
                     deviance
@@ -946,7 +957,7 @@ impl GeneralizedLinearMixedModel {
                 self.pending_progress_error = Some(message);
                 f64::INFINITY
             }
-            Err(_) => f64::INFINITY,
+            Ok(false) | Err(_) => f64::INFINITY,
         }
     }
 
@@ -970,8 +981,12 @@ impl GeneralizedLinearMixedModel {
 
         self.beta = DVector::from_column_slice(&params[..n_beta]);
         let theta = &params[n_beta..];
-        self.update_pirls_at_theta_with_options(theta, false, GLMM_HESSIAN_PIRLS_MAX_ITER, true)
+        let converged = self
+            .update_pirls_at_theta_with_options(theta, false, GLMM_HESSIAN_PIRLS_MAX_ITER, true)
             .map_err(|error| format!("conditional-mode PIRLS probe failed: {error}"))?;
+        if !converged {
+            return Err("conditional-mode PIRLS probe did not converge".to_string());
+        }
 
         let deviance = self.deviance_with_response_constants(n_agq);
         if deviance.is_finite() {
@@ -2014,6 +2029,196 @@ pub(crate) fn solve_dense_upper_from_lower_transpose_against_rhs(
             sum -= l[(j, i)] * rhs[j];
         }
         rhs[i] = sum / l[(i, i)];
+    }
+}
+
+#[cfg(test)]
+mod centered_adoption_tests {
+    use super::*;
+    use crate::model::traits::MixedModelFit;
+
+    fn fixture() -> (
+        GeneralizedLinearMixedModel,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<f64>,
+        Vec<usize>,
+    ) {
+        let json: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/adoption/osf_centered.json"
+        ))
+        .unwrap();
+        let mut data = DataFrame::new();
+        for name in ["Error", "OpenPractice", "cYear"] {
+            data.add_numeric(
+                name,
+                serde_json::from_value(json["numeric_columns"][name].clone()).unwrap(),
+            )
+            .unwrap();
+        }
+        let levels: Vec<String> =
+            serde_json::from_value(json["categorical_levels"]["Source"].clone()).unwrap();
+        let values: Vec<String> =
+            serde_json::from_value(json["categorical_values"]["Source"].clone()).unwrap();
+        let group = values
+            .iter()
+            .map(|v| levels.iter().position(|l| l == v).unwrap())
+            .collect();
+        data.add_categorical_with_levels("Source", values, levels)
+            .unwrap();
+        let model = GeneralizedLinearMixedModel::new(
+            crate::formula::parse_formula(json["formula"].as_str().unwrap()).unwrap(),
+            &data,
+            Family::Bernoulli,
+            None,
+        )
+        .unwrap();
+        (
+            model,
+            data.numeric("Error").unwrap().to_vec(),
+            data.numeric("OpenPractice").unwrap().to_vec(),
+            data.numeric("cYear").unwrap().to_vec(),
+            group,
+        )
+    }
+
+    // Independent scalar-intercept Bernoulli oracle. Monotone score bisection
+    // uses the raw model frame, not engine PIRLS, factors, or design matrices.
+    fn oracle(
+        beta: &[f64],
+        theta: f64,
+        y: &[f64],
+        practice: &[f64],
+        year: &[f64],
+        group: &[usize],
+    ) -> (f64, Vec<f64>) {
+        let groups = group.iter().max().unwrap() + 1;
+        let mut rows = vec![Vec::new(); groups];
+        for (i, &g) in group.iter().enumerate() {
+            rows[g].push(i);
+        }
+        let eta: Vec<_> = (0..y.len())
+            .map(|i| {
+                beta[0]
+                    + beta[1] * practice[i]
+                    + beta[2] * year[i]
+                    + beta[3] * practice[i] * year[i]
+            })
+            .collect();
+        let mut objective = 0.0;
+        let mut modes = Vec::new();
+        for indices in rows {
+            let mut lower = -theta * indices.len() as f64;
+            let mut upper = -lower;
+            for _ in 0..100 {
+                let u = (lower + upper) / 2.0;
+                let score = u + theta
+                    * indices
+                        .iter()
+                        .map(|&i| 1.0 / (1.0 + (-eta[i] - theta * u).exp()) - y[i])
+                        .sum::<f64>();
+                if score > 0.0 {
+                    upper = u;
+                } else {
+                    lower = u;
+                }
+            }
+            let u = (lower + upper) / 2.0;
+            modes.push(u);
+            let mut curvature = 1.0;
+            objective += u * u;
+            for i in indices {
+                let e = eta[i] + theta * u;
+                let p = 1.0 / (1.0 + (-e).exp());
+                objective += 2.0 * (e.max(0.0) + (-e.abs()).exp().ln_1p() - y[i] * e);
+                curvature += theta * theta * p * (1.0 - p);
+            }
+            objective += curvature.ln();
+        }
+        (objective, modes)
+    }
+
+    #[test]
+    fn centered_adoption_conditional_objective_matches_independent_oracle() {
+        let (mut model, y, practice, year, group) = fixture();
+        let bad = [
+            -3.219198663706437,
+            -0.3651700356522332,
+            -0.22731916566523758,
+            0.8517039930629361,
+        ];
+        let reference = [-3.1980925, -0.3866951, -0.2306187, 0.8543862];
+        for (beta, theta) in [
+            (bad, 1.3038785296692017),
+            (reference, 1.30157),
+            (reference, 0.0),
+            (bad, 1.3038785296692017),
+        ] {
+            let mut params: Vec<_> = model.lmm.feterm.piv.iter().map(|&i| beta[i]).collect();
+            params.push(theta);
+            let (expected, modes) = oracle(&beta, theta, &y, &practice, &year, &group);
+            let actual = model.joint_glmm_deviance_at_params(&params, 4, 1);
+            eprintln!("joint objective={actual:.12} independent={expected:.12}");
+            assert!((actual - expected).abs() < 1e-7);
+            for (actual_u, expected_u) in model.u[0].iter().zip(modes) {
+                assert!((actual_u - expected_u).abs() < 1e-8);
+            }
+            let hessian_probe = model
+                .joint_glmm_deviance_at_params_for_hessian(&params, 4, 1)
+                .unwrap();
+            assert!((hessian_probe - actual).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn centered_adoption_joint_fit_preserves_parity_and_stationarity() {
+        let references: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/adoption/lme4_reference.json"
+        ))
+        .unwrap();
+        let reference = &references["glmm"];
+        let (mut model, y, practice, year, group) = fixture();
+        model
+            .fit_with_glmm_options(
+                GlmmFitOptions::joint_laplace()
+                    .with_optimizer_control(OptimizerControl::default().with_max_feval(50000)),
+            )
+            .unwrap();
+        let beta = model.coef();
+        eprintln!(
+            "centered GLMM beta={beta:?}, theta={:?}, objective={}",
+            model.theta,
+            model.objective()
+        );
+        for (actual, expected) in beta.iter().zip(reference["beta"].as_array().unwrap()) {
+            assert!(
+                (actual - expected.as_f64().unwrap()).abs() < 0.005,
+                "beta={beta:?}"
+            );
+        }
+        assert!((model.loglikelihood() - reference["loglik"].as_f64().unwrap()).abs() < 0.05);
+        let (expected, _) = oracle(
+            beta.as_slice(),
+            model.theta[0],
+            &y,
+            &practice,
+            &year,
+            &group,
+        );
+        assert!((model.objective() - expected).abs() < 1e-7);
+        let certificate = model
+            .compiler_artifact()
+            .optimizer_certificate
+            .as_ref()
+            .unwrap();
+        assert!(
+            certificate.free_gradient_norm.is_some_and(|g| g < 0.02),
+            "{certificate:?}"
+        );
+        assert_eq!(
+            certificate.status,
+            crate::compiler::FitStatus::ConvergedInterior
+        );
     }
 }
 
