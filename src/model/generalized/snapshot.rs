@@ -438,6 +438,12 @@ mod tests {
     use crate::model::traits::MixedModelFit;
 
     fn weighted_offset_poisson() -> GeneralizedLinearMixedModel {
+        weighted_offset_poisson_with_options(super::super::GlmmFitOptions::joint_laplace())
+    }
+
+    fn weighted_offset_poisson_with_options(
+        options: super::super::GlmmFitOptions,
+    ) -> GeneralizedLinearMixedModel {
         let mut frame = DataFrame::new();
         let mut y = Vec::new();
         let mut x = Vec::new();
@@ -463,8 +469,90 @@ mod tests {
         .offset(offset)
         .build()
         .unwrap();
-        model.fit_with_options(false, 1, false).unwrap();
+        model.fit_with_glmm_options(options).unwrap();
         model
+    }
+
+    #[test]
+    fn snapshot_preserves_glmm_working_optimizer_strategies_and_refits() {
+        use super::super::GlmmFitOptions;
+        use crate::model::linear::{
+            ActiveFaceRefit, OptimizerControl, TrustBqGradientOracle, TrustBqSampleReuse,
+            TrustBqStartLadder,
+        };
+
+        for options in [
+            GlmmFitOptions::fast_laplace(),
+            GlmmFitOptions::joint_laplace(),
+        ] {
+            let control = OptimizerControl::default()
+                .with_trust_bq_start_ladder(TrustBqStartLadder::DiagonalFirst)
+                .with_trust_bq_sample_reuse(TrustBqSampleReuse::Disabled)
+                .with_trust_bq_gradient_oracle(TrustBqGradientOracle::Disabled)
+                .with_active_face_refit(ActiveFaceRefit::Experimental);
+            let mut original = weighted_offset_poisson_with_options(
+                options.with_optimizer_control(control.clone()),
+            );
+            let json = original.snapshot_json().unwrap();
+            let guard = OptimizerEntryGuard::expect_none();
+            let mut restored = GeneralizedLinearMixedModel::restore_json(&json).unwrap();
+            assert_eq!(guard.entries_since(), 0);
+            for model in [&original, &restored] {
+                assert_eq!(
+                    model.lmm.trust_bq_start_ladder,
+                    control.trust_bq_start_ladder
+                );
+                assert_eq!(
+                    model.lmm.trust_bq_sample_reuse,
+                    control.trust_bq_sample_reuse
+                );
+                assert_eq!(
+                    model.lmm.trust_bq_gradient_oracle,
+                    control.trust_bq_gradient_oracle
+                );
+                assert_eq!(model.lmm.active_face_refit, control.active_face_refit);
+            }
+            assert_eq!(
+                original.lmm.optsum.caller_set_fields,
+                restored.lmm.optsum.caller_set_fields
+            );
+            let response: Vec<_> = original
+                .y
+                .iter()
+                .enumerate()
+                .map(|(i, y)| y + (i % 2) as f64)
+                .collect();
+            original.refit(&response).unwrap();
+            restored.refit(&response).unwrap();
+            assert!(same_scalar(original.objective(), restored.objective()));
+            assert!(same_vector(&original.theta, &restored.theta));
+            assert!(same_vector(
+                original.beta.as_slice(),
+                restored.beta.as_slice()
+            ));
+            assert_eq!(original.lmm.optsum.feval, restored.lmm.optsum.feval);
+            assert_eq!(
+                original.lmm.optsum.return_value,
+                restored.lmm.optsum.return_value
+            );
+            assert_eq!(
+                original.lmm.optsum.caller_set_fields,
+                restored.lmm.optsum.caller_set_fields
+            );
+            assert_eq!(
+                restored.lmm.trust_bq_start_ladder,
+                control.trust_bq_start_ladder
+            );
+            assert_eq!(
+                restored.lmm.trust_bq_sample_reuse,
+                control.trust_bq_sample_reuse
+            );
+            assert_eq!(
+                restored.lmm.trust_bq_gradient_oracle,
+                control.trust_bq_gradient_oracle
+            );
+            assert_eq!(restored.lmm.active_face_refit, control.active_face_refit);
+        }
     }
 
     #[test]

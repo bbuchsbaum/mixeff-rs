@@ -6,7 +6,42 @@ use crate::model::summary_estimates::ResidualSource;
 use crate::model::traits::MixedModelFit;
 use crate::types::OptSummary;
 
-use super::LinearMixedModel;
+use super::{
+    ActiveFaceRefit, LinearMixedModel, TrustBqGradientOracle, TrustBqSampleReuse,
+    TrustBqStartLadder,
+};
+
+// Keep these encodings private to the opaque, source-bound snapshot format.
+// Remote derives validate the enum variants without adding public serde APIs.
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "TrustBqStartLadder", rename_all = "snake_case")]
+enum SnapshotStartLadder {
+    Off,
+    DiagonalFirst,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "TrustBqSampleReuse", rename_all = "snake_case")]
+enum SnapshotSampleReuse {
+    FamilyPolicy,
+    Disabled,
+    AllFamilies,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "TrustBqGradientOracle", rename_all = "snake_case")]
+enum SnapshotGradientOracle {
+    FamilyPolicy,
+    Disabled,
+    AllFamilies,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "ActiveFaceRefit", rename_all = "snake_case")]
+enum SnapshotActiveFaceRefit {
+    Off,
+    Experimental,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LinearSnapshot {
@@ -17,6 +52,14 @@ struct LinearSnapshot {
     theta: Vec<f64>,
     working_sqrtwts: Vec<f64>,
     optsum: OptSummary,
+    #[serde(with = "SnapshotStartLadder")]
+    trust_bq_start_ladder: TrustBqStartLadder,
+    #[serde(with = "SnapshotSampleReuse")]
+    trust_bq_sample_reuse: TrustBqSampleReuse,
+    #[serde(with = "SnapshotGradientOracle")]
+    trust_bq_gradient_oracle: TrustBqGradientOracle,
+    #[serde(with = "SnapshotActiveFaceRefit")]
+    active_face_refit: ActiveFaceRefit,
     artifact: crate::compiler::CompiledModelArtifact,
     residual_source: ResidualSource,
     beta_witness: Vec<f64>,
@@ -93,6 +136,10 @@ impl LinearMixedModel {
             theta,
             working_sqrtwts: self.sqrtwts.clone(),
             optsum,
+            trust_bq_start_ladder: self.trust_bq_start_ladder,
+            trust_bq_sample_reuse: self.trust_bq_sample_reuse,
+            trust_bq_gradient_oracle: self.trust_bq_gradient_oracle,
+            active_face_refit: self.active_face_refit,
             artifact: self.compiler_artifact().clone(),
             residual_source: self.residual_source,
             beta_witness: self.beta().as_slice().to_vec(),
@@ -144,6 +191,10 @@ impl LinearMixedModel {
             snapshot.artifact,
             snapshot.residual_source,
         )?;
+        restored.trust_bq_start_ladder = snapshot.trust_bq_start_ladder;
+        restored.trust_bq_sample_reuse = snapshot.trust_bq_sample_reuse;
+        restored.trust_bq_gradient_oracle = snapshot.trust_bq_gradient_oracle;
+        restored.active_face_refit = snapshot.active_face_refit;
         if !same_finite_vector(restored.beta().as_slice(), &snapshot.beta_witness, 1e-10)
             || !same_finite(restored.objective(), snapshot.objective_witness, 1e-10)
         {
@@ -355,7 +406,160 @@ mod tests {
     use super::*;
     use crate::formula::parse_formula;
     use crate::model::data::DataFrame;
+    use crate::model::linear::{
+        ActiveFaceRefit, FitOptions, OptimizerControl, TrustBqGradientOracle, TrustBqSampleReuse,
+        TrustBqStartLadder,
+    };
     use crate::model::snapshot::OptimizerEntryGuard;
+
+    #[test]
+    fn review_snapshot_preserves_optimizer_strategy_controls() {
+        let (data, meta) = crate::datasets::load("dyestuff").unwrap();
+        let mut model =
+            LinearMixedModel::new(parse_formula(&meta.fits[0].formula).unwrap(), &data, None)
+                .unwrap();
+        let control = OptimizerControl::default()
+            .with_trust_bq_start_ladder(TrustBqStartLadder::DiagonalFirst)
+            .with_trust_bq_sample_reuse(TrustBqSampleReuse::Disabled)
+            .with_trust_bq_gradient_oracle(TrustBqGradientOracle::Disabled)
+            .with_active_face_refit(ActiveFaceRefit::Experimental);
+        model
+            .fit_with_options(FitOptions::ml().with_optimizer_control(control))
+            .unwrap();
+        let expected = (
+            model.trust_bq_start_ladder,
+            model.trust_bq_sample_reuse,
+            model.trust_bq_gradient_oracle,
+            model.active_face_refit,
+        );
+        let original_audit = model.optsum.caller_set_fields.clone();
+        let guard = OptimizerEntryGuard::expect_none();
+        let restored = LinearMixedModel::restore_json(&model.snapshot_json().unwrap()).unwrap();
+        assert_eq!(guard.entries_since(), 0);
+        assert_eq!(restored.optsum.caller_set_fields, original_audit);
+        let actual = (
+            restored.trust_bq_start_ladder,
+            restored.trust_bq_sample_reuse,
+            restored.trust_bq_gradient_oracle,
+            restored.active_face_refit,
+        );
+        assert_eq!(
+            actual, expected,
+            "restored strategies must match the caller settings retained in the audit"
+        );
+    }
+
+    #[test]
+    fn snapshot_strategy_controls_survive_native_refits() {
+        let data = varied_data();
+        for control in [
+            OptimizerControl::default(),
+            OptimizerControl::default()
+                .with_trust_bq_start_ladder(TrustBqStartLadder::DiagonalFirst)
+                .with_trust_bq_sample_reuse(TrustBqSampleReuse::Disabled)
+                .with_trust_bq_gradient_oracle(TrustBqGradientOracle::Disabled)
+                .with_active_face_refit(ActiveFaceRefit::Experimental),
+            OptimizerControl::default()
+                .with_trust_bq_sample_reuse(TrustBqSampleReuse::AllFamilies)
+                .with_trust_bq_gradient_oracle(TrustBqGradientOracle::AllFamilies),
+        ] {
+            let mut original =
+                LinearMixedModel::new(parse_formula("y ~ x + (1 + x | g)").unwrap(), &data, None)
+                    .unwrap();
+            original
+                .fit_with_options(
+                    FitOptions::ml().with_optimizer_control(
+                        control
+                            .clone()
+                            .with_optimizer(crate::types::Optimizer::TrustBq),
+                    ),
+                )
+                .unwrap();
+            let original_audit = original.optsum.caller_set_fields.clone();
+            let json = original.snapshot_json().unwrap();
+            let guard = OptimizerEntryGuard::expect_none();
+            let mut restored = LinearMixedModel::restore_json(&json).unwrap();
+            assert_eq!(guard.entries_since(), 0);
+            assert_eq!(
+                restored.trust_bq_start_ladder,
+                control.trust_bq_start_ladder
+            );
+            assert_eq!(
+                restored.trust_bq_sample_reuse,
+                control.trust_bq_sample_reuse
+            );
+            assert_eq!(
+                restored.trust_bq_gradient_oracle,
+                control.trust_bq_gradient_oracle
+            );
+            assert_eq!(restored.active_face_refit, control.active_face_refit);
+            let response: Vec<_> = original
+                .y
+                .iter()
+                .enumerate()
+                .map(|(i, y)| y + 0.1 * (i as f64).cos())
+                .collect();
+            original.refit(&response).unwrap();
+            restored.refit(&response).unwrap();
+            assert!(same_finite(
+                original.objective(),
+                restored.objective(),
+                1e-10
+            ));
+            assert!(same_finite_vector(
+                &original.theta(),
+                &restored.theta(),
+                1e-10
+            ));
+            assert_eq!(original.optsum.feval, restored.optsum.feval);
+            assert_eq!(original.optsum.return_value, restored.optsum.return_value);
+            assert_eq!(original.optsum.caller_set_fields, original_audit);
+            assert_eq!(restored.optsum.caller_set_fields, original_audit);
+            assert_eq!(
+                restored.optsum.caller_selected_optimizer(),
+                Some(crate::types::Optimizer::TrustBq)
+            );
+            assert_eq!(
+                restored.trust_bq_start_ladder,
+                control.trust_bq_start_ladder
+            );
+            assert_eq!(
+                restored.trust_bq_sample_reuse,
+                control.trust_bq_sample_reuse
+            );
+            assert_eq!(
+                restored.trust_bq_gradient_oracle,
+                control.trust_bq_gradient_oracle
+            );
+            assert_eq!(restored.active_face_refit, control.active_face_refit);
+        }
+    }
+
+    #[test]
+    fn snapshot_requires_known_optimizer_strategy_controls() {
+        let model = transformed_weighted_model();
+        let payload: LinearSnapshot = decode_snapshot(&model.snapshot_json().unwrap()).unwrap();
+        let value = serde_json::to_value(payload).unwrap();
+        for field in [
+            "trust_bq_start_ladder",
+            "trust_bq_sample_reuse",
+            "trust_bq_gradient_oracle",
+            "active_face_refit",
+        ] {
+            let mut invalid = value.clone();
+            invalid[field] = "unknown_strategy".into();
+            assert!(serde_json::from_value::<LinearSnapshot>(invalid)
+                .unwrap_err()
+                .to_string()
+                .contains("unknown variant"));
+            let mut missing = value.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<LinearSnapshot>(missing)
+                .unwrap_err()
+                .to_string()
+                .contains(&format!("missing field `{field}`")));
+        }
+    }
 
     fn query_values(model: &LinearMixedModel, data: &DataFrame) -> serde_json::Value {
         serde_json::json!({
@@ -565,6 +769,10 @@ mod tests {
             theta: model.theta(),
             working_sqrtwts: model.sqrtwts.clone(),
             optsum: model.optsum.clone(),
+            trust_bq_start_ladder: model.trust_bq_start_ladder,
+            trust_bq_sample_reuse: model.trust_bq_sample_reuse,
+            trust_bq_gradient_oracle: model.trust_bq_gradient_oracle,
+            active_face_refit: model.active_face_refit,
             artifact: model.compiler_artifact().clone(),
             residual_source: model.residual_source,
             beta_witness: model.beta().as_slice().to_vec(),

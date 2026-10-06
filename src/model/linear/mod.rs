@@ -3880,6 +3880,7 @@ impl LinearMixedModel {
     /// bootstrap, bootstrap likelihood-ratio tests) use
     /// [`refit_with_start`](Self::refit_with_start) with a warm start
     /// instead.
+    /// The template's optimizer controls and progress callback are retained.
     ///
     /// Mirrors `refit!(fm, new_y)` in Julia's MixedModels.jl.
     pub fn refit(&mut self, new_y: &[f64]) -> Result<()> {
@@ -3974,7 +3975,8 @@ impl LinearMixedModel {
             self.optsum.initial_step = vec![WARM_REFIT_INITIAL_STEP; start_theta.len()];
         }
         self.set_theta(&start_theta)?;
-        self.fit(reml)?;
+        crate::model::snapshot::record_optimizer_entry();
+        self.fit_with_current_controls(reml)?;
         Ok(())
     }
 

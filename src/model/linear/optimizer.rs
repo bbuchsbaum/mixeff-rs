@@ -3803,6 +3803,13 @@ impl LinearMixedModel {
             );
         }
 
+        self.apply_optimizer_control(&options.optimizer_control)?;
+        self.fit_with_current_controls(reml)
+    }
+
+    /// Run a fit using the controls already installed on this model. Refits
+    /// retain the template's strategies, explicit optimizer, audit and callback.
+    pub(super) fn fit_with_current_controls(&mut self, reml: bool) -> Result<&mut Self> {
         if self.feterm.rank >= self.dims.n {
             return Err(MixedModelError::RankSaturatedFixedEffects {
                 rank: self.feterm.rank,
@@ -3810,10 +3817,9 @@ impl LinearMixedModel {
             });
         }
 
-        self.apply_optimizer_control(&options.optimizer_control)?;
         self.optsum.reml = reml;
 
-        if let Some(optimizer) = options.optimizer_control.optimizer.named() {
+        if let Some(optimizer) = self.optsum.caller_selected_optimizer() {
             self.fit_with_forced_optimizer(reml, optimizer)?;
             return Ok(self);
         }

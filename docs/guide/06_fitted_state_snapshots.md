@@ -23,6 +23,9 @@ also retain the observed response, offsets, family/link, dispersion, fixed
 coefficients, random modes, quadrature setting, effective estimator and the last
 PIRLS working response and weights. Construction-time policy rebuilds the design;
 the final recorded policy governs reconstruction of the fitted factors.
+Optimizer controls include the TrustBQ start ladder, sample reuse, gradient
+oracle, and active-face refit strategies retained by later refits. Missing or
+unknown strategy values are refused rather than reset to constructor defaults.
 
 The JSON is an opaque engine-owned persistence record with schema
 `mixeff-rs.fitted-state` version `1.0.0`. Consumers must store the entire string

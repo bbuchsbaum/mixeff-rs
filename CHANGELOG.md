@@ -12,6 +12,16 @@ vs. `unstable-internals` surface inventory.
 
 ## [Unreleased]
 
+### Fixed
+
+- Fitted-state snapshots retain the TrustBQ start ladder, sample reuse,
+  gradient oracle, and active-face refit strategies for both standalone LMMs
+  and GLMM working LMMs. Restored templates preserve these controls on later
+  refits; restoration itself still performs no optimizer search.
+- LMM refits retain the template's optimizer controls, explicit optimizer
+  selection, audit fields, and progress callback instead of applying default
+  fit options.
+
 ## [1.0.0-rc.5] - 2026-10-06
 
 Fifth 1.0 release candidate, prepared locally. Publication and downstream R
