@@ -12,32 +12,12 @@ vs. `unstable-internals` surface inventory.
 
 ## [Unreleased]
 
-### Fixed
+## [1.0.0-rc.5] - 2026-10-07
 
-- Native TrustBQ gradient-oracle steps minimize the original quadratic along
-  the feasible shifted-Newton direction when an indefinite Hessian requires
-  damping. This restores default-budget nested LMM REML parity without
-  disabling the analytic gradient oracle or changing interpolation steps.
-- Joint GLMM conditional solves minimize the conditional penalized likelihood,
-  require a finite mode score, and refresh working factors at the final modes.
-  Optimizer and derivative probes reject unfinished conditional solves. This
-  restores centered OSF coefficient parity and stationarity; fast profiled
-  PIRLS retains its existing fitting convention.
-- Negative-binomial conditional deviance uses stable logarithms near the
-  Poisson limit. Unavailable derivative probes are recorded without nonfinite
-  numeric measurements in optimizer certificates.
-- Fitted-state snapshots retain the TrustBQ start ladder, sample reuse,
-  gradient oracle, and active-face refit strategies for both standalone LMMs
-  and GLMM working LMMs. Restored templates preserve these controls on later
-  refits; restoration itself still performs no optimizer search.
-- LMM refits retain the template's optimizer controls, explicit optimizer
-  selection, audit fields, and progress callback instead of applying default
-  fit options.
-
-## [1.0.0-rc.5] - 2026-10-06
-
-Fifth 1.0 release candidate, prepared locally. Publication and downstream R
-snapshot adoption require their own release and integration checks.
+Fifth 1.0 release candidate. Includes fitted-state restoration and numerical
+correctness fixes for nested LMM optimization, joint GLMM conditional solves,
+refits, and extreme Wald tails. This starts a new RC soak period; it is not
+the final 1.0 release.
 
 ### Added
 
@@ -51,8 +31,41 @@ snapshot adoption require their own release and integration checks.
   downstream adoption requirements. Existing reporting schema versions do not
   change.
 
+### Fixed
+
+- Fitted-state snapshots retain the TrustBQ start ladder, sample reuse,
+  gradient oracle, and active-face refit strategies for both standalone LMMs
+  and GLMM working LMMs. Restored templates preserve these controls on later
+  refits; restoration itself still performs no optimizer search.
+- LMM refits retain the template's optimizer controls, explicit optimizer
+  selection, audit fields, and progress callback instead of applying default
+  fit options.
+- Unavailable derivative probes are recorded without nonfinite numeric
+  measurements. A finite gradient remains available when only the Hessian
+  probe fails; unavailable GLMM gradients cannot silently become certified
+  convergence. Deterministic fallback snapshots retain their fitted evidence
+  without entering an optimizer during restoration.
+
 ### Fixed (numerical)
 
+- Native TrustBQ gradient-oracle steps minimize the original quadratic along
+  the feasible shifted-Newton direction when an indefinite Hessian requires
+  damping. The default-budget PW2 nested REML fit now converges in 34
+  evaluations: objective `444.59054844` -> `439.73151877`, residual SD
+  `3.27530882` -> `0.60217188`. Original lme4 parity bounds are retained;
+  the analytic gradient oracle remains enabled and interpolation steps are
+  unchanged.
+- Joint GLMM conditional solves minimize the conditional penalized likelihood,
+  require a finite mode score, and refresh working factors at the final modes.
+  Optimizer and derivative probes reject unfinished conditional solves. On the
+  centered OSF fixture the intercept changes from `-3.21919866` to
+  `-3.19828443` and the free-gradient residual from `15.1135` to `0.000219`;
+  the original coefficient and log-likelihood parity bounds now pass. The
+  fast profiled-PIRLS fitting convention is unchanged.
+- Negative-binomial conditional deviance uses stable logarithms near the
+  Poisson limit. For shape `25074971.4082`, response `3`, and mean `3.001`,
+  the unit deviance is `3.33259238e-7`, preserving small differences needed
+  by conditional solves and derivative probes.
 - Two-sided normal Wald p-values use the survival function directly in LMM
   inference, joint-GLMM inference, coefficient tables, and summary fallbacks.
   Representable extreme tails no longer round to zero through CDF subtraction:
@@ -65,6 +78,13 @@ snapshot adoption require their own release and integration checks.
   parametric bootstrap records it as a failed replicate rather than mixing
   estimators. A template that already returned a labelled fast-PIRLS fallback
   is refitted using that effective estimator.
+
+### Known limitations
+
+- Passing GLMM stationarity checks does not imply that a full Hessian
+  certificate is available. Unavailable Hessian evidence remains explicit.
+- Downstream R/Python engine pins and snapshot adoption require their own
+  integration checks; the crate release does not update those wrappers.
 
 ## [1.0.0-rc.4] - 2026-09-27
 
