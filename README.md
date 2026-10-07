@@ -24,9 +24,6 @@ behind the [mixeff](https://github.com/bbuchsbaum/mixeff) R package.
 mixeff-rs = "=1.0.0-rc.5"
 ```
 
-For an unpublished candidate, use a local checkout containing that candidate:
-`mixeff-rs = { path = "/path/to/mixeff-rs" }`.
-
 The default build includes the NLopt optimizers and needs CMake and a C/C++
 toolchain. For a pure-Rust build with no C dependencies, use
 `default-features = false`. See [Cargo features](#cargo-features).
