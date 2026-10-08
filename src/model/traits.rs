@@ -279,6 +279,14 @@ pub trait MixedModelFit {
     /// Random effects (conditional modes), one matrix per grouping factor.
     fn ranef(&self) -> Vec<DMatrix<f64>>;
 
+    /// Names of fixed-effect columns dropped from the fit because they are
+    /// linear combinations of earlier columns (rank deficiency), in
+    /// coefficient order. Their [`coef`](Self::coef) entries are `NaN` (R's
+    /// `NA`, as in `lme4::fixef(fit, add.dropped = TRUE)`).
+    fn dropped_coef_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Random-effects term structure, used by model-comparison helpers to
     /// reject obviously non-nested comparisons before computing LRT statistics.
     fn random_effect_terms(&self) -> Vec<RandomEffectTermInfo> {

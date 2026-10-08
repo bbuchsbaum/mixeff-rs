@@ -1751,7 +1751,8 @@ impl MixedModelFit for GeneralizedLinearMixedModel {
     }
 
     fn coef(&self) -> DVector<f64> {
-        let mut full = DVector::from_element(self.lmm.feterm.piv.len(), 0.0);
+        // Dropped (aliased) columns are NaN, not 0: they were not estimated.
+        let mut full = DVector::from_element(self.lmm.feterm.piv.len(), f64::NAN);
         for (i, &val) in self.beta.iter().enumerate() {
             if i < self.lmm.feterm.piv.len() {
                 full[self.lmm.feterm.piv[i]] = val;
@@ -1762,6 +1763,10 @@ impl MixedModelFit for GeneralizedLinearMixedModel {
 
     fn fixef(&self) -> DVector<f64> {
         self.beta.clone()
+    }
+
+    fn dropped_coef_names(&self) -> Vec<String> {
+        self.lmm.feterm.dropped_coef_names()
     }
     fn coef_names(&self) -> Vec<String> {
         self.lmm.coef_names()

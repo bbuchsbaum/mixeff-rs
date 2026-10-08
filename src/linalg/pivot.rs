@@ -348,6 +348,12 @@ pub fn gram_full_rank_certificate(
 /// diagonal element.
 ///
 /// The default rank tolerance is `1e-8`.
+///
+/// When the matrix is rank deficient, the retained columns follow R's
+/// `qr()`/`lm()` rule whenever it yields the same rank: columns are
+/// scanned in order and a column that is a linear combination of earlier
+/// ones is moved to the end, so of two collinear columns the later one is
+/// dropped (lme4 parity). The Householder pivot is the fallback.
 pub fn stats_rank(a: &DMatrix<f64>) -> (usize, Vec<usize>) {
     stats_rank_with_tol(a, 1e-8)
 }
@@ -388,6 +394,16 @@ pub fn stats_rank_with_tol(a: &DMatrix<f64>, ranktol: f64) -> (usize, Vec<usize>
         return (n, (0..n).collect());
     }
 
+    // Which columns to keep: R (`qr(X, LAPACK = FALSE)` / LINPACK dqrdc2,
+    // used by lm() and lme4's chkRank.drop.cols) walks the columns in order
+    // and moves a column to the end only when it is (numerically) a linear
+    // combination of the columns before it, so the *later* of two collinear
+    // columns is dropped. Use that rule whenever it reproduces the rank found
+    // above; otherwise fall back to the Householder pivot below.
+    if let Some(piv) = in_order_rank_pivot(a, rank) {
+        return (rank, piv);
+    }
+
     let mut piv = piv;
 
     // Intercept-preservation: if the first column is all-ones and the
@@ -411,10 +427,102 @@ pub fn stats_rank_with_tol(a: &DMatrix<f64>, ranktol: f64) -> (usize, Vec<usize>
     (rank, piv)
 }
 
+/// Relative residual-norm tolerance of R's LINPACK `dqrdc2` (`qr()`'s
+/// default `tol = 1e-07`).
+const R_QR_RANK_TOLERANCE: f64 = 1e-7;
+
+/// R-style limited-pivoting column selection: keep each column, in order,
+/// unless its residual after projecting out the already kept columns is
+/// below `R_QR_RANK_TOLERANCE` relative to its own norm. Returns the pivot
+/// (kept columns in order, then dropped columns in order) when exactly
+/// `rank` columns are kept, else `None`.
+fn in_order_rank_pivot(a: &DMatrix<f64>, rank: usize) -> Option<Vec<usize>> {
+    let (m, n) = (a.nrows(), a.ncols());
+    let mut basis: Vec<nalgebra::DVector<f64>> = Vec::with_capacity(rank);
+    let mut kept = Vec::with_capacity(rank);
+    let mut dropped = Vec::new();
+    for j in 0..n {
+        let column = a.column(j).into_owned();
+        let norm = column.norm();
+        if !norm.is_finite() {
+            return None;
+        }
+        let mut residual = column;
+        // Two passes of modified Gram-Schmidt for numerical orthogonality.
+        for _ in 0..2 {
+            for q in &basis {
+                let coef = q.dot(&residual);
+                residual.axpy(-coef, q, 1.0);
+            }
+        }
+        let resid_norm = residual.norm();
+        if norm > 0.0 && resid_norm > R_QR_RANK_TOLERANCE * norm && basis.len() < m {
+            basis.push(residual / resid_norm);
+            kept.push(j);
+        } else {
+            dropped.push(j);
+        }
+    }
+    if kept.len() != rank {
+        return None;
+    }
+    kept.extend(dropped);
+    Some(kept)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use approx::assert_relative_eq;
+
+    #[test]
+    fn rank_deficient_pivot_keeps_earlier_collinear_column_like_r() {
+        // x2 = 2 * x: R's qr()/lm() keep x and drop the later x2, even
+        // though x2 has the larger norm.
+        let a = DMatrix::from_row_slice(
+            4,
+            3,
+            &[
+                1.0, 0.0, 0.0, //
+                1.0, 1.0, 2.0, //
+                1.0, 2.0, 4.0, //
+                1.0, 3.0, 6.0, //
+            ],
+        );
+        let (rank, piv) = stats_rank(&a);
+        assert_eq!(rank, 2);
+        assert_eq!(piv, vec![0, 1, 2]);
+
+        // Collinear pair listed in the other order: drop the later column.
+        let b = DMatrix::from_row_slice(
+            4,
+            3,
+            &[
+                1.0, 0.0, 0.0, //
+                1.0, 2.0, 1.0, //
+                1.0, 4.0, 2.0, //
+                1.0, 6.0, 3.0, //
+            ],
+        );
+        let (rank, piv) = stats_rank(&b);
+        assert_eq!(rank, 2);
+        assert_eq!(piv, vec![0, 1, 2]);
+
+        // A dependent column in the middle moves to the end.
+        let c = DMatrix::from_row_slice(
+            4,
+            4,
+            &[
+                1.0, 0.0, 0.0, 1.0, //
+                1.0, 1.0, 2.0, 0.0, //
+                1.0, 2.0, 4.0, 1.0, //
+                1.0, 3.0, 6.0, 0.0, //
+            ],
+        );
+        let (rank, piv) = stats_rank(&c);
+        assert_eq!(rank, 3);
+        assert_eq!(piv, vec![0, 1, 3, 2]);
+    }
 
     #[test]
     fn test_pivoted_qr_identity() {

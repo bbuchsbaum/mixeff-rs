@@ -4304,8 +4304,9 @@ impl MixedModelFit for LinearMixedModel {
     }
 
     fn coef(&self) -> DVector<f64> {
+        // Dropped (aliased) columns are NaN, not 0: they were not estimated.
         let beta = self.fixef();
-        let mut full = DVector::from_element(self.feterm.piv.len(), 0.0);
+        let mut full = DVector::from_element(self.feterm.piv.len(), f64::NAN);
         for (i, &val) in beta.iter().enumerate() {
             if i < self.feterm.piv.len() {
                 full[self.feterm.piv[i]] = val;
@@ -4316,6 +4317,10 @@ impl MixedModelFit for LinearMixedModel {
 
     fn fixef(&self) -> DVector<f64> {
         self.beta()
+    }
+
+    fn dropped_coef_names(&self) -> Vec<String> {
+        self.feterm.dropped_coef_names()
     }
 
     fn coef_names(&self) -> Vec<String> {

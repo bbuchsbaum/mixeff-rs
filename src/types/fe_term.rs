@@ -37,6 +37,18 @@ pub struct FeTerm {
 }
 
 impl FeTerm {
+    /// Names of the columns dropped for rank deficiency, in original
+    /// column order.
+    pub fn dropped_coef_names(&self) -> Vec<String> {
+        let mut dropped: Vec<(usize, &String)> = self.piv[self.rank..]
+            .iter()
+            .zip(&self.cnames[self.rank..])
+            .map(|(&original, name)| (original, name))
+            .collect();
+        dropped.sort_by_key(|(original, _)| *original);
+        dropped.into_iter().map(|(_, name)| name.clone()).collect()
+    }
+
     /// Create a new `FeTerm` from a design matrix and column names.
     ///
     /// Performs a column-pivoted QR decomposition to detect the

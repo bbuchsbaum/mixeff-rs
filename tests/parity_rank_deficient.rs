@@ -135,7 +135,21 @@ fn test_rank_deficient_sigma2_reml_matches_julia() {
     model.fit(true).unwrap();
 
     assert_eq!(model.fixed_effect_rank(), expected.fixed_effect_rank);
-    assert_relative_eq!(model.objective(), expected.reml.objective, epsilon = 1e-8);
+    // The REML criterion depends on the scaling of the retained X columns.
+    // MixedModels.jl's Householder pivot keeps the larger-norm x2 (= 2x);
+    // the engine follows R/lme4 and keeps the earlier column x, so its REML
+    // criterion is lower by exactly 2*log(2) (lme4::lmer REMLcrit =
+    // -0.6688243). σ and the variance estimate are invariant.
+    assert_relative_eq!(
+        model.objective(),
+        expected.reml.objective - 2.0 * 2f64.ln(),
+        epsilon = 1e-8
+    );
+    assert_relative_eq!(model.objective(), -0.6688243, epsilon = 1e-6);
+    assert_eq!(model.dropped_coef_names(), vec!["x2".to_string()]);
+    let coef = model.coef();
+    assert!(coef[2].is_nan(), "dropped coefficient must be NaN: {coef:?}");
+    assert_relative_eq!(coef[1], 1.511667, epsilon = 1e-5);
     assert_relative_eq!(model.sigma(), expected.reml.sigma, epsilon = 2e-7);
     assert_relative_eq!(model.varest(), expected.reml.varest, epsilon = 4e-8);
 }
