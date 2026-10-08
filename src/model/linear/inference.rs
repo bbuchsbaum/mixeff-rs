@@ -593,6 +593,25 @@ impl LinearMixedModel {
             ));
         }
 
+        // Other random-effect grouping columns nested within the cluster
+        // (e.g. classroom ids within schools) are relabeled per draw along
+        // with the cluster, so a cluster drawn twice contributes two
+        // independent sets of nested units instead of merging them.
+        let nested_within_group = data.categorical_columns_nested_within(group)?;
+        let mut nested_grouping_columns: Vec<String> = Vec::new();
+        for term in &self.formula.random_terms {
+            let names: Vec<&String> = match &term.grouping {
+                crate::formula::GroupingFactor::Single(name) => vec![name],
+                crate::formula::GroupingFactor::Interaction(names)
+                | crate::formula::GroupingFactor::Cell(names) => names.iter().collect(),
+            };
+            for name in names {
+                if nested_within_group.contains(name) && !nested_grouping_columns.contains(name) {
+                    nested_grouping_columns.push(name.clone());
+                }
+            }
+        }
+
         let mut rng = match options.seed {
             Some(seed) => rand::rngs::StdRng::seed_from_u64(seed),
             None => rand::rngs::StdRng::from_entropy(),
@@ -612,7 +631,8 @@ impl LinearMixedModel {
                     &mut last_progress,
                 )?;
             }
-            let (resampled, draw) = data.cluster_resample(group, &mut rng)?;
+            let (resampled, draw) =
+                data.cluster_resample_with_nested(group, &nested_grouping_columns, &mut rng)?;
             distinct_counts.push(draw.distinct_sampled_level_count);
             duplicate_counts.push(draw.duplicate_count);
 
@@ -689,6 +709,12 @@ impl LinearMixedModel {
         metadata.notes.push(format!(
             "cluster_resample group={group}, relabeling_policy=replicate_local_unique_levels"
         ));
+        if !nested_grouping_columns.is_empty() {
+            metadata.notes.push(format!(
+                "cluster_resample relabeled nested grouping factor(s) per draw: {}",
+                nested_grouping_columns.join(", ")
+            ));
+        }
         if let (Some(min_distinct), Some(max_duplicates)) =
             (distinct_counts.iter().min(), duplicate_counts.iter().max())
         {
