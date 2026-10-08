@@ -271,6 +271,10 @@ pub struct LinearMixedModel {
     /// depend only on the grouping references, which never change.
     pub(crate) re_cross_sparse_patterns:
         std::collections::HashMap<usize, blocks::ScalarCrossPattern>,
+    /// Reused row-major copy of the weighted `[X|y]` for the weighted
+    /// A-block rebuild (scratch only; contents are meaningless between
+    /// rebuilds).
+    pub(crate) wtxy_rows_scratch: Vec<f64>,
     /// True while the `[X|y]` rows of `a_blocks` (`A[k, 0..=k]`) do not
     /// reflect the current `wtz`/`wtxy`. Set only by
     /// [`update_irls_weights_re_only`](Self::update_irls_weights_re_only)
@@ -1423,6 +1427,7 @@ impl LinearMixedModel {
             derivative_evidence_pending: false,
             inspection_artifact: std::sync::OnceLock::new(),
             re_cross_sparse_patterns: std::collections::HashMap::new(),
+            wtxy_rows_scratch: Vec::new(),
             fe_a_blocks_stale: false,
             fe_l_row_stale: false,
         };
@@ -2097,20 +2102,27 @@ impl LinearMixedModel {
         // references) and refresh their values in place; rebuilding the
         // pattern through a keyed map every PIRLS iteration dominated the
         // per-iteration cost on crossed Bernoulli fits.
+        // Every block is written into the existing A block's storage when
+        // its shape and variant are unchanged (bit-identical values).
         for i in 0..k {
             for j in 0..=i {
-                let block = if i == j {
-                    compute_re_cross_product(&self.reterms[i], &self.reterms[i])
+                let target = &mut self.a_blocks[idx];
+                if i == j {
+                    let a = &self.reterms[i];
+                    blocks::compute_re_cross_product_into(a, a, target);
                 } else if self.reterms[i].vsize == 1 && self.reterms[j].vsize == 1 {
                     let (a, b) = (&self.reterms[i], &self.reterms[j]);
                     self.re_cross_sparse_patterns
                         .entry(idx)
                         .or_insert_with(|| blocks::ScalarCrossPattern::new(a, b))
-                        .refresh(a, b)
+                        .refresh_into(a, b, target);
                 } else {
-                    compute_re_cross_product(&self.reterms[i], &self.reterms[j])
-                };
-                self.a_blocks[idx] = block;
+                    blocks::compute_re_cross_product_into(
+                        &self.reterms[i],
+                        &self.reterms[j],
+                        target,
+                    );
+                }
                 idx += 1;
             }
         }
@@ -2137,14 +2149,30 @@ impl LinearMixedModel {
             && self.fixed_design.storage() != FixedDesignStorage::Streamed
             && self.xy_mat.wtxy.ncols() == self.feterm.rank + 1;
         if weighted_dense {
-            let wtxy = &self.xy_mat.wtxy;
+            // One row-major copy of `wtxy` feeds every kernel (contiguous
+            // per-observation reads); blocks are written in place. Dense
+            // FE x RE blocks need no `finalize_fixed_re_block`.
+            let mut rows = std::mem::take(&mut self.wtxy_rows_scratch);
+            blocks::wtxy_to_rows(&self.xy_mat.wtxy, &mut rows);
+            let pp1 = self.xy_mat.wtxy.ncols();
             for j in 0..k {
-                let block =
-                    MatrixBlock::Dense(compute_wtxy_re_cross_product(wtxy, &self.reterms[j]));
-                self.a_blocks[idx] = finalize_fixed_re_block(block, k);
+                let target = &mut self.a_blocks[idx];
+                if !matches!(target, MatrixBlock::Dense(_)) {
+                    *target = MatrixBlock::Dense(DMatrix::zeros(0, 0));
+                }
+                if let MatrixBlock::Dense(out) = target {
+                    blocks::compute_wtxy_re_cross_product_into(&rows, pp1, &self.reterms[j], out);
+                }
                 idx += 1;
             }
-            self.a_blocks[idx] = MatrixBlock::Dense(compute_wtxy_cross_product(wtxy));
+            let target = &mut self.a_blocks[idx];
+            if !matches!(target, MatrixBlock::Dense(_)) {
+                *target = MatrixBlock::Dense(DMatrix::zeros(0, 0));
+            }
+            if let MatrixBlock::Dense(out) = target {
+                blocks::compute_wtxy_cross_product_into(&self.xy_mat.wtxy, &rows, out);
+            }
+            self.wtxy_rows_scratch = rows;
             return Ok(());
         }
 
