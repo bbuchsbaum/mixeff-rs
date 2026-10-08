@@ -247,7 +247,19 @@ fn intact_prepared_frame_builds_native_glmm_design_without_refitting() {
 
     assert_eq!(model.nobs(), 5_760);
     assert_eq!(model.fixef().len(), 9);
-    assert_eq!(model.theta().len(), 4);
+    // lme4 expands `(1 + mask + soa_s || participant)` with the factor
+    // `mask` to (1|participant) + (0+mask|participant) + (0+soa_s|participant):
+    // 1 + 3 + 1 participant theta plus the item intercept = 6, matching the
+    // six `theta` entries in reference.json.
+    assert_eq!(model.theta().len(), 6);
+    let reference = reference_json();
+    assert_eq!(
+        reference_model(&reference, "intact")["theta"]
+            .as_object()
+            .unwrap()
+            .len(),
+        6
+    );
 }
 
 #[cfg(all(not(feature = "nlopt"), feature = "unstable-internals"))]
@@ -268,13 +280,11 @@ fn combined_glmm_data() -> DataFrame {
 /// optimizer must now actually descend from the profiled start and return a
 /// joint result.
 ///
-/// Note the lme4 reference for this formula is NOT a parity target here:
-/// lme4's `||` keeps the within-factor correlation of `mask` (a full 2x2
-/// block, 6 theta), while the native `||` drops it (4 theta), and lme4's
-/// fitted combined optimum needs that off-diagonal. The native-family joint
-/// optimum sits ~1.9 logLik above lme4's; the explicit expansion
-/// `(1|p) + (0+mask|p) + (0+soa_s|p) + (1|item)` reproduces lme4's family
-/// and its optimum (see `probe_aphantasia_combined`).
+/// History: lme4's `||` keeps the within-factor correlation of `mask` (a
+/// full 2x2 block, 6 theta). The native `||` used to drop it (4 theta), so
+/// the joint optimum sat ~1.9 logLik from lme4's. `||` with a factor now
+/// expands exactly like lme4 (`(1|p) + (0+mask|p) + (0+soa_s|p)`), so the
+/// gap bound below is loose headroom rather than a family difference.
 #[cfg(all(not(feature = "nlopt"), feature = "unstable-internals"))]
 #[test]
 #[ignore = "real aphantasia combined GLMM takes ~15 minutes; run intentionally for optimizer diagnostics"]
@@ -313,9 +323,8 @@ fn combined_native_joint_descends_from_profiled_start_without_fallback() {
         joint_loglik > profiled_loglik + 1.0,
         "joint Laplace should materially improve the profiled start: joint={joint_loglik:.4} profiled={profiled_loglik:.4}"
     );
-    // Native-family optimum (zero-correlation mask dummy) sits ~1.9 logLik
-    // above lme4's 6-theta optimum; allow headroom but catch regressions back
-    // toward the profiled start (~5.0 above).
+    // Same 6-theta family as lme4 now; keep the old headroom but catch
+    // regressions back toward the profiled start (~5.0 above).
     let gap = (joint_loglik - reference_loglik).abs();
     assert!(
         gap < 2.5,
