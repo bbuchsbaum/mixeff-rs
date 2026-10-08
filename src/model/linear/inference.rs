@@ -474,50 +474,94 @@ impl LinearMixedModel {
         let mut fits = Vec::with_capacity(options.requested_replicates);
         let mut statistics = Vec::with_capacity(options.requested_replicates);
         let mut last_progress = 0usize;
+        crate::parallel::validate_threads(options.threads)?;
 
-        for replicate in 0..options.requested_replicates {
-            if let Some(callback) = &self.progress_callback {
-                callback.report_if_due(
-                    FitProgressPhase::Bootstrap,
-                    replicate + 1,
-                    Some(options.requested_replicates),
-                    &mut last_progress,
-                )?;
-            }
-            let y_sim = self.simulate_fixed_effect_null(&mut rng, target)?;
-            let mut work = self.clone();
-            work.suppress_derivative_diagnostics = true;
-            match work.refit_with_start(y_sim.as_slice(), RefitStart::Fitted) {
-                Ok(()) => {
-                    statistics.push(
-                        fixed_effect_bootstrap_statistic(&work, hypothesis)
-                            .map(|statistic| statistic.value)
-                            .unwrap_or(f64::NAN),
-                    );
-                    fits.push(BootstrapReplicate {
-                        objective: work.objective(),
-                        sigma: work.sigma(),
-                        beta: work.beta(),
-                        se: work.stderror(),
-                        theta: work.theta(),
-                    });
+        if options.threads == 1 {
+            for replicate in 0..options.requested_replicates {
+                if let Some(callback) = &self.progress_callback {
+                    callback.report_if_due(
+                        FitProgressPhase::Bootstrap,
+                        replicate + 1,
+                        Some(options.requested_replicates),
+                        &mut last_progress,
+                    )?;
                 }
-                Err(error @ MixedModelError::Interrupted(_)) => return Err(error),
-                Err(_) => {
-                    let beta = work.beta();
-                    statistics.push(f64::NAN);
-                    fits.push(BootstrapReplicate {
-                        objective: f64::NAN,
-                        sigma: f64::NAN,
-                        se: DVector::from_element(beta.len(), f64::NAN),
-                        beta,
-                        theta: work.theta(),
-                    });
-                    if options.failed_refit_policy == BootstrapFailedRefitPolicy::Abort {
-                        break;
+                let y_sim = self.simulate_fixed_effect_null(&mut rng, target)?;
+                let mut work = self.clone();
+                work.suppress_derivative_diagnostics = true;
+                let (replicate, statistic, outcome) =
+                    null_bootstrap_refit(&mut work, &y_sim, hypothesis);
+                if let Err(error @ MixedModelError::Interrupted(_)) = outcome {
+                    return Err(error);
+                }
+                let failed = outcome.is_err();
+                fits.push(replicate);
+                statistics.push(statistic);
+                if failed && options.failed_refit_policy == BootstrapFailedRefitPolicy::Abort {
+                    break;
+                }
+            }
+        } else {
+            // Parallel refits: responses are simulated serially on this
+            // thread in the serial RNG order; each refit starts from a
+            // fresh clone of the fitted model (as the serial loop does), so
+            // replicates are bit-identical for every thread count. Host
+            // callbacks run only here, in replicate order.
+            let mut template = self.clone();
+            template.progress_callback = None;
+            template.suppress_derivative_diagnostics = true;
+            let total = options.requested_replicates;
+            // The serial loop reports progress for a replicate before
+            // simulating it, and stops (Abort policy) before simulating any
+            // later one. A simulation error is therefore deferred to its
+            // replicate's turn in the in-order consumer below.
+            let simulation_error = std::cell::RefCell::new(None);
+            let rng = &mut rng;
+            crate::parallel::pipeline(
+                options.threads,
+                total,
+                &mut |_| {
+                    if simulation_error.borrow().is_some() {
+                        return Ok(None);
                     }
-                }
-            }
+                    match self.simulate_fixed_effect_null(rng, target) {
+                        Ok(y_sim) => Ok(Some(y_sim)),
+                        Err(error) => {
+                            *simulation_error.borrow_mut() = Some(error);
+                            Ok(None)
+                        }
+                    }
+                },
+                || (),
+                |_, y_sim: Option<DVector<f64>>| {
+                    y_sim.map(|y_sim| {
+                        let mut work = template.clone();
+                        null_bootstrap_refit(&mut work, &y_sim, hypothesis)
+                    })
+                },
+                &mut |index, outcome: Option<(BootstrapReplicate, f64, Result<()>)>| {
+                    if let Some(callback) = &self.progress_callback {
+                        callback.report_if_due(
+                            FitProgressPhase::Bootstrap,
+                            index + 1,
+                            Some(total),
+                            &mut last_progress,
+                        )?;
+                    }
+                    let Some((replicate, statistic, outcome)) = outcome else {
+                        return Err(simulation_error.borrow_mut().take().unwrap_or_else(|| {
+                            MixedModelError::InvalidArgument(
+                                "fixed-effect null bootstrap simulation failed".to_string(),
+                            )
+                        }));
+                    };
+                    let failed = outcome.is_err();
+                    fits.push(replicate);
+                    statistics.push(statistic);
+                    Ok(!(failed
+                        && options.failed_refit_policy == BootstrapFailedRefitPolicy::Abort))
+                },
+            )?;
         }
 
         let bootstrap = MixedModelBootstrap { fits };
@@ -3243,5 +3287,48 @@ impl Clone for SatterthwaiteCache {
 impl std::fmt::Debug for SatterthwaiteCache {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("SatterthwaiteCache")
+    }
+}
+
+/// One fixed-effect-null bootstrap refit: the replicate record, its test
+/// statistic (NaN on failure), and the refit outcome (an `Interrupted`
+/// error is only possible when the model carries a host callback, i.e.
+/// never on worker threads).
+fn null_bootstrap_refit(
+    work: &mut LinearMixedModel,
+    y_sim: &DVector<f64>,
+    hypothesis: &FixedEffectHypothesis,
+) -> (BootstrapReplicate, f64, Result<()>) {
+    match work.refit_with_start(y_sim.as_slice(), RefitStart::Fitted) {
+        Ok(()) => {
+            let statistic = fixed_effect_bootstrap_statistic(work, hypothesis)
+                .map(|statistic| statistic.value)
+                .unwrap_or(f64::NAN);
+            (
+                BootstrapReplicate {
+                    objective: work.objective(),
+                    sigma: work.sigma(),
+                    beta: work.beta(),
+                    se: work.stderror(),
+                    theta: work.theta(),
+                },
+                statistic,
+                Ok(()),
+            )
+        }
+        Err(error) => {
+            let beta = work.beta();
+            (
+                BootstrapReplicate {
+                    objective: f64::NAN,
+                    sigma: f64::NAN,
+                    se: DVector::from_element(beta.len(), f64::NAN),
+                    beta,
+                    theta: work.theta(),
+                },
+                f64::NAN,
+                Err(error),
+            )
+        }
     }
 }

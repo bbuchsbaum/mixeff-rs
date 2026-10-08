@@ -73,7 +73,8 @@ pub(crate) use gradient::ProfiledGradientInputs;
 
 mod bootstrap;
 pub use bootstrap::{
-    parametricbootstrap, try_parametricbootstrap, BootstrapFailedRefitPolicy, BootstrapInterval,
+    parametricbootstrap, parametricbootstrap_with_options, try_parametricbootstrap,
+    BootstrapExecutionOptions, BootstrapFailedRefitPolicy, BootstrapInterval,
     BootstrapIntervalMethod, BootstrapQuantile, BootstrapRefitOptions, BootstrapReplicate,
     BootstrapRunMetadata, BootstrapRunPayload, BootstrapSeedRecord, BootstrapTarget,
     BootstrapTargetKind, FixedEffectBootstrapOptions, FixedEffectNullBootstrapTarget,
@@ -103,6 +104,9 @@ pub enum FitProgressPhase {
     Pirls,
     /// A parametric or resampling bootstrap replicate loop.
     Bootstrap,
+    /// A profile-likelihood sweep running on worker threads; the calling
+    /// thread polls the callback while it waits (`current` counts polls).
+    Profile,
 }
 
 /// One throttled progress event emitted by a long-running fit loop.
@@ -2507,6 +2511,9 @@ impl LinearMixedModel {
     }
 
     unstable_internal_method! {
+    // Engine paths now use the analytic Jacobian; this stays as unstable
+    // inspection surface (and the finite-difference test oracle's input).
+    #[cfg_attr(not(any(test, feature = "unstable-internals")), allow(dead_code))]
     /// Evaluate the fixed-effect covariance matrix at `varpar = c(theta, sigma)`.
     ///
     /// This is the Rust analogue of `lmerTestR::get_covbeta`: at a trial
@@ -2549,6 +2556,7 @@ impl LinearMixedModel {
     }
     }
 
+    #[cfg_attr(not(any(test, feature = "unstable-internals")), allow(dead_code))]
     fn vcov_beta_varpar_fast(&self, varpar: &[f64]) -> Option<DMatrix<f64>> {
         let n_theta = self.n_theta();
         let theta = &varpar[..n_theta];

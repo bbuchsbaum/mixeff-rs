@@ -1373,6 +1373,7 @@ fn test_fixed_effect_null_bootstrap_table_callable_returns_inference_table() {
             requested_replicates: 2,
             failed_refit_policy: BootstrapFailedRefitPolicy::Exclude,
             seed: Some(20260503),
+            threads: 1,
         },
     );
 
@@ -1409,6 +1410,7 @@ fn test_fixed_effect_null_bootstrap_multi_df_term_returns_joint_f_row() {
             requested_replicates: 35,
             failed_refit_policy: BootstrapFailedRefitPolicy::Exclude,
             seed: Some(20260512),
+            threads: 1,
         },
     );
 
@@ -1456,6 +1458,7 @@ fn test_cluster_resample_full_model_contrast_payload_returns_intervals() {
                 requested_replicates: 3,
                 failed_refit_policy: BootstrapFailedRefitPolicy::Exclude,
                 seed: Some(20260517),
+                threads: 1,
             },
             &[0.95],
         )

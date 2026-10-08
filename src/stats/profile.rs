@@ -1221,6 +1221,134 @@ pub fn profile(m: &mut LinearMixedModel) -> Result<MixedModelProfile> {
     Ok(MixedModelProfile { tbl, fwd, rev })
 }
 
+/// Execution controls for [`profile_with_options`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileOptions {
+    /// Worker threads (default 1 = serial). With more than one thread the
+    /// independent per-parameter profiles (σ, each ML β, each θ) run
+    /// concurrently, each on its own copy of the fitted model; the result
+    /// is bit-identical to the serial profile for every thread count.
+    /// Workers never invoke the host progress/interrupt callback: the
+    /// calling thread polls it while it waits (phase
+    /// [`FitProgressPhase::Profile`](crate::model::linear::FitProgressPhase::Profile))
+    /// and, on an interrupt, stops the workers and returns the error.
+    #[serde(default = "default_profile_threads")]
+    pub threads: usize,
+}
+
+impl Default for ProfileOptions {
+    fn default() -> Self {
+        Self { threads: 1 }
+    }
+}
+
+fn default_profile_threads() -> usize {
+    1
+}
+
+/// One independent per-parameter profile of [`profile`].
+#[derive(Debug, Clone, Copy)]
+enum ProfileTask {
+    Sigma,
+    Beta(usize),
+    Theta(usize),
+}
+
+/// [`profile`] with execution options (worker threads).
+///
+/// `threads == 1` is exactly [`profile`]. With more threads, the σ profile,
+/// each ML β profile, and each θ profile run on scoped worker threads, each
+/// on a fresh copy of the fitted model (every per-parameter profile starts
+/// from, and restores, the fitted state, so the copies see exactly what the
+/// serial sweep sees), and the pieces are assembled in the serial order.
+/// `m` itself is left untouched.
+pub fn profile_with_options(
+    m: &mut LinearMixedModel,
+    options: &ProfileOptions,
+) -> Result<MixedModelProfile> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    use crate::model::linear::{FitProgressCallback, FitProgressPhase};
+
+    crate::parallel::validate_threads(options.threads)?;
+    if options.threads == 1 {
+        return profile(m);
+    }
+
+    let mut tasks = vec![ProfileTask::Sigma];
+    if !m.optsum.reml {
+        tasks.extend((0..m.feterm.rank).map(ProfileTask::Beta));
+    }
+    tasks.extend((0..m.n_theta()).map(ProfileTask::Theta));
+
+    // Workers get a pure-Rust callback that only watches the cancel flag,
+    // so refits on worker threads can stop early without touching the host.
+    let cancel = Arc::new(AtomicBool::new(false));
+    let mut template = m.clone();
+    template.progress_callback = Some({
+        let cancel = Arc::clone(&cancel);
+        FitProgressCallback::new(move |_| {
+            if cancel.load(Ordering::Acquire) {
+                Err(MixedModelError::Interrupted(
+                    "profile cancelled by the host".to_string(),
+                ))
+            } else {
+                Ok(())
+            }
+        })
+    });
+
+    let host_callback = m.progress_callback.clone();
+    let mut polls = 0usize;
+    let mut last_reported = 0usize;
+    let mut poll = || -> Result<()> {
+        polls += 1;
+        match &host_callback {
+            Some(callback) => {
+                callback.report_if_due(FitProgressPhase::Profile, polls, None, &mut last_reported)
+            }
+            None => Ok(()),
+        }
+    };
+    let pieces = crate::parallel::map_with_workers_polled(
+        options.threads,
+        tasks,
+        || (),
+        |_, task| {
+            let mut work = template.clone();
+            match task {
+                ProfileTask::Sigma => profile_sigma(&mut work, 4.0),
+                ProfileTask::Beta(index) => profile_beta(&mut work, index, 4.0),
+                ProfileTask::Theta(index) => profile_theta(&mut work, index, 4.0),
+            }
+        },
+        &cancel,
+        &mut poll,
+    )?;
+
+    let mut tbl = Vec::new();
+    let mut fwd = BTreeMap::new();
+    let mut rev = BTreeMap::new();
+    for piece in pieces {
+        let piece = piece?;
+        tbl.extend(piece.tbl);
+        fwd.extend(piece.fwd);
+        rev.extend(piece.rev);
+    }
+    Ok(MixedModelProfile { tbl, fwd, rev })
+}
+
+/// [`profile_confint_payload`] with execution options (worker threads).
+pub fn profile_confint_payload_with_options(
+    m: &mut LinearMixedModel,
+    level: f64,
+    options: &ProfileOptions,
+) -> Result<ProfileLikelihoodCiPayload> {
+    let reml = m.optsum.reml;
+    profile_with_options(m, options)?.confint_payload(level, reml)
+}
+
 /// Compute a serializable profile-likelihood CI payload for a fitted LMM.
 pub fn profile_confint_payload(
     m: &mut LinearMixedModel,
@@ -1821,6 +1949,59 @@ mod tests {
         assert!(parameters.contains(&"σ"));
         assert!(parameters.contains(&"θ1"));
         assert!(parameters.contains(&"β1"));
+    }
+
+    fn profile_bits(pr: &MixedModelProfile) -> Vec<(String, Vec<u64>)> {
+        pr.tbl
+            .iter()
+            .map(|row| {
+                let mut bits = vec![row.zeta.to_bits(), row.sigma.to_bits()];
+                bits.extend(row.beta.iter().map(|v| v.to_bits()));
+                bits.extend(row.theta.iter().map(|v| v.to_bits()));
+                (row.p.clone(), bits)
+            })
+            .collect()
+    }
+
+    /// The per-parameter profiles run on worker threads must reproduce the
+    /// serial profile bit for bit (rows, order, and splines via confint),
+    /// and leave the model's fitted state untouched.
+    #[test]
+    fn profile_with_threads_is_bit_identical_to_serial() {
+        for (data, formula) in [
+            (dyestuff_fixture(), "yield ~ 1 + (1 | batch)"),
+            (random_slope_fixture(), "y ~ 1 + x + (1 + x | g)"),
+        ] {
+            let mut model =
+                LinearMixedModel::new(parse_formula(formula).unwrap(), &data, None).unwrap();
+            model.fit(false).unwrap();
+            let theta_before = model.theta();
+            let serial = profile(&mut model).unwrap();
+            for threads in [1, 2, 3] {
+                let parallel =
+                    profile_with_options(&mut model, &ProfileOptions { threads }).unwrap();
+                assert_eq!(
+                    profile_bits(&parallel),
+                    profile_bits(&serial),
+                    "{formula} threads={threads}"
+                );
+                let (a, b) = (
+                    parallel.confint(0.95).unwrap(),
+                    serial.confint(0.95).unwrap(),
+                );
+                assert_eq!(format!("{a:?}"), format!("{b:?}"));
+            }
+            assert_eq!(model.theta(), theta_before);
+        }
+        let data = dyestuff_fixture();
+        let mut model = LinearMixedModel::new(
+            parse_formula("yield ~ 1 + (1 | batch)").unwrap(),
+            &data,
+            None,
+        )
+        .unwrap();
+        model.fit(false).unwrap();
+        assert!(profile_with_options(&mut model, &ProfileOptions { threads: 0 }).is_err());
     }
 
     #[derive(Debug, Deserialize)]
