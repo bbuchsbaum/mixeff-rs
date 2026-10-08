@@ -12,6 +12,41 @@ vs. `unstable-internals` surface inventory.
 
 ## [Unreleased]
 
+### Fixed (lme4 parity; pre-CRAN audit section 2)
+
+- `LinearMixedModel::random_effect_terms()` now reports the random-effect
+  structure (diagonal `||` blocks as one scalar entry per column), so model
+  comparison detects non-nested and reverse-nested random effects.
+- `BoundaryLikelihoodRatioTest`: the 50:50 chi-square mixture is used only
+  when exactly one variance is added; comparisons that add only
+  correlations (`||` vs `|`) use the ordinary chi-square(df).
+- `||` with a factor expands like lme4 (`(1 + x + f || g)` →
+  `(1 + x || g) + (0 + f | g)`), and random-effect bases use R's
+  `model.matrix()` coding (`(0 + f + h | g)` is full rank).
+- Gamma / inverse-Gaussian GLMMs follow glmer's scale conventions (density
+  φ = mean unit deviance; residual SD, vcov and random-effect SDs on
+  lme4's `sigma()` scale); the fast path no longer collapses θ to zero.
+  `logLik` is 1.0 above glmer's printed value (glmer includes the family
+  `aic()`'s `+2`).
+- Estimated negative-binomial θ maximizes the GLMM log-likelihood like
+  `glmer.nb` instead of a conditional update.
+- GLMM `stderror()` / bootstrap replicate SEs never fall back to unscaled
+  working-LMM SEs.
+- Rank-deficient X keeps the earlier of two collinear columns (R's `qr()`
+  rule); dropped coefficients are `NaN` in `coef()` and listed by
+  `MixedModelFit::dropped_coef_names()`.
+- Unused grouping-factor levels are dropped; REML treats a non-positive
+  `L_XX` pivot as infeasible; `a*b - b:a` removes `a:b`; cluster
+  resampling relabels nested grouping factors per draw; the design audit
+  codes interactions like the fitted design; bootstrap interval helpers no
+  longer panic (`try_shortest_cov_int` added).
+
+### Added
+
+- `stats::profile_sdcor` / `profile_sdcors`: profile-likelihood intervals on
+  lme4's `.sig01`/`.sigma` (SD/correlation) scale; included in `profile()`
+  and the profile CI payload next to the θ rows.
+
 ## [1.0.0-rc.5] - 2026-10-07
 
 Fifth 1.0 release candidate. Includes fitted-state restoration and numerical
