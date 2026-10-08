@@ -4763,6 +4763,97 @@ fn test_kenward_roger_sigma_g_vector_random_effect_components() {
     );
 }
 
+/// The Woodbury (no `n x n`) Kenward-Roger ingredients and adjusted
+/// covariance must match the original dense formulation.
+#[test]
+fn test_kenward_roger_low_rank_matches_dense_reference() {
+    let mut rng = StdRng::seed_from_u64(1234);
+    let n = 150;
+    let mut synthetic = DataFrame::new();
+    let g: Vec<String> = (0..n).map(|i| format!("g{}", i % 10)).collect();
+    let h: Vec<String> = (0..n)
+        .map(|_| format!("h{}", rng.gen_range(0..7)))
+        .collect();
+    let x: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let y: Vec<f64> = (0..n)
+        .map(|i| {
+            2.0 + 0.7 * x[i]
+                + ((i % 10) as f64 - 4.5) * 0.4 * (1.0 + 0.5 * x[i])
+                + rng.gen_range(-1.0..1.0)
+        })
+        .collect();
+    synthetic.add_categorical("g", g).unwrap();
+    synthetic.add_categorical("h", h).unwrap();
+    synthetic.add_numeric("x", x).unwrap();
+    synthetic.add_numeric("y", y).unwrap();
+
+    let cases: Vec<(DataFrame, &str)> = vec![
+        (
+            sleepstudy_fixture(),
+            "reaction ~ 1 + days + (1 + days | subj)",
+        ),
+        (sleepstudy_fixture(), "reaction ~ 1 + days + (1 | subj)"),
+        (
+            pastes_fixture(),
+            "strength ~ 1 + (1 | batch) + (1 | batch_cask)",
+        ),
+        (
+            penicillin_fixture(),
+            "diameter ~ 1 + (1 | plate) + (1 | sample)",
+        ),
+        (synthetic.clone(), "y ~ 1 + x + (1 + x | g) + (1 | h)"),
+        (synthetic, "y ~ 1 + x + (1 | g) + (0 + x | g) + (1 | h)"),
+    ];
+    let rel = |a: &DMatrix<f64>, b: &DMatrix<f64>| (a - b).amax() / b.amax().max(1e-300);
+    for (data, formula) in cases {
+        let mut model =
+            LinearMixedModel::new(parse_formula(formula).unwrap(), &data, None).unwrap();
+        model.fit(true).unwrap();
+        let x = model.feterm.full_rank_x().into_owned();
+        let low = model.kenward_roger_ingredients(&x).unwrap();
+        let dense = model.kenward_roger_ingredients_dense(&x).unwrap();
+        assert_eq!(low.component_labels, dense.component_labels, "{formula}");
+        assert!(rel(&low.ktrace, &dense.ktrace) < 1e-9, "{formula}: ktrace");
+        for (a, b) in low.p_matrices.iter().zip(&dense.p_matrices) {
+            assert!(rel(a, b) < 1e-9, "{formula}: P {:e}", rel(a, b));
+        }
+        assert_eq!(low.q_matrices.len(), dense.q_matrices.len());
+        for (a, b) in low.q_matrices.iter().zip(&dense.q_matrices) {
+            assert!(rel(a, b) < 1e-9, "{formula}: Q {:e}", rel(a, b));
+        }
+
+        let adjusted = model.kenward_roger_adjusted_vcov().unwrap();
+        let phi = adjusted.unadjusted_vcov_active.clone();
+        let reference = model
+            .kenward_roger_adjusted_from_ingredients(phi, dense)
+            .unwrap();
+        assert!(
+            rel(
+                &adjusted.adjusted_vcov_active,
+                &reference.adjusted_vcov_active
+            ) < 1e-9,
+            "{formula}: adjusted vcov"
+        );
+        assert!(rel(&adjusted.w, &reference.w) < 1e-8, "{formula}: W");
+        for row in 0..model.coef_names().len() {
+            let mut l = DMatrix::zeros(1, model.coef_names().len());
+            l[(0, row)] = 1.0;
+            let a = model
+                .kenward_roger_lbddf_with_adjusted(&l, &adjusted)
+                .unwrap();
+            let b = model
+                .kenward_roger_lbddf_with_adjusted(&l, &reference)
+                .unwrap();
+            assert!(
+                (a.denominator_df - b.denominator_df).abs() <= 1e-8 * b.denominator_df.abs(),
+                "{formula}: ddf {} vs {}",
+                a.denominator_df,
+                b.denominator_df
+            );
+        }
+    }
+}
+
 #[test]
 fn test_kenward_roger_adjusted_vcov_returns_pbkrtest_style_artifacts() {
     let data = sleepstudy_fixture();

@@ -66,6 +66,8 @@ mod active_face;
 mod blocks;
 // Cache-friendly dense Cholesky / triangular-solve / downdate kernels.
 mod dense_kernels;
+// Kenward-Roger adjustment through the Woodbury identity (no n x n).
+mod kenward_roger;
 // Analytic profiled-deviance gradient (Phase 5).
 mod gradient;
 pub(crate) use blocks::*;
@@ -2919,14 +2921,15 @@ impl LinearMixedModel {
     /// Unstable internal surface: `pub` only with the `unstable-internals`
     /// feature; otherwise `pub(crate)`.
     unstable_vis fn kenward_roger_adjusted_vcov(&self) -> Result<KenwardRogerAdjustedVcov> {
-        let sigma_g = self.kenward_roger_sigma_g()?;
-        if !sigma_g.sigma_positive_definite {
-            return Err(MixedModelError::Singular(
-                "Kenward-Roger adjusted covariance requires a positive-definite response covariance"
-                    .to_string(),
-            ));
-        }
+        let (phi, x) = self.kenward_roger_phi_and_x()?;
+        let ingredients = self.kenward_roger_ingredients(&x)?;
+        self.kenward_roger_adjusted_from_ingredients(phi, ingredients)
+    }
+    }
 
+    /// Fitted active fixed-effect covariance `Φ` and active design `X`,
+    /// after the shared Kenward-Roger prerequisites.
+    fn kenward_roger_phi_and_x(&self) -> Result<(DMatrix<f64>, DMatrix<f64>)> {
         let phi = self.vcov_active_with_sigma(self.sigma());
         if !matrix_is_finite(&phi) {
             return Err(MixedModelError::InvalidArgument(
@@ -2942,37 +2945,81 @@ impl LinearMixedModel {
                 x.ncols()
             )));
         }
+        Ok((phi, x))
+    }
 
+    /// The original dense (`n × n`) Kenward-Roger ingredients through
+    /// `kenward_roger_sigma_g`, kept as the test oracle for the low-rank
+    /// formulation in `kenward_roger.rs`.
+    #[cfg(test)]
+    fn kenward_roger_ingredients_dense(
+        &self,
+        x: &DMatrix<f64>,
+    ) -> Result<kenward_roger::KenwardRogerIngredients> {
+        let sigma_g = self.kenward_roger_sigma_g()?;
+        if !sigma_g.sigma_positive_definite {
+            return Err(MixedModelError::Singular(
+                "Kenward-Roger adjusted covariance requires a positive-definite response covariance"
+                    .to_string(),
+            ));
+        }
         let sigma_inv = invert_spd_matrix(&sigma_g.sigma, "Kenward-Roger response covariance")?;
-        let tt = &sigma_inv * &x;
+        let tt = &sigma_inv * x;
         let n_components = sigma_g.components.len();
-        let p = phi.ncols();
 
         let mut hh = Vec::with_capacity(n_components);
         let mut oo = Vec::with_capacity(n_components);
         let mut p_matrices = Vec::with_capacity(n_components);
         for component in &sigma_g.components {
             let h = component * &sigma_inv;
-            let o = &h * &x;
+            let o = &h * x;
             let p_matrix = symmetrize_matrix(&(-o.transpose() * &tt));
             hh.push(h);
             oo.push(o);
             p_matrices.push(p_matrix);
         }
-
         let mut q_matrices = Vec::with_capacity(n_components.saturating_mul(n_components + 1) / 2);
+        let mut ktrace = DMatrix::zeros(n_components, n_components);
+        for rr in 0..n_components {
+            for ss in rr..n_components {
+                q_matrices.push(oo[rr].transpose() * &sigma_inv * &oo[ss]);
+                let value = matrix_elementwise_dot(&hh[rr].transpose(), &hh[ss]);
+                ktrace[(rr, ss)] = value;
+                ktrace[(ss, rr)] = value;
+            }
+        }
+        Ok(kenward_roger::KenwardRogerIngredients {
+            p_matrices,
+            q_matrices,
+            ktrace,
+            component_labels: sigma_g.component_labels,
+        })
+    }
+
+    /// The `p × p` tail of `pbkrtest::vcovAdj_internal()`: information
+    /// matrix, its (generalized) inverse `W`, and `Φ + 2ΦUΦ`.
+    fn kenward_roger_adjusted_from_ingredients(
+        &self,
+        phi: DMatrix<f64>,
+        ingredients: kenward_roger::KenwardRogerIngredients,
+    ) -> Result<KenwardRogerAdjustedVcov> {
+        let kenward_roger::KenwardRogerIngredients {
+            p_matrices,
+            q_matrices,
+            ktrace,
+            component_labels,
+        } = ingredients;
+        let n_components = p_matrices.len();
+        let p = phi.ncols();
+
         let mut information_matrix = DMatrix::zeros(n_components, n_components);
         for rr in 0..n_components {
             for ss in rr..n_components {
-                let q_matrix = oo[rr].transpose() * &sigma_inv * &oo[ss];
-                let q_index = q_matrices.len();
-                q_matrices.push(q_matrix);
-
-                let ktrace = matrix_elementwise_dot(&hh[rr].transpose(), &hh[ss]);
+                let q_index = symmetric_pair_index(rr, ss, n_components);
                 let phi_q = matrix_elementwise_dot(&phi, &q_matrices[q_index]);
                 let phi_p_rr = &phi * &p_matrices[rr];
                 let pp_term = matrix_elementwise_dot(&phi_p_rr, &(&p_matrices[ss] * &phi));
-                let value = ktrace - 2.0 * phi_q + pp_term;
+                let value = ktrace[(rr, ss)] - 2.0 * phi_q + pp_term;
                 information_matrix[(rr, ss)] = value;
                 information_matrix[(ss, rr)] = value;
             }
@@ -3042,9 +3089,6 @@ impl LinearMixedModel {
                 "Kenward-Roger information matrix used a generalized inverse at tolerance {generalized_inverse_tolerance}"
             ));
         }
-        if sigma_g.reliability != ReliabilityGrade::Moderate {
-            notes.extend(sigma_g.notes.clone());
-        }
 
         let reliability = if used_generalized_inverse {
             ReliabilityGrade::Low
@@ -3063,11 +3107,10 @@ impl LinearMixedModel {
             information_eigenvalues,
             condition_min_abs_eigenvalue,
             used_generalized_inverse,
-            component_labels: sigma_g.component_labels,
+            component_labels,
             reliability,
             notes,
         })
-    }
     }
 
     unstable_internal_method! {
