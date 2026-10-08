@@ -2546,6 +2546,13 @@ pub(super) fn rank_k_downdate(c: &mut MatrixBlock, a: &DMatrix<f64>) {
                 && a.ncols() >= 512
             {
                 rank_k_downdate_small_dense(c_mat, a);
+            } else if c_mat.nrows() == c_mat.ncols()
+                && c_mat.nrows() == a.nrows()
+                && super::dense_kernels::use_symmetric_downdate(a.nrows(), a.ncols())
+            {
+                // Only the lower triangle feeds the dense Cholesky that
+                // follows every diagonal-block downdate; half the flops.
+                super::dense_kernels::symmetric_rank_k_downdate_lower(c_mat, a);
             } else {
                 gemm_sub_abt(c_mat, a, a);
             }
@@ -2814,44 +2821,11 @@ pub(super) fn cholesky_block_with_tolerance(
             Ok(())
         }
         MatrixBlock::Dense(mat) => {
-            let n = mat.nrows();
             let tol = cholesky_zero_pad_abs_tolerance(
                 diagonal_abs_max_matrix(mat),
                 cholesky_zero_pad_tolerance,
             );
-            for j in 0..n {
-                // Compute L[j,j]
-                let mut s = mat[(j, j)];
-                for k in 0..j {
-                    s -= mat[(j, k)] * mat[(j, k)];
-                }
-                if s <= 0.0 {
-                    if s < -tol {
-                        return Err(MixedModelError::PosDefException);
-                    }
-                    // Zero row (singular RE)
-                    for i in j..n {
-                        mat[(i, j)] = 0.0;
-                    }
-                    continue;
-                }
-                mat[(j, j)] = s.sqrt();
-
-                // Compute L[i,j] for i > j
-                for i in (j + 1)..n {
-                    let mut s = mat[(i, j)];
-                    for k in 0..j {
-                        s -= mat[(i, k)] * mat[(j, k)];
-                    }
-                    mat[(i, j)] = s / mat[(j, j)];
-                }
-
-                // Zero out upper triangle
-                for i in 0..j {
-                    mat[(i, j)] = 0.0;
-                }
-            }
-            Ok(())
+            super::dense_kernels::dense_cholesky_lower_in_place(mat, tol)
         }
         MatrixBlock::Sparse(_) => {
             let dense = block.as_dense();
@@ -3045,21 +3019,7 @@ pub(super) fn rdiv_lower_transpose(a: &mut MatrixBlock, l: &MatrixBlock) {
 
             match a {
                 MatrixBlock::Dense(a_mat) => {
-                    for j in 0..n {
-                        if l_dense[(j, j)].abs() < BLOCK_TRIANGULAR_SOLVE_ZERO_TOLERANCE {
-                            for i in 0..a_mat.nrows() {
-                                a_mat[(i, j)] = 0.0;
-                            }
-                            continue;
-                        }
-                        for i in 0..a_mat.nrows() {
-                            let mut s = a_mat[(i, j)];
-                            for k in 0..j {
-                                s -= a_mat[(i, k)] * l_dense[(j, k)];
-                            }
-                            a_mat[(i, j)] = s / l_dense[(j, j)];
-                        }
-                    }
+                    super::dense_kernels::dense_rdiv_lower_transpose_in_place(a_mat, l_dense);
                 }
                 MatrixBlock::Diagonal(a_diag) => match l {
                     MatrixBlock::Diagonal(l_diag) => {

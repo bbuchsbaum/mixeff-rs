@@ -64,6 +64,8 @@ use crate::types::{FeMat, FeTerm, FitLogEntry, OptSummary, Optimizer, OptimizerS
 mod active_face;
 
 mod blocks;
+// Cache-friendly dense Cholesky / triangular-solve / downdate kernels.
+mod dense_kernels;
 // Analytic profiled-deviance gradient (Phase 5).
 mod gradient;
 pub(crate) use blocks::*;
