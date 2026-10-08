@@ -28,6 +28,7 @@ pub mod varcorr;
 pub use block_description::BlockDescription;
 pub use bootstrap::{
     restore_replicates, restorereplicates, save_replicates, savereplicates, shortest_cov_int,
+    try_shortest_cov_int,
 };
 pub use coeftable::{
     coeftable_to_markdown, CoefTable, CoefTablePValuePolicy, InferenceCovarianceMethod,

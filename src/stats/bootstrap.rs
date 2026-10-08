@@ -167,11 +167,25 @@ pub fn parametricbootstrap_glmm<R: rand::Rng>(
 /// and non-finite ends are trimmed before the window scan. If there are
 /// fewer than `ceil(n*level)` finite values the degenerate full-range
 /// `(v[0], v[n-1])` is returned (Julia's fallback), never a crash.
+///
+/// A `level` outside the open interval `(0, 1)` returns `(NaN, NaN)`; use
+/// [`try_shortest_cov_int`] to get a typed error instead.
 pub fn shortest_cov_int(v: &mut [f64], level: f64) -> (f64, f64) {
-    assert!(
-        level > 0.0 && level < 1.0,
-        "level must be in the open interval (0, 1)"
-    );
+    try_shortest_cov_int(v, level).unwrap_or((f64::NAN, f64::NAN))
+}
+
+/// Fallible form of [`shortest_cov_int`]: errors when `level` is not in the
+/// open interval `(0, 1)`; otherwise identical.
+pub fn try_shortest_cov_int(v: &mut [f64], level: f64) -> crate::error::Result<(f64, f64)> {
+    if !(level > 0.0 && level < 1.0) {
+        return Err(crate::error::MixedModelError::InvalidArgument(format!(
+            "level must be in the open interval (0, 1); got {level}"
+        )));
+    }
+    Ok(shortest_cov_int_valid_level(v, level))
+}
+
+fn shortest_cov_int_valid_level(v: &mut [f64], level: f64) -> (f64, f64) {
     let n = v.len();
     if n == 0 {
         return (f64::NAN, f64::NAN);
@@ -280,6 +294,17 @@ mod tests {
         let mut v2 = vec![f64::NAN, 0.0, 10.0, 11.0, 12.0, 100.0, f64::NAN];
         let (lo2, hi2) = shortest_cov_int(&mut v2, 0.4); // ceil(7*0.4)=3
         assert_eq!((lo2, hi2), (10.0, 12.0));
+    }
+
+    #[test]
+    fn test_shortest_cov_int_invalid_level_is_not_a_panic() {
+        let mut v = vec![1.0, 2.0, 3.0];
+        let (lo, hi) = shortest_cov_int(&mut v, 1.5);
+        assert!(lo.is_nan() && hi.is_nan());
+        let (lo, hi) = shortest_cov_int(&mut v, 0.0);
+        assert!(lo.is_nan() && hi.is_nan());
+        assert!(try_shortest_cov_int(&mut v, f64::NAN).is_err());
+        assert_eq!(try_shortest_cov_int(&mut v, 0.6).unwrap(), (1.0, 2.0));
     }
 
     #[test]
