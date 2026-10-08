@@ -47,9 +47,9 @@ pub use model_summary::{
     FIT_SUMMARY_SCHEMA_VERSION,
 };
 pub use profile::{
-    profile, profile_beta, profile_betas, profile_confint_payload, profile_sigma, profile_theta,
-    profile_theta_scalar, ConfintRow, MixedModelProfile, ProfileLikelihoodCiPayload,
-    ProfileLikelihoodCiRow, ProfileRow, PROFILE_LIKELIHOOD_CI_SCHEMA,
-    PROFILE_LIKELIHOOD_CI_SCHEMA_VERSION,
+    profile, profile_beta, profile_betas, profile_confint_payload, profile_sdcor, profile_sdcors,
+    profile_sigma, profile_theta, profile_theta_scalar, sdcor_from_theta, theta_from_sdcor,
+    ConfintRow, MixedModelProfile, ProfileLikelihoodCiPayload, ProfileLikelihoodCiRow, ProfileRow,
+    PROFILE_LIKELIHOOD_CI_SCHEMA, PROFILE_LIKELIHOOD_CI_SCHEMA_VERSION,
 };
 pub use varcorr::{VarCorr, VarCorrComponent};

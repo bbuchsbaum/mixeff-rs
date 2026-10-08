@@ -1,8 +1,9 @@
 //! Profile-likelihood confidence intervals for linear mixed models.
 //!
 //! This is a partial port of `MixedModels.jl/src/profile/`. The current
-//! scope covers the residual-scale profile (σ), θ profiles, and ML fixed-effect
-//! β profiles together
+//! scope covers the residual-scale profile (σ), θ profiles, lme4-scale
+//! standard-deviation/correlation profiles (`.sig01`, …; see
+//! [`profile_sdcor`]), and ML fixed-effect β profiles together
 //! with the shared [`MixedModelProfile`] container and
 //! [`MixedModelProfile::confint`].
 //!
@@ -52,6 +53,11 @@ pub struct ProfileRow {
     pub beta: Vec<f64>,
     /// θ vector at this row.
     pub theta: Vec<f64>,
+    /// lme4-scale variance parameters at this row (`.sig01`, …: one per θ
+    /// slot — a standard deviation for a diagonal slot, a correlation for an
+    /// off-diagonal one), recorded by the SD/correlation-scale profile.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sdcor: Option<Vec<f64>>,
 }
 
 impl ProfileRow {
@@ -62,6 +68,7 @@ impl ProfileRow {
             sigma: m.sigma(),
             beta: m.beta().iter().cloned().collect(),
             theta: m.theta(),
+            sdcor: None,
         }
     }
 }
@@ -219,7 +226,13 @@ impl MixedModelProfile {
             // NaN comparisons are false, so an undetermined (NaN) bound
             // neither trips this guard nor is falsely accepted — it is
             // surfaced verbatim as the honest "not determined" signal.
-            if lower > estimate || upper < estimate {
+            if (lower > estimate || upper < estimate) && name.starts_with(".sig") {
+                // SD/correlation-scale profiles are supplementary to the θ
+                // profiles; an inconsistent one reports "not determined"
+                // instead of failing the whole table.
+                lower = f64::NAN;
+                upper = f64::NAN;
+            } else if lower > estimate || upper < estimate {
                 return Err(MixedModelError::Optimization(format!(
                     "confint for {name}: profile interval [{lower}, {upper}] does not bracket estimate {estimate}"
                 )));
@@ -273,6 +286,12 @@ impl MixedModelProfile {
             "profile-likelihood intervals are computed by spline inversion of signed-root deviance values".to_string(),
             "profile rows are serialized for diagnostics; spline coefficients are intentionally not part of the wire contract".to_string(),
         ];
+        if self.rev.keys().any(|name| name.starts_with(".sig")) {
+            notes.push(
+                "`.sigNN` rows are lme4-scale intervals (confint(method = \"profile\")): θ slot NN in engine θ order, a random-effect standard deviation for a diagonal slot and a correlation for an off-diagonal slot; like lme4 they profile the ML deviance (REML fits are refitted by ML). `θNN` rows remain relative-Cholesky-scale intervals."
+                    .to_string(),
+            );
+        }
         if reml {
             notes.push(
                 "REML profile payloads omit fixed-effect beta profiles; beta profile intervals require ML fits in this contract"
@@ -313,6 +332,13 @@ impl MixedModelProfile {
     }
 
     fn parameter_values(&self, parameter: &str) -> Option<Vec<f64>> {
+        if parameter.starts_with(".sig") {
+            return self
+                .rows_for(parameter)
+                .into_iter()
+                .map(|row| profile_row_parameter_value(row, parameter))
+                .collect();
+        }
         if parameter == "σ" {
             return Some(
                 self.rows_for(parameter)
@@ -349,9 +375,20 @@ fn parameter_index(parameter: &str, prefix: char) -> Option<usize> {
         .checked_sub(1)
 }
 
+fn sdcor_parameter_index(parameter: &str) -> Option<usize> {
+    parameter
+        .strip_prefix(".sig")?
+        .parse::<usize>()
+        .ok()?
+        .checked_sub(1)
+}
+
 fn profile_row_parameter_value(row: &ProfileRow, parameter: &str) -> Option<f64> {
-    if parameter == "σ" {
+    if parameter == "σ" || parameter == ".sigma" {
         return Some(row.sigma);
+    }
+    if let Some(index) = sdcor_parameter_index(parameter) {
+        return row.sdcor.as_ref()?.get(index).copied();
     }
     if let Some(index) = parameter_index(parameter, 'β') {
         return row.beta.get(index).copied();
@@ -442,6 +479,7 @@ pub fn profile_sigma(m: &mut LinearMixedModel, threshold: f64) -> Result<MixedMo
             sigma: sigma_val,
             beta: m.beta().iter().cloned().collect(),
             theta: m.theta(),
+            sdcor: None,
         });
         Ok(zeta)
     };
@@ -632,6 +670,7 @@ pub fn profile_theta(
             sigma: m.sigma(),
             beta: m.beta().iter().cloned().collect(),
             theta: m.theta(),
+            sdcor: None,
         });
         Ok(zeta)
     };
@@ -945,6 +984,7 @@ pub fn profile_beta(
             sigma,
             beta,
             theta: conditional_theta,
+            sdcor: None,
         });
         Ok(zeta)
     };
@@ -1192,6 +1232,486 @@ fn marginal_relative_covariance(m: &LinearMixedModel) -> DMatrix<f64> {
     v
 }
 
+// ===========================================================================
+// SD / correlation (lme4 `.sigNN`) profiles
+// ===========================================================================
+
+/// lme4-scale variance parameters for a θ vector and residual σ: one value
+/// per θ slot (in θ order), a standard deviation `σ·‖Λ[r,:]‖` for a diagonal
+/// slot and the correlation for an off-diagonal slot. This is the layout of
+/// lme4's `.sig01`, `.sig02`, … within each random-effect term.
+pub fn sdcor_from_theta(m: &LinearMixedModel, theta: &[f64], sigma: f64) -> Vec<f64> {
+    let lambdas = block_lambdas(m, theta);
+    m.parmap
+        .iter()
+        .map(|&(block, row, col)| {
+            let lambda = &lambdas[block];
+            let cov = |i: usize, j: usize| -> f64 {
+                (0..lambda.ncols())
+                    .map(|k| lambda[(i, k)] * lambda[(j, k)])
+                    .sum()
+            };
+            if row == col {
+                sigma * cov(row, row).max(0.0).sqrt()
+            } else {
+                let denom = (cov(row, row) * cov(col, col)).sqrt();
+                if denom > 0.0 {
+                    (cov(row, col) / denom).clamp(-1.0, 1.0)
+                } else {
+                    0.0
+                }
+            }
+        })
+        .collect()
+}
+
+fn block_lambdas(m: &LinearMixedModel, theta: &[f64]) -> Vec<DMatrix<f64>> {
+    let mut lambdas: Vec<DMatrix<f64>> = m
+        .reterms
+        .iter()
+        .map(|term| DMatrix::zeros(term.vsize, term.vsize))
+        .collect();
+    for (&(block, row, col), &value) in m.parmap.iter().zip(theta) {
+        lambdas[block][(row, col)] = value;
+    }
+    lambdas
+}
+
+/// Inverse of [`sdcor_from_theta`]: the θ vector (lower Cholesky factor of
+/// each relative covariance block) for lme4-scale parameters and σ, or
+/// `None` when they do not define a positive semi-definite covariance.
+pub fn theta_from_sdcor(m: &LinearMixedModel, sdcor: &[f64], sigma: f64) -> Option<Vec<f64>> {
+    if sdcor.len() != m.parmap.len() || !(sigma > 0.0) {
+        return None;
+    }
+    let mut sds: Vec<Vec<f64>> = m.reterms.iter().map(|t| vec![0.0; t.vsize]).collect();
+    let mut cors: Vec<DMatrix<f64>> = m
+        .reterms
+        .iter()
+        .map(|t| DMatrix::identity(t.vsize, t.vsize))
+        .collect();
+    for (&(block, row, col), &value) in m.parmap.iter().zip(sdcor) {
+        if !value.is_finite() {
+            return None;
+        }
+        if row == col {
+            if value < 0.0 {
+                return None;
+            }
+            sds[block][row] = value / sigma;
+        } else {
+            if value.abs() > 1.0 {
+                return None;
+            }
+            cors[block][(row, col)] = value;
+            cors[block][(col, row)] = value;
+        }
+    }
+    let mut factors = Vec::with_capacity(m.reterms.len());
+    for (block, term) in m.reterms.iter().enumerate() {
+        let k = term.vsize;
+        let cov = DMatrix::from_fn(k, k, |i, j| {
+            cors[block][(i, j)] * sds[block][i] * sds[block][j]
+        });
+        factors.push(semidefinite_cholesky(&cov)?);
+    }
+    Some(
+        m.parmap
+            .iter()
+            .map(|&(block, row, col)| factors[block][(row, col)])
+            .collect(),
+    )
+}
+
+/// Lower Cholesky factor of a positive semi-definite matrix (zero pivots
+/// allowed), or `None` when the matrix is indefinite.
+fn semidefinite_cholesky(a: &DMatrix<f64>) -> Option<DMatrix<f64>> {
+    let n = a.nrows();
+    let scale = (0..n)
+        .map(|i| a[(i, i)].abs())
+        .fold(0.0, f64::max)
+        .max(1e-300);
+    let tol = 1e-10 * scale;
+    let mut l = DMatrix::zeros(n, n);
+    for j in 0..n {
+        let d = a[(j, j)] - (0..j).map(|k| l[(j, k)] * l[(j, k)]).sum::<f64>();
+        if d < -tol {
+            return None;
+        }
+        let ljj = d.max(0.0).sqrt();
+        l[(j, j)] = ljj;
+        for i in (j + 1)..n {
+            let r = a[(i, j)] - (0..j).map(|k| l[(i, k)] * l[(j, k)]).sum::<f64>();
+            if ljj > tol.sqrt() {
+                l[(i, j)] = r / ljj;
+            } else if r.abs() > tol.sqrt() * scale.sqrt() {
+                return None;
+            }
+        }
+    }
+    Some(l)
+}
+
+/// lme4 name for SD/correlation parameter `index` (0-based θ slot) or, when
+/// `index == n_theta`, the residual scale.
+fn sdcor_parameter_name(index: usize, n_theta: usize) -> String {
+    if index == n_theta {
+        ".sigma".to_string()
+    } else {
+        format!(".sig{:02}", index + 1)
+    }
+}
+
+struct SdcorObjective<'a> {
+    model: &'a mut LinearMixedModel,
+    reml: bool,
+    n_theta: usize,
+}
+
+impl SdcorObjective<'_> {
+    /// Deviance at lme4-scale parameters `p = (sdcor…, σ)`; `+∞` when they
+    /// are infeasible.
+    fn eval(&mut self, p: &[f64]) -> f64 {
+        let sigma = p[self.n_theta];
+        let Some(theta) = theta_from_sdcor(self.model, &p[..self.n_theta], sigma) else {
+            return f64::INFINITY;
+        };
+        let mut varpar = theta;
+        varpar.push(sigma);
+        self.model
+            .deviance_varpar(&varpar, self.reml)
+            .ok()
+            .filter(|value| value.is_finite())
+            .unwrap_or(f64::INFINITY)
+    }
+
+    fn clamp(&self, index: usize, value: f64) -> f64 {
+        if index == self.n_theta {
+            value.max(1e-12)
+        } else if self.model.parmap[index].1 == self.model.parmap[index].2 {
+            value.max(0.0)
+        } else {
+            value.clamp(-1.0, 1.0)
+        }
+    }
+
+    /// Minimize over every coordinate except `fixed` (bound-constrained
+    /// trust-region search on scaled coordinates, polished by a coordinate
+    /// pattern search), starting from `start`.
+    fn minimize_others(&mut self, fixed: usize, start: &[f64]) -> (Vec<f64>, f64) {
+        let free: Vec<usize> = (0..start.len()).filter(|&i| i != fixed).collect();
+        if free.is_empty() {
+            let obj = self.eval(start);
+            return (start.to_vec(), obj);
+        }
+        let scale: Vec<f64> = free
+            .iter()
+            .map(|&i| {
+                if i < self.n_theta && self.model.parmap[i].1 != self.model.parmap[i].2 {
+                    1.0
+                } else {
+                    start[i].abs().max(1e-3)
+                }
+            })
+            .collect();
+        let lower: Vec<f64> = free
+            .iter()
+            .zip(&scale)
+            .map(|(&i, s)| {
+                if i == self.n_theta {
+                    1e-8
+                } else if self.model.parmap[i].1 == self.model.parmap[i].2 {
+                    0.0
+                } else {
+                    -1.0 / s
+                }
+            })
+            .collect();
+        let upper: Vec<f64> = free
+            .iter()
+            .zip(&scale)
+            .map(|(&i, s)| {
+                if i < self.n_theta && self.model.parmap[i].1 != self.model.parmap[i].2 {
+                    1.0 / s
+                } else {
+                    1e6
+                }
+            })
+            .collect();
+        let initial: Vec<f64> = free
+            .iter()
+            .zip(&scale)
+            .map(|(&i, s)| start[i] / s)
+            .collect();
+        let options = crate::optimizer::trust_bq::TrustBqOptions {
+            initial_radius: 0.05,
+            final_radius: 1e-8,
+            max_evaluations: 2000,
+            ..Default::default()
+        };
+        let base = start.to_vec();
+        let trust = crate::optimizer::trust_bq::minimize_with_progress(
+            &initial,
+            &lower,
+            &upper,
+            options,
+            |y: &[f64]| {
+                let mut p = base.clone();
+                for ((&i, s), v) in free.iter().zip(&scale).zip(y) {
+                    p[i] = v * s;
+                }
+                let value = self.eval(&p);
+                Ok(if value.is_finite() { value } else { 1e300 })
+            },
+            |_| Ok(false),
+        );
+        let mut polished_start = start.to_vec();
+        if let Ok(result) = trust {
+            for ((&i, s), v) in free.iter().zip(&scale).zip(&result.x) {
+                polished_start[i] = self.clamp(i, v * s);
+            }
+            if self.eval(&polished_start) > self.eval(start) {
+                polished_start = start.to_vec();
+            }
+        }
+        self.pattern_search_others(fixed, &polished_start)
+    }
+
+    /// Coordinate pattern search over every coordinate except `fixed`.
+    fn pattern_search_others(&mut self, fixed: usize, start: &[f64]) -> (Vec<f64>, f64) {
+        let mut best = start.to_vec();
+        let mut best_obj = self.eval(&best);
+        let mut steps: Vec<f64> = best
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                if i == fixed {
+                    0.0
+                } else if i < self.n_theta && self.model.parmap[i].1 != self.model.parmap[i].2 {
+                    0.01
+                } else {
+                    (v.abs() * 0.01).max(1e-3)
+                }
+            })
+            .collect();
+        for _ in 0..200 {
+            let mut improved = false;
+            for i in 0..best.len() {
+                if i == fixed {
+                    continue;
+                }
+                for direction in [1.0, -1.0] {
+                    let mut candidate = best.clone();
+                    candidate[i] = self.clamp(i, candidate[i] + direction * steps[i]);
+                    if (candidate[i] - best[i]).abs() < 1e-14 {
+                        continue;
+                    }
+                    let obj = self.eval(&candidate);
+                    if obj + 1e-10 < best_obj {
+                        best_obj = obj;
+                        best = candidate;
+                        improved = true;
+                        steps[i] *= 1.5;
+                        break;
+                    }
+                }
+            }
+            if !improved {
+                let mut max_rel = 0.0_f64;
+                for (i, step) in steps.iter_mut().enumerate() {
+                    if i == fixed {
+                        continue;
+                    }
+                    *step *= 0.5;
+                    max_rel = max_rel.max(*step / best[i].abs().max(1e-3));
+                }
+                if max_rel < 1e-7 {
+                    break;
+                }
+            }
+        }
+        (best, best_obj)
+    }
+}
+
+/// Profile one lme4-scale variance parameter (`.sigNN` — an SD or a
+/// correlation of a random-effect term — or `.sigma` for `index == n_theta`),
+/// refitting every other variance parameter at each point (fixed effects
+/// are profiled out).
+///
+/// Like lme4, a REML fit is first refitted by ML and the ML deviance is
+/// profiled (the `"σ"`/`"θ…"` profiles of a REML fit profile the REML
+/// criterion instead).
+///
+/// This is lme4's `profile()` parameterization (`devfun2`), so its
+/// intervals are the ones `confint(fit, method = "profile")` reports for
+/// `.sig01`, …, `.sigma`; θ-scale profiles remain available from
+/// [`profile_theta`].
+pub fn profile_sdcor(
+    m: &mut LinearMixedModel,
+    index: usize,
+    threshold: f64,
+) -> Result<MixedModelProfile> {
+    let n_theta = m.n_theta();
+    if index > n_theta {
+        return Err(MixedModelError::InvalidArgument(format!(
+            "profile_sdcor index {index} is out of bounds for {n_theta} θ parameter(s) plus σ"
+        )));
+    }
+    if m.optsum.feval <= 0 {
+        return Err(MixedModelError::InvalidArgument(
+            "profile_sdcor: model must be fitted first".into(),
+        ));
+    }
+    if m.optsum.sigma.is_some() {
+        return Err(MixedModelError::InvalidArgument(
+            "profile_sdcor requires σ to be estimated, not fixed".into(),
+        ));
+    }
+    if m.optsum.reml {
+        // lme4's profile() (devfun2) always profiles the ML deviance of the
+        // ML refit (`refitML`), also for REML fits; do the same so the
+        // intervals are the ones `confint(fit, method = "profile")` reports.
+        let mut ml = m.clone();
+        // Reset the fit state (as `refit` does) so `fit` accepts the clone.
+        ml.optsum.feval = 0;
+        ml.fit(false)?;
+        return profile_sdcor(&mut ml, index, threshold);
+    }
+
+    let parameter = sdcor_parameter_name(index, n_theta);
+    let saved_theta = m.theta();
+    let saved_fmin = m.optsum.fmin;
+    let sigma_hat = m.sigma();
+    let reml = m.optsum.reml;
+    let mut estimate = sdcor_from_theta(m, &saved_theta, sigma_hat);
+    estimate.push(sigma_hat);
+    let is_correlation = index < n_theta && m.parmap[index].1 != m.parmap[index].2;
+
+    let result = (|| -> Result<MixedModelProfile> {
+        let mut objective = SdcorObjective {
+            model: &mut *m,
+            reml,
+            n_theta,
+        };
+        let obj_hat = objective.eval(&estimate);
+        if !obj_hat.is_finite() {
+            return Err(MixedModelError::Optimization(format!(
+                "profile_{parameter}: deviance is not finite at the estimate"
+            )));
+        }
+        let value_hat = estimate[index];
+        let row_for = |objective: &SdcorObjective, p: &[f64], zeta: f64| -> ProfileRow {
+            let theta = theta_from_sdcor(objective.model, &p[..n_theta], p[n_theta])
+                .unwrap_or_else(|| vec![f64::NAN; n_theta]);
+            ProfileRow {
+                p: parameter.clone(),
+                zeta,
+                sigma: p[n_theta],
+                beta: Vec::new(),
+                theta,
+                sdcor: Some(p[..n_theta].to_vec()),
+            }
+        };
+        let mut rows = vec![row_for(&objective, &estimate, 0.0)];
+
+        // Step size from a local quadratic probe: aim for Δζ ≈ 0.3 per step.
+        let probe_h = if is_correlation {
+            0.02
+        } else {
+            (value_hat.abs() * 0.02).max(1e-4)
+        };
+        let mut probe = estimate.clone();
+        probe[index] = objective.clamp(index, value_hat + probe_h);
+        let (_, probe_obj) = objective.minimize_others(index, &probe);
+        let curvature = ((probe_obj - obj_hat).max(1e-12)) / (probe[index] - value_hat).powi(2);
+        let mut base_step = (0.3 / curvature.sqrt()).max(probe_h);
+        if is_correlation {
+            base_step = base_step.min(0.1);
+        }
+
+        for direction in [-1.0, 1.0] {
+            let mut current = estimate.clone();
+            let mut step = base_step;
+            let mut last_zeta = 0.0_f64;
+            for _ in 0..60 {
+                let target = objective.clamp(index, current[index] + direction * step);
+                if (target - current[index]).abs() < 1e-12 {
+                    break;
+                }
+                let mut start = current.clone();
+                start[index] = target;
+                let (point, obj) = objective.minimize_others(index, &start);
+                if !obj.is_finite() {
+                    break;
+                }
+                let zeta = direction * (obj - obj_hat).max(0.0).sqrt();
+                rows.push(row_for(&objective, &point, zeta));
+                current = point;
+                let at_bound = objective.clamp(index, target + direction * 1e-9) == target;
+                if zeta.abs() >= threshold || at_bound {
+                    break;
+                }
+                if (zeta - last_zeta).abs() < 0.15 {
+                    step *= 1.6;
+                }
+                last_zeta = zeta;
+            }
+        }
+
+        rows.sort_by(|a, b| {
+            a.zeta
+                .partial_cmp(&b.zeta)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let value_of = |row: &ProfileRow| -> f64 {
+            if index == n_theta {
+                row.sigma
+            } else {
+                row.sdcor.as_ref().map_or(f64::NAN, |v| v[index])
+            }
+        };
+        // Points pinned at a boundary (SD at 0, |ρ| at 1) can repeat ζ; keep
+        // the first so the ζ table stays strictly monotone.
+        rows.dedup_by(|a, b| a.zeta <= b.zeta + 1e-12 || (value_of(a) - value_of(b)).abs() < 1e-14);
+
+        let mut fwd = BTreeMap::new();
+        let mut rev = BTreeMap::new();
+        add_profile_splines(&parameter, &rows, &mut fwd, &mut rev, value_of)?;
+        Ok(MixedModelProfile {
+            tbl: rows,
+            fwd,
+            rev,
+        })
+    })();
+
+    m.set_theta(&saved_theta)?;
+    m.update_l()?;
+    m.optsum.fmin = saved_fmin;
+    result
+}
+
+/// SD/correlation-scale profiles (`.sig01`, …) for every θ slot.
+///
+/// A parameter whose profile cannot be computed (for example a correlation
+/// pinned at ±1) is omitted rather than failing the whole table; `.sigma` is
+/// not repeated because the σ profile is already the `"σ"` entry.
+pub fn profile_sdcors(m: &mut LinearMixedModel, threshold: f64) -> MixedModelProfile {
+    let mut out = MixedModelProfile {
+        tbl: Vec::new(),
+        fwd: BTreeMap::new(),
+        rev: BTreeMap::new(),
+    };
+    for index in 0..m.n_theta() {
+        if let Ok(profile) = profile_sdcor(m, index, threshold) {
+            out.tbl.extend(profile.tbl);
+            out.fwd.extend(profile.fwd);
+            out.rev.extend(profile.rev);
+        }
+    }
+    out
+}
+
 /// Public entry point matching the shape of `MixedModels.jl::profile`.
 ///
 /// Profiles σ and θ for fitted LMMs. For ML fits, active fixed-effect β
@@ -1218,6 +1738,10 @@ pub fn profile(m: &mut LinearMixedModel) -> Result<MixedModelProfile> {
         fwd.extend(theta.fwd);
         rev.extend(theta.rev);
     }
+    let sdcor = profile_sdcors(m, 4.0);
+    tbl.extend(sdcor.tbl);
+    fwd.extend(sdcor.fwd);
+    rev.extend(sdcor.rev);
     Ok(MixedModelProfile { tbl, fwd, rev })
 }
 
@@ -1514,6 +2038,7 @@ mod tests {
                     sigma: 10.0,
                     beta: Vec::new(),
                     theta: Vec::new(),
+                    sdcor: None,
                 },
                 ProfileRow {
                     p: "σ".to_string(),
@@ -1521,6 +2046,7 @@ mod tests {
                     sigma: 5.0,
                     beta: Vec::new(),
                     theta: Vec::new(),
+                    sdcor: None,
                 },
                 ProfileRow {
                     p: "σ".to_string(),
@@ -1528,6 +2054,7 @@ mod tests {
                     sigma: 6.0,
                     beta: Vec::new(),
                     theta: Vec::new(),
+                    sdcor: None,
                 },
             ],
             fwd: BTreeMap::new(),
@@ -1594,6 +2121,7 @@ mod tests {
                 sigma: 1.0,
                 beta: Vec::new(),
                 theta: vec![0.9],
+                sdcor: None,
             },
             ProfileRow {
                 p: "θ1".to_string(),
@@ -1601,6 +2129,7 @@ mod tests {
                 sigma: 1.0,
                 beta: Vec::new(),
                 theta: vec![1.0],
+                sdcor: None,
             },
             ProfileRow {
                 p: "θ1".to_string(),
@@ -1608,6 +2137,7 @@ mod tests {
                 sigma: 1.0,
                 beta: Vec::new(),
                 theta: vec![1.1],
+                sdcor: None,
             },
         ];
         let mut fwd = BTreeMap::new();
@@ -1811,7 +2341,8 @@ mod tests {
         assert!(!pr.rows_for("σ").is_empty());
         assert!(!pr.rows_for("θ1").is_empty());
         assert!(!pr.rows_for("β1").is_empty());
-        assert_eq!(profile_row_order(&pr), vec!["σ", "β1", "θ1"]);
+        // `.sig01` is the lme4-scale (SD) profile of the batch intercept.
+        assert_eq!(profile_row_order(&pr), vec!["σ", "β1", "θ1", ".sig01"]);
 
         let ci = pr.confint(0.95).unwrap();
         let parameters = ci
@@ -1915,9 +2446,13 @@ mod tests {
 
             let pr = profile(&mut model)
                 .unwrap_or_else(|error| panic!("profile failed for {}: {error}", case.id));
+            // The Julia reference has no lme4-scale `.sigNN` profiles.
+            let order = profile_row_order(&pr)
+                .into_iter()
+                .filter(|name| !name.starts_with(".sig"))
+                .collect::<Vec<_>>();
             assert_eq!(
-                profile_row_order(&pr),
-                case.rust_row_order,
+                order, case.rust_row_order,
                 "row order mismatch for {}",
                 case.id
             );
@@ -1947,5 +2482,74 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn sdcor_profile_intervals_match_lme4_confint_profile() {
+        // lme4: confint(lmer(Reaction ~ Days + (Days | Subject), sleepstudy))
+        let (data, _) = datasets::load("sleepstudy").unwrap();
+        let formula = parse_formula("Reaction ~ Days + (Days | Subject)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(true).unwrap();
+        let theta_before = model.theta();
+
+        // Round trip between θ and the lme4 scale.
+        let sdcor = sdcor_from_theta(&model, &model.theta(), model.sigma());
+        let back = theta_from_sdcor(&model, &sdcor, model.sigma()).unwrap();
+        for (a, b) in back.iter().zip(model.theta()) {
+            assert!((a - b).abs() < 1e-10);
+        }
+
+        let expected = [
+            (".sig01", 14.3814181608, 37.7159953183),
+            (".sig02", -0.4815007583, 0.6849862733),
+            (".sig03", 3.8011640533, 8.7533807531),
+        ];
+        let profile = profile_sdcors(&mut model, 4.0);
+        let rows = profile.confint(0.95).unwrap();
+        for (name, lower, upper) in expected {
+            let row = rows
+                .iter()
+                .find(|row| row.parameter == name)
+                .unwrap_or_else(|| panic!("{name} profiled: {rows:?}"));
+            let tol = 2e-3 * (upper - lower);
+            assert!(
+                (row.lower - lower).abs() < tol,
+                "{name} lower {} vs {lower}",
+                row.lower
+            );
+            assert!(
+                (row.upper - upper).abs() < tol,
+                "{name} upper {} vs {upper}",
+                row.upper
+            );
+        }
+        // The model is restored and the θ-scale profile is still available.
+        assert_eq!(model.theta(), theta_before);
+        let sigma = profile_sdcor(&mut model, 3, 4.0).unwrap();
+        let row = &sigma.confint(0.95).unwrap()[0];
+        assert_eq!(row.parameter, ".sigma");
+        assert!((row.lower - 22.8982668821).abs() < 0.02, "{row:?}");
+        assert!((row.upper - 28.8579965114).abs() < 0.02, "{row:?}");
+    }
+
+    #[test]
+    fn sdcor_profile_scalar_term_ml_matches_lme4() {
+        // lme4: confint(lmer(Reaction ~ Days + (1 | Subject), sleepstudy,
+        //                    REML = FALSE))[".sig01", ]
+        let (data, _) = datasets::load("sleepstudy").unwrap();
+        let formula = parse_formula("Reaction ~ Days + (1 | Subject)").unwrap();
+        let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+        model.fit(false).unwrap();
+        let payload = profile_confint_payload(&mut model, 0.95).unwrap();
+        let sig = payload
+            .intervals
+            .iter()
+            .find(|row| row.parameter == ".sig01")
+            .expect(".sig01 interval in the payload");
+        assert!((sig.lower - 26.007120448).abs() < 0.05, "{sig:?}");
+        assert!((sig.upper - 52.93598353).abs() < 0.05, "{sig:?}");
+        // θ rows remain.
+        assert!(payload.intervals.iter().any(|row| row.parameter == "θ1"));
     }
 }
