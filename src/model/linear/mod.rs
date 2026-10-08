@@ -2767,6 +2767,9 @@ impl LinearMixedModel {
     }
 
     unstable_internal_method! {
+    // The adjusted covariance uses the low-rank route; this explicit n x n
+    // decomposition stays as unstable inspection surface and test oracle.
+    #[cfg_attr(not(any(test, feature = "unstable-internals")), allow(dead_code))]
     /// Build the Kenward-Roger response-covariance component decomposition.
     ///
     /// The returned matrices follow the `pbkrtest::get_SigmaG()` convention:

@@ -2215,6 +2215,7 @@ impl LinearMixedModel {
     }
 }
 
+#[cfg_attr(not(any(test, feature = "unstable-internals")), allow(dead_code))]
 pub(super) fn kenward_roger_covariance_component_count(reterm: &ReMat) -> usize {
     reterm.inds.len()
 }
@@ -2231,6 +2232,7 @@ pub(super) fn kenward_roger_covariance_component_indices(reterm: &ReMat) -> Vec<
         .collect()
 }
 
+#[cfg_attr(not(any(test, feature = "unstable-internals")), allow(dead_code))]
 pub(super) fn kenward_roger_response_component(
     reterm: &ReMat,
     row: usize,
