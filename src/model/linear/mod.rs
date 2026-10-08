@@ -1361,6 +1361,7 @@ impl LinearMixedModel {
         // Apply weights: scale each row of X, Z, and y by sqrt(w_i).
         let mut sqrtwts_dvec = None;
         let sqrtwts = if let Some(wts) = weights {
+            validate_lmm_prior_weights(wts, y.len())?;
             let sw: Vec<f64> = wts.iter().map(|w| w.sqrt()).collect();
             let sw_dvec = DVector::from_vec(sw.clone());
             xy_mat.reweight(&sw_dvec);
@@ -3750,10 +3751,12 @@ impl LinearMixedModel {
             }
         }
 
-        // Residual noise ε ~ N(0, σ²)
-        let eps_dist = Normal::new(0.0, sigma).unwrap();
+        // Residual noise ε_i ~ N(0, σ² / w_i): prior weights scale the
+        // residual variance (lme4's simulate.merMod uses sigma / sqrt(w)).
+        // X and Z are stored unweighted, so y_new is on the data scale.
         for i in 0..n {
-            y_new[i] += eps_dist.sample(rng);
+            let sd = self.sqrtwts.get(i).map_or(sigma, |sw| sigma / sw);
+            y_new[i] += sd * normal01.sample(rng);
         }
 
         Ok(y_new)
@@ -4577,6 +4580,31 @@ fn streamed_rank_path_diagnostic(
         serde_json::json!(policy.max_dense_bytes),
     );
     diagnostic
+}
+
+/// LMM prior weights scale the residual variance as sigma^2 / w_i, so each
+/// must be finite and strictly positive, and there must be one per
+/// observation. Checked before the weights reach the design (where a length
+/// mismatch would trip an assertion) or the log-determinant (where a zero
+/// weight would produce -inf).
+fn validate_lmm_prior_weights(weights: &[f64], n_obs: usize) -> Result<()> {
+    if weights.len() != n_obs {
+        return Err(MixedModelError::InvalidArgument(format!(
+            "prior weights length ({}) does not match number of observations ({n_obs})",
+            weights.len()
+        )));
+    }
+    if let Some((i, &w)) = weights
+        .iter()
+        .enumerate()
+        .find(|(_, w)| !w.is_finite() || **w <= 0.0)
+    {
+        return Err(MixedModelError::InvalidArgument(format!(
+            "prior weight at index {i} must be finite and positive (got {w}); \
+             drop observations with zero weight before fitting"
+        )));
+    }
+    Ok(())
 }
 
 fn use_direct_dense_fixed_design(

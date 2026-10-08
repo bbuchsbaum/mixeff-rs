@@ -6676,3 +6676,24 @@ fn joint_trust_bq_ftol_confirmation_respects_tight_budgets() {
     }
     assert!(saw_unconfirmed && saw_confirmed && saw_confirmed_at_budget);
 }
+
+#[test]
+fn binomial_response_counts_above_one_are_refused() {
+    let mut df = DataFrame::new();
+    let n = 40;
+    df.add_numeric("y", (0..n).map(|i| (i % 6) as f64).collect())
+        .unwrap();
+    df.add_numeric("x", (0..n).map(|i| (i % 5) as f64 - 2.0).collect())
+        .unwrap();
+    df.add_categorical("g", (0..n).map(|i| format!("G{}", i % 8)).collect())
+        .unwrap();
+    let err = GeneralizedLinearMixedModel::new_with_weights(
+        parse_formula("y ~ x + (1|g)").unwrap(),
+        &df,
+        Family::Binomial,
+        None,
+        vec![5.0; n],
+    )
+    .unwrap_err();
+    assert!(matches!(err, MixedModelError::InvalidArgument(msg) if msg.contains("proportion")));
+}

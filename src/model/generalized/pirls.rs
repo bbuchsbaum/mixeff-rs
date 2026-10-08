@@ -637,12 +637,13 @@ pub(crate) fn validate_glmm_response_domain(
                 "bernoulli GLMM response must be exactly 0 or 1; index {idx} has {value}"
             )));
         }
-        if family == Family::Binomial
-            && !(0.0..=1.0).contains(&value)
-            && !is_nonnegative_integer_response(value)
-        {
+        // The binomial deviance, likelihood and simulator all work on the
+        // proportion scale (successes / trials, with trials as prior
+        // weights); a count above 1 would make log(1 - y) NaN and the fit
+        // return non-finite estimates instead of an error.
+        if family == Family::Binomial && !(0.0..=1.0).contains(&value) {
             return Err(MixedModelError::InvalidArgument(format!(
-                "binomial GLMM response must be a proportion in [0, 1] or a non-negative integer count; index {idx} has {value}"
+                "binomial GLMM response must be a proportion in [0, 1] (successes / trials, with the trial counts passed as weights); index {idx} has {value}"
             )));
         }
         if family == Family::Poisson && value < 0.0 {

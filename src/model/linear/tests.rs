@@ -7309,3 +7309,77 @@ fn predict_new_on_training_data_matches_fitted_for_categorical_codings() {
         }
     }
 }
+
+#[test]
+fn lmm_prior_weights_are_validated_before_use() {
+    let df = categorical_prediction_fixture();
+    let formula = || parse_formula("y ~ f + (1|g)").unwrap();
+    let n = df.nrow();
+    for (weights, needle) in [
+        (vec![1.0; n - 1], "length"),
+        (
+            {
+                let mut w = vec![1.0; n];
+                w[3] = 0.0;
+                w
+            },
+            "index 3",
+        ),
+        (
+            {
+                let mut w = vec![1.0; n];
+                w[5] = -1.0;
+                w
+            },
+            "index 5",
+        ),
+        (
+            {
+                let mut w = vec![1.0; n];
+                w[7] = f64::NAN;
+                w
+            },
+            "index 7",
+        ),
+    ] {
+        let err = LinearMixedModel::new(formula(), &df, Some(&weights)).unwrap_err();
+        assert!(
+            matches!(&err, MixedModelError::InvalidArgument(msg) if msg.contains(needle)),
+            "unexpected error for {needle}: {err:?}"
+        );
+    }
+}
+
+/// With prior weights the residual variance is sigma^2 / w_i, so simulated
+/// residual spread must shrink where the weight is large.
+#[test]
+fn weighted_lmm_simulation_scales_residual_noise_by_weights() {
+    let df = categorical_prediction_fixture();
+    let n = df.nrow();
+    let weights: Vec<f64> = (0..n)
+        .map(|i| if i % 2 == 0 { 1.0 } else { 100.0 })
+        .collect();
+    let mut model =
+        LinearMixedModel::new(parse_formula("y ~ f + (1|g)").unwrap(), &df, Some(&weights))
+            .unwrap();
+    model.fit(false).unwrap();
+    let mut rng = StdRng::seed_from_u64(11);
+    let beta = model.beta();
+    let (mut light, mut heavy) = (0.0, 0.0);
+    let reps = 200;
+    for _ in 0..reps {
+        let a = model.simulate_with_active_beta(&mut rng, &beta).unwrap();
+        let b = model.simulate_with_active_beta(&mut rng, &beta).unwrap();
+        // Same fixed part; difference of two draws isolates the noise
+        // (random effects differ too, but equally for both weight classes).
+        for i in 0..n {
+            let d = (a[i] - b[i]).powi(2);
+            if i % 2 == 0 {
+                light += d
+            } else {
+                heavy += d
+            }
+        }
+    }
+    assert!(light > 2.0 * heavy, "light={light} heavy={heavy}");
+}
