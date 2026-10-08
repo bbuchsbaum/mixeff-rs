@@ -2009,6 +2009,7 @@ pub(crate) fn glmm_block_index(row: usize, col: usize) -> usize {
     row * (row + 1) / 2 + col
 }
 
+#[cfg(test)]
 pub(crate) fn solve_dense_lower_against_rhs(l: &DMatrix<f64>, rhs: &mut [f64]) {
     for i in 0..rhs.len() {
         let mut sum = rhs[i];

@@ -1096,14 +1096,29 @@ impl GeneralizedLinearMixedModel {
 
         // Add random effects: η += Z_i * b_i
         for (i, rt) in self.lmm.reterms.iter().enumerate() {
-            // b_i = λ_i * u_i
-            self.b[i] = &rt.lambda * &self.u[i];
-            // Multiply Z * vec(b) using refs for sparse multiplication
-            let bvec = DVector::from_column_slice(self.b[i].as_slice());
-            for (obs, &ref_idx) in rt.refs.iter().enumerate() {
-                let r = ref_idx as usize;
-                for s in 0..rt.vsize {
-                    self.eta[obs] += rt.z[(s, obs)] * bvec[r * rt.vsize + s];
+            // b_i = λ_i * u_i, written into the existing buffer (this runs
+            // on every η update of every PIRLS iteration and AGQ node).
+            let u = &self.u[i];
+            let b = &mut self.b[i];
+            if b.shape() == (rt.lambda.nrows(), u.ncols()) {
+                rt.lambda.mul_to(u, b);
+            } else {
+                *b = &rt.lambda * u;
+            }
+            // η += Z vec(b) via the grouping references; `z` is
+            // `vsize × n` column-major, so observation `obs` is one
+            // contiguous chunk.
+            let vsize = rt.vsize;
+            let b = b.as_slice();
+            let eta = self.eta.as_mut_slice();
+            for ((eta_obs, &ref_idx), z_obs) in eta
+                .iter_mut()
+                .zip(&rt.refs)
+                .zip(rt.z.as_slice().chunks_exact(vsize))
+            {
+                let base = ref_idx as usize * vsize;
+                for (s, &z) in z_obs.iter().enumerate() {
+                    *eta_obs += z * b[base + s];
                 }
             }
         }
@@ -1663,6 +1678,9 @@ struct AgqRestoreGuard<'a> {
     glmm: &'a mut GeneralizedLinearMixedModel,
     /// `u[0]` snapshot at the conditional modes (flat, length `n_levels`).
     u0_flat: Vec<f64>,
+    /// `offset + Xβ`, constant over the sweep (β is not perturbed), or
+    /// `None` to recompute it on restore.
+    fixed: Option<DVector<f64>>,
 }
 
 impl std::ops::Deref for AgqRestoreGuard<'_> {
@@ -1683,7 +1701,10 @@ impl Drop for AgqRestoreGuard<'_> {
         for (g, &uv) in self.u0_flat.iter().enumerate() {
             self.glmm.u[0][(0, g)] = uv;
         }
-        self.glmm.update_eta();
+        match self.fixed.take() {
+            Some(fixed) => self.glmm.update_eta_given_fixed(Some(&fixed)),
+            None => self.glmm.update_eta(),
+        }
     }
 }
 
