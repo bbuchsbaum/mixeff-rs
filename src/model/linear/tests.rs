@@ -950,7 +950,7 @@ fn test_random_effect_no_intercept_factor_uses_cell_means_with_explicit_contrast
 }
 
 #[test]
-fn test_random_effect_categorical_cell_means_preserves_zero_correlation_map() {
+fn test_random_effect_factor_in_double_bar_gets_full_covariance_like_lme4() {
     let mut data = DataFrame::new();
     data.add_numeric("y", vec![1.0, 2.0, 3.0, 1.5, 2.5, 3.5])
         .unwrap();
@@ -971,6 +971,8 @@ fn test_random_effect_categorical_cell_means_preserves_zero_correlation_map() {
     )
     .unwrap();
 
+    // lme4 expands `(0 + cond || subj)` to `(0 + cond | subj)`: a factor
+    // inside `||` keeps an unstructured covariance among its indicators.
     let formula = parse_formula("y ~ cond + (0 + cond || subj)").unwrap();
     let model = LinearMixedModel::new(formula, &data, None).unwrap();
 
@@ -978,12 +980,12 @@ fn test_random_effect_categorical_cell_means_preserves_zero_correlation_map() {
         model.reterms[0].cnames,
         vec!["cond: A", "cond: B", "cond: C"]
     );
-    assert_eq!(model.theta().len(), 3);
-    assert!(matches!(
+    assert_eq!(model.theta().len(), 6);
+    assert!(!matches!(
         model.compiler_artifact().theta_maps[0],
         ThetaMap::Diagonal(_)
     ));
-    assert_eq!(model.compiler_artifact().theta_maps[0].n_free(), 3);
+    assert_eq!(model.compiler_artifact().theta_maps[0].n_free(), 6);
 }
 
 #[test]
@@ -1045,10 +1047,25 @@ fn test_zerocorr_factor_split_terms_record_no_error_diagnostics() {
     data.add_categorical("g", (0..n).map(|i| format!("g{}", i / 6)).collect())
         .unwrap();
 
+    // lme4: (1 + f + x || g) -> (1 | g) + (0 + f | g) + (0 + x | g). The
+    // engine keeps the intercept and x as one diagonal block.
     let formula = parse_formula("y ~ x + f + (1 + f + x || g)").unwrap();
     let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
 
-    assert_eq!(model.reterms[0].cnames, vec!["(Intercept)", "f: b", "x"]);
+    let mut bases = model
+        .reterms
+        .iter()
+        .map(|term| term.cnames.clone())
+        .collect::<Vec<_>>();
+    bases.sort();
+    assert_eq!(
+        bases,
+        vec![
+            vec!["(Intercept)".to_string(), "x".to_string()],
+            vec!["f: a".to_string(), "f: b".to_string()],
+        ]
+    );
+    assert_eq!(model.theta().len(), 2 + 3);
     let artifact = model.compiler_artifact();
     let errors = artifact
         .diagnostics
@@ -1060,10 +1077,18 @@ fn test_zerocorr_factor_split_terms_record_no_error_diagnostics() {
         errors.is_empty(),
         "||-with-factor construction should not record error diagnostics: {errors:?}"
     );
+    // Two scalar maps for the diagonal (Intercept, x) block plus one
+    // unstructured map for the factor block.
     assert_eq!(artifact.theta_maps.len(), 3);
-    let factor_map = &artifact.theta_maps[1];
+    let factor_map = &artifact.theta_maps[2];
+    assert!(matches!(factor_map, ThetaMap::FullCholesky(_)));
     assert_eq!(factor_map.block().user_basis, vec!["f".to_string()]);
-    assert_eq!(factor_map.block().theta_slots[0].lambda_row, 1);
+    assert_eq!(
+        factor_map.block().optimizer_basis,
+        vec!["f: a".to_string(), "f: b".to_string()]
+    );
+    assert_eq!(factor_map.n_free(), 3);
+    assert_eq!(factor_map.block().theta_slots[0].lambda_row, 0);
     let total_free: usize = artifact.theta_maps.iter().map(|map| map.n_free()).sum();
     assert_eq!(total_free, model.theta().len());
 

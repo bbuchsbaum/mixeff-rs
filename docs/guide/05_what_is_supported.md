@@ -71,7 +71,7 @@ subset:
 | `y ~ x1 / x2` | Nesting (`x1 + x1:x2`) | Stable |
 | `0 + …`, `-1 + …`, `1 + …` | Explicit intercept handling | Stable |
 | `(re | g)` | Correlated random effects in group `g` | Stable |
-| `(re || g)` | Zero-correlation random effects | Stable |
+| `(re || g)` | Zero-correlation random effects (lme4 expansion; see below for factors) | Stable |
 | `(re | g1 & g2)` | Interaction grouping factor | Stable |
 | `(re | g1:g2)` | Cell-level grouping factor | Stable |
 | `(re | g1/g2)` | Nested grouping expansion | Stable |
@@ -81,6 +81,33 @@ subset:
 | `cs(re | g)`, `ar1(re | g)` | Structured random-effect covariance syntax | Parsed and refused for fitting in v1.0 |
 | `I(expr)` and other in-formula transforms | Stateless arithmetic subset | Stable (minimal subset) |
 | Full `I()` / model.matrix transformations | — | Out of scope |
+
+### Random-effect basis coding and `||` with factors
+
+The random-effect basis inside `( … | g)` is coded exactly like R's
+`model.matrix()` for the same terms (as lme4's `mkReTrms` does): with an
+intercept every factor uses contrasts (treatment by default, or the factor's
+explicit contrast); without an intercept the *first* factor gets full
+indicator columns and later factors use contrasts, so `(0 + f + h | g)` has
+`nlevels(f) + nlevels(h) - 1` full-rank columns; interactions follow R's
+marginality rules.
+
+`||` follows lme4's `expandDoubleVerts`. For intercept and numeric terms it
+means independent variances (`(1 + x || g)` is `(1 | g) + (0 + x | g)`; the
+engine fits it as one diagonal block, which is the same model). A **factor**
+inside `||` is not split into independent contrast variances: like lme4,
+`(1 + x + f || g)` becomes `(1 + x || g) + (0 + f | g)`, i.e. the factor is
+its own block with full indicator coding and an unstructured covariance among
+its levels. The fitted model's formula shows this expansion, and the compiler
+records it as a `syntax_expansion` diagnostic with
+`expansion_kind = "zero_correlation_factor_split"`. (Through 1.0.0-rc.5 a
+factor inside `||` was treatment-coded with one independent variance per
+contrast, a different model from lme4.)
+
+Unused levels of a grouping factor are dropped when the random-effect terms
+are built (as in lme4), so they do not appear in `ranef`, the number of
+groups, or conditional variances; at prediction time such a level is a new
+level.
 
 Random-effect covariance artifacts serialize stable support labels:
 `supported` for scalar, diagonal, and full/unstructured fitted families;

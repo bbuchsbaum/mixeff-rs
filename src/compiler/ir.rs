@@ -465,6 +465,7 @@ fn expansion_kind_label(expansion: RandomTermExpansion) -> &'static str {
     match expansion {
         RandomTermExpansion::NestedGrouping => "nested",
         RandomTermExpansion::CrossedGrouping => "crossed_with_cell",
+        RandomTermExpansion::ZeroCorrelationFactorSplit => "zero_correlation_factor_split",
     }
 }
 
