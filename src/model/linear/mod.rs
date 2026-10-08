@@ -275,6 +275,9 @@ pub struct LinearMixedModel {
     /// A-block rebuild (scratch only; contents are meaningless between
     /// rebuilds).
     pub(crate) wtxy_rows_scratch: Vec<f64>,
+    /// Memo of the hypothesis-independent Satterthwaite ingredients for
+    /// the current fitted state (see `satterthwaite_ingredients`).
+    pub(crate) satterthwaite_cache: inference::SatterthwaiteCache,
     /// True while the `[X|y]` rows of `a_blocks` (`A[k, 0..=k]`) do not
     /// reflect the current `wtz`/`wtxy`. Set only by
     /// [`update_irls_weights_re_only`](Self::update_irls_weights_re_only)
@@ -1428,6 +1431,7 @@ impl LinearMixedModel {
             inspection_artifact: std::sync::OnceLock::new(),
             re_cross_sparse_patterns: std::collections::HashMap::new(),
             wtxy_rows_scratch: Vec::new(),
+            satterthwaite_cache: inference::SatterthwaiteCache::default(),
             fe_a_blocks_stale: false,
             fe_l_row_stale: false,
         };
@@ -2564,16 +2568,82 @@ impl LinearMixedModel {
     }
 
     unstable_internal_method! {
-    /// Numerically differentiate `vcov_beta_varpar` with respect to `varpar`.
+    /// Differentiate `vcov_beta_varpar` with respect to `varpar`.
     ///
-    /// Returns one `p x p` matrix per `varpar` component. The first
-    /// implementation intentionally requires a feasible central-difference
-    /// stencil; boundary-active parameters return an explicit unavailable
-    /// reason instead of silently producing one-sided derivatives.
+    /// Returns one `p x p` matrix per `varpar` component. The θ derivatives
+    /// are analytic (`vcov · G'D_mG · vcov / σ²`, see
+    /// `vcov_active_theta_derivatives`) from one factorization at the
+    /// requested θ; the σ derivative is `2 vcov / σ`. This replaced a
+    /// central-difference Jacobian that refactored `2·len(varpar)` times
+    /// and cloned every L block per evaluation; the two agree to the
+    /// finite-difference truncation error (~1e-8 relative).
+    ///
+    /// The feasibility gate of the former central-difference stencil is
+    /// kept: boundary-active parameters still return an explicit
+    /// unavailable reason, so which hypotheses are assessed is unchanged.
     ///
     /// Unstable internal surface: `pub` only with the `unstable-internals`
     /// feature; otherwise `pub(crate)`.
     unstable_vis fn jac_vcov_beta_varpar(&mut self, varpar: &[f64]) -> Result<Vec<DMatrix<f64>>> {
+        self.validate_varpar(varpar)?;
+        self.ensure_central_stencil_feasible(varpar)?;
+
+        let n_theta = self.n_theta();
+        let theta = &varpar[..n_theta];
+        let sigma = varpar[n_theta];
+
+        let original_theta = self.theta();
+        let original_l_blocks = self.l_blocks.clone();
+        let result = (|| {
+            self.set_theta(theta)?;
+            self.update_l()?;
+            let vcov_active = self.vcov_active_with_sigma(sigma);
+            let mut active = self.vcov_active_theta_derivatives(sigma)?;
+            active.push(&vcov_active * (2.0 / sigma));
+            let mut jacobian = Vec::with_capacity(active.len());
+            for (index, derivative) in active.iter().enumerate() {
+                let derivative = self.unpivot_fixed_effect_covariance(derivative);
+                if !matrix_is_finite(&derivative) {
+                    return Err(MixedModelError::InvalidArgument(format!(
+                        "jac_vcov_beta derivative for varpar[{index}] contains non-finite entries"
+                    )));
+                }
+                jacobian.push(symmetrize_matrix(&derivative));
+            }
+            Ok(jacobian)
+        })();
+        self.set_theta(&original_theta)?;
+        self.l_blocks = original_l_blocks;
+        result
+    }
+    }
+
+    /// The central-difference stencil gate shared by the varpar Jacobian:
+    /// every component must admit a feasible central step.
+    fn ensure_central_stencil_feasible(&self, varpar: &[f64]) -> Result<()> {
+        let lower_bounds = self.varpar_lower_bounds();
+        let steps = finite_difference_steps(varpar, &lower_bounds, 1e-5);
+        for index in 0..varpar.len() {
+            let lower = lower_bounds
+                .get(index)
+                .copied()
+                .unwrap_or(f64::NEG_INFINITY);
+            if feasible_central_step(varpar[index], lower, steps[index]).is_none() {
+                return Err(MixedModelError::InvalidArgument(format!(
+                    "cannot compute central finite-difference derivative for varpar[{index}]: \
+                     value is at or too near lower bound {lower}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// The former central-difference Jacobian, kept as a test oracle.
+    #[cfg(test)]
+    pub(crate) fn jac_vcov_beta_varpar_finite_difference(
+        &mut self,
+        varpar: &[f64],
+    ) -> Result<Vec<DMatrix<f64>>> {
         self.validate_varpar(varpar)?;
 
         let lower_bounds = self.varpar_lower_bounds();
@@ -2585,32 +2655,18 @@ impl LinearMixedModel {
                 .get(index)
                 .copied()
                 .unwrap_or(f64::NEG_INFINITY);
-            let step =
-                feasible_central_step(varpar[index], lower, steps[index]).ok_or_else(|| {
-                    MixedModelError::InvalidArgument(format!(
-                        "cannot compute central finite-difference derivative for varpar[{index}]: \
-                     value is at or too near lower bound {lower}"
-                    ))
-                })?;
-
+            let step = feasible_central_step(varpar[index], lower, steps[index])
+                .expect("feasible central step");
             let mut plus = varpar.to_vec();
             let mut minus = varpar.to_vec();
             plus[index] += step;
             minus[index] -= step;
-
             let vcov_plus = self.vcov_beta_varpar(&plus)?;
             let vcov_minus = self.vcov_beta_varpar(&minus)?;
             let derivative = (&vcov_plus - &vcov_minus) * (0.5 / step);
-            if !matrix_is_finite(&derivative) {
-                return Err(MixedModelError::InvalidArgument(format!(
-                    "jac_vcov_beta derivative for varpar[{index}] contains non-finite entries"
-                )));
-            }
             jacobian.push(symmetrize_matrix(&derivative));
         }
-
         Ok(jacobian)
-    }
     }
 
     /// Estimate `vcov(varpar)` from the Hessian of `deviance_varpar`.
@@ -3245,20 +3301,35 @@ impl LinearMixedModel {
 
     /// Gradient of `deviance_varpar` at `varpar = c(theta, sigma)`: the
     /// analytic θ-gradient of the fixed-σ objective plus
-    /// `∂/∂σ = 2·denomdf/σ − 2·pwrss/σ³`. Restores the fitted state.
-    fn gradient_deviance_varpar(&mut self, varpar: &[f64], reml: bool) -> Result<Vec<f64>> {
+    /// `∂/∂σ = 2·denomdf/σ − 2·pwrss/σ³`, after the argument checks
+    /// (`varpar` shape/finiteness, positive σ). Leaves θ and `L` at the
+    /// evaluation point; the caller restores the fitted state.
+    fn gradient_deviance_varpar_checked_unrestored(
+        &mut self,
+        varpar: &[f64],
+        reml: bool,
+    ) -> Result<Vec<f64>> {
         self.validate_varpar(varpar)?;
         let n_theta = self.n_theta();
-        let theta = &varpar[..n_theta];
         let sigma = varpar[n_theta];
         if !(sigma.is_finite() && sigma > 0.0) {
             return Err(MixedModelError::InvalidArgument(format!(
                 "sigma must be positive and finite, got {sigma}"
             )));
         }
+        self.gradient_deviance_varpar_unrestored(&varpar[..n_theta], sigma, reml)
+    }
 
-        let original_theta = self.theta();
-        let original_l_blocks = self.l_blocks.clone();
+    /// Analytic varpar gradient of `deviance_varpar` at `(theta, sigma)`,
+    /// without a state save/restore: leaves θ and `L` at the evaluation
+    /// point. The Hessian sweep saves and restores once around all its
+    /// evaluations instead of cloning every L block per evaluation.
+    fn gradient_deviance_varpar_unrestored(
+        &mut self,
+        theta: &[f64],
+        sigma: f64,
+        reml: bool,
+    ) -> Result<Vec<f64>> {
         let result = (|| {
             self.set_theta(theta)?;
             self.update_l()?;
@@ -3288,8 +3359,6 @@ impl LinearMixedModel {
                 ))
             }
         })();
-        self.set_theta(&original_theta)?;
-        self.l_blocks = original_l_blocks;
         result
     }
 
@@ -3319,18 +3388,28 @@ impl LinearMixedModel {
 
         let n = varpar.len();
         let mut hessian = DMatrix::zeros(n, n);
-        for col in 0..n {
-            let h = central_steps[col];
-            let mut plus = varpar.to_vec();
-            let mut minus = varpar.to_vec();
-            plus[col] += h;
-            minus[col] -= h;
-            let g_plus = self.gradient_deviance_varpar(&plus, reml)?;
-            let g_minus = self.gradient_deviance_varpar(&minus, reml)?;
-            for row in 0..n {
-                hessian[(row, col)] = (g_plus[row] - g_minus[row]) / (2.0 * h);
+        // Save θ and L once for the whole sweep (each stencil point fully
+        // rebuilds L), instead of cloning every L block per evaluation.
+        let original_theta = self.theta();
+        let original_l_blocks = self.l_blocks.clone();
+        let sweep: Result<()> = (|| {
+            for col in 0..n {
+                let h = central_steps[col];
+                let mut plus = varpar.to_vec();
+                let mut minus = varpar.to_vec();
+                plus[col] += h;
+                minus[col] -= h;
+                let g_plus = self.gradient_deviance_varpar_checked_unrestored(&plus, reml)?;
+                let g_minus = self.gradient_deviance_varpar_checked_unrestored(&minus, reml)?;
+                for row in 0..n {
+                    hessian[(row, col)] = (g_plus[row] - g_minus[row]) / (2.0 * h);
+                }
             }
-        }
+            Ok(())
+        })();
+        self.set_theta(&original_theta)?;
+        self.l_blocks = original_l_blocks;
+        sweep?;
         let transposed = hessian.transpose();
         hessian += transposed;
         hessian *= 0.5;

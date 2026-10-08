@@ -1,7 +1,7 @@
 use super::*;
 use approx::assert_relative_eq;
 use rand::rngs::StdRng;
-use rand::SeedableRng;
+use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, Normal};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -4541,6 +4541,86 @@ fn test_jac_vcov_beta_varpar_returns_symmetric_matrices_and_sigma_derivative() {
     assert_matrix_relative_eq(sigma_derivative, &expected_sigma_derivative, 1e-6);
     assert_eq!(model.theta(), theta_before);
     assert_relative_eq!(model.objective_value(), objective_before, epsilon = 1e-10);
+}
+
+#[test]
+fn test_analytic_jac_vcov_beta_varpar_matches_central_differences() {
+    let mut rng = StdRng::seed_from_u64(91);
+    let n = 240;
+    let mut synthetic = DataFrame::new();
+    let g: Vec<String> = (0..n).map(|i| format!("g{}", i % 12)).collect();
+    let h: Vec<String> = (0..n)
+        .map(|_| format!("h{}", rng.gen_range(0..9)))
+        .collect();
+    let x: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let z: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let y: Vec<f64> = (0..n)
+        .map(|i| {
+            1.0 + 0.5 * x[i] - 0.3 * z[i]
+                + 0.4 * ((i % 12) as f64 - 6.0) / 6.0 * (1.0 + x[i])
+                + rng.gen_range(-1.0..1.0)
+        })
+        .collect();
+    let weights: Vec<f64> = (0..n).map(|_| rng.gen_range(0.5..2.0)).collect();
+    synthetic.add_categorical("g", g).unwrap();
+    synthetic.add_categorical("h", h).unwrap();
+    synthetic.add_numeric("x", x).unwrap();
+    synthetic.add_numeric("z", z).unwrap();
+    synthetic.add_numeric("y", y).unwrap();
+
+    let cases: Vec<(DataFrame, &str, Option<Vec<f64>>)> = vec![
+        (
+            sleepstudy_fixture(),
+            "reaction ~ 1 + days + (1 + days | subj)",
+            None,
+        ),
+        (
+            sleepstudy_fixture(),
+            "reaction ~ 1 + days + (1 | subj)",
+            None,
+        ),
+        (
+            pastes_fixture(),
+            "strength ~ 1 + (1 | batch) + (1 | batch_cask)",
+            None,
+        ),
+        (
+            synthetic.clone(),
+            "y ~ 1 + x + z + (1 + x | g) + (1 | h)",
+            None,
+        ),
+        (
+            synthetic,
+            "y ~ 1 + x + z + (1 + x | g) + (1 | h)",
+            Some(weights),
+        ),
+    ];
+    for (data, formula, weights) in cases {
+        let mut model =
+            LinearMixedModel::new(parse_formula(formula).unwrap(), &data, weights.as_deref())
+                .unwrap();
+        model.fit(true).unwrap();
+        let fitted = fitted_varpar(&model);
+        // At the optimum and at a nearby interior point.
+        let perturbed: Vec<f64> = fitted.iter().map(|v| v * 1.07 + 0.01).collect();
+        for varpar in [fitted, perturbed] {
+            let theta_before = model.theta();
+            let analytic = model.jac_vcov_beta_varpar(&varpar).unwrap();
+            let numeric = model
+                .jac_vcov_beta_varpar_finite_difference(&varpar)
+                .unwrap();
+            assert_eq!(model.theta(), theta_before);
+            assert_eq!(analytic.len(), numeric.len());
+            for (index, (a, b)) in analytic.iter().zip(&numeric).enumerate() {
+                let scale = b.amax().max(1e-12);
+                let diff = (a - b).amax() / scale;
+                assert!(
+                    diff < 1e-6,
+                    "{formula} varpar[{index}]: relative diff {diff:e}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

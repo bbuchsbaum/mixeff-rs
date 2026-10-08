@@ -1085,6 +1085,36 @@ impl LinearMixedModel {
         }
     }
 
+    /// The hypothesis-independent Satterthwaite ingredients at the fitted
+    /// `varpar = c(θ̂, σ̂)`: the `vcov_beta` Jacobian and the `vcov_varpar`
+    /// Hessian estimate. Computed once per fitted state and shared by every
+    /// row of an inference table (each row used to clone the model and redo
+    /// both, which dominated table cost); the cache is keyed on the bits of
+    /// θ, σ, β, the objective and the REML flag, so any refit or state
+    /// change recomputes.
+    fn satterthwaite_ingredients(&self) -> std::sync::Arc<SatterthwaiteIngredients> {
+        let mut varpar = self.theta();
+        varpar.push(self.sigma());
+        let mut key: Vec<u64> = varpar.iter().map(|v| v.to_bits()).collect();
+        key.extend(self.beta().iter().map(|v| v.to_bits()));
+        key.push(self.optsum.fmin.to_bits());
+        key.push(u64::from(self.optsum.reml));
+        if let Some(hit) = self.satterthwaite_cache.get(&key) {
+            return hit;
+        }
+        let mut evaluator = self.clone();
+        let computed = match evaluator.jac_vcov_beta_varpar(&varpar) {
+            Err(error) => Err(SatterthwaiteIngredientError::Jacobian(error.to_string())),
+            Ok(jacobian) => match evaluator.vcov_varpar(&varpar, self.optsum.reml) {
+                Err(error) => Err(SatterthwaiteIngredientError::VcovVarpar(error.to_string())),
+                Ok(estimate) => Ok((jacobian, estimate)),
+            },
+        };
+        let computed = std::sync::Arc::new(computed);
+        self.satterthwaite_cache.set(key, computed.clone());
+        computed
+    }
+
     fn satterthwaite_fixed_effect_test(
         &self,
         hypothesis: FixedEffectHypothesis,
@@ -1112,12 +1142,10 @@ impl LinearMixedModel {
             );
         }
 
-        let mut varpar = self.theta();
-        varpar.push(self.sigma());
-        let mut evaluator = self.clone();
-        let jacobian = match evaluator.jac_vcov_beta_varpar(&varpar) {
-            Ok(jacobian) => jacobian,
-            Err(error) => {
+        let ingredients = self.satterthwaite_ingredients();
+        let (jacobian, vcov_varpar) = match &*ingredients {
+            Ok((jacobian, vcov_varpar)) => (jacobian, vcov_varpar.clone()),
+            Err(SatterthwaiteIngredientError::Jacobian(error)) => {
                 return fixed_effect_test_not_assessed_with_method(
                     hypothesis,
                     estimates,
@@ -1128,10 +1156,7 @@ impl LinearMixedModel {
                     format!("Satterthwaite fixed-effect inference could not compute vcov_beta derivatives: {error}"),
                 );
             }
-        };
-        let vcov_varpar = match evaluator.vcov_varpar(&varpar, self.optsum.reml) {
-            Ok(estimate) => estimate,
-            Err(error) => {
+            Err(SatterthwaiteIngredientError::VcovVarpar(error)) => {
                 return fixed_effect_test_not_assessed_with_method(
                     hypothesis,
                     estimates,
@@ -1290,7 +1315,7 @@ impl LinearMixedModel {
             };
 
             let mut notes = vec![
-                "Satterthwaite multi-df F row computed from eigen-directions of L V_beta L' and finite-difference vcov_beta Jacobian over varpar"
+                "Satterthwaite multi-df F row computed from eigen-directions of L V_beta L' and analytic vcov_beta Jacobian over varpar"
                     .to_string(),
             ];
             if q < hypothesis.n_contrasts() {
@@ -1407,7 +1432,7 @@ impl LinearMixedModel {
         };
 
         let mut notes = vec![
-            "Satterthwaite denominator df computed from finite-difference vcov_beta Jacobian and deviance Hessian over varpar"
+            "Satterthwaite denominator df computed from analytic vcov_beta Jacobian and finite-difference deviance Hessian over varpar"
                 .to_string(),
         ];
         notes.extend(vcov_varpar.notes);
@@ -3170,5 +3195,53 @@ mod tests {
             unavailable.status,
             InferenceStatus::PValueUnavailable { .. }
         ));
+    }
+}
+
+/// Hypothesis-independent Satterthwaite inputs (see
+/// `LinearMixedModel::satterthwaite_ingredients`).
+pub(crate) type SatterthwaiteIngredients =
+    std::result::Result<(Vec<DMatrix<f64>>, VcovVarparEstimate), SatterthwaiteIngredientError>;
+
+/// Which Satterthwaite ingredient could not be computed (with the error
+/// text the row's not-assessed reason quotes).
+#[derive(Debug, Clone)]
+pub(crate) enum SatterthwaiteIngredientError {
+    Jacobian(String),
+    VcovVarpar(String),
+}
+
+/// Per-model memo of [`SatterthwaiteIngredients`] keyed on the fitted
+/// state's bits. Cloning a model starts with an empty cache.
+#[derive(Default)]
+pub(crate) struct SatterthwaiteCache(
+    std::sync::Mutex<Option<(Vec<u64>, std::sync::Arc<SatterthwaiteIngredients>)>>,
+);
+
+impl SatterthwaiteCache {
+    fn get(&self, key: &[u64]) -> Option<std::sync::Arc<SatterthwaiteIngredients>> {
+        let guard = self.0.lock().ok()?;
+        guard
+            .as_ref()
+            .filter(|(cached_key, _)| cached_key.as_slice() == key)
+            .map(|(_, value)| value.clone())
+    }
+
+    fn set(&self, key: Vec<u64>, value: std::sync::Arc<SatterthwaiteIngredients>) {
+        if let Ok(mut guard) = self.0.lock() {
+            *guard = Some((key, value));
+        }
+    }
+}
+
+impl Clone for SatterthwaiteCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl std::fmt::Debug for SatterthwaiteCache {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SatterthwaiteCache")
     }
 }
