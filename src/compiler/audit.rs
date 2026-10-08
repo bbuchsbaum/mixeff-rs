@@ -2447,17 +2447,17 @@ fn zerocorr_factor_decorrelation_diagnostics(
                 DiagnosticSeverity::Info,
                 DiagnosticStage::DesignAudit,
                 format!(
-                    "zero-correlation syntax fully decorrelates factor '{name}' within '{group}': \
-                     each treatment-coded level contrast of '{name}' receives an independent \
-                     variance and no within-factor level covariances are estimated"
+                    "zero-correlation syntax with factor '{name}' within '{group}' expands like \
+                     lme4: '{name}' is fitted as its own block `(0 + {name} | {group})` with full \
+                     indicator coding and an unstructured covariance among its levels; only the \
+                     intercept and numeric terms get independent variances"
                 ),
             )
             .with_affected_terms(vec![term.source_syntax.user_text().to_string()])
             .with_suggested_actions(vec![
                 format!(
-                    "to estimate within-factor level covariances for '{name}', give it its own \
-                     correlated cell-means block `(0 + {name} | {group})` and keep the remaining \
-                     coefficients under zero-correlation terms"
+                    "to give each level contrast of '{name}' an independent variance instead \
+                     (MixedModels.jl zerocorr semantics), write `diag(1 + {name} | {group})`"
                 ),
                 "zero-correlation expansions of factor terms differ across mixed-model \
                  implementations; when matching an external fit, write the intended expansion \
@@ -2478,8 +2478,8 @@ fn zerocorr_factor_decorrelation_diagnostics(
                 serde_json::json!("double_bar_factor_term"),
             );
             diagnostic.payload.insert(
-                "dropped".to_string(),
-                serde_json::json!("within_factor_level_covariances"),
+                "expansion".to_string(),
+                serde_json::json!("lme4_double_vert"),
             );
             diagnostic.payload.insert(
                 "correlated_block_equivalent".to_string(),
