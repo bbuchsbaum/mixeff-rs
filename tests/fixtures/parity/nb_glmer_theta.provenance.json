@@ -1,0 +1,11 @@
+{
+  "fixture": "nb_glmer_theta.csv",
+  "source": "R 4.3 + lme4::glmer.nb(y ~ x + (1 | g)), default nAGQ = 1",
+  "data_recipe": "set.seed(42); G <- 20; R <- 10; g <- factor(rep(sprintf('g%02d', 1:G), each = R)); x <- rnorm(G*R); u <- rnorm(G, sd = 0.5)[as.integer(g)]; mu <- exp(1 + 0.4*x + u); y <- rnbinom(G*R, size = 2.5, mu = mu)",
+  "glmer_nb": {
+    "theta_nb": 2.015601784,
+    "logLik": -424.650373688,
+    "fixef": [0.8739943573, 0.3437253199],
+    "theta": [0.5117918]
+  }
+}

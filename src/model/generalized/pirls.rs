@@ -357,8 +357,6 @@ pub(crate) const NEGATIVE_BINOMIAL_THETA_MAX_ITERS: usize = 8;
 
 pub(crate) const NEGATIVE_BINOMIAL_THETA_TOL: f64 = 1.0e-5;
 
-pub(crate) const NEGATIVE_BINOMIAL_THETA_FINAL_REFIT_TOL: f64 = 1.0e-8;
-
 pub(crate) fn clamp_negative_binomial_theta(theta: f64) -> f64 {
     theta.clamp(NEGATIVE_BINOMIAL_THETA_MIN, NEGATIVE_BINOMIAL_THETA_MAX)
 }
