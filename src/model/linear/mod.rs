@@ -4408,6 +4408,41 @@ impl MixedModelFit for LinearMixedModel {
     fn ranef(&self) -> Vec<DMatrix<f64>> {
         self.ranef_b()
     }
+
+    fn random_effect_terms(&self) -> Vec<crate::model::traits::RandomEffectTermInfo> {
+        random_effect_term_infos(&self.reterms)
+    }
+}
+
+/// Structural summary of the random-effect terms for model comparison.
+///
+/// Each returned entry is one unstructured covariance block. A diagonal
+/// (`||` / `diag(...)`) block is reported as one scalar entry per basis
+/// column, which is exactly lme4's `||` expansion `(1|g) + (0+x|g)`; this lets
+/// model-comparison helpers see that `(1 + x || g)` is nested in
+/// `(1 + x | g)` (it omits the covariance) and not the other way round.
+pub(crate) fn random_effect_term_infos(
+    reterms: &[ReMat],
+) -> Vec<crate::model::traits::RandomEffectTermInfo> {
+    use crate::model::traits::RandomEffectTermInfo;
+    let mut out = Vec::new();
+    for rt in reterms {
+        let diagonal = rt.vsize > 1 && rt.inds.len() == rt.vsize;
+        if diagonal {
+            for name in &rt.cnames {
+                out.push(RandomEffectTermInfo {
+                    group: rt.grouping_name.clone(),
+                    columns: vec![name.clone()],
+                });
+            }
+        } else {
+            out.push(RandomEffectTermInfo {
+                group: rt.grouping_name.clone(),
+                columns: rt.cnames.clone(),
+            });
+        }
+    }
+    out
 }
 
 pub(crate) fn prediction_interval_cutoff(level: f64) -> Result<f64> {
