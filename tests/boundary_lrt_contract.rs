@@ -85,3 +85,98 @@ fn boundary_lrt_refuses_fixed_effect_comparisons() {
     );
     assert!(lrt.pvalue.is_none());
 }
+
+fn random_slope_data() -> DataFrame {
+    let mut y = Vec::new();
+    let mut x = Vec::new();
+    let mut group = Vec::new();
+    for g in 0..10 {
+        let shift = (g as f64 - 4.5) * 0.9;
+        let slope = 0.7 + ((g * 7) % 5) as f64 * 0.25 - 0.5;
+        for i in 0..6 {
+            let x_value = i as f64 - 2.5;
+            let noise = (((g * 13 + i * 7) % 11) as f64 - 5.0) * 0.12;
+            y.push(10.0 + slope * x_value + shift + noise);
+            x.push(x_value);
+            group.push(format!("G{g}"));
+        }
+    }
+    let mut data = DataFrame::new();
+    data.add_numeric("y", y).unwrap();
+    data.add_numeric("x", x).unwrap();
+    data.add_categorical("group", group).unwrap();
+    data
+}
+
+fn fit_ml(formula: &str, data: &DataFrame) -> LinearMixedModel {
+    let mut model = LinearMixedModel::new(parse_formula(formula).unwrap(), data, None).unwrap();
+    model.fit(false).unwrap();
+    model
+}
+
+#[test]
+fn boundary_lrt_uses_plain_chisq_for_an_added_correlation() {
+    let data = random_slope_data();
+    let uncorrelated = fit_ml("y ~ 1 + x + (1 + x || group)", &data);
+    let correlated = fit_ml("y ~ 1 + x + (1 + x | group)", &data);
+
+    let lrt = BoundaryLikelihoodRatioTest::variance_component(&uncorrelated, &correlated);
+    assert_eq!(lrt.status, BoundaryLrtStatus::Available, "{lrt:?}");
+    assert_eq!(
+        lrt.comparison_class,
+        Some(ModelComparisonClass::NestedRandomEffects)
+    );
+    assert_eq!(lrt.ordinary_chisq_dof, Some(1));
+    assert_eq!(lrt.mixture.len(), 1);
+    assert_eq!(lrt.mixture[0].chisq_df, Some(1));
+    let chisq = lrt.statistic.unwrap();
+    let plain = {
+        use statrs::distribution::{ChiSquared, ContinuousCDF};
+        1.0 - ChiSquared::new(1.0).unwrap().cdf(chisq)
+    };
+    assert!((lrt.pvalue.unwrap() - plain).abs() < 1e-12);
+}
+
+#[test]
+fn boundary_lrt_keeps_mixture_for_an_added_variance() {
+    let data = random_slope_data();
+    let intercept = fit_ml("y ~ 1 + x + (1 | group)", &data);
+    let with_slope_variance = fit_ml("y ~ 1 + x + (1 + x || group)", &data);
+
+    let lrt = BoundaryLikelihoodRatioTest::variance_component(&intercept, &with_slope_variance);
+    assert_eq!(lrt.status, BoundaryLrtStatus::Available, "{lrt:?}");
+    assert_eq!(lrt.mixture.len(), 2);
+    assert_eq!(lrt.mixture[0].point_mass_at, Some(0.0));
+    let chisq = lrt.statistic.unwrap();
+    let half = {
+        use statrs::distribution::{ChiSquared, ContinuousCDF};
+        0.5 * (1.0 - ChiSquared::new(1.0).unwrap().cdf(chisq))
+    };
+    assert!((lrt.pvalue.unwrap() - half).abs() < 1e-12);
+}
+
+#[test]
+fn lmm_comparison_detects_random_effect_nesting() {
+    use mixeff_rs::stats::{ModelComparisonAssessment, RandomEffectComparison};
+    let data = random_slope_data();
+    let intercept = fit_ml("y ~ 1 + x + (1 | group)", &data);
+    let slope_only = fit_ml("y ~ 1 + x + (0 + x | group)", &data);
+    let uncorrelated = fit_ml("y ~ 1 + x + (1 + x || group)", &data);
+    let correlated = fit_ml("y ~ 1 + x + (1 + x | group)", &data);
+
+    // (1|g) and (0+x|g) have the same dof but neither nests the other.
+    let a = ModelComparisonAssessment::assess(&intercept, &slope_only);
+    assert_eq!(a.random_effects, RandomEffectComparison::NonNested);
+    assert!(!a.lrt_available);
+
+    let a = ModelComparisonAssessment::assess(&uncorrelated, &correlated);
+    assert_eq!(a.random_effects, RandomEffectComparison::Nested);
+    assert!(a.lrt_available);
+
+    let a = ModelComparisonAssessment::assess(&correlated, &uncorrelated);
+    assert_eq!(a.random_effects, RandomEffectComparison::ReverseNested);
+    assert!(!a.lrt_available);
+
+    let a = ModelComparisonAssessment::assess(&intercept, &correlated);
+    assert_eq!(a.class, ModelComparisonClass::NestedRandomEffects);
+}
