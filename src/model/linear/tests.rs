@@ -7383,3 +7383,23 @@ fn weighted_lmm_simulation_scales_residual_noise_by_weights() {
     }
     assert!(light > 2.0 * heavy, "light={light} heavy={heavy}");
 }
+
+#[test]
+fn reml_logdet_treats_non_positive_lxx_pivot_as_infeasible() {
+    let df = dyestuff_fixture();
+    let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+    let mut model = LinearMixedModel::new(formula, &df, None).unwrap();
+    model.fit(true).unwrap();
+    let (logdet, _) = model.determinant_term_and_pwrss_for_reml(true);
+    assert!(logdet.is_finite());
+
+    let k = model.reterms.len();
+    let mut last = model.l_blocks[block_index(k, k)].as_dense();
+    last[(0, 0)] = 0.0;
+    model.l_blocks[block_index(k, k)] = MatrixBlock::Dense(last);
+    let (logdet, _) = model.determinant_term_and_pwrss_for_reml(true);
+    assert_eq!(logdet, f64::INFINITY);
+    // ML ignores L_XX and is unaffected.
+    let (ml_logdet, _) = model.determinant_term_and_pwrss_for_reml(false);
+    assert!(ml_logdet.is_finite());
+}

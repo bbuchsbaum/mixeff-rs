@@ -2199,12 +2199,19 @@ impl LinearMixedModel {
         let pwrss = last_diag * last_diag;
 
         if reml {
+            // `X` is reduced to its full-rank pivoted columns before the
+            // factorization, so every diagonal of `L_XX` must be strictly
+            // positive. A non-positive or non-finite pivot means the
+            // factorization broke down at this θ; skipping it would silently
+            // drop a term from the REML criterion, so mark the point as
+            // infeasible (objective +∞) instead.
             let mut logdet_lxx = 0.0;
             for i in 0..(pp1 - 1) {
                 let d = l_dense[(i, i)];
-                if d > 0.0 {
-                    logdet_lxx += d.ln();
+                if !(d.is_finite() && d > 0.0) {
+                    return (f64::INFINITY, pwrss);
                 }
+                logdet_lxx += d.ln();
             }
             logdet += 2.0 * logdet_lxx;
         }
