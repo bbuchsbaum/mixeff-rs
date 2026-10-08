@@ -255,13 +255,26 @@ fn categorical_random_basis_artifact() -> CompiledModelArtifact {
 }
 
 fn cbpp_glmm_artifact() -> CompiledModelArtifact {
-    let (data, _meta) = datasets::load("cbpp").unwrap();
+    let (mut data, _meta) = datasets::load("cbpp").unwrap();
+    // Binomial responses are proportions with the trial counts as prior
+    // weights; replace the raw counts in place so the requested formula (and
+    // its wire fixture) keeps the `incidence` name.
+    let size = data.numeric("size").unwrap().to_vec();
+    let proportion = data
+        .numeric("incidence")
+        .unwrap()
+        .iter()
+        .zip(&size)
+        .map(|(&y, &n)| y / n)
+        .collect();
+    data.add_numeric("incidence", proportion).unwrap();
     let formula = parse_formula("incidence ~ 1 + period + (1 | herd)").unwrap();
-    let model = GeneralizedLinearMixedModel::new(
+    let model = GeneralizedLinearMixedModel::new_with_weights(
         formula,
         &data,
         Family::Binomial,
         Some(LinkFunction::Logit),
+        size,
     )
     .unwrap();
     model.compiler_artifact().clone()
