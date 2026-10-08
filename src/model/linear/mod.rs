@@ -4908,7 +4908,13 @@ fn build_re_mat(rt: &crate::formula::RandomTerm, data: &DataFrame, n: usize) -> 
                     name
                 ))
             })?;
-            (name.clone(), cat.refs.clone(), cat.levels.clone())
+            // lme4 drops unused grouping-factor levels (`factor(g)[,
+            // drop = TRUE]` in mkReTrms): a declared level with no
+            // observations would be an empty random-effect level that only
+            // inflates ngrps/ranef/condVar. Keep observed levels in their
+            // declared order.
+            let (refs, levels) = drop_unused_grouping_levels(&cat.refs, &cat.levels);
+            (name.clone(), refs, levels)
         }
         GroupingFactor::Interaction(names) | GroupingFactor::Cell(names) => {
             // Create interaction levels
@@ -5022,6 +5028,26 @@ fn build_re_mat(rt: &crate::formula::RandomTerm, data: &DataFrame, n: usize) -> 
     }
 
     Ok(remat)
+}
+
+/// Compact a grouping factor to its observed levels (declared order kept).
+fn drop_unused_grouping_levels(refs: &[u32], levels: &[String]) -> (Vec<u32>, Vec<String>) {
+    let mut used = vec![false; levels.len()];
+    for &r in refs {
+        used[r as usize] = true;
+    }
+    if used.iter().all(|&u| u) {
+        return (refs.to_vec(), levels.to_vec());
+    }
+    let mut remap = vec![u32::MAX; levels.len()];
+    let mut kept = Vec::new();
+    for (index, level) in levels.iter().enumerate() {
+        if used[index] {
+            remap[index] = kept.len() as u32;
+            kept.push(level.clone());
+        }
+    }
+    (refs.iter().map(|&r| remap[r as usize]).collect(), kept)
 }
 
 /// Build the parameter map: Vec<(block_idx, row, col)> for each θ element.

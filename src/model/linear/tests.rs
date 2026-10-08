@@ -7403,3 +7403,50 @@ fn reml_logdet_treats_non_positive_lxx_pivot_as_infeasible() {
     let (ml_logdet, _) = model.determinant_term_and_pwrss_for_reml(false);
     assert!(ml_logdet.is_finite());
 }
+
+#[test]
+fn unused_grouping_levels_are_dropped_like_lme4() {
+    let base = dyestuff_fixture();
+    let batch = base.categorical("batch").unwrap();
+    let mut declared = batch.levels.clone();
+    declared.insert(1, "unused_a".to_string());
+    declared.push("unused_b".to_string());
+    let mut df = DataFrame::new();
+    df.add_numeric("yield", base.numeric("yield").unwrap().to_vec())
+        .unwrap();
+    df.add_categorical_with_levels("batch", batch.values.clone(), declared)
+        .unwrap();
+
+    let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+    let mut with_unused = LinearMixedModel::new(formula.clone(), &df, None).unwrap();
+    with_unused.fit(true).unwrap();
+    let mut reference = LinearMixedModel::new(formula, &base, None).unwrap();
+    reference.fit(true).unwrap();
+
+    assert_eq!(with_unused.reterms[0].n_levels(), batch.levels.len());
+    assert_eq!(with_unused.reterms[0].levels, batch.levels);
+    assert_relative_eq!(
+        with_unused.objective(),
+        reference.objective(),
+        epsilon = 1e-8
+    );
+    assert_eq!(with_unused.ranef_b()[0].ncols(), batch.levels.len());
+
+    // A level that was declared but never observed is a new level at
+    // prediction time.
+    let mut newdata = DataFrame::new();
+    newdata.add_numeric("yield", vec![0.0, 0.0]).unwrap();
+    newdata
+        .add_categorical(
+            "batch",
+            vec![batch.levels[0].clone(), "unused_a".to_string()],
+        )
+        .unwrap();
+    assert!(with_unused
+        .predict_new(&newdata, NewReLevels::Error)
+        .is_err());
+    let pred = with_unused
+        .predict_new(&newdata, NewReLevels::Population)
+        .unwrap();
+    assert_eq!(pred.len(), 2);
+}
