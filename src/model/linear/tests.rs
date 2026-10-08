@@ -7236,3 +7236,76 @@ fn inference_covariance_provenance_survives_tables_and_legacy_json() {
     assert_eq!(refused.rows[0].covariance_method, Cov::ModelBased);
     assert!(refused.rows[0].std_error.is_some());
 }
+
+fn categorical_prediction_fixture() -> DataFrame {
+    let n = 120;
+    let (mut y, mut f, mut h, mut g) = (vec![], vec![], vec![], vec![]);
+    for i in 0..n {
+        let level = i % 3;
+        let half = (i / 3) % 2;
+        let group = i % 6;
+        f.push(format!("L{level}"));
+        h.push(format!("H{half}"));
+        g.push(format!("G{group}"));
+        y.push(
+            5.0 + level as f64
+                + 0.7 * (half * level) as f64
+                + 0.3 * group as f64
+                + (((i * 37) % 11) as f64 - 5.0) * 0.2,
+        );
+    }
+    let mut df = DataFrame::new();
+    df.add_numeric("y", y).unwrap();
+    df.add_categorical("f", f).unwrap();
+    df.add_categorical("h", h).unwrap();
+    df.add_categorical("g", g).unwrap();
+    df
+}
+
+/// `y ~ 0 + f` is a reparameterization of `y ~ f` (one mean per level), so
+/// the ML fits must agree; treatment-coding `f` without an intercept used to
+/// drop the reference level and fit a different, worse model.
+#[test]
+fn no_intercept_factor_model_is_a_reparameterization() {
+    let df = categorical_prediction_fixture();
+    let fit = |formula: &str| {
+        let mut model = LinearMixedModel::new(parse_formula(formula).unwrap(), &df, None).unwrap();
+        model.fit(false).unwrap();
+        model
+    };
+    let with_intercept = fit("y ~ f + (1|g)");
+    let cell_means = fit("y ~ 0 + f + (1|g)");
+    assert_eq!(cell_means.coef_names(), vec!["f: L0", "f: L1", "f: L2"]);
+    assert_relative_eq!(
+        cell_means.loglikelihood(),
+        with_intercept.loglikelihood(),
+        epsilon = 1e-6
+    );
+    let b = with_intercept.coef();
+    let m = cell_means.coef();
+    assert_relative_eq!(m[0], b[0], epsilon = 1e-5);
+    assert_relative_eq!(m[1], b[0] + b[1], epsilon = 1e-5);
+    assert_relative_eq!(m[2], b[0] + b[2], epsilon = 1e-5);
+}
+
+/// Prediction looks coefficients up by design-column name, so the newdata
+/// design must use the fit's codings (marginality, no-intercept rule).
+/// Predicting on the training data must reproduce the fitted values.
+#[test]
+fn predict_new_on_training_data_matches_fitted_for_categorical_codings() {
+    let df = categorical_prediction_fixture();
+    for formula in [
+        "y ~ f + (1|g)",
+        "y ~ 0 + f + h + (1|g)",
+        "y ~ f + f:h + (1|g)",
+        "y ~ 0 + f:h + (1|g)",
+    ] {
+        let mut model = LinearMixedModel::new(parse_formula(formula).unwrap(), &df, None).unwrap();
+        model.fit(false).unwrap();
+        let fitted = model.fitted();
+        let predicted = model.predict_new(&df, NewReLevels::Error).unwrap();
+        for (p, f) in predicted.iter().zip(fitted.iter()) {
+            assert_relative_eq!(p.unwrap(), *f, epsilon = 1e-8);
+        }
+    }
+}

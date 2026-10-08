@@ -933,6 +933,7 @@ fn audit_fixed_effects_with_matrix(
     data: &DataFrame,
 ) -> (FixedEffectAudit, DMatrix<f64>, Vec<usize>) {
     let mut builder = FixedDesignBuilder::new(data);
+    builder.full_coded_main_effect = no_intercept_full_coded_main_effect(semantic_model, data);
     for term in &semantic_model.fixed_terms {
         builder.push_term(term);
     }
@@ -1068,6 +1069,41 @@ fn audit_fixed_effects_with_matrix(
     (audit, matrix, rank_pivot)
 }
 
+/// Mirror of the model's no-intercept coding rule (R's `model.matrix()`):
+/// without an intercept, the first factor found -- terms by increasing
+/// degree, variables by first appearance -- gets full indicator columns.
+/// Returns the factor only when that first factor occurs as a main effect;
+/// the audit's interaction expansion does not model per-term codings.
+fn no_intercept_full_coded_main_effect(
+    semantic_model: &SemanticModel,
+    data: &DataFrame,
+) -> Option<String> {
+    let terms = &semantic_model.fixed_terms;
+    if terms.iter().any(|term| term == "1") {
+        return None;
+    }
+    let mut variable_order: Vec<&str> = Vec::new();
+    for term in terms {
+        for name in term.split(':') {
+            if !variable_order.contains(&name) {
+                variable_order.push(name);
+            }
+        }
+    }
+    let mut by_degree = terms.iter().collect::<Vec<_>>();
+    by_degree.sort_by_key(|term| term.split(':').count());
+    let (term, name) = by_degree.into_iter().find_map(|term| {
+        variable_order
+            .iter()
+            .find(|name| {
+                term.split(':').any(|var| var == **name)
+                    && matches!(data.column(name), Some(Column::Categorical(_)))
+            })
+            .map(|name| (term, *name))
+    })?;
+    (term == name).then(|| name.to_string())
+}
+
 fn format_factor_level_assignment(factors: &[String], levels: &[String]) -> String {
     factors
         .iter()
@@ -1083,6 +1119,7 @@ struct FixedDesignBuilder<'a> {
     term_ranges: Vec<TermColumnRange>,
     empty_cells: Vec<EmptyCellAudit>,
     diagnostics: Vec<Diagnostic>,
+    full_coded_main_effect: Option<String>,
 }
 
 struct FixedDesignBuild {
@@ -1114,6 +1151,7 @@ impl<'a> FixedDesignBuilder<'a> {
             term_ranges: Vec::new(),
             empty_cells: Vec::new(),
             diagnostics: Vec::new(),
+            full_coded_main_effect: None,
         }
     }
 
@@ -1153,7 +1191,12 @@ impl<'a> FixedDesignBuilder<'a> {
                 values: DVector::from_column_slice(values),
             }),
             Some(Column::Categorical(cat)) => {
-                for encoded in cat.encoded_columns(name, CategoricalCoding::Treatment) {
+                let coding = if self.full_coded_main_effect.as_deref() == Some(name) {
+                    CategoricalCoding::CellMeans
+                } else {
+                    CategoricalCoding::Treatment
+                };
+                for encoded in cat.encoded_columns(name, coding) {
                     self.columns.push(DesignColumn {
                         audit: FixedEffectColumnAudit {
                             name: encoded.name,

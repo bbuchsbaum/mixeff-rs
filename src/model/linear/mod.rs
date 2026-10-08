@@ -4609,6 +4609,20 @@ fn build_fixed_effects_matrix(
 fn build_fixed_effects_design(formula: &Formula, data: &DataFrame) -> Result<DenseFixedDesign> {
     use crate::formula::FixedTerm;
 
+    // Categorical codings depend on R's marginality and no-intercept rules,
+    // which only the shared fixed-design builder implements. Fit-time and
+    // prediction-time designs must agree column for column (prediction looks
+    // coefficients up by name and treats an absent column as zero), so any
+    // design with a categorical term goes through that builder.
+    if !fixed_terms_are_numeric_only(formula, data) {
+        let streamed =
+            crate::model::fixed_design::build_streamed_fixed_effects_design(formula, data)?;
+        return DenseFixedDesign::new(
+            streamed.materialize_dense(),
+            streamed.column_names().to_vec(),
+        );
+    }
+
     let n = data.nrow();
     let mut columns: Vec<DVector<f64>> = Vec::new();
     let mut names: Vec<String> = Vec::new();
