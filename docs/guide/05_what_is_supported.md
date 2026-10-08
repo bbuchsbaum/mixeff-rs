@@ -38,6 +38,21 @@ mixed model, so use
 | `InverseGaussian` | `Log`, `Inverse` | `Inverse` |
 | `Normal` (as GLMM) | `Log`, `Inverse`, `Sqrt` | — (use LMM for Identity) |
 
+**Gamma and inverse-Gaussian scale conventions (lme4).** These dispersion
+families follow `lme4::glmer` throughout: the conditional density in the
+Laplace/AGQ criterion uses φ = mean unit deviance (the family `aic()` glmer
+calls), both the profiled fast path (lme4 `nAGQ = 0`) and the joint path
+(`nAGQ = 1`) optimize that full criterion, and one scale — lme4's `sigma()`
+= sqrt((Pearson RSS + ‖u‖²)/n) — is reported as the residual SD
+(`dispersion(false)`) and rescales the fixed-effect covariance and the
+random-effect SDs in `varcorr()`. Fixed effects, θ, σ and standard errors
+match glmer (see `tests/parity_dispersion_glmm_lme4.rs`). The engine's
+`loglikelihood()` is the Laplace log-likelihood itself; glmer's printed
+`logLik` for these families includes the family `aic()`'s `+2` term and is
+therefore exactly 1.0 lower. (Through 1.0.0-rc.5 the fast path minimized the
+unit-φ deviance, which drove θ to zero, and the residual SD, the likelihood
+φ and the covariance rescale each used a different φ.)
+
 The variants below compile against the public types. Both enums are
 `#[non_exhaustive]`, so a newly added variant does not break this example;
 update the table when one is added:

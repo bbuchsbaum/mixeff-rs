@@ -1,0 +1,14 @@
+{
+  "fixture": "dispersion_glmm_lme4_scale.csv",
+  "source": "R 4.3 + lme4::glmer, y ~ x + (1 | g), Gamma(link='log') and inverse.gaussian(link='log'), nAGQ = 0 and 1",
+  "data_recipe": "G <- 15; R <- 8; i <- 0:(G*R-1); gi <- i %/% R; x <- ((i*7) %% 11)/5 - 1; mu <- exp(0.5 + 0.3*x + 0.4*sin(gi*1.9)); p <- pmin(pmax((sin(i*12.9898+0.5)*43758.5453) %% 1, 0.01), 0.99); y <- qgamma(p, shape = 4, rate = 4/mu); g <- factor(sprintf('g%02d', gi))",
+  "note": "lme4's logLik for Gamma/inverse-Gaussian glmer equals the Laplace -2logLik/2 with the family aic()'s '+2' term included, i.e. 1.0 below the engine's logLik; reference values below are lme4's printed values.",
+  "gamma": {
+    "nAGQ0": {"logLik": -146.864034955, "fixef": [0.5379763560, 0.1796992748], "theta": [0.4808987], "sigma": 0.4954208, "se": [0.07635102, 0.07159531]},
+    "nAGQ1": {"logLik": -146.850838195, "fixef": [0.5251647064, 0.1719770404], "theta": [0.4802132059], "sigma": 0.4976379863, "se": [0.10390939994, 0.06958738214], "varcorr_sd": 0.2389723328}
+  },
+  "inverse_gaussian": {
+    "nAGQ0": {"logLik": -150.918215401, "fixef": [0.5157539429, 0.1819428100], "theta": [0.5346403], "sigma": 0.3910504, "se": [0.07120974, 0.07258217]},
+    "nAGQ1": {"logLik": -150.904529833, "fixef": [0.5264315024, 0.1724057892], "theta": [0.536094], "sigma": 0.3886201, "se": [0.1073307, 0.07942297]}
+  }
+}

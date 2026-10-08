@@ -1231,15 +1231,38 @@ impl GeneralizedLinearMixedModel {
     /// constant inline.
     fn minus_two_loglik_sum(&self) -> f64 {
         let cached = self.current_response_log_constants();
+        let density_phi = self.conditional_density_dispersion();
         (0..self.y.len())
             .map(|i| {
                 let constant = match cached {
                     Some(values) => Some(values[i]),
                     None => self.response_log_constant_observation(i),
                 };
-                self.minus_two_loglik_observation_given_constant(i, constant)
+                self.minus_two_loglik_observation_given_constant(i, constant, density_phi)
             })
             .sum::<f64>()
+    }
+
+    /// Dispersion φ plugged into the conditional response density of the
+    /// log-likelihood.
+    ///
+    /// Gamma and inverse-Gaussian use lme4's convention (the family `aic()`
+    /// that `glmer`'s Laplace criterion calls): φ = Σ wᵢ dᵢ / Σ wᵢ, the mean
+    /// unit deviance at the current μ. Other dispersion families use the
+    /// stored dispersion (σ²).
+    pub(super) fn conditional_density_dispersion(&self) -> f64 {
+        match self.family {
+            Family::Gamma | Family::InverseGaussian => {
+                let (mut dev, mut total_weight) = (0.0, 0.0);
+                for i in 0..self.y.len() {
+                    let weight = self.case_weight(i);
+                    dev += weight * self.dev_resid_component(self.y[i], self.mu[i]);
+                    total_weight += weight;
+                }
+                (dev / total_weight.max(f64::MIN_POSITIVE)).max(f64::MIN_POSITIVE)
+            }
+            _ => self.dispersion(true).max(f64::MIN_POSITIVE),
+        }
     }
 
     /// `-2 log p(y_i | μ_i)` with the response-only constant supplied by the
@@ -1249,6 +1272,7 @@ impl GeneralizedLinearMixedModel {
         &self,
         index: usize,
         response_constant: Option<f64>,
+        density_phi: f64,
     ) -> f64 {
         let y = self.y[index];
         let mu = self.mu[index].max(f64::MIN_POSITIVE);
@@ -1291,7 +1315,7 @@ impl GeneralizedLinearMixedModel {
                 -2.0 * loglik
             }
             Family::Gamma => {
-                let phi = self.dispersion(true).max(f64::MIN_POSITIVE);
+                let phi = density_phi;
                 let shape = 1.0 / phi;
                 let scale = mu * phi;
                 -2.0 * ((shape - 1.0) * y.ln() - y / scale - shape * scale.ln() - ln_gamma(shape))
@@ -1302,7 +1326,7 @@ impl GeneralizedLinearMixedModel {
                 (2.0 * std::f64::consts::PI * variance).ln() + residual * residual / variance
             }
             Family::InverseGaussian => {
-                let phi = self.dispersion(true).max(f64::MIN_POSITIVE);
+                let phi = density_phi;
                 (2.0 * std::f64::consts::PI * phi * y.powi(3)).ln()
                     + (y - mu).powi(2) / (phi * y * mu * mu)
             }
@@ -1557,7 +1581,7 @@ impl GeneralizedLinearMixedModel {
         }
         match self.update_pirls_at_theta(theta, true) {
             Ok(_) => {
-                let deviance = self.deviance(n_agq);
+                let deviance = self.profiled_outer_objective(n_agq);
                 if deviance.is_finite() {
                     deviance
                 } else {
@@ -1569,6 +1593,23 @@ impl GeneralizedLinearMixedModel {
                 f64::INFINITY
             }
             Err(_) => f64::INFINITY,
+        }
+    }
+
+    /// Objective the profiled (fast-PIRLS) outer θ search minimizes.
+    ///
+    /// For Gamma and inverse-Gaussian the response-constant offset depends
+    /// on θ through the dispersion φ = mean unit deviance, so the outer
+    /// criterion is the full Laplace `-2 logLik` (lme4's `nAGQ = 0`
+    /// criterion); minimizing the unit-φ deviance alone drives θ to the
+    /// boundary. Other families keep the dropped-constant deviance, which
+    /// differs from `-2 logLik` by a θ-free constant.
+    pub(super) fn profiled_outer_objective(&mut self, n_agq: usize) -> f64 {
+        let deviance = self.deviance(n_agq);
+        if matches!(self.family, Family::Gamma | Family::InverseGaussian) {
+            deviance + self.response_constants_offset()
+        } else {
+            deviance
         }
     }
 
@@ -1585,6 +1626,16 @@ impl GeneralizedLinearMixedModel {
         }
 
         let pearson = self.pearson_dispersion_numerator();
+        if matches!(self.family, Family::Gamma | Family::InverseGaussian) {
+            // lme4's `sigma()` for a glmer fit: sqrt(pwrss / n) with
+            // pwrss = Pearson weighted RSS + ||u||². The same scale rescales
+            // the fixed-effect covariance and the random-effect SDs, so the
+            // residual SD, VarCorr and vcov agree with each other and with
+            // lme4.
+            let n = self.y.len().max(1) as f64;
+            let variance = ((pearson + self.u_penalty()) / n).max(f64::MIN_POSITIVE);
+            return variance.sqrt();
+        }
         let denom = self.y.len().saturating_sub(self.lmm.feterm.rank).max(1) as f64;
         let variance = (pearson / denom).max(f64::MIN_POSITIVE);
         variance.sqrt()
