@@ -669,6 +669,22 @@ pub struct KenwardRogerLbDdf {
     pub notes: Vec<String>,
 }
 
+impl KenwardRogerLbDdf {
+    /// Kenward & Roger (1997) F scaling factor λ, as `pbkrtest`'s
+    /// `.KR_adjust`: `λ = ddf · (1 − A2/q) / (ddf − 2)`, with `λ = 1` when
+    /// `|ddf − 2| < 0.01`. For a single restriction (`q = 1`) `A1 = A2` and
+    /// λ is 1 up to rounding.
+    pub fn f_scaling(&self) -> f64 {
+        let q = self.restriction_rank as f64;
+        let ddf = self.denominator_df;
+        if (ddf - 2.0).abs() < 1e-2 {
+            1.0
+        } else {
+            ddf * (1.0 - self.a2 / q) / (ddf - 2.0)
+        }
+    }
+}
+
 /// Controls the bounded verification workflow run after a fitted model.
 #[doc(hidden)]
 #[derive(Debug, Clone)]

@@ -38,20 +38,29 @@ mixed model, so use
 | `InverseGaussian` | `Log`, `Inverse` | `Inverse` |
 | `Normal` (as GLMM) | `Log`, `Inverse`, `Sqrt` | — (use LMM for Identity) |
 
-**Gamma and inverse-Gaussian scale conventions (lme4).** These dispersion
-families follow `lme4::glmer` throughout: the conditional density in the
-Laplace/AGQ criterion uses φ = mean unit deviance (the family `aic()` glmer
-calls), both the profiled fast path (lme4 `nAGQ = 0`) and the joint path
-(`nAGQ = 1`) optimize that full criterion, and one scale — lme4's `sigma()`
-= sqrt((Pearson RSS + ‖u‖²)/n) — is reported as the residual SD
-(`dispersion(false)`) and rescales the fixed-effect covariance and the
-random-effect SDs in `varcorr()`. Fixed effects, θ, σ and standard errors
-match glmer (see `tests/parity_dispersion_glmm_lme4.rs`). The engine's
-`loglikelihood()` is the Laplace log-likelihood itself; glmer's printed
-`logLik` for these families includes the family `aic()`'s `+2` term and is
-therefore exactly 1.0 lower. (Through 1.0.0-rc.5 the fast path minimized the
-unit-φ deviance, which drove θ to zero, and the residual SD, the likelihood
-φ and the covariance rescale each used a different φ.)
+**Estimated-dispersion GLMMs (Gamma, inverse Gaussian, Gaussian with a
+non-identity link) follow lme4 2.1.** By default
+([`GlmmDispersionMethod::Moment`](crate::model::GlmmDispersionMethod::Moment), lme4 2.1's
+`glmerControl(disp_method = "moment", disp_dof_correction = TRUE)`) the
+dispersion φ is profiled inside PIRLS: the working weights are
+`w μ'(η)² / (φ V(μ))`, the conditional modes minimize `dev/φ + ‖u‖²`, and φ
+follows lme4's damped fixed-point iteration `φ ← φ^0.9 (dev / (Σw − rank([X,
+Z])))^0.1` from φ = 1 (at most `maxPhiIter = 100` steps per objective
+evaluation). Consequently θ is the absolute random-effect SD on the link
+scale (`varcorr()` reports θ, not θσ), `dispersion(false)` is lme4's
+`sigma()` = sqrt(φ), and the fixed-effect covariance is the φ-weighted RX
+(or the joint Laplace Hessian) with no further σ² rescaling. The Laplace/AGQ
+criterion keeps the family `aic()` density with φ = mean unit deviance, and
+`loglikelihood()` equals lme4 2.1's `logLik` (lme4 < 2.1 added the `aic()`'s
+`+2`, printing a value 1.0 lower). θ, β, σ, logLik, deviance and AIC match
+lme4 2.1 (`tests/parity_dispersion_glmm_lme4.rs`). lme4 2.1's own `vcov()`
+for `nAGQ = 0` fits and its `predict(se.fit = TRUE)` multiply the
+already-φ-weighted factorization by `sigma()²` once more; the engine does
+not, so those lme4 numbers are σ (resp. σ²) times the engine's.
+`set_dispersion_method(GlmmDispersionMethod::Legacy)` reproduces lme4 < 2.1
+(`disp_method = "old/buggy"`: unit-φ working weights, θ relative to σ,
+σ = sqrt((Pearson RSS + ‖u‖²)/n)); `set_dispersion_dof_correction(false)`
+and `set_max_phi_iter(n)` mirror the other two controls.
 
 The variants below compile against the public types. Both enums are
 `#[non_exhaustive]`, so a newly added variant does not break this example;

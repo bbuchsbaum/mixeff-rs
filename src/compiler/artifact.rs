@@ -467,6 +467,25 @@ impl FixedEffectCovarianceMatrix {
         )
     }
 
+    /// RX-based GLMM fixed-effect covariance conditional on θ (the joint
+    /// active-Hessian fallback); `Low` reliability because θ uncertainty is
+    /// ignored.
+    pub fn laplace_rx_conditional_on_theta(
+        coef_names: Vec<String>,
+        matrix: Vec<Vec<f64>>,
+        details: FixedEffectCovarianceDetails,
+        notes: Vec<String>,
+    ) -> Self {
+        Self::available_with_method(
+            coef_names,
+            matrix,
+            FixedEffectCovarianceMethod::LaplaceRxConditionalOnTheta,
+            ReliabilityGrade::Low,
+            details,
+            notes,
+        )
+    }
+
     pub fn unavailable(
         coef_names: Vec<String>,
         reason: impl Into<String>,
@@ -495,6 +514,10 @@ pub enum FixedEffectCovarianceMethod {
     ModelBased,
     PirlsLaplaceWorkingHessian,
     JointLaplaceActiveHessian,
+    /// RX (fixed-effect block of the Laplace PLS factorization) at the joint
+    /// optimum, conditional on θ; the fallback when the joint active Hessian
+    /// is not positive definite (lme4 `vcov(use.hessian = FALSE)`).
+    LaplaceRxConditionalOnTheta,
     Unavailable,
 }
 
@@ -558,6 +581,9 @@ pub enum FixedEffectReliabilityReason {
     KenwardRogerApproximation,
     ParametricBootstrapMonteCarlo,
     GlmmJointLaplaceActiveHessianWald,
+    /// Wald z from the RX covariance conditional on θ (joint active Hessian
+    /// not positive definite): θ uncertainty is ignored.
+    GlmmLaplaceRxConditionalOnThetaWald,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -621,8 +647,18 @@ pub struct ContrastFamilyDetails {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KenwardRogerInferenceDetails {
     pub restriction_rank: Option<usize>,
+    /// Kenward-Roger F scaling factor λ of a multi-df F row (pbkrtest
+    /// `F.scaling`); `None` for a t row.
     pub f_scaling: Option<f64>,
+    /// `"kenward_roger_scaled"` when the row's statistic is λ·F_U
+    /// (pbkrtest `Ftest`).
     pub statistic_scale: Option<String>,
+    /// Unscaled F_U of a multi-df F row (pbkrtest `FtestU`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unscaled_statistic: Option<f64>,
+    /// p-value of F_U on F(q, ddf) (pbkrtest `FtestU`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unscaled_p_value: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

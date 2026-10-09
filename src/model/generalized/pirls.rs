@@ -825,7 +825,7 @@ impl GeneralizedLinearMixedModel {
         max_iter: usize,
         reset_modes: bool,
     ) -> Result<bool> {
-        let result = self.pirls_iterations(vary_beta, verbose, max_iter, reset_modes);
+        let result = self.pirls_profiling_dispersion(vary_beta, verbose, max_iter, reset_modes);
         // Fixed-β iterations update only the RE rows of the LMM's A/L (they
         // are all the conditional-mode solve and the Laplace log-determinant
         // read). The `[X|y]` rows are brought back in line with the final
@@ -841,7 +841,7 @@ impl GeneralizedLinearMixedModel {
         Ok(converged)
     }
 
-    fn pirls_iterations(
+    pub(super) fn pirls_iterations(
         &mut self,
         vary_beta: bool,
         verbose: bool,
@@ -852,7 +852,7 @@ impl GeneralizedLinearMixedModel {
         // With beta fixed, solve the conditional penalized likelihood only:
         // the Laplace determinant belongs to the outer objective, evaluated
         // after the conditional modes and their weights have converged.
-        let tol = 1.0e-5;
+        let tol = self.pirls_tolerance_override.unwrap_or(1.0e-5);
         let max_halvings = 10;
 
         let n = self.y.len();
@@ -894,6 +894,10 @@ impl GeneralizedLinearMixedModel {
         let mut sqrtwts = vec![0.0f64; n];
         let mut working_y = vec![0.0f64; n];
         let mut score_buf: Vec<DMatrix<f64>> = Vec::new();
+        // The data part of the score carries 1/φ; keep the stopping rule on
+        // the φ = 1 scale so a small dispersion does not demand a score below
+        // rounding error.
+        let score_tol = 1e-8 * self.pirls_phi().recip().max(1.0);
 
         // Whether PIRLS reached its convergence tolerance within `max_iter`.
         // Returned to the caller so a non-converged conditional-mode solve is
@@ -917,7 +921,7 @@ impl GeneralizedLinearMixedModel {
                 )?;
             }
             self.update_pirls_working_state(vary_beta, &mut sqrtwts, &mut working_y)?;
-            if !vary_beta && self.conditional_mode_score_max_abs_with(&mut score_buf) <= 1e-8 {
+            if !vary_beta && self.conditional_mode_score_max_abs_with(&mut score_buf) <= score_tol {
                 converged = true;
                 break;
             }
@@ -995,19 +999,22 @@ impl GeneralizedLinearMixedModel {
             // The Laplace determinant and AGQ scale must describe the final
             // modes, including after an exhausted or failed conditional solve.
             self.update_pirls_working_state(false, &mut sqrtwts, &mut working_y)?;
-            converged = self.conditional_mode_score_max_abs_with(&mut score_buf) <= 1e-8;
+            converged = self.conditional_mode_score_max_abs_with(&mut score_buf) <= score_tol;
         }
         self.refresh_dispersion();
 
         Ok(converged)
     }
 
-    fn update_pirls_working_state(
+    pub(super) fn update_pirls_working_state(
         &mut self,
         vary_beta: bool,
         sqrtwts: &mut [f64],
         working_y: &mut [f64],
     ) -> Result<()> {
+        // lme4 2.1 `sqrtWrkWt()`: μ'(η) sqrt(w / (φ V(μ))).
+        let phi = self.pirls_phi();
+        let inv_sqrt_phi = (phi != 1.0).then(|| 1.0 / phi.sqrt());
         for obs in 0..self.y.len() {
             (sqrtwts[obs], working_y[obs]) =
                 pirls_working_observation_with_offset_and_family_parameters(
@@ -1020,6 +1027,9 @@ impl GeneralizedLinearMixedModel {
                     self.case_weight(obs),
                     self.offset[obs],
                 );
+            if let Some(scale) = inv_sqrt_phi {
+                sqrtwts[obs] *= scale;
+            }
         }
         if vary_beta {
             self.lmm.update_irls_weights(sqrtwts, working_y)?;
@@ -1054,6 +1064,7 @@ impl GeneralizedLinearMixedModel {
         } else {
             score.clone_from(&self.u);
         }
+        let phi = self.pirls_phi();
         for obs in 0..self.y.len() {
             let mu = self.mu[obs];
             if !mu.is_finite() || !self.eta[obs].is_finite() {
@@ -1083,7 +1094,8 @@ impl GeneralizedLinearMixedModel {
                     }
                     (self.y[obs] - mu) * derivative / variance
                 }
-            } * self.case_weight(obs);
+            } * self.case_weight(obs)
+                / phi;
             if !residual.is_finite() {
                 return f64::INFINITY;
             }
@@ -1218,13 +1230,16 @@ impl GeneralizedLinearMixedModel {
         self.conditional_objective() + self.lmm_logdet()
     }
 
+    /// The PIRLS criterion `dev/φ + ‖u‖²` (φ = 1 except for profiled
+    /// estimated-dispersion families).
     fn conditional_objective(&self) -> f64 {
         // For binomial-with-trials data the response is a per-trial proportion
         // and `wt[i]` is the trial count; weighting the per-observation
         // deviance contribution by `wt[i]` recovers the binomial deviance.
         let dev: f64 = (0..self.y.len())
             .map(|i| self.case_weight(i) * self.dev_resid_component(self.y[i], self.mu[i]))
-            .sum();
+            .sum::<f64>()
+            / self.pirls_phi();
         let u_penalty: f64 = self
             .u
             .iter()
@@ -1309,12 +1324,16 @@ impl GeneralizedLinearMixedModel {
     /// Dispersion φ plugged into the conditional response density of the
     /// log-likelihood.
     ///
-    /// Gamma and inverse-Gaussian use lme4's convention (the family `aic()`
-    /// that `glmer`'s Laplace criterion calls): φ = Σ wᵢ dᵢ / Σ wᵢ, the mean
-    /// unit deviance at the current μ. Other dispersion families use the
-    /// stored dispersion (σ²).
+    /// Every estimated-dispersion family uses lme4's convention (the family
+    /// `aic()` that `glmer`'s Laplace criterion calls, unchanged in lme4
+    /// 2.1): φ = Σ wᵢ dᵢ / Σ wᵢ, the mean unit deviance at the current μ
+    /// (Gaussian: over the observation count, as `gaussian()$aic`).
     pub(super) fn conditional_density_dispersion(&self) -> f64 {
         match self.family {
+            Family::Normal => {
+                let n = self.y.len().max(1) as f64;
+                (self.weighted_deviance() / n).max(f64::MIN_POSITIVE)
+            }
             Family::Gamma | Family::InverseGaussian => {
                 let (mut dev, mut total_weight) = (0.0, 0.0);
                 for i in 0..self.y.len() {
@@ -1377,21 +1396,28 @@ impl GeneralizedLinearMixedModel {
                     };
                 -2.0 * loglik
             }
+            // Prior weights enter as the base R family `aic()`s use them.
             Family::Gamma => {
                 let phi = density_phi;
                 let shape = 1.0 / phi;
                 let scale = mu * phi;
-                -2.0 * ((shape - 1.0) * y.ln() - y / scale - shape * scale.ln() - ln_gamma(shape))
+                -2.0 * self.case_weight(index)
+                    * ((shape - 1.0) * y.ln() - y / scale - shape * scale.ln() - ln_gamma(shape))
             }
             Family::Normal => {
-                let variance = self.dispersion(true).max(f64::MIN_POSITIVE);
+                let weight = self.case_weight(index);
+                if weight <= 0.0 {
+                    return 0.0;
+                }
+                let variance = density_phi / weight;
                 let residual = y - mu;
                 (2.0 * std::f64::consts::PI * variance).ln() + residual * residual / variance
             }
             Family::InverseGaussian => {
                 let phi = density_phi;
-                (2.0 * std::f64::consts::PI * phi * y.powi(3)).ln()
-                    + (y - mu).powi(2) / (phi * y * mu * mu)
+                let weight = self.case_weight(index);
+                weight * (2.0 * std::f64::consts::PI * phi * y.powi(3)).ln()
+                    + weight * (y - mu).powi(2) / (phi * y * mu * mu)
             }
         }
     }
@@ -1406,9 +1432,7 @@ impl GeneralizedLinearMixedModel {
     /// convention, so callers should treat those values as explicit metadata
     /// rather than as a cross-engine parity claim.
     pub fn response_constants_offset(&self) -> f64 {
-        let dropped: f64 = (0..self.y.len())
-            .map(|i| self.case_weight(i) * self.dev_resid_component(self.y[i], self.mu[i]))
-            .sum();
+        let dropped = self.weighted_deviance() / self.pirls_phi();
         let included = self.minus_two_loglik_sum();
         included - dropped
     }
@@ -1474,9 +1498,11 @@ impl GeneralizedLinearMixedModel {
         for (g, &uv) in u0_flat.iter().enumerate() {
             devc0[g] = uv * uv;
         }
+        // lme4 2.1 `devcCol()`: deviance residuals reweighted by 1/φ.
+        let inv_phi = 1.0 / self.pirls_phi();
         for i in 0..n_obs {
             devc0[refs[i] as usize] +=
-                self.case_weight(i) * self.dev_resid_component(self.y[i], self.mu[i]);
+                self.case_weight(i) * self.dev_resid_component(self.y[i], self.mu[i]) * inv_phi;
         }
 
         // Sweep over GH nodes.
@@ -1518,7 +1544,7 @@ impl GeneralizedLinearMixedModel {
             }
             for i in 0..n_obs {
                 devc[refs[i] as usize] +=
-                    work.case_weight(i) * work.dev_resid_component(work.y[i], work.mu[i]);
+                    work.case_weight(i) * work.dev_resid_component(work.y[i], work.mu[i]) * inv_phi;
             }
             // mult[g] += exp((z² + devc0[g] - devc[g]) / 2) * w
             let z2 = z * z;
@@ -1554,7 +1580,7 @@ impl GeneralizedLinearMixedModel {
         self.deviance(n_agq) + offset
     }
 
-    fn case_weight(&self, obs: usize) -> f64 {
+    pub(super) fn case_weight(&self, obs: usize) -> f64 {
         if self.wt.is_empty() {
             1.0
         } else {
@@ -1674,7 +1700,7 @@ impl GeneralizedLinearMixedModel {
     /// differs from `-2 logLik` by a θ-free constant.
     pub(super) fn profiled_outer_objective(&mut self, n_agq: usize) -> f64 {
         let deviance = self.deviance(n_agq);
-        if matches!(self.family, Family::Gamma | Family::InverseGaussian) {
+        if self.family.has_dispersion() {
             deviance + self.response_constants_offset()
         } else {
             deviance
@@ -1693,6 +1719,10 @@ impl GeneralizedLinearMixedModel {
             return 1.0;
         }
 
+        if self.profiles_dispersion() {
+            // lme4 2.1 `sigma()`: sqrt of the profiled (damped) φ.
+            return self.pirls_phi.max(f64::MIN_POSITIVE).sqrt();
+        }
         let pearson = self.pearson_dispersion_numerator();
         if matches!(self.family, Family::Gamma | Family::InverseGaussian) {
             // lme4's `sigma()` for a glmer fit: sqrt(pwrss / n) with

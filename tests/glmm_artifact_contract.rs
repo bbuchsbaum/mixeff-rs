@@ -552,21 +552,22 @@ fn joint_laplace_glmm_artifact_reports_certified_wald_rows_when_hessian_passes()
         .as_ref()
         .expect("joint-laplace GLMM artifact should carry Wald inference rows");
     assert_eq!(inference.rows.len(), 2);
-    // lme4 2.0.1 reference:
+    // lme4 2.1.0 reference (default disp_method = "moment"):
     // glmer(y ~ 1 + x + (1 | group), Gamma(log), nAGQ = 1,
     //       control = glmerControl(optimizer = "bobyqa"))
+    // coef(summary(.)) (finite-difference Hessian vcov).
     let lme4_reference = [
         (
             "(Intercept)",
-            0.4680676199782735,
-            0.06290563672667525,
-            7.440789797773219,
+            0.4685034243265831,
+            0.044537750826834761,
+            10.51924301584403,
         ),
         (
             "x",
-            0.200_518_166_202_369,
-            0.002706648896103688,
-            74.08355272492919,
+            0.2005179102243963,
+            0.002870890914214904,
+            69.84518611680913,
         ),
     ];
     for row in &inference.rows {

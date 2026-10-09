@@ -6,7 +6,10 @@ use crate::model::linear::LinearMixedModel;
 use crate::model::snapshot::{decode_snapshot, encode_snapshot};
 use crate::model::traits::{Family, LinkFunction};
 
-use super::{GeneralizedLinearMixedModel, PirlsProfiledOptimumCertificate};
+use super::{
+    DispersionControl, GeneralizedLinearMixedModel, GlmmDispersionMethod,
+    PirlsProfiledOptimumCertificate,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct FittedStateSeal {
@@ -17,6 +20,7 @@ pub(crate) struct FittedStateSeal {
     theta: Vec<f64>,
     u: Vec<Vec<f64>>,
     dispersion: f64,
+    pirls_phi: f64,
     nb_theta: Option<f64>,
     family: Family,
     link: LinkFunction,
@@ -41,6 +45,19 @@ struct GlmmSnapshot {
     objective_witness: f64,
     pirls_certificate: Option<std::result::Result<PirlsProfiledOptimumCertificate, String>>,
     artifact: crate::compiler::CompiledModelArtifact,
+    /// lme4 2.1 dispersion controls and the profiled PIRLS φ. Absent from
+    /// snapshots written before the moment method existed, which restore as
+    /// [`GlmmDispersionMethod::Legacy`] (the semantics they were fit with).
+    #[serde(default)]
+    dispersion_profile: Option<DispersionProfileSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DispersionProfileSnapshot {
+    method: GlmmDispersionMethod,
+    dof_correction: bool,
+    max_phi_iter: usize,
+    pirls_phi: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +77,7 @@ impl GeneralizedLinearMixedModel {
             theta: self.theta.clone(),
             u: self.u.iter().map(|m| m.as_slice().to_vec()).collect(),
             dispersion: self.dispersion,
+            pirls_phi: self.pirls_phi,
             nb_theta: self.negative_binomial_theta,
             family: self.family,
             link: self.link,
@@ -103,6 +121,12 @@ impl GeneralizedLinearMixedModel {
             objective_witness: fixed_state_objective,
             pirls_certificate: self.pirls_profiled_optimum_certificate().clone(),
             artifact: self.compiler_artifact().clone(),
+            dispersion_profile: Some(DispersionProfileSnapshot {
+                method: self.dispersion_control.method,
+                dof_correction: self.dispersion_control.dof_correction,
+                max_phi_iter: self.dispersion_control.max_phi_iter,
+                pirls_phi: self.pirls_phi,
+            }),
         };
         validate_glmm(&payload)?;
         encode_snapshot(&payload)
@@ -178,6 +202,24 @@ impl GeneralizedLinearMixedModel {
             warm_refit_step: None,
             pending_progress_error: None,
             response_log_constants: None,
+            dispersion_control: match &snapshot.dispersion_profile {
+                Some(profile) => DispersionControl {
+                    method: profile.method,
+                    dof_correction: profile.dof_correction,
+                    max_phi_iter: profile.max_phi_iter.max(1),
+                    ..DispersionControl::default()
+                },
+                None => DispersionControl {
+                    method: GlmmDispersionMethod::Legacy,
+                    ..DispersionControl::default()
+                },
+            },
+            pirls_phi: snapshot
+                .dispersion_profile
+                .as_ref()
+                .map_or(1.0, |profile| profile.pirls_phi),
+            design_rank_cache: std::sync::OnceLock::new(),
+            pirls_tolerance_override: None,
         };
         model.lmm.compiler_artifact = snapshot.artifact;
         validate_glmm_metadata(&model)?;
@@ -217,6 +259,7 @@ fn seal_matches(model: &GeneralizedLinearMixedModel, seal: &FittedStateSeal) -> 
         && seal.u.iter().zip(&model.u).all(|(a, b)| a == b.as_slice())
         && seal.u.len() == model.u.len()
         && seal.dispersion.to_bits() == model.dispersion.to_bits()
+        && seal.pirls_phi.to_bits() == model.pirls_phi.to_bits()
         && seal.nb_theta.map(f64::to_bits) == model.negative_binomial_theta.map(f64::to_bits)
         && seal.family == model.family
         && seal.link == model.link
@@ -234,6 +277,10 @@ fn validate_glmm(snapshot: &GlmmSnapshot) -> Result<()> {
         .all(|v| v.is_finite())
         && snapshot.dispersion.is_finite()
         && snapshot.dispersion > 0.0
+        && snapshot
+            .dispersion_profile
+            .as_ref()
+            .is_none_or(|profile| profile.pirls_phi.is_finite() && profile.pirls_phi > 0.0)
         && snapshot
             .u
             .iter()

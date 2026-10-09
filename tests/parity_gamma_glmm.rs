@@ -299,19 +299,26 @@ fn fit_gamma_log(data: &DataFrame, formula: &str, n_agq: usize) -> GeneralizedLi
     model
 }
 
-/// MixedModels.jl's Gamma GLMM minimizes the deviance with a unit
-/// dispersion, which drives this fixture's random-effect SD to the boundary
-/// (θ ≈ 7.5e-9). The engine follows lme4::glmer instead: the conditional
-/// density uses φ = mean unit deviance, so the Laplace criterion has an
-/// interior optimum (θ ≈ 1.67, matching glmer; see
-/// `tests/parity_dispersion_glmm_lme4.rs`). This test pins that documented
-/// divergence from the MixedModels.jl reference.
+fn engine<'a>(fixture: &'a GammaGlmmFixture, name: &str) -> &'a EngineReference {
+    fixture
+        .engines
+        .iter()
+        .find(|engine| engine.engine == name)
+        .unwrap_or_else(|| panic!("missing {name} engine reference"))
+}
+
+/// The engine follows lme4 2.1's glmer (nAGQ = 0 here): φ is profiled inside
+/// PIRLS, θ is the absolute random-effect SD and sigma() = sqrt(φ) with the
+/// (n − rank([X, Z])) correction (see `tests/parity_dispersion_glmm_lme4.rs`).
+/// MixedModels.jl's Gamma GLMM still uses unit-φ PIRLS weights and puts θ on
+/// the boundary for this fixture; this test pins that documented divergence.
 #[cfg(feature = "nlopt")]
 #[test]
-fn test_gamma_log_glmm_follows_lme4_not_mixedmodels_jl_unit_phi() {
+fn test_gamma_log_glmm_matches_lme4_2_1_not_mixedmodels_jl_unit_phi() {
     let expected = fixture();
     assert_eq!(expected.schema_version, "1.0.0");
     assert!(expected.source.contains("MixedModels.jl"));
+    assert!(expected.source.contains("lme4 2.1-0"));
     assert_eq!(expected.formula, "y ~ 1 + x + (1 | group)");
     assert_eq!(expected.family, "gamma");
     assert_eq!(expected.link, "log");
@@ -322,19 +329,37 @@ fn test_gamma_log_glmm_follows_lme4_not_mixedmodels_jl_unit_phi() {
 
     assert_eq!(model.nobs(), expected.nobs);
     assert_eq!(model.dof(), expected.dof);
-    assert_eq!(model.theta().len(), expected.rust_reference.theta.len());
-    assert_eq!(model.fixef().len(), expected.rust_reference.beta.len());
-
-    // The unit-phi reference sits on the boundary; the lme4 criterion does not.
-    assert!(expected.rust_reference.theta[0] < 1e-6);
-    assert!(
-        model.theta()[0] > 0.1,
-        "lme4's Gamma criterion has an interior optimum, got theta {:?}",
-        model.theta()
+    let reference = &expected.rust_reference;
+    assert_relative_eq!(model.theta()[0], reference.theta[0], max_relative = 1e-6);
+    for (got, want) in model.fixef().iter().zip(&reference.beta) {
+        assert_relative_eq!(*got, *want, epsilon = 1e-8);
+    }
+    assert_relative_eq!(
+        model.dispersion(false),
+        reference.dispersion_sigma,
+        max_relative = 1e-6
     );
+    assert_relative_eq!(model.loglikelihood(), reference.loglik, epsilon = 1e-6);
+    for (got, want) in model.fitted().iter().zip(&reference.fitted_mu_head) {
+        assert_relative_eq!(*got, *want, max_relative = 1e-7);
+    }
+
+    let glmer = engine(&expected, "lme4::glmer");
+    assert!(glmer.version.as_deref().unwrap().contains("lme4 2.1"));
+    assert_eq!(glmer.verdict, "parity_reference");
+    assert!((model.theta()[0] - glmer.theta.as_ref().unwrap()[0]).abs() < 1e-5);
+    for (got, want) in model.fixef().iter().zip(glmer.beta.as_ref().unwrap()) {
+        assert!((got - want).abs() < 1e-6, "fixef {got} vs glmer {want}");
+    }
+    assert!((model.dispersion(false) - glmer.dispersion.unwrap()).abs() < 1e-7);
+    assert!((model.loglikelihood() - glmer.loglik.unwrap()).abs() < 1e-6);
+
+    // MixedModels.jl (unit-φ PIRLS) sits on the boundary; lme4 2.1 does not.
+    let julia = engine(&expected, "MixedModels.jl");
+    assert_eq!(julia.verdict, "documented_divergence");
+    assert_eq!(julia.theta.as_ref().unwrap()[0], 0.0);
+    assert!(model.theta()[0] > 0.1);
     assert!(!model.is_singular());
-    assert!(model.objective().is_finite());
-    assert!(model.loglikelihood().is_finite());
     for fitted in model.fitted().iter() {
         assert!(fitted.is_finite() && *fitted > 0.0);
     }
@@ -374,9 +399,10 @@ fn test_gamma_log_glmm_native_cobyla_preserves_fixture_contract() {
 #[test]
 fn test_gamma_log_fit_is_invariant_to_row_order() {
     // The Gamma Laplace criterion uses φ = mean unit deviance at the PIRLS
-    // modes (lme4's convention), so it depends to first order on the inner
-    // PIRLS solution: row order changes the objective at the 1e-6 relative
-    // level (the PIRLS tolerance), not the optimum (θ agrees to ~1e-6).
+    // modes and the PIRLS weights a φ profiled around them (lme4 2.1's
+    // convention), so it depends to first order on the inner PIRLS
+    // solution: row order changes the objective at the 1e-6 relative level
+    // (the PIRLS tolerance), not the optimum (θ agrees to ~1e-6).
     let expected = fixture();
     let ordered = fit_gamma_log(&gamma_log_data(), &expected.formula, expected.n_agq);
     let reversed = fit_gamma_log(
@@ -549,6 +575,14 @@ fn test_lme4_issue_643_gamma_log_simulation_and_bootstrap_are_sane() {
     assert!(model.loglikelihood().is_finite());
     assert!(model.dispersion(true).is_finite() && model.dispersion(true) > 0.0);
     assert!(model.theta()[0].is_finite() && model.theta()[0] >= 0.0);
+
+    // The profiled fit matches lme4 2.1.0's glmer(..., nAGQ = 0) (recorded in
+    // the lme4::glmer row's note): beta -2.34336615707113, theta
+    // 0.01531059830872, sigma 0.584026143538438, logLik 1611.0368961151.
+    assert!((model.fixef()[0] - -2.34336615707113).abs() < 1e-5);
+    assert!((model.theta()[0] - 0.01531059830872).abs() < 1e-4);
+    assert!((model.dispersion(false) - 0.584026143538438).abs() < 1e-6);
+    assert!((model.loglikelihood() - 1611.0368961151).abs() < 1e-5);
 
     let glmm_tmb = issue_643_engine(&fixture, "glmmTMB");
     assert_relative_eq!(

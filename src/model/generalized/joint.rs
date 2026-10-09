@@ -60,14 +60,23 @@ impl GeneralizedLinearMixedModel {
         self.fit_with_options_impl(n_agq, verbose)?;
         let fallback_fast_pirls = self.clone();
         let start_beta = self.beta.as_slice().to_vec();
-        let start_theta = self.theta.clone();
+        let mut start_theta = self.theta.clone();
         let mut start_params = start_beta.clone();
         start_params.extend_from_slice(&start_theta);
         // Compare every joint candidate against the same converged
         // conditional objective, rather than the fast-PIRLS approximation.
-        let profiled_start_objective =
+        let mut profiled_start_objective =
             self.joint_glmm_deviance_at_params(&start_params, start_beta.len(), n_agq);
         self.take_pending_interrupt()?;
+        if let Some((lifted_theta, lifted_objective)) = self.joint_boundary_lifted_start(
+            &start_beta,
+            &start_theta,
+            n_agq,
+            profiled_start_objective,
+        )? {
+            start_theta = lifted_theta;
+            profiled_start_objective = lifted_objective;
+        }
         let n_joint_params = start_beta.len() + start_theta.len();
         self.lmm.optsum.optimizer = joint_optimizer;
         self.lmm.optsum.backend = joint_optimizer.canonical_backend();
@@ -82,6 +91,67 @@ impl GeneralizedLinearMixedModel {
             n_agq,
             maxeval,
             Some(fallback_fast_pirls),
+        )
+    }
+
+    /// A start off the covariance boundary for the joint fit, when the
+    /// fast-PIRLS start has a variance-component θ on (or within 1e-3 of) its
+    /// lower bound and
+    /// moving it off the bound already lowers the joint objective.
+    ///
+    /// The Laplace/AGQ objective depends on a diagonal θ only through θ², so
+    /// a boundary θ = 0 is always a stationary point (zero gradient, possibly
+    /// negative curvature). The joint optimizers are gradient-model driven
+    /// and cannot leave such a saddle: a Gaussian inverse-link GLMM whose
+    /// fast-PIRLS start collapsed to θ = 0 stayed there (reported as
+    /// converged) while lme4::glmer, which starts from θ = 1, reached the
+    /// interior optimum. Every boundary entry is therefore probed at
+    /// `lower + 1` (lme4's default start for a diagonal θ) with β held at the
+    /// fast-PIRLS values; the probe is adopted only if it is strictly better
+    /// than the boundary start, so a genuine boundary optimum (where the
+    /// probe is worse) keeps the original start bit for bit. The probe is
+    /// evaluated on a copy, leaving the model state untouched.
+    fn joint_boundary_lifted_start(
+        &self,
+        start_beta: &[f64],
+        start_theta: &[f64],
+        n_agq: usize,
+        start_objective: f64,
+    ) -> Result<Option<(Vec<f64>, f64)>> {
+        const BOUNDARY_LIFT: f64 = 1.0;
+        // θ is on the relative (dimensionless) scale and the gradient
+        // vanishes like θ near the bound, so a start within this distance
+        // of it is as stuck as one exactly on it.
+        const BOUNDARY_TOL: f64 = 1e-3;
+        let lower = self.lmm.lower_bounds();
+        let on_boundary = |index: usize| {
+            lower.get(index).is_some_and(|bound| {
+                bound.is_finite() && start_theta[index] <= *bound + BOUNDARY_TOL
+            })
+        };
+        if !(0..start_theta.len()).any(on_boundary) || !start_objective.is_finite() {
+            return Ok(None);
+        }
+        let lifted_theta: Vec<f64> = (0..start_theta.len())
+            .map(|index| {
+                if on_boundary(index) {
+                    lower[index] + BOUNDARY_LIFT
+                } else {
+                    start_theta[index]
+                }
+            })
+            .collect();
+        let mut params = start_beta.to_vec();
+        params.extend_from_slice(&lifted_theta);
+        let mut probe = self.clone();
+        let lifted_objective =
+            probe.joint_glmm_deviance_at_params(&params, start_beta.len(), n_agq);
+        probe.take_pending_interrupt()?;
+        let (ftol_abs, ftol_rel) = self.joint_ftol();
+        let tolerance = ftol_abs + ftol_rel * start_objective.abs().max(1.0);
+        Ok(
+            (lifted_objective.is_finite() && lifted_objective < start_objective - tolerance)
+                .then_some((lifted_theta, lifted_objective)),
         )
     }
 
@@ -1276,55 +1346,50 @@ impl GeneralizedLinearMixedModel {
             }
         }
 
-        let hessian = self.finite_difference_joint_laplace_hessian_for_indices(
+        let hessian_covariance = self.joint_laplace_active_hessian_covariance(
             &params,
             &lower_bounds,
             &active_indices,
-            true,
-        );
-        self.record_full_newton_decrement(hessian.as_ref(), &active_indices);
-        let hessian = hessian?;
-        let certification = certify_glmm_joint_hessian(&hessian, "joint-laplace GLMM Hessian")?;
-        let beta_covariance = 2.0 * certification.inverse.view((0, 0), (p, p)).into_owned();
-        if !matrix_is_finite_local(&beta_covariance) {
-            return Err(
-                "joint-laplace GLMM fixed-effect covariance contains non-finite entries"
-                    .to_string(),
-            );
-        }
-        let full_covariance = unpivot_glmm_fixed_effect_covariance(
-            &beta_covariance,
-            &self.lmm.feterm.piv,
-            full_coef_names.len(),
-        );
-        let covariance_payload = glmm_joint_laplace_fixed_effect_covariance_matrix(
-            full_coef_names.clone(),
-            &full_covariance,
-            self.lmm.feterm.rank,
-            &certification,
             &omitted_boundary_theta_indices,
-        )?;
-        let inference_notes =
-            glmm_joint_laplace_hessian_notes(&certification, &omitted_boundary_theta_indices);
+            &full_coef_names,
+        );
+        let (
+            full_covariance,
+            covariance_payload,
+            inference_notes,
+            covariance_method,
+            reliability,
+            reliability_reason,
+        ) = match hessian_covariance {
+            Ok((full_covariance, covariance_payload, inference_notes)) => (
+                full_covariance,
+                covariance_payload,
+                inference_notes,
+                crate::stats::InferenceCovarianceMethod::JointLaplaceActiveHessian,
+                ReliabilityGrade::Moderate,
+                FixedEffectReliabilityReason::GlmmJointLaplaceActiveHessianWald,
+            ),
+            Err(hessian_reason) => {
+                let (full_covariance, covariance_payload, inference_notes) = self
+                    .laplace_rx_conditional_covariance(&params, &full_coef_names, &hessian_reason)
+                    .map_err(|rx_reason| format!("{hessian_reason}; RX fallback: {rx_reason}"))?;
+                (
+                    full_covariance,
+                    covariance_payload,
+                    inference_notes,
+                    crate::stats::InferenceCovarianceMethod::LaplaceRxConditionalOnTheta,
+                    ReliabilityGrade::Low,
+                    FixedEffectReliabilityReason::GlmmLaplaceRxConditionalOnThetaWald,
+                )
+            }
+        };
+        let std_errors = (0..full_coef_names.len())
+            .map(|index| full_covariance[(index, index)].sqrt())
+            .collect::<Vec<_>>();
 
         let normal = Normal::new(0.0, 1.0)
             .map_err(|err| format!("normal reference distribution unavailable: {err}"))?;
         let estimates = self.coef();
-        let mut std_errors = vec![f64::NAN; full_coef_names.len()];
-        for full_index in 0..full_coef_names.len() {
-            let variance = full_covariance[(full_index, full_index)];
-            if !variance.is_finite() || variance <= 0.0 {
-                return Err(format!(
-                    "joint-laplace GLMM fixed-effect covariance has invalid variance for coefficient {}",
-                    full_coef_names
-                        .get(full_index)
-                        .cloned()
-                        .unwrap_or_else(|| full_index.to_string())
-                ));
-            }
-            std_errors[full_index] = variance.sqrt();
-        }
-
         let rows = full_coef_names
             .into_iter()
             .enumerate()
@@ -1340,8 +1405,7 @@ impl GeneralizedLinearMixedModel {
                 let statistic = estimate.zip(std_error).map(|(estimate, se)| estimate / se);
                 let p_value = statistic.map(|z| normal_wald_two_sided_p_value(&normal, z));
                 FixedEffectInferenceRow {
-                    covariance_method:
-                        crate::stats::InferenceCovarianceMethod::JointLaplaceActiveHessian,
+                    covariance_method,
                     label: label.clone(),
                     kind: FixedEffectInferenceRowKind::Coefficient,
                     estimate,
@@ -1353,10 +1417,8 @@ impl GeneralizedLinearMixedModel {
                     p_value,
                     method: FixedEffectInferenceMethod::AsymptoticWaldZ,
                     status: FixedEffectInferenceStatus::Available,
-                    reliability: ReliabilityGrade::Moderate,
-                    reliability_reason: Some(
-                        FixedEffectReliabilityReason::GlmmJointLaplaceActiveHessianWald,
-                    ),
+                    reliability,
+                    reliability_reason: Some(reliability_reason),
                     estimability: EstimabilityAssessment::FixedContrast(
                         FixedContrastEstimability::estimable(label, 1, 1),
                     ),
@@ -1371,6 +1433,119 @@ impl GeneralizedLinearMixedModel {
             table: FixedEffectInferenceTable::new(rows),
             covariance: Some(covariance_payload),
         })
+    }
+
+    /// Fixed-effect covariance from the β block of the inverse active-space
+    /// joint-Laplace Hessian (unpivoted, with its payload and notes), or why
+    /// it is unusable (Hessian unavailable, not positive definite, or an
+    /// invalid variance).
+    fn joint_laplace_active_hessian_covariance(
+        &mut self,
+        params: &[f64],
+        lower_bounds: &[f64],
+        active_indices: &[usize],
+        omitted_boundary_theta_indices: &[usize],
+        full_coef_names: &[String],
+    ) -> std::result::Result<(DMatrix<f64>, FixedEffectCovarianceMatrix, Vec<String>), String> {
+        let p = self.beta.len();
+        let hessian = self.finite_difference_joint_laplace_hessian_for_indices(
+            params,
+            lower_bounds,
+            active_indices,
+            true,
+        );
+        self.record_full_newton_decrement(hessian.as_ref(), active_indices);
+        let hessian = hessian?;
+        let certification = certify_glmm_joint_hessian(&hessian, "joint-laplace GLMM Hessian")?;
+        let beta_covariance = 2.0 * certification.inverse.view((0, 0), (p, p)).into_owned();
+        if !matrix_is_finite_local(&beta_covariance) {
+            return Err(
+                "joint-laplace GLMM fixed-effect covariance contains non-finite entries"
+                    .to_string(),
+            );
+        }
+        let full_covariance = unpivot_glmm_fixed_effect_covariance(
+            &beta_covariance,
+            &self.lmm.feterm.piv,
+            full_coef_names.len(),
+        );
+        let covariance_payload = glmm_joint_laplace_fixed_effect_covariance_matrix(
+            full_coef_names.to_vec(),
+            &full_covariance,
+            self.lmm.feterm.rank,
+            &certification,
+            omitted_boundary_theta_indices,
+        )?;
+        validate_glmm_fixed_effect_variances(&full_covariance, full_coef_names, "joint-laplace")?;
+        let notes =
+            glmm_joint_laplace_hessian_notes(&certification, omitted_boundary_theta_indices);
+        Ok((full_covariance, covariance_payload, notes))
+    }
+
+    /// lme4's `vcov(fit, use.hessian = FALSE)` fallback for a joint-Laplace
+    /// fit whose active Hessian is unusable (typically not positive definite
+    /// because a covariance block is at or near its boundary, e.g. a
+    /// correlation near ±1): the fixed-effect block RX of the Laplace PLS
+    /// factorization at the joint optimum, conditional on θ, on the GLMM
+    /// dispersion scale. It ignores θ uncertainty, so rows built from it are
+    /// labelled `laplace_rx_conditional_on_theta` with `Low` reliability and
+    /// carry `hessian_reason`. Refuses only when RX itself is unusable.
+    pub(super) fn laplace_rx_conditional_covariance(
+        &mut self,
+        params: &[f64],
+        full_coef_names: &[String],
+        hessian_reason: &str,
+    ) -> std::result::Result<(DMatrix<f64>, FixedEffectCovarianceMatrix, Vec<String>), String> {
+        let p = self.beta.len();
+        // Restore the conditional modes and working weights at the optimum
+        // (the Hessian probes moved them).
+        let objective = self.joint_glmm_deviance_at_params(params, p, 1);
+        self.take_pending_interrupt()
+            .map_err(|error| error.to_string())?;
+        if !objective.is_finite() {
+            return Err("the joint objective is not finite at the final parameters".to_string());
+        }
+        let covariance = self
+            .profiled_glmm_fixed_effect_covariance()
+            .ok_or_else(|| {
+                "RX covariance could not be rescaled to the GLMM dispersion scale".to_string()
+            })?;
+        if covariance.nrows() != full_coef_names.len()
+            || covariance.ncols() != full_coef_names.len()
+        {
+            return Err(format!(
+                "RX covariance is {} x {}, expected {} coefficients",
+                covariance.nrows(),
+                covariance.ncols(),
+                full_coef_names.len()
+            ));
+        }
+        if matrix_max_asymmetry_local(&covariance) > 1.0e-8 {
+            return Err("RX covariance failed symmetry validation".to_string());
+        }
+        validate_glmm_fixed_effect_variances(&covariance, full_coef_names, "RX")?;
+        let notes = vec![
+            format!("joint-laplace active Hessian unusable for Wald inference: {hessian_reason}"),
+            "fixed-effect covariance falls back to the fixed-effect block (RX) of the Laplace PLS factorization at the joint optimum, conditional on theta (as lme4 vcov(fit, use.hessian = FALSE)); it ignores covariance-parameter uncertainty, so standard errors may be too small"
+                .to_string(),
+        ];
+        let finite = matrix_is_finite_local(&covariance);
+        let details = FixedEffectCovarianceDetails {
+            rank: Some(self.lmm.feterm.rank),
+            expected_rank: Some(full_coef_names.len()),
+            aliased: Vec::new(),
+            matrix_rows: covariance.nrows(),
+            matrix_cols: covariance.ncols(),
+            finite: Some(finite),
+            symmetric: Some(true),
+        };
+        let payload = FixedEffectCovarianceMatrix::laplace_rx_conditional_on_theta(
+            full_coef_names.to_vec(),
+            matrix_rows_local(&covariance),
+            details,
+            notes.clone(),
+        );
+        Ok((covariance, payload, notes))
     }
 
     pub(super) fn finite_difference_joint_laplace_hessian(
@@ -2255,4 +2430,23 @@ mod wald_tail_tests {
             }
         }
     }
+}
+
+/// Every diagonal entry of a fixed-effect covariance must be a finite
+/// positive variance.
+fn validate_glmm_fixed_effect_variances(
+    covariance: &DMatrix<f64>,
+    coef_names: &[String],
+    source: &str,
+) -> std::result::Result<(), String> {
+    for index in 0..coef_names.len() {
+        let variance = covariance[(index, index)];
+        if !variance.is_finite() || variance <= 0.0 {
+            return Err(format!(
+                "{source} GLMM fixed-effect covariance has invalid variance for coefficient {}",
+                coef_names[index]
+            ));
+        }
+    }
+    Ok(())
 }

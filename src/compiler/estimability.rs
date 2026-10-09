@@ -481,6 +481,26 @@ pub struct FixedEffectTest {
     pub status: InferenceStatus,
     pub estimability: FixedContrastEstimability,
     pub notes: Vec<String>,
+    /// Kenward-Roger multi-df F scaling (pbkrtest `KRmodcomp`): present on
+    /// a KR F test, where `statistics[0]`/`p_values[0]` are the scaled
+    /// (`Ftest`) values and the unscaled (`FtestU`) ones are kept here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kenward_roger_f_scaling: Option<KenwardRogerFScaling>,
+}
+
+/// Kenward & Roger (1997) F scaling of a multi-df Kenward-Roger test, as in
+/// `pbkrtest::KRmodcomp`: `F = λ · F_U` with
+/// `λ = ddf · (1 − A2/q) / (ddf − 2)` (`λ = 1` when `|ddf − 2| < 0.01`), and
+/// the p-value from `F(q, ddf)`. `F_U = W/q` is the Wald statistic on the
+/// KR-adjusted covariance.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct KenwardRogerFScaling {
+    /// Scaling factor λ.
+    pub f_scaling: f64,
+    /// Unscaled statistic `F_U` (pbkrtest `FtestU`).
+    pub unscaled_statistic: f64,
+    /// p-value of `F_U` on `F(q, ddf)` (pbkrtest `FtestU`).
+    pub unscaled_p_value: Option<f64>,
 }
 
 impl FixedEffectTest {

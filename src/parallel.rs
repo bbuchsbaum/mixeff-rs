@@ -11,6 +11,82 @@
 
 use crate::error::{MixedModelError, Result};
 
+/// The calling thread's floating-point control state, re-applied on every
+/// worker thread so a refit computes bit-identically wherever it runs.
+///
+/// On 32/64-bit x86 Windows with the GNU toolchain, mingw-w64's libm
+/// (`exp`, `log`, `lgamma`, ...) evaluates with x87 instructions whose
+/// precision/rounding control word is per thread: a fresh worker starts
+/// with the CRT default, which can differ from the host's (R sets its own),
+/// so threaded GLMM refits differed from serial ones in the last bits. Here
+/// the precision- and rounding-control fields of the caller's word are
+/// captured before spawning and applied in each worker. Everywhere else
+/// this is a no-op (SSE2 math has no per-thread precision control and the
+/// rounding mode is never changed by this crate).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FloatingPointEnv {
+    #[cfg(all(
+        windows,
+        target_env = "gnu",
+        any(target_arch = "x86", target_arch = "x86_64")
+    ))]
+    control_word: u32,
+}
+
+#[cfg(all(
+    windows,
+    target_env = "gnu",
+    any(target_arch = "x86", target_arch = "x86_64")
+))]
+mod x87_control {
+    /// x87 precision-control mask (`_MCW_PC`).
+    pub(super) const MCW_PC: u32 = 0x0003_0000;
+    /// Rounding-control mask (`_MCW_RC`).
+    pub(super) const MCW_RC: u32 = 0x0000_0300;
+    extern "C" {
+        /// msvcrt `_controlfp`: with `mask == 0` it only reads the word.
+        pub(super) fn _controlfp(new: u32, mask: u32) -> u32;
+    }
+}
+
+impl FloatingPointEnv {
+    /// Capture the calling thread's control state.
+    pub(crate) fn capture() -> Self {
+        #[cfg(all(
+            windows,
+            target_env = "gnu",
+            any(target_arch = "x86", target_arch = "x86_64")
+        ))]
+        {
+            // SAFETY: `_controlfp(0, 0)` only reads the control word.
+            let control_word = unsafe { x87_control::_controlfp(0, 0) };
+            Self { control_word }
+        }
+        #[cfg(not(all(
+            windows,
+            target_env = "gnu",
+            any(target_arch = "x86", target_arch = "x86_64")
+        )))]
+        {
+            Self {}
+        }
+    }
+
+    /// Apply the captured state to the current (worker) thread.
+    pub(crate) fn apply(self) {
+        #[cfg(all(
+            windows,
+            target_env = "gnu",
+            any(target_arch = "x86", target_arch = "x86_64")
+        ))]
+        // SAFETY: sets only the precision- and rounding-control fields of
+        // this thread's control word to the values read on the caller.
+        unsafe {
+            x87_control::_controlfp(self.control_word, x87_control::MCW_PC | x87_control::MCW_RC);
+        }
+    }
+}
+
 /// Validate a caller-supplied thread count (`0` is rejected; `1` is serial).
 pub(crate) fn validate_threads(threads: usize) -> Result<()> {
     if threads == 0 {
@@ -53,10 +129,12 @@ where
     let queue = std::sync::Mutex::new(items.into_iter().enumerate());
     let running = AtomicUsize::new(workers);
     let mut poll_error = None;
+    let fp_env = FloatingPointEnv::capture();
     let produced: Vec<Vec<(usize, R)>> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..workers)
             .map(|_| {
                 scope.spawn(|| {
+                    fp_env.apply();
                     // Decrement `running` even if a job panics.
                     struct Finished<'a>(&'a AtomicUsize);
                     impl Drop for Finished<'_> {
@@ -167,12 +245,14 @@ where
     let panic_payload: std::sync::Mutex<Option<Box<dyn std::any::Any + Send>>> =
         std::sync::Mutex::new(None);
 
+    let fp_env = FloatingPointEnv::capture();
     let outcome = std::thread::scope(|scope| -> Result<()> {
         for _ in 0..workers {
             let result_tx = result_tx.clone();
             let (job_rx, stop, init, run, panic_payload) =
                 (&job_rx, &stop, &init, &run, &panic_payload);
             scope.spawn(move || {
+                fp_env.apply();
                 let worker = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let mut state = init();
                     loop {
@@ -327,6 +407,66 @@ mod tests {
         }
         assert!(validate_threads(0).is_err());
         assert!(validate_threads(1).is_ok());
+    }
+
+    /// libm-heavy work (the exp/log/lgamma-style kernels of GLMM refits) is
+    /// bit-identical on worker threads and on the calling thread, through
+    /// both mappers. On x86 windows-gnu this exercises the x87 control-word
+    /// propagation of [`FloatingPointEnv`]; elsewhere it guards the
+    /// invariant.
+    #[test]
+    fn worker_floating_point_matches_calling_thread() {
+        fn kernel(x: f64) -> u64 {
+            let a = (x * 0.37).exp() + (1.0 + x).ln() + (x * 0.11).sin();
+            let b = (2.5 + x).powf(0.73) * (x / 7.0).tanh();
+            (a / 3.0 + b).to_bits()
+        }
+        let items: Vec<f64> = (0..200).map(|i| i as f64 * 0.731 + 0.013).collect();
+        let serial: Vec<u64> = items.iter().map(|&x| kernel(x)).collect();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let mapped = map_with_workers_polled(
+            4,
+            items.clone(),
+            || (),
+            |_, x| kernel(x),
+            &cancel,
+            &mut || Ok(()),
+        )
+        .unwrap();
+        assert_eq!(mapped, serial);
+        let mut piped = Vec::new();
+        pipeline(
+            4,
+            items.len(),
+            &mut |i| Ok(items[i]),
+            || (),
+            |_, x| kernel(x),
+            &mut |_, bits| {
+                piped.push(bits);
+                Ok(true)
+            },
+        )
+        .unwrap();
+        assert_eq!(piped, serial);
+    }
+
+    /// The captured control state is re-applied on a fresh thread.
+    #[cfg(all(
+        windows,
+        target_env = "gnu",
+        any(target_arch = "x86", target_arch = "x86_64")
+    ))]
+    #[test]
+    fn floating_point_env_propagates_x87_control_word() {
+        let mask = x87_control::MCW_PC | x87_control::MCW_RC;
+        let caller = FloatingPointEnv::capture();
+        let seen = std::thread::spawn(move || {
+            caller.apply();
+            FloatingPointEnv::capture()
+        })
+        .join()
+        .unwrap();
+        assert_eq!(caller.control_word & mask, seen.control_word & mask);
     }
 }
 

@@ -68,13 +68,13 @@
     {
       "engine": "lme4::glmer",
       "status": "fit",
-      "version": "lme4 2.0.1; R 4.5.1",
-      "beta": -2.3459566451811007,
-      "theta": 0.080813063634800342,
+      "version": "lme4 2.1.0; R 4.3.3",
+      "beta": -2.3433847244654,
+      "theta": 0.0153110461508903,
       "theta_scale": "lme4_internal_theta",
-      "random_effect_sd": 0.080813063634800342,
-      "dispersion_phi": 0.3001617438903541,
-      "loglik": 1610.8447252468125,
+      "random_effect_sd": 0.0153110461508903,
+      "dispersion_phi": 0.341086504610419,
+      "loglik": 1611.03689659839,
       "simulation_summary": {
         "mean": 0.093574083350817072,
         "sd": 0.050051898599254324,
@@ -86,7 +86,7 @@
         "q99": 0.23983116406851257
       },
       "verdict": "documented_divergence",
-      "note": "glmer profiles Gamma dispersion and keeps a nonzero random-intercept theta where glmmTMB and MixedModels.jl put the random-effect scale effectively at zero; preserve as a divergence sentinel, not as the sole oracle."
+      "note": "lme4 2.1.0 (default disp_method = 'moment': phi profiled inside PIRLS, sigma^2 = deviance / (n - rank([X, Z])), nAGQ = 1) keeps a nonzero random-intercept theta (0.0153) where glmmTMB and MixedModels.jl put the random-effect scale effectively at zero. lme4 2.1 is much closer than lme4 2.0.1 (unit-phi PIRLS weights: beta -2.3459566451811007, theta 0.080813063634800342, phi 0.3001617438903541, logLik 1610.8447252468125; lme4 2.1 NEWS cites GH #643 for this fix), but its moment phi is not the ML phi, so a divergence from glmmTMB's direct MLE remains; preserve as a divergence sentinel, not as the sole oracle. lme4 2.1.0 nAGQ = 0: beta -2.34336615707113, theta 0.01531059830872, sigma 0.584026143538438, logLik 1611.0368961151. simulation_summary is still the lme4 2.0.1 simulate() summary."
     }
   ],
   "stress_contract": {

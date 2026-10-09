@@ -1655,31 +1655,65 @@ fn test_glmm_constructor_accepts_normal_nonidentity_dispersion_family() {
 fn test_gamma_glmm_fit_estimates_lme4_sigma_dispersion() {
     let data = gamma_dispersion_fixture();
     let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
-    let mut model =
-        GeneralizedLinearMixedModel::new(formula, &data, Family::Gamma, Some(LinkFunction::Log))
-            .unwrap();
+    let mut model = GeneralizedLinearMixedModel::new(
+        formula.clone(),
+        &data,
+        Family::Gamma,
+        Some(LinkFunction::Log),
+    )
+    .unwrap();
 
     model.fit_with_options(true, 1, false).unwrap();
 
     let sigma = model.dispersion(false);
     let phi = model.dispersion(true);
-    // lme4's sigma() for glmer: pwrss / n with pwrss = Pearson RSS + ||u||².
-    let u_sq: f64 = model
-        .u
-        .iter()
-        .map(|u| u.iter().map(|v| v * v).sum::<f64>())
-        .sum();
-    let expected_phi = (model.pearson_dispersion_numerator() + u_sq) / model.nobs() as f64;
+    // lme4 2.1 sigma() for glmer: sqrt of the profiled moment estimate
+    // phi = deviance / (n - rank([X, Z])), reached by a damped fixed-point
+    // iteration capped at 100 steps (so within ~1e-3 of the fixed point).
+    let rank = model.dispersion_dof_rank();
+    assert_eq!(rank, (model.lmm.feterm.rank + 4 - 1) as f64);
+    let fixed_point = model.weighted_deviance() / (model.nobs() as f64 - rank);
 
     assert!(sigma.is_finite());
     assert!(sigma > 0.0);
     assert_relative_eq!(phi, sigma * sigma, epsilon = 1e-12);
-    assert_relative_eq!(phi, expected_phi, epsilon = 1e-12, max_relative = 1e-12);
+    assert_relative_eq!(phi, fixed_point, max_relative = 1e-3);
     assert_eq!(
         model.dof(),
         model.lmm.feterm.rank + model.lmm.parmap.len() + 1
     );
     assert_relative_eq!(model.varcorr().residual_sd.unwrap(), sigma, epsilon = 1e-12);
+    // theta is the absolute random-effect SD under the moment method.
+    assert_relative_eq!(
+        model.varcorr().components[0].std_dev[0],
+        model.theta()[0],
+        max_relative = 1e-12
+    );
+
+    // disp_method = "old/buggy": lme4 < 2.1's sigma() = sqrt(pwrss / n)
+    // with pwrss = Pearson RSS + ||u||^2, and theta relative to sigma.
+    let mut legacy =
+        GeneralizedLinearMixedModel::new(formula, &data, Family::Gamma, Some(LinkFunction::Log))
+            .unwrap();
+    legacy.set_dispersion_method(GlmmDispersionMethod::Legacy);
+    legacy.fit_with_options(true, 1, false).unwrap();
+    let u_sq: f64 = legacy
+        .u
+        .iter()
+        .map(|u| u.iter().map(|v| v * v).sum::<f64>())
+        .sum();
+    let expected_phi = (legacy.pearson_dispersion_numerator() + u_sq) / legacy.nobs() as f64;
+    assert_relative_eq!(
+        legacy.dispersion(true),
+        expected_phi,
+        epsilon = 1e-12,
+        max_relative = 1e-12
+    );
+    assert_relative_eq!(
+        legacy.varcorr().components[0].std_dev[0],
+        legacy.theta()[0] * legacy.dispersion(false),
+        max_relative = 1e-12
+    );
 }
 
 /// Difficult-model corpus row `gamma_near_zero_random_effect_unit`
@@ -3494,13 +3528,23 @@ fn test_glmm_predict_new_variance_reports_joint_laplace_conditional_rows_availab
         .predict_new_variance(&data, GlmmPredictionScale::Link, NewReLevels::Error)
         .unwrap();
 
-    // lme4 2.0.1 reference:
+    // lme4 2.1.0 reference:
     // glmer(y ~ 1 + x + (1 | group), data, family = Gamma(link = "log"),
     //       nAGQ = 1, control = glmerControl(optimizer = "bobyqa"))
     // predict(..., newdata = data[1:5,], re.form = NULL, se.fit = TRUE)
     // emits lme4's documented approximation warning for se.fit.
-    let lme4_response_fit = [0.9529792, 1.1645747, 1.4231520, 1.7391427, 2.1252947];
-    let lme4_response_se = [0.01402705, 0.01476743, 0.01696936, 0.02205325, 0.03128255];
+    // lme4 2.1's se.fit uses vcov_full(), which multiplies the already
+    // phi-weighted factorization by sigma() (= 0.01876655136) once more, so
+    // the references below are lme4's se.fit / sigma and its covariance
+    // components / sigma^2 (the engine keeps the phi-weighted scale).
+    let lme4_response_fit = [0.94692436, 1.15717518, 1.41410915, 1.72809159, 2.11178926];
+    let lme4_response_se = [
+        0.0097116875,
+        0.0102703750,
+        0.0118285703,
+        0.0153374778,
+        0.0216585805,
+    ];
     for (idx, (row, (expected_fit, expected_se))) in payload
         .rows
         .iter()
@@ -3520,23 +3564,29 @@ fn test_glmm_predict_new_variance_reports_joint_laplace_conditional_rows_availab
             );
     }
 
-    let lme4_link_fit = [-0.0481622, 0.1523560, 0.3528741, 0.5533923, 0.7539105];
-    let lme4_link_se = [0.01471916, 0.01268053, 0.01192378, 0.01268053, 0.01471916];
-    let lme4_link_fixed = [
-        0.0006883062,
-        0.0006324485,
-        0.0006138292,
-        0.0006324485,
-        0.0006883062,
+    let lme4_link_fit = [-0.05453606, 0.14598185, 0.34649976, 0.54701767, 0.74753558];
+    let lme4_link_se = [
+        0.0102560330,
+        0.0088753848,
+        0.0083646798,
+        0.0088753848,
+        0.0102560330,
     ];
-    let lme4_link_random = [0.0006815289; 5];
-    let lme4_link_cross = [-0.0005765908; 5];
+    let lme4_link_fixed = [
+        0.0020194473,
+        0.0019930335,
+        0.0019842289,
+        0.0019930335,
+        0.0020194473,
+    ];
+    let lme4_link_random = [0.0020189785; 5];
+    let lme4_link_cross = [-0.0019666198; 5];
     let lme4_link_combined = [
-        0.0002166536,
-        0.0001607959,
-        0.0001421766,
-        0.0001607959,
-        0.0002166536,
+        1.0518621e-04,
+        7.8772455e-05,
+        6.9967869e-05,
+        7.8772455e-05,
+        1.0518621e-04,
     ];
     for (idx, (row, (expected_fit, expected_se))) in link_payload
         .rows
@@ -6725,4 +6775,237 @@ fn glmm_replicate_standard_errors_use_glmm_scale_covariance() {
         (working[0] - expected[0]).abs() > 1e-6 * expected[0],
         "fixture should distinguish the working and GLMM scales"
     );
+}
+
+/// Gaussian inverse-link GLMM with a small residual scale (σ ≈ 0.05).
+/// Under lme4 < 2.1's unit-φ working weights its fast-PIRLS start collapsed
+/// to θ = 0, a stationary point the joint optimizer had to be taught to
+/// leave (θ ≈ 28.18 relative to σ). lme4 2.1 profiles φ inside PIRLS and
+/// both the profiled and the joint fit are interior; the engine matches
+/// both. See the fixture's provenance for the data and the glmer references.
+#[test]
+fn test_gaussian_inverse_link_matches_lme4_2_1_profiled_and_joint() {
+    let text =
+        include_str!("../../../tests/fixtures/regression/gaussian_inverse_link_small_sigma.csv");
+    let (mut y, mut x, mut g) = (Vec::new(), Vec::new(), Vec::new());
+    for line in text.lines().skip(1) {
+        let fields: Vec<&str> = line.split(',').collect();
+        y.push(fields[0].parse::<f64>().unwrap());
+        x.push(fields[1].parse::<f64>().unwrap());
+        g.push(fields[2].trim_matches('"').to_string());
+    }
+    let mut df = DataFrame::new();
+    df.add_numeric("y", y).unwrap();
+    df.add_numeric("x", x).unwrap();
+    df.add_categorical("g", g).unwrap();
+    let build = || {
+        GeneralizedLinearMixedModelBuilder::new(
+            parse_formula("y ~ x + (1 | g)").unwrap(),
+            &df,
+            Family::Normal,
+        )
+        .link(LinkFunction::Inverse)
+        .build()
+        .unwrap()
+    };
+    // lme4 2.1 nAGQ = 0: theta 0.5725170689, fixef (10.26465715,
+    // 1.531300358), sigma 0.04940827903.
+    let mut fast = build();
+    fast.fit_with_glmm_options(GlmmFitOptions::fast_laplace())
+        .unwrap();
+    assert!(
+        (fast.theta[0] - 0.5725170689).abs() < 1e-3,
+        "fast θ = {:?}",
+        fast.theta
+    );
+    assert!(
+        (fast.beta[0] - 10.26465715).abs() < 2e-3,
+        "fast β = {:?}",
+        fast.beta
+    );
+    assert!((fast.dispersion(false) - 0.04940827903).abs() < 1e-5);
+
+    let mut model = build();
+    model
+        .fit_with_glmm_options(GlmmFitOptions::joint_laplace())
+        .unwrap();
+    let (theta, beta) = (model.theta[0], model.beta.as_slice().to_vec());
+    // lme4 2.1 nAGQ = 1: theta 0.6112774968, fixef (10.31356369,
+    // 1.524810815), sigma 0.04936225298, logLik 198.3075623.
+    assert!((theta - 0.6112774968).abs() < 5e-4, "θ = {theta}");
+    assert!((beta[0] - 10.31356369).abs() < 2e-3, "β = {beta:?}");
+    assert!((beta[1] - 1.524810815).abs() < 2e-3, "β = {beta:?}");
+    assert!((model.dispersion(false) - 0.04936225298).abs() < 1e-6);
+    assert!((model.loglikelihood() - 198.3075623).abs() < 1e-5);
+    let status = model
+        .lmm
+        .compiler_artifact
+        .optimizer_certificate
+        .as_ref()
+        .map(|c| c.status);
+    assert_eq!(status, Some(crate::compiler::FitStatus::ConvergedInterior));
+}
+
+/// The RX fallback (lme4 `vcov(fit, use.hessian = FALSE)`) for a
+/// joint-Laplace fit whose active Hessian is unusable: on contraception the
+/// RX standard errors match glmer's RX ones, while the regular fit keeps the
+/// active-Hessian rows. Reference: R 4.3.3, lme4 1.1.35.1,
+/// `glmer(use_num ~ 1 + age + age2 + urban + livch + (1 | urban_dist),
+/// family = binomial)` on src/model/contra.csv with factor levels in
+/// first-appearance order (the engine's reference levels).
+#[test]
+fn joint_laplace_rx_fallback_matches_glmer_rx_vcov() {
+    let data = contra_fixture();
+    let formula =
+        parse_formula("use_num ~ 1 + age + age2 + urban + livch + (1 | urban_dist)").unwrap();
+    let mut model =
+        GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+    model
+        .fit_with_glmm_options(GlmmFitOptions::joint_laplace())
+        .unwrap();
+    // Well-conditioned: the active-Hessian path is used, unchanged.
+    let table = model
+        .inference_artifact()
+        .fixed_effect_inference_table
+        .clone()
+        .unwrap();
+    assert!(table.rows.iter().all(|row| row.covariance_method
+        == crate::stats::InferenceCovarianceMethod::JointLaplaceActiveHessian
+        && row.reliability_reason
+            == Some(FixedEffectReliabilityReason::GlmmJointLaplaceActiveHessianWald)));
+
+    let glmer_rx_se = [
+        0.1669743583120,
+        0.0093334337233,
+        0.0007336116765,
+        0.1709921423816,
+        0.1881386030027,
+        0.1567547353329,
+        0.1653170407715,
+    ];
+    // ... and the active-Hessian rows match glmer's default (use.hessian =
+    // TRUE) standard errors.
+    let glmer_hessian_se = [
+        0.1688982881106,
+        0.0094110013178,
+        0.0007387265951,
+        0.1726091120678,
+        0.1905380436421,
+        0.1587350821051,
+        0.1673066353226,
+    ];
+    for (row, want) in table.rows.iter().zip(glmer_hessian_se) {
+        let got = row.std_error.unwrap();
+        assert!(
+            (got / want - 1.0).abs() < 0.01,
+            "{}: {got} vs {want}",
+            row.label
+        );
+    }
+    let names = model.coef_names();
+    let params = model.lmm.optsum.final_params.clone();
+    let (covariance, payload, notes) = model
+        .laplace_rx_conditional_covariance(&params, &names, "forced for the test")
+        .unwrap();
+    assert_eq!(
+        payload.method,
+        FixedEffectCovarianceMethod::LaplaceRxConditionalOnTheta
+    );
+    assert_eq!(payload.status, FixedEffectCovarianceStatus::Available);
+    assert!(notes[0].contains("forced for the test"));
+    for (index, want) in glmer_rx_se.iter().enumerate() {
+        let got = covariance[(index, index)].sqrt();
+        assert!(
+            (got / want - 1.0).abs() < 0.01,
+            "{}: RX se {got} vs glmer {want}",
+            names[index]
+        );
+    }
+}
+
+/// The aphantasia primary model (the R package's flagship example): the
+/// joint active Hessian is not positive definite (a near-±1 correlation in
+/// the participant `mask` block), and the fixed-effect rows fall back to the
+/// RX covariance conditional on θ instead of withholding Wald inference.
+/// Reference SEs: R 4.3.3, lme4 1.1.35.1,
+/// `vcov(glmer(correct ~ group * mask * soa_s + block +
+/// (1 + mask + soa_s || participant) + (1 | item), binomial),
+/// use.hessian = FALSE)` on
+/// tests/fixtures/aphantasia/prepared/primary.csv. Slow (about two minutes
+/// in release): run with `cargo test --release -- --ignored aphantasia_primary`.
+#[test]
+#[ignore]
+fn aphantasia_primary_joint_laplace_falls_back_to_rx_standard_errors() {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/aphantasia/prepared/primary.csv"
+    );
+    let mut reader = csv::Reader::from_path(path).unwrap();
+    let headers = reader.headers().unwrap().clone();
+    let numeric = ["correct", "soa_s"];
+    let categorical = ["participant", "item", "group", "mask", "block"];
+    let column = |name: &str| headers.iter().position(|h| h == name).unwrap();
+    let mut numeric_values = vec![Vec::new(); numeric.len()];
+    let mut categorical_values = vec![Vec::new(); categorical.len()];
+    for record in reader.records() {
+        let record = record.unwrap();
+        for (slot, name) in numeric.iter().enumerate() {
+            numeric_values[slot].push(record[column(name)].parse::<f64>().unwrap());
+        }
+        for (slot, name) in categorical.iter().enumerate() {
+            categorical_values[slot].push(record[column(name)].to_string());
+        }
+    }
+    let mut data = DataFrame::new();
+    for (name, values) in numeric.iter().zip(numeric_values) {
+        data.add_numeric(name, values).unwrap();
+    }
+    for (name, values) in categorical.iter().zip(categorical_values) {
+        data.add_categorical(name, values).unwrap();
+    }
+    let formula = parse_formula(
+        "correct ~ group * mask * soa_s + block + (1 + mask + soa_s || participant) + (1 | item)",
+    )
+    .unwrap();
+    let mut model =
+        GeneralizedLinearMixedModel::new(formula, &data, Family::Bernoulli, None).unwrap();
+    model
+        .fit_with_glmm_options(GlmmFitOptions::joint_laplace())
+        .unwrap();
+    let glmer_rx_se = [
+        ("(Intercept)", 0.12882153521),
+        ("group: control", 0.12668120134),
+        ("mask: unmasked", 0.06110160081),
+        ("soa_s", 0.04040653510),
+        ("group: control:mask: unmasked", 0.08079523347),
+        ("group: control:soa_s", 0.05331854190),
+        ("mask: unmasked:soa_s", 0.05432499659),
+        ("group: control:mask: unmasked:soa_s", 0.07208257962),
+        ("block: 2", 0.12466414582),
+    ];
+    let table = model
+        .inference_artifact()
+        .fixed_effect_inference_table
+        .clone()
+        .unwrap();
+    for (label, want) in glmer_rx_se {
+        let row = table.rows.iter().find(|row| row.label == label).unwrap();
+        assert_eq!(
+            row.covariance_method,
+            crate::stats::InferenceCovarianceMethod::LaplaceRxConditionalOnTheta,
+            "{label}"
+        );
+        assert_eq!(row.status, FixedEffectInferenceStatus::Available);
+        assert_eq!(row.reliability, ReliabilityGrade::Low);
+        assert!(
+            row.notes[0].contains("not positive definite"),
+            "{:?}",
+            row.notes
+        );
+        let got = row.std_error.unwrap();
+        assert!(
+            (got / want - 1.0).abs() < 0.01,
+            "{label}: {got} vs glmer RX {want}"
+        );
+    }
 }

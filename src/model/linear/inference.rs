@@ -4,6 +4,7 @@
 //! distance. Moved verbatim from the former single-file `linear.rs`.
 
 use super::*;
+use crate::compiler::KenwardRogerFScaling;
 use crate::stats::InferenceCovarianceMethod;
 
 impl LinearMixedModel {
@@ -175,6 +176,7 @@ impl LinearMixedModel {
                 },
                 estimability,
                 notes: Vec::new(),
+                kenward_roger_f_scaling: None,
             };
         }
 
@@ -200,6 +202,7 @@ impl LinearMixedModel {
                 status: InferenceStatus::Unsupported { reason },
                 estimability,
                 notes: Vec::new(),
+                kenward_roger_f_scaling: None,
             };
         }
 
@@ -345,6 +348,7 @@ impl LinearMixedModel {
                 },
                 estimability,
                 notes: Vec::new(),
+                kenward_roger_f_scaling: None,
             };
         }
 
@@ -1410,6 +1414,7 @@ impl LinearMixedModel {
                 status: InferenceStatus::Available,
                 estimability,
                 notes,
+                kenward_roger_f_scaling: None,
             };
         }
 
@@ -1521,6 +1526,7 @@ impl LinearMixedModel {
             status: InferenceStatus::Available,
             estimability,
             notes,
+            kenward_roger_f_scaling: None,
         }
     }
 
@@ -1605,7 +1611,7 @@ impl LinearMixedModel {
                 .to_string(),
         ];
         notes.extend(adjusted.notes);
-        notes.extend(lbddf.notes);
+        notes.extend(lbddf.notes.iter().cloned());
 
         if hypothesis.n_contrasts() == 1 {
             let Some(std_error) = adjusted_standard_errors.first().copied().flatten() else {
@@ -1664,6 +1670,7 @@ impl LinearMixedModel {
                 status: InferenceStatus::Available,
                 estimability,
                 notes,
+                kenward_roger_f_scaling: None,
             };
         }
 
@@ -1698,8 +1705,8 @@ impl LinearMixedModel {
             )
             .with_covariance_method(InferenceCovarianceMethod::KenwardRogerAdjusted);
         }
-        let p_value = match FisherSnedecor::new(q as f64, lbddf.denominator_df) {
-            Ok(f_dist) => Some(1.0 - f_dist.cdf(f_statistic)),
+        let f_dist = match FisherSnedecor::new(q as f64, lbddf.denominator_df) {
+            Ok(f_dist) => f_dist,
             Err(error) => {
                 return fixed_effect_test_not_assessed_with_method(
                     hypothesis,
@@ -1714,17 +1721,37 @@ impl LinearMixedModel {
                 ).with_covariance_method(InferenceCovarianceMethod::KenwardRogerAdjusted);
             }
         };
-        notes.push(
-            "Kenward-Roger multi-df F row uses F scaling = 1.0 in the current row payload"
-                .to_string(),
-        );
+        // pbkrtest::KRmodcomp's `Ftest` row: the Wald F on the adjusted
+        // covariance (`FtestU`) times the Kenward-Roger scaling factor λ,
+        // referred to F(q, ddf).
+        let f_scaling = lbddf.f_scaling();
+        if !f_scaling.is_finite() || f_scaling <= 0.0 {
+            return fixed_effect_test_not_assessed_with_method(
+                hypothesis,
+                estimates,
+                adjusted_standard_errors,
+                statistics,
+                method,
+                estimability,
+                format!(
+                    "Kenward-Roger fixed-effect inference produced an invalid F scaling factor {f_scaling}"
+                ),
+            )
+            .with_covariance_method(InferenceCovarianceMethod::KenwardRogerAdjusted);
+        }
+        let unscaled_p_value = Some(1.0 - f_dist.cdf(f_statistic));
+        let scaled_statistic = f_scaling * f_statistic;
+        let p_value = Some(1.0 - f_dist.cdf(scaled_statistic));
+        notes.push(format!(
+            "Kenward-Roger multi-df F is scaled by lambda = {f_scaling} (pbkrtest KRmodcomp Ftest); the unscaled F (FtestU) is {f_statistic}"
+        ));
 
         FixedEffectTest {
             covariance_method: InferenceCovarianceMethod::KenwardRogerAdjusted,
             hypothesis,
             estimates,
             standard_errors: adjusted_standard_errors,
-            statistics: vec![Some(f_statistic)],
+            statistics: vec![Some(scaled_statistic)],
             numerator_df: Some(q as f64),
             denominator_df: Some(lbddf.denominator_df),
             p_values: vec![p_value],
@@ -1733,6 +1760,11 @@ impl LinearMixedModel {
             status: InferenceStatus::Available,
             estimability,
             notes,
+            kenward_roger_f_scaling: Some(KenwardRogerFScaling {
+                f_scaling,
+                unscaled_statistic: f_statistic,
+                unscaled_p_value,
+            }),
         }
     }
 
@@ -2010,6 +2042,7 @@ impl LinearMixedModel {
             status: InferenceStatus::Available,
             estimability,
             notes,
+            kenward_roger_f_scaling: None,
         }
     }
 
@@ -2159,6 +2192,14 @@ impl LinearMixedModel {
             }
             FixedEffectCovarianceMethod::JointLaplaceActiveHessian => {
                 FixedEffectCovarianceMatrix::joint_laplace_active_hessian(
+                    coef_names,
+                    matrix_rows(&vcov),
+                    details,
+                    notes,
+                )
+            }
+            FixedEffectCovarianceMethod::LaplaceRxConditionalOnTheta => {
+                FixedEffectCovarianceMatrix::laplace_rx_conditional_on_theta(
                     coef_names,
                     matrix_rows(&vcov),
                     details,
@@ -2889,9 +2930,14 @@ fn fixed_effect_details_for_test(
     let kenward_roger =
         (test.method == InferenceMethod::KenwardRoger).then(|| KenwardRogerInferenceDetails {
             restriction_rank: test.estimability.rank,
-            f_scaling: (statistic_name == Some(FixedEffectStatisticName::F)).then_some(1.0),
-            statistic_scale: (statistic_name == Some(FixedEffectStatisticName::F))
-                .then(|| "unscaled".to_string()),
+            f_scaling: test.kenward_roger_f_scaling.map(|s| s.f_scaling),
+            statistic_scale: test
+                .kenward_roger_f_scaling
+                .map(|_| "kenward_roger_scaled".to_string()),
+            unscaled_statistic: test.kenward_roger_f_scaling.map(|s| s.unscaled_statistic),
+            unscaled_p_value: test
+                .kenward_roger_f_scaling
+                .and_then(|s| s.unscaled_p_value),
         });
     let details = FixedEffectInferenceDetails {
         bootstrap: None,
@@ -3125,6 +3171,7 @@ fn fixed_effect_test_asymptotic_wald_z(
         notes: vec![
             "asymptotic Wald z is a labeled fallback, not a finite-sample correction".to_string(),
         ],
+        kenward_roger_f_scaling: None,
     }
 }
 
@@ -3152,6 +3199,7 @@ fn fixed_effect_test_p_value_unavailable(
         status: InferenceStatus::PValueUnavailable { reason },
         estimability,
         notes: Vec::new(),
+        kenward_roger_f_scaling: None,
     }
 }
 
@@ -3181,6 +3229,7 @@ fn fixed_effect_test_not_assessed_with_method(
         },
         estimability,
         notes: vec![reason],
+        kenward_roger_f_scaling: None,
     }
 }
 
@@ -3211,6 +3260,7 @@ fn fixed_effect_test_unavailable(
         status,
         estimability,
         notes: Vec::new(),
+        kenward_roger_f_scaling: None,
     }
 }
 

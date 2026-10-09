@@ -835,7 +835,9 @@ impl GeneralizedLinearMixedModel {
             // accepted as a good fit (audit 03·H1).
             self.record_pirls_nonconvergence_diagnostic(theta);
         }
-        self.beta = self.lmm.beta();
+        // PIRLS leaves β at its accepted iterate; the working factorization
+        // was refreshed at the accepted mean (lme4 GH #998), so re-reading β
+        // from it would take one more unaccepted Newton step.
         self.refresh_dispersion();
 
         self.lmm.optsum.n_agq = n_agq;

@@ -152,7 +152,7 @@ impl ModelSummary {
             None
         };
         let residual_value = if model.family.has_dispersion() {
-            Some(scale)
+            Some(model.dispersion(false))
         } else {
             None
         };
