@@ -81,6 +81,75 @@ jobs:
       - name: Run tests
         run: ${{ matrix.command }}
 
+  # Serial vs threaded bit-identity on the toolchain the R package builds
+  # with on Windows (x86_64-pc-windows-gnu; R >= 4.5 uses Rtools45).
+  # mingw-w64's libm evaluates exp/log/pow/... with x87 instructions, so
+  # results depend on the per-thread x87 precision control; R's main thread
+  # runs `fninit` (extended precision) while new threads start at the
+  # Windows default (double precision). The `*extended_precision*` tests
+  # put the calling thread into R's state and fail unless worker threads
+  # inherit it (`parallel::FloatingPointEnv`). The MSVC leg above links the
+  # UCRT's SSE2 libm and cannot catch this.
+  windows-gnu-determinism:
+    name: windows-gnu thread determinism (${{ matrix.linker }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # rust-mingw: Rust's self-contained mingw-w64 linker and libraries.
+        # rtools45: Rtools45's gcc as linker, as `R CMD INSTALL` builds it.
+        linker: [rust-mingw, rtools45]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (x86_64-pc-windows-gnu host toolchain)
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+          rustup default stable-x86_64-pc-windows-gnu
+          rustc -vV
+      - uses: r-lib/actions/setup-r@v2
+        if: matrix.linker == 'rtools45'
+        with:
+          r-version: release
+          rtools-version: "45"
+      - name: Use the Rtools45 linker
+        if: matrix.linker == 'rtools45'
+        shell: pwsh
+        run: |
+          $bin = "C:\rtools45\x86_64-w64-mingw32.static.posix\bin"
+          if (-not (Test-Path "$bin\x86_64-w64-mingw32.static.posix-gcc.exe")) {
+            Get-ChildItem C:\rtools45 | Out-Host
+            throw "Rtools45 gcc not found in $bin"
+          }
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32.static.posix-gcc.exe" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          # Rtools' static toolchain has no libgcc_eh, which Rust's
+          # windows-gnu std links; R packages (mixeff's Makevars.win, the
+          # extendr template) put an empty stand-in on LIBRARY_PATH.
+          $mock = Join-Path $env:RUNNER_TEMP "libgcc_mock"
+          New-Item -ItemType Directory -Force -Path $mock | Out-Null
+          New-Item -ItemType File -Force -Path (Join-Path $mock "libgcc_eh.a") | Out-Null
+          "LIBRARY_PATH=$mock" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Show linker
+        if: matrix.linker == 'rtools45'
+        run: x86_64-w64-mingw32.static.posix-gcc --version
+      # Filters: worker/control-state tests in `parallel::`, and every
+      # serial-vs-threaded identity test (bootstrap LMM/GLMM incl. the
+      # test-threads.R Poisson nsim = 20 / seed = 2 case, profiles).
+      - name: Thread determinism tests (debug)
+        run: >-
+          cargo test --target x86_64-pc-windows-gnu --no-default-features --lib --
+          parallel:: threads_are_bit_identical threads_match
+          with_threads_is_bit_identical
+      - name: Thread determinism tests (release)
+        run: >-
+          cargo test --release --target x86_64-pc-windows-gnu --no-default-features --lib --
+          parallel:: threads_are_bit_identical threads_match
+          with_threads_is_bit_identical
+
   lint:
     name: lint (fmt + clippy + doc)
     runs-on: ubuntu-latest
