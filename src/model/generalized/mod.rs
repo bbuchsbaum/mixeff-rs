@@ -31,10 +31,11 @@ use crate::compiler::{
 use crate::error::{MixedModelError, Result};
 use crate::formula::Formula;
 use crate::model::data::DataFrame;
+use crate::model::fixed_design::FixedDesignBuildPolicy;
 use crate::model::linear::{
-    prediction_interval_cutoff, CovarianceKktClassification, FitProgressCallback, FitProgressPhase,
-    LinearMixedModel, NewReLevels, OptimizerControl, PredictionVarianceMethod,
-    PredictionVariancePayload, PredictionVarianceStatus,
+    prediction_interval_cutoff, CompiledModelSpec, CovarianceKktClassification,
+    FitProgressCallback, FitProgressPhase, LinearMixedModel, NewReLevels, OptimizerControl,
+    PredictionVarianceMethod, PredictionVariancePayload, PredictionVarianceStatus, RecipeFrame,
 };
 use crate::model::traits::{Family, LinkFunction, MixedModelFit, RandomEffectTermInfo};
 use crate::optimizer::trust_bq::{
@@ -326,8 +327,7 @@ impl GlmmFitOptions {
 /// # }
 /// ```
 pub struct GeneralizedLinearMixedModelBuilder<'a> {
-    formula: Formula,
-    data: &'a DataFrame,
+    source: GlmmBuilderSource<'a>,
     family: Family,
     link: Option<LinkFunction>,
     negative_binomial_theta: Option<f64>,
@@ -337,12 +337,37 @@ pub struct GeneralizedLinearMixedModelBuilder<'a> {
     compiler_policy: Option<CompilerPolicy>,
 }
 
+/// What a [`GeneralizedLinearMixedModelBuilder`] builds from.
+enum GlmmBuilderSource<'a> {
+    Raw {
+        formula: Formula,
+        data: &'a DataFrame,
+    },
+    Compiled(Box<CompiledModelSpec<'a>>),
+}
+
 impl<'a> GeneralizedLinearMixedModelBuilder<'a> {
     /// Start a builder for `formula` over `data` with the given `family`.
     pub fn new(formula: Formula, data: &'a DataFrame, family: Family) -> Self {
+        Self::with_source(GlmmBuilderSource::Raw { formula, data }, family)
+    }
+
+    /// Start a builder from an already compiled and audited
+    /// [`CompiledModelSpec`]: the model is built without a second compile
+    /// or design audit, and is the same model [`new`](Self::new) builds
+    /// from the spec's formula and data.
+    ///
+    /// The spec's compiler policy is fixed at compile time
+    /// ([`CompiledModelSpec::compile_with_policy`]); combining this with
+    /// [`compiler_policy`](Self::compiler_policy) is refused at
+    /// [`build`](Self::build).
+    pub fn from_compiled(spec: CompiledModelSpec<'a>, family: Family) -> Self {
+        Self::with_source(GlmmBuilderSource::Compiled(Box::new(spec)), family)
+    }
+
+    fn with_source(source: GlmmBuilderSource<'a>, family: Family) -> Self {
         Self {
-            formula,
-            data,
+            source,
             family,
             link: None,
             negative_binomial_theta: None,
@@ -401,16 +426,36 @@ impl<'a> GeneralizedLinearMixedModelBuilder<'a> {
 
     /// Construct the (unfitted) model.
     pub fn build(self) -> Result<GeneralizedLinearMixedModel> {
-        let policy = self.compiler_policy.unwrap_or_default();
-        let mut model = GeneralizedLinearMixedModel::new_with_policy_internal(
-            self.formula,
-            self.data,
-            self.family,
-            self.link,
-            self.negative_binomial_theta,
-            self.negative_binomial_estimate_theta,
-            policy,
-        )?;
+        let mut model = match self.source {
+            GlmmBuilderSource::Raw { formula, data } => {
+                GeneralizedLinearMixedModel::new_with_policy_internal(
+                    formula,
+                    data,
+                    self.family,
+                    self.link,
+                    self.negative_binomial_theta,
+                    self.negative_binomial_estimate_theta,
+                    self.compiler_policy.unwrap_or_default(),
+                )?
+            }
+            GlmmBuilderSource::Compiled(spec) => {
+                if self.compiler_policy.is_some() {
+                    return Err(MixedModelError::InvalidArgument(
+                        "a compiled spec carries its compiler policy; compile it with \
+                         CompiledModelSpec::compile_with_policy instead of setting one on \
+                         the builder"
+                            .to_string(),
+                    ));
+                }
+                GeneralizedLinearMixedModel::from_compiled_internal(
+                    *spec,
+                    self.family,
+                    self.link,
+                    self.negative_binomial_theta,
+                    self.negative_binomial_estimate_theta,
+                )?
+            }
+        };
         if let Some(offset) = self.offset {
             model.set_offset(offset)?;
         }
@@ -816,28 +861,57 @@ impl GeneralizedLinearMixedModel {
         // silently omit transform re-evaluation on newdata.
         let materialized = formula.materialize_cow(data)?;
         let data: &DataFrame = &materialized;
+        validate_glmm_response(family, link, &formula, data)?;
+        // The working LMM has always been compiled from the lowered frame
+        // (its own lowering then re-verifies the derived columns); compile
+        // that here and build through the same path as `from_compiled`.
+        let spec = CompiledModelSpec::compile_with_policy(formula, data, compiler_policy)?;
+        Self::from_compiled_internal(
+            spec,
+            family,
+            Some(link),
+            negative_binomial_theta,
+            negative_binomial_estimate_theta,
+        )
+    }
 
-        if let Some(y) = data.numeric(&formula.response) {
-            validate_glmm_response_domain(family, link, y)?;
-            if let Some(&first) = y.first() {
-                if y.iter().all(|&value| value == first) {
-                    return Err(MixedModelError::InvalidArgument(
-                        "response is constant; GLMM construction requires variation in the response"
-                            .to_string(),
-                    ));
-                }
-            }
+    /// Build an unfitted GLMM from a compiled spec (see
+    /// [`GeneralizedLinearMixedModelBuilder::from_compiled`]).
+    fn from_compiled_internal(
+        spec: CompiledModelSpec<'_>,
+        family: Family,
+        link: Option<LinkFunction>,
+        negative_binomial_theta: Option<f64>,
+        negative_binomial_estimate_theta: bool,
+    ) -> Result<Self> {
+        let link = link.unwrap_or_else(|| family.canonical_link());
+        if family == Family::Normal && link == LinkFunction::Identity {
+            return Err(MixedModelError::InvalidArgument(
+                "Use LinearMixedModel for Normal distribution with IdentityLink".to_string(),
+            ));
         }
+        validate_supported_glmm_family_link(family, link)?;
+        validate_negative_binomial_theta_request(
+            family,
+            negative_binomial_theta,
+            negative_binomial_estimate_theta,
+        )?;
+        let data = spec.data();
+        validate_glmm_response(family, link, &spec.source_formula, data)?;
         let negative_binomial_theta = initialize_negative_binomial_theta(
             family,
             negative_binomial_theta,
             negative_binomial_estimate_theta,
-            data.numeric(&formula.response),
+            data.numeric(&spec.source_formula.response),
         )?;
 
         // Build the internal LMM
-        let mut lmm =
-            LinearMixedModel::new_with_compiler_policy(formula, data, None, compiler_policy)?;
+        let mut lmm = LinearMixedModel::from_compiled_internal(
+            spec,
+            None,
+            FixedDesignBuildPolicy::default(),
+            RecipeFrame::Design,
+        )?;
         lmm.compiler_artifact
             .set_model_boundary(ModelBoundary::glmm(
                 family_label(family),
@@ -973,6 +1047,41 @@ impl GeneralizedLinearMixedModel {
         }
     }
 
+    unstable_internal_method! {
+    /// The compiler artifact *without* completing a deferred profiled-optimum
+    /// (PIRLS) certificate; deferred joint-Laplace fixed-effect inference is
+    /// still completed, since the coefficient table and covariance need it.
+    ///
+    /// See [`LinearMixedModel::compiler_artifact_deferred`]: while
+    /// [`certificate_evidence_pending`](Self::certificate_evidence_pending)
+    /// the certificate's derivative evidence, its provenance diagnostic and
+    /// therefore its `status` are provisional; every other field matches
+    /// [`compiler_artifact`](Self::compiler_artifact).
+    #[allow(dead_code)]
+    unstable_vis fn compiler_artifact_deferred(&self) -> &CompiledModelArtifact {
+        if self.lmm.derivative_evidence_pending {
+            return self.compiler_artifact();
+        }
+        self.inference_artifact()
+    }
+    }
+
+    /// Whether certificate evidence is still deferred (completed lazily by
+    /// [`compiler_artifact`](Self::compiler_artifact) or in place by
+    /// [`complete_certificate_evidence`](Self::complete_certificate_evidence)).
+    pub fn certificate_evidence_pending(&self) -> bool {
+        self.pirls_certificate_pending || self.lmm.derivative_evidence_pending
+    }
+
+    /// Complete every deferred post-fit computation (profiled-optimum
+    /// certificate, joint-Laplace inference) in place, so the stored
+    /// artifact equals [`compiler_artifact`](Self::compiler_artifact). The
+    /// fitted state is unchanged.
+    pub fn complete_certificate_evidence(&mut self) {
+        self.complete_deferred_inspection();
+        self.lmm.ensure_derivative_evidence();
+    }
+
     /// The artifact for readers of the fixed-effect inference payloads
     /// (`fixed_effect_inference_table`, `fixed_effect_covariance_matrix`,
     /// `model_boundary.inference_availability`): completes only the deferred
@@ -980,7 +1089,7 @@ impl GeneralizedLinearMixedModel {
     /// which does not touch those fields. The two deferrals are exclusive
     /// (a joint fit clears the profiled one), so a fast fit's `vcov()` or
     /// `stderror()` stays free of certificate probes.
-    pub(super) fn inference_artifact(&self) -> &CompiledModelArtifact {
+    pub(crate) fn inference_artifact(&self) -> &CompiledModelArtifact {
         if self.joint_inference_pending {
             if let Some(inspection) = self.glmm_inspection() {
                 return &inspection.artifact;
@@ -1933,6 +2042,28 @@ impl MixedModelFit for GeneralizedLinearMixedModel {
     fn link_kind(&self) -> Option<crate::model::traits::LinkFunction> {
         Some(self.link)
     }
+}
+
+/// Response checks every GLMM construction runs on the design data: the
+/// family/link response domain and a non-constant response.
+fn validate_glmm_response(
+    family: Family,
+    link: LinkFunction,
+    formula: &Formula,
+    data: &DataFrame,
+) -> Result<()> {
+    if let Some(y) = data.numeric(&formula.response) {
+        validate_glmm_response_domain(family, link, y)?;
+        if let Some(&first) = y.first() {
+            if y.iter().all(|&value| value == first) {
+                return Err(MixedModelError::InvalidArgument(
+                    "response is constant; GLMM construction requires variation in the response"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
