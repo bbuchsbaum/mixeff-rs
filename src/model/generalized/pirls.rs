@@ -898,6 +898,16 @@ impl GeneralizedLinearMixedModel {
         // the φ = 1 scale so a small dispersion does not demand a score below
         // rounding error.
         let score_tol = 1e-8 * self.pirls_phi().recip().max(1.0);
+        // Near the conditional mode a Newton step lowers the criterion by
+        // about score²/2 — far below the rounding error of the criterion, a
+        // sum over every observation. There the objective comparison is a
+        // coin toss decided by the platform's rounding (FMA contraction,
+        // libm `ln`/`exp`), and rejecting the step leaves the solve stalled
+        // above `score_tol`. A step whose criterion stays within this
+        // rounding band of the accepted one is therefore judged by the
+        // score it is driving to zero instead.
+        let n_criterion_terms = (n + self.u.iter().map(|u| u.len()).sum::<usize>()) as f64;
+        let criterion_rounding = 64.0 * f64::EPSILON * n_criterion_terms.sqrt();
 
         // Whether PIRLS reached its convergence tolerance within `max_iter`.
         // Returned to the caller so a non-converged conditional-mode solve is
@@ -921,7 +931,12 @@ impl GeneralizedLinearMixedModel {
                 )?;
             }
             self.update_pirls_working_state(vary_beta, &mut sqrtwts, &mut working_y)?;
-            if !vary_beta && self.conditional_mode_score_max_abs_with(&mut score_buf) <= score_tol {
+            let accepted_score = if vary_beta {
+                f64::INFINITY
+            } else {
+                self.conditional_mode_score_max_abs_with(&mut score_buf)
+            };
+            if accepted_score <= score_tol {
                 converged = true;
                 break;
             }
@@ -949,6 +964,16 @@ impl GeneralizedLinearMixedModel {
             // so without the explicit check a NaN/Inf iterate would skip
             // halving and be silently accepted (audit 03·H2 defense-in-depth;
             // the family μ-floors above are the primary fix).
+            // A full fixed-β step the criterion cannot resolve (see
+            // `criterion_rounding`) is accepted when it lowers the score.
+            let accepted_by_score = !vary_beta
+                && obj.is_finite()
+                && obj > halving_bound
+                && obj - obj0 <= criterion_rounding * obj0.abs().max(1.0)
+                && self.conditional_mode_score_max_abs_with(&mut score_buf) < accepted_score;
+            if accepted_by_score {
+                halving_bound = obj;
+            }
             let mut nhalf = 0;
             while (!obj.is_finite() || obj > halving_bound) && nhalf < max_halvings {
                 nhalf += 1;

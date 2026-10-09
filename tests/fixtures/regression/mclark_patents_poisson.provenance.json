@@ -1,0 +1,10 @@
+{
+  "schema_version": "1.0",
+  "fixture": "mclark_patents_poisson.csv",
+  "purpose": "Regression guard for the joint Laplace Poisson GLMM ncit ~ opposition + biopharm + (1 | year), which failed on macOS arm64 with 'joint GLMM starting conditional-mode solve did not converge'. Near the conditional mode a fixed-beta Newton step changes the PIRLS criterion by less than its rounding error (~3e-10 on ~1.2e4 for these 4809 rows), so the objective-only line search rejected the step on platform-dependent rounding and the solve stalled above the 1e-8 score tolerance at the fast-PIRLS start.",
+  "source": "Columns ncit, opposition, biopharm, year of the m-clark 'patents' data shipped with the mixeff R package (tests/fixtures/mclark_patents.RData, md5 69d70e0e53ed9b94b86b75eff85eb76c; 4809 rows, 18 years).",
+  "reference_engine": "R 4.3.3, lme4 2.1.0 (default glmerControl, nAGQ = 1): glmer(ncit ~ opposition + biopharm + (1 | year), family = poisson) -> theta 0.361148387865, fixef (0.222636556916, 0.384909147589, 0.126412412449), logLik -9588.3923326. lme4 1.1.35.1 agrees: theta 0.36114513463, fixef (0.222632758832, 0.384907456346, 0.126414622971), logLik -9588.39233272.",
+  "regenerate": "e <- new.env(); load('mclark_patents.RData', envir = e); dat <- get(ls(e)[1], e); write.csv(data.frame(ncit = dat$ncit, opposition = dat$opposition, biopharm = dat$biopharm, year = as.character(dat$year)), 'mclark_patents_poisson.csv', row.names = FALSE)",
+  "formula": "ncit ~ opposition + biopharm + (1 | year)",
+  "family": "poisson(log)"
+}
