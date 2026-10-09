@@ -1772,6 +1772,59 @@ pub(super) fn subtract_left_block_product(
     }
 }
 
+/// `out[row] -= Σ_col block[row, col] · x[col]` without densifying `block`.
+///
+/// Each row's sum accumulates over columns in ascending order (structural
+/// zeros skipped), so for a dense block this is bit-identical to the plain
+/// row-dot loop, and a sparse / (block-)diagonal block costs only its stored
+/// entries instead of an `nrows × ncols` dense copy per call.
+pub(super) fn subtract_block_times_slice(block: &MatrixBlock, x: &[f64], out: &mut [f64]) {
+    debug_assert_eq!(block.ncols(), x.len());
+    debug_assert_eq!(block.nrows(), out.len());
+    match block {
+        MatrixBlock::Dense(mat) => {
+            for (row, out_row) in out.iter_mut().enumerate() {
+                let mut dot = 0.0;
+                for (col, &x_col) in x.iter().enumerate() {
+                    dot += mat[(row, col)] * x_col;
+                }
+                *out_row -= dot;
+            }
+        }
+        MatrixBlock::Sparse(mat) => {
+            let mut acc = vec![0.0f64; out.len()];
+            for (col, &x_col) in x.iter().enumerate() {
+                let column = mat.col(col);
+                for (&row, &value) in column.row_indices().iter().zip(column.values()) {
+                    acc[row] += value * x_col;
+                }
+            }
+            for (out_row, value) in out.iter_mut().zip(acc) {
+                *out_row -= value;
+            }
+        }
+        MatrixBlock::Diagonal(diag) => {
+            for ((out_row, &d), &x_row) in out.iter_mut().zip(diag.iter()).zip(x) {
+                *out_row -= d * x_row;
+            }
+        }
+        MatrixBlock::BlockDiagonal(blocks) => {
+            let mut offset = 0;
+            for blk in blocks {
+                let size = blk.nrows();
+                for row in 0..size {
+                    let mut dot = 0.0;
+                    for col in 0..blk.ncols() {
+                        dot += blk[(row, col)] * x[offset + col];
+                    }
+                    out[offset + row] -= dot;
+                }
+                offset += size;
+            }
+        }
+    }
+}
+
 pub(super) fn solve_lower_block_against_rhs(l: &MatrixBlock, rhs: &mut [f64]) {
     debug_assert_eq!(l.nrows(), rhs.len());
     debug_assert_eq!(l.ncols(), rhs.len());
@@ -4016,5 +4069,63 @@ mod wtxy_re_cross_product {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod subtract_block_times_slice_tests {
+    use super::*;
+
+    /// Every storage variant agrees bit-for-bit with the dense row-dot loop
+    /// it replaced in `leverage` / prediction variance.
+    #[test]
+    fn matches_dense_row_dot_for_every_block_storage() {
+        let dense = DMatrix::from_fn(5, 4, |r, c| {
+            if (r + 2 * c) % 3 == 0 {
+                0.0
+            } else {
+                0.37 * r as f64 - 1.1 * c as f64 + 0.25
+            }
+        });
+        let x = [0.7, -1.3, 2.9, -0.4];
+        let reference = |mat: &DMatrix<f64>, x: &[f64]| -> Vec<f64> {
+            (0..mat.nrows())
+                .map(|row| {
+                    let mut dot = 0.0;
+                    for (col, &x_col) in x.iter().enumerate() {
+                        dot += mat[(row, col)] * x_col;
+                    }
+                    1.5 - dot
+                })
+                .collect()
+        };
+        let mut coo = nalgebra_sparse::coo::CooMatrix::new(5, 4);
+        for c in 0..4 {
+            for r in 0..5 {
+                if dense[(r, c)] != 0.0 {
+                    coo.push(r, c, dense[(r, c)]);
+                }
+            }
+        }
+        let sparse = MatrixBlock::Sparse(CscMatrix::from(&coo));
+        for block in [MatrixBlock::Dense(dense.clone()), sparse] {
+            let mut out = vec![1.5; 5];
+            subtract_block_times_slice(&block, &x, &mut out);
+            assert_eq!(out, reference(&dense, &x));
+        }
+
+        let diag = DVector::from_vec(vec![2.0, -0.5, 3.25, 0.0]);
+        let mut out = vec![1.5; 4];
+        subtract_block_times_slice(&MatrixBlock::Diagonal(diag.clone()), &x, &mut out);
+        assert_eq!(out, reference(&DMatrix::from_diagonal(&diag), &x));
+
+        let blocks = vec![
+            DMatrix::from_row_slice(2, 2, &[1.0, 0.0, -0.3, 2.0]),
+            DMatrix::from_row_slice(2, 2, &[0.5, 0.0, 0.7, -1.2]),
+        ];
+        let block = MatrixBlock::BlockDiagonal(blocks);
+        let mut out = vec![1.5; 4];
+        subtract_block_times_slice(&block, &x, &mut out);
+        assert_eq!(out, reference(&block.as_dense(), &x));
     }
 }

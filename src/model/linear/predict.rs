@@ -591,15 +591,12 @@ impl LinearMixedModel {
                 rhs[idx] = v[offsets[j] + idx];
             }
             for m in 0..j {
-                let l_jm = self.l_blocks[block_index(j, m)].as_dense();
                 let nranef_m = self.reterms[m].n_ranef();
-                for row in 0..nranef_j {
-                    let mut dot = 0.0;
-                    for col in 0..nranef_m {
-                        dot += l_jm[(row, col)] * w[offsets[m] + col];
-                    }
-                    rhs[row] -= dot;
-                }
+                subtract_block_times_slice(
+                    &self.l_blocks[block_index(j, m)],
+                    &w[offsets[m]..offsets[m] + nranef_m],
+                    &mut rhs,
+                );
             }
 
             solve_lower_block_against_rhs(&self.l_blocks[block_index(j, j)], &mut rhs);
@@ -611,15 +608,12 @@ impl LinearMixedModel {
         let mut rhs_k = vec![0.0f64; pp1];
         rhs_k.copy_from_slice(&v[nranef_total..nranef_total + pp1]);
         for j in 0..k {
-            let l_kj = self.l_blocks[block_index(k, j)].as_dense();
             let nranef_j = self.reterms[j].n_ranef();
-            for row in 0..pp1 {
-                let mut dot = 0.0;
-                for col in 0..nranef_j {
-                    dot += l_kj[(row, col)] * w[offsets[j] + col];
-                }
-                rhs_k[row] -= dot;
-            }
+            subtract_block_times_slice(
+                &self.l_blocks[block_index(k, j)],
+                &w[offsets[j]..offsets[j] + nranef_j],
+                &mut rhs_k,
+            );
         }
 
         let l_kk = self.l_blocks[block_index(k, k)].as_dense();
