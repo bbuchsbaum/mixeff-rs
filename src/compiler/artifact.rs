@@ -467,6 +467,25 @@ impl FixedEffectCovarianceMatrix {
         )
     }
 
+    /// RX-based GLMM fixed-effect covariance conditional on θ (the joint
+    /// active-Hessian fallback); `Low` reliability because θ uncertainty is
+    /// ignored.
+    pub fn laplace_rx_conditional_on_theta(
+        coef_names: Vec<String>,
+        matrix: Vec<Vec<f64>>,
+        details: FixedEffectCovarianceDetails,
+        notes: Vec<String>,
+    ) -> Self {
+        Self::available_with_method(
+            coef_names,
+            matrix,
+            FixedEffectCovarianceMethod::LaplaceRxConditionalOnTheta,
+            ReliabilityGrade::Low,
+            details,
+            notes,
+        )
+    }
+
     pub fn unavailable(
         coef_names: Vec<String>,
         reason: impl Into<String>,
@@ -495,6 +514,10 @@ pub enum FixedEffectCovarianceMethod {
     ModelBased,
     PirlsLaplaceWorkingHessian,
     JointLaplaceActiveHessian,
+    /// RX (fixed-effect block of the Laplace PLS factorization) at the joint
+    /// optimum, conditional on θ; the fallback when the joint active Hessian
+    /// is not positive definite (lme4 `vcov(use.hessian = FALSE)`).
+    LaplaceRxConditionalOnTheta,
     Unavailable,
 }
 
@@ -558,6 +581,9 @@ pub enum FixedEffectReliabilityReason {
     KenwardRogerApproximation,
     ParametricBootstrapMonteCarlo,
     GlmmJointLaplaceActiveHessianWald,
+    /// Wald z from the RX covariance conditional on θ (joint active Hessian
+    /// not positive definite): θ uncertainty is ignored.
+    GlmmLaplaceRxConditionalOnThetaWald,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

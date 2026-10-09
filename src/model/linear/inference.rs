@@ -2198,6 +2198,14 @@ impl LinearMixedModel {
                     notes,
                 )
             }
+            FixedEffectCovarianceMethod::LaplaceRxConditionalOnTheta => {
+                FixedEffectCovarianceMatrix::laplace_rx_conditional_on_theta(
+                    coef_names,
+                    matrix_rows(&vcov),
+                    details,
+                    notes,
+                )
+            }
             FixedEffectCovarianceMethod::Unavailable => unreachable!(
                 "available covariance constructor should not be called with unavailable method"
             ),

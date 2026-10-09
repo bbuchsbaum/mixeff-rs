@@ -24,6 +24,11 @@ pub enum InferenceCovarianceMethod {
     /// GLMM joint Laplace Hessian over beta and interior covariance parameters;
     /// covariance parameters fixed at their boundary are excluded.
     JointLaplaceActiveHessian,
+    /// GLMM fixed-effect covariance from the fixed-effect block (RX) of the
+    /// Laplace PLS factorization at the joint optimum, conditional on θ
+    /// (lme4 `vcov(fit, use.hessian = FALSE)`); used when the joint active
+    /// Hessian is not positive definite.
+    LaplaceRxConditionalOnTheta,
     /// No covariance was used to produce inference for this row.
     Unavailable,
     /// This row has no fixed-effect inference (e.g. a residual-scale summary).
@@ -39,6 +44,7 @@ impl InferenceCovarianceMethod {
             Self::ModelBased => "model_based",
             Self::KenwardRogerAdjusted => "kenward_roger_adjusted",
             Self::JointLaplaceActiveHessian => "joint_laplace_active_hessian",
+            Self::LaplaceRxConditionalOnTheta => "laplace_rx_conditional_on_theta",
             Self::Unavailable => "unavailable",
             Self::NotApplicable => "not_applicable",
             Self::NotRecorded => "not_recorded",
