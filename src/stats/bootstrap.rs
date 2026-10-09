@@ -573,18 +573,22 @@ mod tests {
     #[test]
     fn test_glmm_parametricbootstrap_threads_are_bit_identical() {
         let model = poisson_glmm_fixture();
-        let mut rng = StdRng::seed_from_u64(20260515);
-        let serial = parametricbootstrap_glmm(&mut rng, 13, &model).unwrap();
-        for threads in [2, 4] {
-            let mut rng = StdRng::seed_from_u64(20260515);
-            let boot = parametricbootstrap_glmm_with_options(
-                &mut rng,
-                13,
-                &model,
-                &BootstrapExecutionOptions { threads },
-            )
-            .unwrap();
-            assert_bootstrap_bit_identical(&serial, &boot);
+        // (seed, replicates): the second mirrors the R package's
+        // test-threads.R Poisson case (nsim = 20, seed = 2).
+        for (seed, n_rep) in [(20260515, 13), (2, 20)] {
+            let mut rng = StdRng::seed_from_u64(seed);
+            let serial = parametricbootstrap_glmm(&mut rng, n_rep, &model).unwrap();
+            for threads in [2, 4] {
+                let mut rng = StdRng::seed_from_u64(seed);
+                let boot = parametricbootstrap_glmm_with_options(
+                    &mut rng,
+                    n_rep,
+                    &model,
+                    &BootstrapExecutionOptions { threads },
+                )
+                .unwrap();
+                assert_bootstrap_bit_identical(&serial, &boot);
+            }
         }
     }
 
