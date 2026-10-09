@@ -68,6 +68,20 @@ impl GeneralizedLinearMixedModel {
         let mut profiled_start_objective =
             self.joint_glmm_deviance_at_params(&start_params, start_beta.len(), n_agq);
         self.take_pending_interrupt()?;
+        if !profiled_start_objective.is_finite() {
+            // The fast-PIRLS fit ends at (β, θ) with its conditional modes
+            // already in hand; a cold (u = 0) conditional solve that stalls
+            // there must not turn a valid start into a failed fit. Resume the
+            // solve from the prefit's modes; it still has to certify the
+            // conditional mode to yield a finite objective.
+            profiled_start_objective = self.joint_glmm_deviance_at_params_from(
+                &start_params,
+                start_beta.len(),
+                n_agq,
+                Some(&fallback_fast_pirls.u),
+            );
+            self.take_pending_interrupt()?;
+        }
         if let Some((lifted_theta, lifted_objective)) = self.joint_boundary_lifted_start(
             &start_beta,
             &start_theta,
@@ -1003,15 +1017,51 @@ impl GeneralizedLinearMixedModel {
         n_beta: usize,
         n_agq: usize,
     ) -> f64 {
+        self.joint_glmm_deviance_at_params_from(params, n_beta, n_agq, None)
+    }
+
+    /// [`joint_glmm_deviance_at_params`](Self::joint_glmm_deviance_at_params)
+    /// with the conditional-mode solve started from `warm_modes` instead of
+    /// u = 0. The value is the same objective: it is returned only when the
+    /// solve certifies the conditional mode (score at tolerance), wherever it
+    /// started.
+    fn joint_glmm_deviance_at_params_from(
+        &mut self,
+        params: &[f64],
+        n_beta: usize,
+        n_agq: usize,
+        warm_modes: Option<&[DMatrix<f64>]>,
+    ) -> f64 {
         if self.pending_progress_error.is_some()
             || params.len() != n_beta + self.theta.len()
             || !params.iter().all(|value| value.is_finite())
+            || warm_modes.is_some_and(|modes| {
+                modes.len() != self.u.len()
+                    || modes
+                        .iter()
+                        .zip(&self.u)
+                        .any(|(mode, u)| mode.shape() != u.shape())
+            })
         {
             return f64::INFINITY;
         }
         self.beta = DVector::from_column_slice(&params[..n_beta]);
         let theta = &params[n_beta..];
-        match self.update_pirls_at_theta(theta, false) {
+        let solved = match warm_modes {
+            Some(modes) => {
+                for (u, mode) in self.u.iter_mut().zip(modes) {
+                    u.copy_from(mode);
+                }
+                self.update_pirls_at_theta_with_options(
+                    theta,
+                    false,
+                    GLMM_HESSIAN_PIRLS_MAX_ITER,
+                    false,
+                )
+            }
+            None => self.update_pirls_at_theta(theta, false),
+        };
+        match solved {
             Ok(true) => {
                 let deviance = self.deviance_with_response_constants(n_agq);
                 if deviance.is_finite() {
