@@ -80,7 +80,7 @@ pub struct CompiledModelSpec<'a> {
 
 impl<'a> CompiledModelSpec<'a> {
     /// Compile and audit `formula` against `data` under the default
-    /// [`CompilerPolicy`].
+    /// compiler policy.
     ///
     /// Errors when the formula has no random-effects term or an in-formula
     /// transform cannot be evaluated on `data` — the same errors
