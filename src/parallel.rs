@@ -14,78 +14,192 @@ use crate::error::{MixedModelError, Result};
 /// The calling thread's floating-point control state, re-applied on every
 /// worker thread so a refit computes bit-identically wherever it runs.
 ///
-/// On 32/64-bit x86 Windows with the GNU toolchain, mingw-w64's libm
-/// (`exp`, `log`, `lgamma`, ...) evaluates with x87 instructions whose
-/// precision/rounding control word is per thread: a fresh worker starts
-/// with the CRT default, which can differ from the host's (R sets its own),
-/// so threaded GLMM refits differed from serial ones in the last bits. Here
-/// the precision- and rounding-control fields of the caller's word are
-/// captured before spawning and applied in each worker. Everywhere else
-/// this is a no-op (SSE2 math has no per-thread precision control and the
-/// rounding mode is never changed by this crate).
+/// On x86/x86_64 there are two per-thread control registers:
+///
+/// * the x87 FPU control word (precision, rounding, exception masks). Rust
+///   code itself never uses x87 on x86_64, but mingw-w64's libm (`exp`,
+///   `log`, `pow`, ... as linked by the `*-windows-gnu` targets) evaluates
+///   with x87 instructions, so its last bits depend on the precision-control
+///   field. R on Windows runs `fninit` on its main thread (`Rwin_fpset`),
+///   selecting 64-bit (extended) precision, control word `0x037F`, whereas a
+///   thread created by `CreateThread` starts with the Windows x64 default
+///   `0x027F` (53-bit precision). Serial refits (on R's thread) and
+///   threaded ones therefore differed in the last ulps.
+/// * the SSE `MXCSR` (rounding, flush-to-zero, denormals-are-zero,
+///   exception masks), which governs all ordinary `f64` arithmetic.
+///
+/// Both are read with `fnstcw`/`stmxcsr` before spawning and loaded with
+/// `fldcw`/`ldmxcsr` in each worker. Going through the CRT's
+/// `_controlfp`/`_control87` does not work: on x64 they ignore the
+/// precision-control field (`_MCW_PC` is unsupported there) and report an
+/// abstraction of `MXCSR`, so the x87 precision never reached the workers.
+/// The registers are propagated on every x86 target (harmless where the
+/// OS already copies them to new threads, as Linux does); other
+/// architectures carry no state, since this crate never changes it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct FloatingPointEnv {
-    #[cfg(all(
-        windows,
-        target_env = "gnu",
-        any(target_arch = "x86", target_arch = "x86_64")
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    x87_control_word: u16,
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "x86", target_feature = "sse")
     ))]
-    control_word: u32,
+    mxcsr: u32,
 }
 
-#[cfg(all(
-    windows,
-    target_env = "gnu",
-    any(target_arch = "x86", target_arch = "x86_64")
-))]
-mod x87_control {
-    /// x87 precision-control mask (`_MCW_PC`).
-    pub(super) const MCW_PC: u32 = 0x0003_0000;
-    /// Rounding-control mask (`_MCW_RC`).
-    pub(super) const MCW_RC: u32 = 0x0000_0300;
-    extern "C" {
-        /// msvcrt `_controlfp`: with `mask == 0` it only reads the word.
-        pub(super) fn _controlfp(new: u32, mask: u32) -> u32;
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+mod x86_control {
+    use std::arch::asm;
+
+    /// `MXCSR` sticky exception-status flags (IE, DE, ZE, OE, UE, PE): not
+    /// control state, so they are not copied to workers.
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "x86", target_feature = "sse")
+    ))]
+    pub(super) const MXCSR_STATUS_FLAGS: u32 = 0x3F;
+
+    /// Read this thread's x87 control word (`fnstcw`).
+    pub(super) fn x87_control_word() -> u16 {
+        let mut word: u16 = 0;
+        // SAFETY: `fnstcw` stores the 16-bit control word to the given,
+        // valid and writable location; it changes no other state.
+        unsafe {
+            asm!(
+                "fnstcw word ptr [{0}]",
+                in(reg) &mut word as *mut u16,
+                options(nostack, preserves_flags)
+            );
+        }
+        word
+    }
+
+    /// Load `word` into this thread's x87 control word (`fldcw`).
+    pub(super) fn set_x87_control_word(word: u16) {
+        // SAFETY: `fldcw` only reads the 16-bit location and replaces this
+        // thread's x87 control word; Rust code does not rely on its value
+        // (SSE2 arithmetic), and the value comes from `fnstcw`.
+        unsafe {
+            asm!(
+                "fldcw word ptr [{0}]",
+                in(reg) &word as *const u16,
+                options(nostack, preserves_flags, readonly)
+            );
+        }
+    }
+
+    /// Read this thread's `MXCSR` (`stmxcsr`).
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "x86", target_feature = "sse")
+    ))]
+    pub(super) fn mxcsr() -> u32 {
+        let mut csr: u32 = 0;
+        // SAFETY: `stmxcsr` stores the 32-bit register to the given, valid
+        // and writable location; it changes no other state.
+        unsafe {
+            asm!(
+                "stmxcsr dword ptr [{0}]",
+                in(reg) &mut csr as *mut u32,
+                options(nostack, preserves_flags)
+            );
+        }
+        csr
+    }
+
+    /// Load `csr` into this thread's `MXCSR` (`ldmxcsr`).
+    #[cfg(any(
+        target_arch = "x86_64",
+        all(target_arch = "x86", target_feature = "sse")
+    ))]
+    pub(super) fn set_mxcsr(csr: u32) {
+        // SAFETY: `ldmxcsr` only reads the 32-bit location; the value comes
+        // from `stmxcsr` (reserved bits zero), so it cannot fault.
+        unsafe {
+            asm!(
+                "ldmxcsr dword ptr [{0}]",
+                in(reg) &csr as *const u32,
+                options(nostack, preserves_flags, readonly)
+            );
+        }
     }
 }
 
 impl FloatingPointEnv {
     /// Capture the calling thread's control state.
     pub(crate) fn capture() -> Self {
-        #[cfg(all(
-            windows,
-            target_env = "gnu",
-            any(target_arch = "x86", target_arch = "x86_64")
-        ))]
-        {
-            // SAFETY: `_controlfp(0, 0)` only reads the control word.
-            let control_word = unsafe { x87_control::_controlfp(0, 0) };
-            Self { control_word }
-        }
-        #[cfg(not(all(
-            windows,
-            target_env = "gnu",
-            any(target_arch = "x86", target_arch = "x86_64")
-        )))]
-        {
-            Self {}
+        Self {
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            x87_control_word: x86_control::x87_control_word(),
+            #[cfg(any(
+                target_arch = "x86_64",
+                all(target_arch = "x86", target_feature = "sse")
+            ))]
+            mxcsr: x86_control::mxcsr() & !x86_control::MXCSR_STATUS_FLAGS,
         }
     }
 
     /// Apply the captured state to the current (worker) thread.
     pub(crate) fn apply(self) {
-        #[cfg(all(
-            windows,
-            target_env = "gnu",
-            any(target_arch = "x86", target_arch = "x86_64")
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        x86_control::set_x87_control_word(self.x87_control_word);
+        #[cfg(any(
+            target_arch = "x86_64",
+            all(target_arch = "x86", target_feature = "sse")
         ))]
-        // SAFETY: sets only the precision- and rounding-control fields of
-        // this thread's control word to the values read on the caller.
-        unsafe {
-            x87_control::_controlfp(self.control_word, x87_control::MCW_PC | x87_control::MCW_RC);
-        }
+        x86_control::set_mxcsr(
+            self.mxcsr | (x86_control::mxcsr() & x86_control::MXCSR_STATUS_FLAGS),
+        );
     }
 }
+
+/// Spawn a scoped worker thread that first adopts `fp_env` (captured on the
+/// calling thread). Every worker spawn site goes through this helper, so no
+/// worker can run a job under a different floating-point control state.
+fn spawn_worker<'scope, T, F>(
+    scope: &'scope std::thread::Scope<'scope, '_>,
+    fp_env: FloatingPointEnv,
+    f: F,
+) -> std::thread::ScopedJoinHandle<'scope, T>
+where
+    T: Send + 'scope,
+    F: FnOnce() -> T + Send + 'scope,
+{
+    scope.spawn(move || {
+        fp_env.apply();
+        f()
+    })
+}
+
+/// Run `f` with this thread's x87 control word set to `0x037F` (all
+/// exceptions masked, 64-bit extended precision, round to nearest): the
+/// state R on Windows establishes on its main thread with `fninit`. The
+/// previous control word is restored afterwards (also on panic). Tests use
+/// it to reproduce the R host situation, in which worker threads start with
+/// a different x87 precision than the calling thread.
+#[cfg(test)]
+pub(crate) fn with_r_host_x87_precision<R>(f: impl FnOnce() -> R) -> R {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    {
+        struct Restore(u16);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                x86_control::set_x87_control_word(self.0);
+            }
+        }
+        let _restore = Restore(x86_control::x87_control_word());
+        x86_control::set_x87_control_word(R_HOST_X87_CONTROL_WORD);
+        f()
+    }
+    #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+    {
+        f()
+    }
+}
+
+/// x87 control word after `fninit` (R's `Rwin_fpset`).
+#[cfg(test)]
+const R_HOST_X87_CONTROL_WORD: u16 = 0x037F;
 
 /// Validate a caller-supplied thread count (`0` is rejected; `1` is serial).
 pub(crate) fn validate_threads(threads: usize) -> Result<()> {
@@ -133,8 +247,7 @@ where
     let produced: Vec<Vec<(usize, R)>> = std::thread::scope(|scope| {
         let handles: Vec<_> = (0..workers)
             .map(|_| {
-                scope.spawn(|| {
-                    fp_env.apply();
+                spawn_worker(scope, fp_env, || {
                     // Decrement `running` even if a job panics.
                     struct Finished<'a>(&'a AtomicUsize);
                     impl Drop for Finished<'_> {
@@ -251,8 +364,7 @@ where
             let result_tx = result_tx.clone();
             let (job_rx, stop, init, run, panic_payload) =
                 (&job_rx, &stop, &init, &run, &panic_payload);
-            scope.spawn(move || {
-                fp_env.apply();
+            spawn_worker(scope, fp_env, move || {
                 let worker = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     let mut state = init();
                     loop {
@@ -411,17 +523,18 @@ mod tests {
 
     /// libm-heavy work (the exp/log/lgamma-style kernels of GLMM refits) is
     /// bit-identical on worker threads and on the calling thread, through
-    /// both mappers. On x86 windows-gnu this exercises the x87 control-word
-    /// propagation of [`FloatingPointEnv`]; elsewhere it guards the
-    /// invariant.
+    /// both mappers (see `worker_floating_point_matches_extended_precision_caller`
+    /// for the R-host x87 state).
     #[test]
     fn worker_floating_point_matches_calling_thread() {
         fn kernel(x: f64) -> u64 {
             let a = (x * 0.37).exp() + (1.0 + x).ln() + (x * 0.11).sin();
             let b = (2.5 + x).powf(0.73) * (x / 7.0).tanh();
-            (a / 3.0 + b).to_bits()
+            let c = (x * 1e-3).ln_1p() + (x * 1e-2).exp_m1() + x.atan2(3.0) + (x + 0.5).log10();
+            let d = statrs::function::gamma::ln_gamma(x + 1.0) - (-x * 0.05).exp() * x.cosh().ln();
+            (a / 3.0 + b + c * 0.25 + d).to_bits()
         }
-        let items: Vec<f64> = (0..200).map(|i| i as f64 * 0.731 + 0.013).collect();
+        let items: Vec<f64> = (0..2000).map(|i| i as f64 * 0.0731 + 0.013).collect();
         let serial: Vec<u64> = items.iter().map(|&x| kernel(x)).collect();
         let cancel = std::sync::atomic::AtomicBool::new(false);
         let mapped = map_with_workers_polled(
@@ -450,23 +563,61 @@ mod tests {
         assert_eq!(piped, serial);
     }
 
-    /// The captured control state is re-applied on a fresh thread.
-    #[cfg(all(
-        windows,
-        target_env = "gnu",
-        any(target_arch = "x86", target_arch = "x86_64")
-    ))]
+    /// The caller's x87 control word and MXCSR reach every worker, also
+    /// when they differ from the state a fresh thread starts with: here the
+    /// caller runs with R's extended x87 precision (`fninit`, `0x037F`)
+    /// and flush-to-zero set, while a new Windows thread starts at `0x027F`
+    /// with FTZ clear. Fails on Windows without the propagation.
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[test]
-    fn floating_point_env_propagates_x87_control_word() {
-        let mask = x87_control::MCW_PC | x87_control::MCW_RC;
-        let caller = FloatingPointEnv::capture();
-        let seen = std::thread::spawn(move || {
-            caller.apply();
-            FloatingPointEnv::capture()
-        })
-        .join()
-        .unwrap();
-        assert_eq!(caller.control_word & mask, seen.control_word & mask);
+    fn worker_threads_adopt_extended_precision_caller_control_state() {
+        with_r_host_x87_precision(|| {
+            #[cfg(any(
+                target_arch = "x86_64",
+                all(target_arch = "x86", target_feature = "sse")
+            ))]
+            let saved_mxcsr = x86_control::mxcsr();
+            #[cfg(any(
+                target_arch = "x86_64",
+                all(target_arch = "x86", target_feature = "sse")
+            ))]
+            x86_control::set_mxcsr(saved_mxcsr | 0x8000); // FTZ
+            let caller = FloatingPointEnv::capture();
+            assert_eq!(caller.x87_control_word, R_HOST_X87_CONTROL_WORD);
+            let read = |_: &mut (), _: usize| FloatingPointEnv::capture();
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            let mapped =
+                map_with_workers_polled(3, vec![0; 6], || (), read, &cancel, &mut || Ok(()))
+                    .unwrap();
+            let mut piped = Vec::new();
+            pipeline(3, 6, &mut |i| Ok(i), || (), read, &mut |_, env| {
+                piped.push(env);
+                Ok(true)
+            })
+            .unwrap();
+            #[cfg(any(
+                target_arch = "x86_64",
+                all(target_arch = "x86", target_feature = "sse")
+            ))]
+            x86_control::set_mxcsr(saved_mxcsr);
+            for seen in mapped.iter().chain(&piped) {
+                assert_eq!(seen.x87_control_word, caller.x87_control_word);
+                #[cfg(any(
+                    target_arch = "x86_64",
+                    all(target_arch = "x86", target_feature = "sse")
+                ))]
+                assert_eq!(seen.mxcsr, caller.mxcsr);
+            }
+        });
+    }
+
+    /// The libm kernel stays bit-identical on workers when the caller runs
+    /// with R's extended x87 precision. With mingw-w64's x87-based libm
+    /// (windows-gnu) the results depend on the precision control, so this
+    /// fails there without the propagation.
+    #[test]
+    fn worker_floating_point_matches_extended_precision_caller() {
+        with_r_host_x87_precision(worker_floating_point_matches_calling_thread);
     }
 }
 

@@ -592,6 +592,31 @@ mod tests {
         }
     }
 
+    /// The R package's situation on Windows: R's main thread runs with
+    /// extended x87 precision (`fninit`), fresh worker threads do not, and
+    /// mingw-w64's x87-based libm makes GLMM refits precision-sensitive.
+    /// Serial (calling thread) and threaded bootstraps must still agree bit
+    /// for bit (test-threads.R Poisson case: nsim = 20, seed = 2).
+    #[test]
+    fn test_glmm_parametricbootstrap_threads_match_under_extended_precision() {
+        crate::parallel::with_r_host_x87_precision(|| {
+            let model = poisson_glmm_fixture();
+            let mut rng = StdRng::seed_from_u64(2);
+            let serial = parametricbootstrap_glmm(&mut rng, 20, &model).unwrap();
+            for threads in [2, 4] {
+                let mut rng = StdRng::seed_from_u64(2);
+                let boot = parametricbootstrap_glmm_with_options(
+                    &mut rng,
+                    20,
+                    &model,
+                    &BootstrapExecutionOptions { threads },
+                )
+                .unwrap();
+                assert_bootstrap_bit_identical(&serial, &boot);
+            }
+        });
+    }
+
     /// The fixed-effect null bootstrap honours `threads` with identical
     /// replicates, statistics and p-value.
     #[test]
