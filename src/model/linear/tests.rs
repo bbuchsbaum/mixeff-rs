@@ -4958,10 +4958,18 @@ fn test_lmm_explicit_kenward_roger_multi_df_request_returns_f_test() {
     assert_eq!(test.p_values.len(), 1);
     assert!(test.p_values[0].unwrap().is_finite());
     assert!((0.0..=1.0).contains(&test.p_values[0].unwrap()));
+    let scaling = test
+        .kenward_roger_f_scaling
+        .expect("multi-df KR F test records its F scaling");
+    assert!(scaling.f_scaling.is_finite() && scaling.f_scaling > 0.0);
+    assert!(
+        (test.statistics[0].unwrap() - scaling.f_scaling * scaling.unscaled_statistic).abs()
+            <= 1e-12 * test.statistics[0].unwrap().abs()
+    );
     assert!(test
         .notes
         .iter()
-        .any(|note| note.contains("F scaling = 1.0")));
+        .any(|note| note.contains("scaled by lambda")));
 
     let row = fixed_effect_test_to_inference_row(FixedEffectInferenceRowKind::Term, test);
     let details = row.details.expect("multi-df row should carry details");
@@ -4974,8 +4982,10 @@ fn test_lmm_explicit_kenward_roger_multi_df_request_returns_f_test() {
     let kr = details
         .kenward_roger
         .expect("KR row should carry KR details");
-    assert_eq!(kr.f_scaling, Some(1.0));
-    assert_eq!(kr.statistic_scale.as_deref(), Some("unscaled"));
+    assert_eq!(kr.f_scaling, Some(scaling.f_scaling));
+    assert_eq!(kr.statistic_scale.as_deref(), Some("kenward_roger_scaled"));
+    assert_eq!(kr.unscaled_statistic, Some(scaling.unscaled_statistic));
+    assert_eq!(kr.unscaled_p_value, scaling.unscaled_p_value);
 }
 
 #[test]
@@ -5064,7 +5074,11 @@ fn test_native_default_kenward_roger_rows_are_finite_with_realistic_tolerances()
             // `test_lmm_kenward_roger_scalar_rows_match_pbkrtest_fixture`.
             test.statistics[0].unwrap().powi(2)
         } else {
-            test.statistics[0].unwrap()
+            // Multi-row rows report pbkrtest's scaled `Ftest`; the
+            // unscaled `FtestU` lives in the KR scaling record.
+            test.kenward_roger_f_scaling
+                .expect("multi-df KR F test records its scaling")
+                .unscaled_statistic
         };
         assert!(
             (unscaled_statistic - case.unscaled_statistic).abs()
@@ -5148,7 +5162,7 @@ fn test_lmm_kenward_roger_scalar_rows_match_pbkrtest_fixture() {
 // native no-default-features path drifts in the unscaled F statistic.
 #[cfg(feature = "nlopt")]
 #[test]
-fn test_lmm_kenward_roger_multi_df_rows_match_pbkrtest_unscaled_fixture() {
+fn test_lmm_kenward_roger_multi_df_rows_match_pbkrtest_fixture() {
     let fixture = kenward_roger_pbkrtest_parity_fixture();
 
     for case in fixture.multi_df_cases {
@@ -5192,29 +5206,172 @@ fn test_lmm_kenward_roger_multi_df_rows_match_pbkrtest_unscaled_fixture() {
             epsilon = 1e-3,
             max_relative = 5e-4,
         );
-        assert!(
-            (test.statistics[0].unwrap() - case.unscaled_statistic).abs()
-                <= 1e-3 + 5e-4 * case.unscaled_statistic.abs(),
-            "{}: unscaled F drift exceeds tolerance: rust={} ref={}",
-            case.name,
-            test.statistics[0].unwrap(),
-            case.unscaled_statistic
+        // The row reports pbkrtest's scaled `Ftest`; the unscaled `FtestU`
+        // is kept in the KR scaling record.
+        assert_kenward_roger_scaled_f_matches(
+            &test,
+            &case.name,
+            KenwardRogerScaledReference {
+                statistic: case.statistic,
+                p_value: case.p_value,
+                f_scaling: case.f_scaling,
+                unscaled_statistic: case.unscaled_statistic,
+                unscaled_p_value: case.unscaled_p_value,
+            },
         );
-        assert_relative_eq!(
-            test.p_values[0].unwrap(),
-            case.unscaled_p_value,
-            epsilon = 1e-12,
-            max_relative = 1e-3,
-        );
+    }
+}
 
-        if (case.f_scaling - 1.0).abs() > 1e-12 {
-            assert_ne!(case.statistic, case.unscaled_statistic);
-            assert_ne!(case.p_value, case.unscaled_p_value);
-            assert!(test
-                .notes
-                .iter()
-                .any(|note| note.contains("F scaling = 1.0")));
-        }
+struct KenwardRogerScaledReference {
+    statistic: f64,
+    p_value: f64,
+    f_scaling: f64,
+    unscaled_statistic: f64,
+    unscaled_p_value: f64,
+}
+
+fn assert_kenward_roger_scaled_f_matches(
+    test: &FixedEffectTest,
+    name: &str,
+    reference: KenwardRogerScaledReference,
+) {
+    // Multi-df F drift vs pbkrtest is dominated by numerical noise in the
+    // adjusted-vcov off-diagonals; match a realistic numerical tolerance
+    // rather than bit-exactness.
+    let close = |got: f64, want: f64| (got - want).abs() <= 1e-3 + 5e-4 * want.abs();
+    let statistic = test.statistics[0].unwrap();
+    assert!(
+        close(statistic, reference.statistic),
+        "{name}: scaled F rust={statistic} pbkrtest Ftest={}",
+        reference.statistic
+    );
+    assert_relative_eq!(
+        test.p_values[0].unwrap(),
+        reference.p_value,
+        epsilon = 1e-12,
+        max_relative = 1e-3,
+    );
+    let scaling = test
+        .kenward_roger_f_scaling
+        .unwrap_or_else(|| panic!("{name}: KR F test must record its scaling"));
+    assert!(
+        (scaling.f_scaling - reference.f_scaling).abs() <= 1e-4,
+        "{name}: lambda rust={} pbkrtest={}",
+        scaling.f_scaling,
+        reference.f_scaling
+    );
+    assert!(
+        close(scaling.unscaled_statistic, reference.unscaled_statistic),
+        "{name}: unscaled F rust={} pbkrtest FtestU={}",
+        scaling.unscaled_statistic,
+        reference.unscaled_statistic
+    );
+    assert_relative_eq!(
+        scaling.unscaled_p_value.unwrap(),
+        reference.unscaled_p_value,
+        epsilon = 1e-12,
+        max_relative = 1e-3,
+    );
+}
+
+#[derive(Debug, Deserialize)]
+struct KenwardRogerScaledFixture {
+    generated_with: serde_json::Value,
+    cases: Vec<KenwardRogerScaledCase>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KenwardRogerScaledCase {
+    name: String,
+    formula: String,
+    label: String,
+    l: Vec<Vec<f64>>,
+    rhs: Vec<f64>,
+    numerator_df: f64,
+    denominator_df: f64,
+    statistic: f64,
+    p_value: f64,
+    f_scaling: f64,
+    unscaled_statistic: f64,
+    unscaled_p_value: f64,
+    coefficient_names: Vec<String>,
+}
+
+/// sleepstudy plus the derived factors used by the scaled-F fixture:
+/// `phase` = a (days 0-1), b (2-4), c (5-7), d (8-9); `half` = early
+/// (days < 5) / late.
+fn sleepstudy_with_phase_fixture() -> DataFrame {
+    let mut df = sleepstudy_fixture();
+    let days = df.numeric("days").unwrap().to_vec();
+    let phase = days
+        .iter()
+        .map(|&d| match d as i32 {
+            0..=1 => "a",
+            2..=4 => "b",
+            5..=7 => "c",
+            _ => "d",
+        })
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let half = days
+        .iter()
+        .map(|&d| if d < 5.0 { "early" } else { "late" }.to_string())
+        .collect::<Vec<_>>();
+    df.add_categorical("phase", phase).unwrap();
+    df.add_categorical("half", half).unwrap();
+    df
+}
+
+/// pbkrtest::KRmodcomp `Ftest` parity (scaled F, ndf, ddf, p) for 2- and
+/// 3-df L-matrix tests; see the fixture's provenance for the R script.
+#[test]
+fn test_lmm_kenward_roger_scaled_f_matches_pbkrtest_krmodcomp() {
+    let fixture: KenwardRogerScaledFixture = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/compiler_contract/kenward_roger_pbkrtest_scaled_f_v1.json"
+    ))
+    .expect("scaled KR fixture should deserialize");
+    assert!(fixture.generated_with["r_packages"]["pbkrtest"].is_string());
+    assert!(fixture.cases.len() >= 2);
+    let data = sleepstudy_with_phase_fixture();
+    for case in fixture.cases {
+        let formula = case
+            .formula
+            .replace("Reaction", "reaction")
+            .replace("Days", "days");
+        let mut model =
+            LinearMixedModel::new(parse_formula(&formula).unwrap(), &data, None).unwrap();
+        model.fit(true).unwrap();
+        assert_eq!(model.coef_names().len(), case.coefficient_names.len());
+        let hypothesis = fixed_effect_hypothesis_from_fixture(&case.label, &case.l, &case.rhs);
+        let test = model.test_contrast_with_method(hypothesis, FixedEffectTestMethod::KenwardRoger);
+        assert_eq!(test.status, InferenceStatus::Available, "{}", case.name);
+        assert_eq!(test.numerator_df, Some(case.numerator_df), "{}", case.name);
+        assert_relative_eq!(
+            test.denominator_df.unwrap(),
+            case.denominator_df,
+            epsilon = 1e-3,
+            max_relative = 5e-4,
+        );
+        assert!(
+            (case.f_scaling - 1.0).abs() > 1e-3,
+            "{}: informative λ",
+            case.name
+        );
+        assert_kenward_roger_scaled_f_matches(
+            &test,
+            &case.name,
+            KenwardRogerScaledReference {
+                statistic: case.statistic,
+                p_value: case.p_value,
+                f_scaling: case.f_scaling,
+                unscaled_statistic: case.unscaled_statistic,
+                unscaled_p_value: case.unscaled_p_value,
+            },
+        );
+        let row = fixed_effect_test_to_inference_row(FixedEffectInferenceRowKind::Term, test);
+        let kr = row.details.unwrap().kenward_roger.unwrap();
+        assert_eq!(kr.statistic_scale.as_deref(), Some("kenward_roger_scaled"));
+        assert!(kr.unscaled_statistic.is_some() && kr.unscaled_p_value.is_some());
     }
 }
 

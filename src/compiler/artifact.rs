@@ -621,8 +621,18 @@ pub struct ContrastFamilyDetails {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KenwardRogerInferenceDetails {
     pub restriction_rank: Option<usize>,
+    /// Kenward-Roger F scaling factor λ of a multi-df F row (pbkrtest
+    /// `F.scaling`); `None` for a t row.
     pub f_scaling: Option<f64>,
+    /// `"kenward_roger_scaled"` when the row's statistic is λ·F_U
+    /// (pbkrtest `Ftest`).
     pub statistic_scale: Option<String>,
+    /// Unscaled F_U of a multi-df F row (pbkrtest `FtestU`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unscaled_statistic: Option<f64>,
+    /// p-value of F_U on F(q, ddf) (pbkrtest `FtestU`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unscaled_p_value: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

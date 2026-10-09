@@ -1,0 +1,69 @@
+{
+  "schema_version": "1.0.0",
+  "generated_with": {
+    "r_version": "4.3.3",
+    "r_packages": {
+      "lme4": "1.1.35.1",
+      "pbkrtest": "0.5.2"
+    },
+    "method": "pbkrtest::KRmodcomp(lmer(formula, data, REML = TRUE), L)$test -- statistic/p_value/denominator_df from the scaled Ftest row (F = F.scaling * FtestU), unscaled_* from the FtestU row",
+    "data": "datasets/sleepstudy/data.csv; subj = factor(Subject); phase = a (Days 0-1), b (2-4), c (5-7), d (8-9); half = early (Days < 5), late; treatment contrasts"
+  },
+  "cases": [
+    {
+      "name": "sleepstudy_phase_three_df",
+      "formula": "Reaction ~ 1 + phase + (Days | subj)",
+      "label": "sleepstudy_phase_three_df = 0",
+      "l": [
+        [0, 1, 0, 0],
+        [0, 0, 1, 0],
+        [0, 0, 0, 1]
+      ],
+      "rhs": [0, 0, 0],
+      "numerator_df": 3,
+      "denominator_df": 94.0255596206055,
+      "statistic": 11.1633005892588,
+      "p_value": 2.47332217162839e-06,
+      "f_scaling": 0.990845153199829,
+      "unscaled_statistic": 11.2664431502825,
+      "unscaled_p_value": 2.21390819554469e-06,
+      "coefficient_names": ["(Intercept)", "phaseb", "phasec", "phased"]
+    },
+    {
+      "name": "sleepstudy_days_half_two_df",
+      "formula": "Reaction ~ 1 + Days + half + (Days | subj)",
+      "label": "sleepstudy_days_half_two_df = 0",
+      "l": [
+        [0, 1, 0],
+        [0, 0, 1]
+      ],
+      "rhs": [0, 0],
+      "numerator_df": 2,
+      "denominator_df": 39.8170424428287,
+      "statistic": 22.8301620528116,
+      "p_value": 2.48146591079375e-07,
+      "f_scaling": 0.983588885238526,
+      "unscaled_statistic": 23.2110817796352,
+      "unscaled_p_value": 2.07964172864542e-07,
+      "coefficient_names": ["(Intercept)", "Days", "halflate"]
+    },
+    {
+      "name": "sleepstudy_phase_contrast_two_df",
+      "formula": "Reaction ~ 1 + phase + (Days | subj)",
+      "label": "sleepstudy_phase_contrast_two_df = 0",
+      "l": [
+        [0, 1, -1, 0],
+        [0, 0, 1, -1]
+      ],
+      "rhs": [0, 0],
+      "numerator_df": 2,
+      "denominator_df": 87.4582484932264,
+      "statistic": 16.373363354857,
+      "p_value": 9.12137761928746e-07,
+      "f_scaling": 0.994350069919646,
+      "unscaled_statistic": 16.4663973485516,
+      "unscaled_p_value": 8.52483686048856e-07,
+      "coefficient_names": ["(Intercept)", "phaseb", "phasec", "phased"]
+    }
+  ]
+}
