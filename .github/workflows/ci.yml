@@ -126,6 +126,13 @@ jobs:
           $bin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32.static.posix-gcc.exe" |
             Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          # Rtools' static toolchain has no libgcc_eh, which Rust's
+          # windows-gnu std links; R packages (mixeff's Makevars.win, the
+          # extendr template) put an empty stand-in on LIBRARY_PATH.
+          $mock = Join-Path $env:RUNNER_TEMP "libgcc_mock"
+          New-Item -ItemType Directory -Force -Path $mock | Out-Null
+          New-Item -ItemType File -Force -Path (Join-Path $mock "libgcc_eh.a") | Out-Null
+          "LIBRARY_PATH=$mock" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Show linker
         if: matrix.linker == 'rtools45'
         run: x86_64-w64-mingw32.static.posix-gcc --version
