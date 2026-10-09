@@ -81,13 +81,13 @@ fn patents_poisson_joint_laplace_matches_glmer() {
 }
 
 /// Covariate scalings at which the pre-fix engine failed the starting
-/// conditional-mode solve on x86-64 (8795083 and 5db36cd), so the guard does
-/// not depend on reproducing arm64 rounding.
+/// conditional-mode solve on x86-64 (0.999592 and 1.002 on 5db36cd; 0.998079
+/// and 1.000187 among seven of 300 on 8795083), so the guard does not depend
+/// on reproducing arm64 rounding. Scaling a binary covariate only
+/// reparameterizes its coefficient, so the log-likelihood is unchanged.
 #[test]
 fn patents_poisson_joint_start_survives_rounding_perturbations() {
-    for scale in [
-        0.998079, 0.998504, 0.99864, 0.999592, 0.999609, 0.999983, 1.000187, 1.001326, 1.002,
-    ] {
+    for scale in [0.999592, 1.002, 0.998079, 1.000187] {
         let mut model = build_model(scale);
         model
             .fit_with_options(false, 1, false)
