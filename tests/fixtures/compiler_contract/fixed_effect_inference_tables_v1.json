@@ -113,42 +113,15 @@
           "assessment": {
             "diagnostics": [],
             "label": "x",
-            "rank": 0,
-            "requested_rank": 1,
-            "status": "not_estimable"
-          },
-          "estimand": "fixed_contrast"
-        },
-        "estimate": 0.0,
-        "kind": "coefficient",
-        "label": "x",
-        "method": "not_computed",
-        "notes": [],
-        "numerator_df": null,
-        "p_value": null,
-        "reason": "contrast touches aliased or non-finite coefficient directions",
-        "reliability": "not_available",
-        "statistic": null,
-        "statistic_name": null,
-        "status": "not_estimable",
-        "std_error": null
-      },
-      {
-        "covariance_method": "model_based",
-        "denominator_df": null,
-        "estimability": {
-          "assessment": {
-            "diagnostics": [],
-            "label": "x2",
             "rank": 1,
             "requested_rank": 1,
             "status": "estimable"
           },
           "estimand": "fixed_contrast"
         },
-        "estimate": -0.08333333333333333,
+        "estimate": -0.16666666666666666,
         "kind": "coefficient",
-        "label": "x2",
+        "label": "x",
         "method": "asymptotic_wald_z",
         "notes": [
           "asymptotic Wald z is a labeled fallback, not a finite-sample correction"
@@ -161,6 +134,33 @@
         "statistic": null,
         "statistic_name": "z",
         "status": "p_value_unavailable",
+        "std_error": null
+      },
+      {
+        "covariance_method": "model_based",
+        "denominator_df": null,
+        "estimability": {
+          "assessment": {
+            "diagnostics": [],
+            "label": "x2",
+            "rank": 0,
+            "requested_rank": 1,
+            "status": "not_estimable"
+          },
+          "estimand": "fixed_contrast"
+        },
+        "estimate": 0.0,
+        "kind": "coefficient",
+        "label": "x2",
+        "method": "not_computed",
+        "notes": [],
+        "numerator_df": null,
+        "p_value": null,
+        "reason": "contrast touches aliased or non-finite coefficient directions",
+        "reliability": "not_available",
+        "statistic": null,
+        "statistic_name": null,
+        "status": "not_estimable",
         "std_error": null
       }
     ],

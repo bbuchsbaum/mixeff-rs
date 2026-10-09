@@ -1793,8 +1793,10 @@ impl MixedModelFit for GeneralizedLinearMixedModel {
     }
 
     fn coef(&self) -> DVector<f64> {
-        // Dropped (aliased) columns are NaN, not 0: they were not estimated.
-        let mut full = DVector::from_element(self.lmm.feterm.piv.len(), f64::NAN);
+        // Dropped (aliased) columns are 0, the value every contrast and
+        // prediction (L * coef) needs; `dropped_coef_names()` identifies them
+        // so hosts can report NA, as lme4's fixef(add.dropped = TRUE) does.
+        let mut full = DVector::from_element(self.lmm.feterm.piv.len(), 0.0);
         for (i, &val) in self.beta.iter().enumerate() {
             if i < self.lmm.feterm.piv.len() {
                 full[self.lmm.feterm.piv[i]] = val;

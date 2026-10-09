@@ -818,6 +818,7 @@ impl GeneralizedLinearMixedModel {
         n_agq: usize,
     ) -> Result<()> {
         LinearMixedModel::rectify_theta_columns(theta, &self.lmm.parmap, self.lmm.reterms.len());
+        self.snap_near_zero_variances_to_boundary(theta, n_agq);
 
         // Final PIRLS at optimal θ, after matching MixedModels.jl's
         // post-optimizer sign convention for Cholesky columns.
@@ -841,6 +842,34 @@ impl GeneralizedLinearMixedModel {
         self.lmm.optsum.fmin = self.deviance(n_agq);
         self.lmm.optsum.final_params = theta.to_vec();
         Ok(())
+    }
+
+    /// Boundary check, as the LMM path does after its optimizer: a diagonal
+    /// θ that the optimizer left just above its zero lower bound is set to
+    /// exactly 0 when the penalized deviance there is no worse. Derivative-
+    /// free optimizers often stop a hair inside a flat boundary (θ ≈ 1e-7),
+    /// which would otherwise hide a singular fit from boundary diagnostics.
+    fn snap_near_zero_variances_to_boundary(&mut self, theta: &mut [f64], n_agq: usize) {
+        const NEAR_ZERO: f64 = 1e-5;
+        let mut snapped = theta.to_vec();
+        let mut changed = false;
+        for (i, (_, row, col)) in self.lmm.parmap.iter().enumerate() {
+            if row == col && snapped[i] > 0.0 && snapped[i] < NEAR_ZERO {
+                snapped[i] = 0.0;
+                changed = true;
+            }
+        }
+        if !changed {
+            return;
+        }
+        let current = self.penalized_pirls_deviance_at_theta(theta, n_agq);
+        let at_zero = self.penalized_pirls_deviance_at_theta(&snapped, n_agq);
+        if at_zero.is_finite()
+            && current.is_finite()
+            && at_zero <= current + 1e-10 * (1.0 + current.abs())
+        {
+            theta.copy_from_slice(&snapped);
+        }
     }
 
     fn cobyla_success_status_label(status: cobyla::SuccessStatus) -> String {

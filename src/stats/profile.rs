@@ -1776,12 +1776,16 @@ enum ProfileTask {
     Sigma,
     Beta(usize),
     Theta(usize),
+    /// lme4-scale `.sigNN` profile; failures are omitted, as in
+    /// [`profile_sdcors`].
+    SdCor(usize),
 }
 
 /// [`profile`] with execution options (worker threads).
 ///
 /// `threads == 1` is exactly [`profile`]. With more threads, the σ profile,
-/// each ML β profile, and each θ profile run on scoped worker threads, each
+/// each ML β profile, each θ profile and each lme4-scale `.sigNN` profile
+/// run on scoped worker threads, each
 /// on a fresh copy of the fitted model (every per-parameter profile starts
 /// from, and restores, the fitted state, so the copies see exactly what the
 /// serial sweep sees), and the pieces are assembled in the serial order.
@@ -1805,6 +1809,7 @@ pub fn profile_with_options(
         tasks.extend((0..m.feterm.rank).map(ProfileTask::Beta));
     }
     tasks.extend((0..m.n_theta()).map(ProfileTask::Theta));
+    tasks.extend((0..m.n_theta()).map(ProfileTask::SdCor));
 
     // Workers get a pure-Rust callback that only watches the cancel flag,
     // so refits on worker threads can stop early without touching the host.
@@ -1845,6 +1850,12 @@ pub fn profile_with_options(
                 ProfileTask::Sigma => profile_sigma(&mut work, 4.0),
                 ProfileTask::Beta(index) => profile_beta(&mut work, index, 4.0),
                 ProfileTask::Theta(index) => profile_theta(&mut work, index, 4.0),
+                ProfileTask::SdCor(index) => Ok(profile_sdcor(&mut work, index, 4.0)
+                    .unwrap_or_else(|_| MixedModelProfile {
+                        tbl: Vec::new(),
+                        fwd: BTreeMap::new(),
+                        rev: BTreeMap::new(),
+                    })),
             }
         },
         &cancel,

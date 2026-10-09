@@ -281,8 +281,9 @@ pub trait MixedModelFit {
 
     /// Names of fixed-effect columns dropped from the fit because they are
     /// linear combinations of earlier columns (rank deficiency), in
-    /// coefficient order. Their [`coef`](Self::coef) entries are `NaN` (R's
-    /// `NA`, as in `lme4::fixef(fit, add.dropped = TRUE)`).
+    /// coefficient order. Their [`coef`](Self::coef) entries are 0 (so
+    /// `L * coef` contrasts and predictions are unaffected); hosts report
+    /// them as `NA`, as `lme4::fixef(fit, add.dropped = TRUE)` does.
     fn dropped_coef_names(&self) -> Vec<String> {
         Vec::new()
     }

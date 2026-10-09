@@ -33,7 +33,7 @@ vs. `unstable-internals` surface inventory.
 - GLMM `stderror()` / bootstrap replicate SEs never fall back to unscaled
   working-LMM SEs.
 - Rank-deficient X keeps the earlier of two collinear columns (R's `qr()`
-  rule); dropped coefficients are `NaN` in `coef()` and listed by
+  rule); dropped coefficients stay 0 in `coef()` (so `L * coef` contrasts and predictions are unaffected) and are listed by
   `MixedModelFit::dropped_coef_names()`.
 - Unused grouping-factor levels are dropped; REML treats a non-positive
   `L_XX` pivot as infeasible; `a*b - b:a` removes `a:b`; cluster
