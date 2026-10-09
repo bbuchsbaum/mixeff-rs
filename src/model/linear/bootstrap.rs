@@ -364,7 +364,7 @@ impl MixedModelBootstrap {
         self.parameter_series()?
             .into_iter()
             .map(|(parameter, mut values)| {
-                values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                values.sort_by(f64::total_cmp);
                 Ok(BootstrapQuantile {
                     parameter,
                     probability,
@@ -383,7 +383,7 @@ impl MixedModelBootstrap {
         self.parameter_series()?
             .into_iter()
             .map(|(parameter, mut values)| {
-                values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                values.sort_by(f64::total_cmp);
                 Ok(BootstrapInterval {
                     parameter,
                     level,
@@ -718,8 +718,13 @@ pub(super) fn validate_level(level: f64) -> Result<()> {
     }
 }
 
+/// Type-7 quantile of an already sorted slice. Returns `NaN` for an empty
+/// slice (e.g. a parameter whose replicates were all non-finite) or a
+/// probability outside `[0, 1]` instead of panicking.
 pub(super) fn quantile_sorted(values: &[f64], probability: f64) -> f64 {
-    debug_assert!(!values.is_empty());
+    if values.is_empty() || !(0.0..=1.0).contains(&probability) {
+        return f64::NAN;
+    }
     if values.len() == 1 {
         return values[0];
     }
@@ -733,10 +738,16 @@ pub(super) fn quantile_sorted(values: &[f64], probability: f64) -> f64 {
     }
 }
 
+/// Shortest window covering `level` of the (finite) `values`. Returns
+/// `(NaN, NaN)` for an empty slice or a level outside `(0, 1)` instead of
+/// panicking.
 fn shortest_interval(values: &mut [f64], level: f64) -> (f64, f64) {
-    values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    values.sort_by(f64::total_cmp);
     let n = values.len();
-    let ilen = ((n as f64) * level).ceil() as usize;
+    if n == 0 || !(level > 0.0 && level < 1.0) {
+        return (f64::NAN, f64::NAN);
+    }
+    let ilen = (((n as f64) * level).ceil() as usize).max(1);
     if ilen >= n {
         return (values[0], values[n - 1]);
     }
@@ -982,4 +993,24 @@ fn run_parametricbootstrap<R: rand::Rng>(
     }
 
     Ok(MixedModelBootstrap { fits })
+}
+
+#[cfg(test)]
+mod interval_helper_tests {
+    use super::{quantile_sorted, shortest_interval};
+
+    #[test]
+    fn interval_helpers_do_not_panic_on_empty_input() {
+        assert!(quantile_sorted(&[], 0.5).is_nan());
+        assert!(quantile_sorted(&[1.0, 2.0], 1.5).is_nan());
+        let (lo, hi) = shortest_interval(&mut [], 0.95);
+        assert!(lo.is_nan() && hi.is_nan());
+        let (lo, hi) = shortest_interval(&mut [1.0, 2.0, 3.0], 2.0);
+        assert!(lo.is_nan() && hi.is_nan());
+        assert_eq!(quantile_sorted(&[1.0, 3.0], 0.5), 2.0);
+        assert_eq!(
+            shortest_interval(&mut [3.0, 1.0, 2.0, 10.0], 0.5),
+            (1.0, 2.0)
+        );
+    }
 }

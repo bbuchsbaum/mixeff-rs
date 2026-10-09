@@ -1651,7 +1651,7 @@ fn test_glmm_constructor_accepts_normal_nonidentity_dispersion_family() {
 }
 
 #[test]
-fn test_gamma_glmm_fit_estimates_pearson_dispersion() {
+fn test_gamma_glmm_fit_estimates_lme4_sigma_dispersion() {
     let data = gamma_dispersion_fixture();
     let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
     let mut model =
@@ -1662,8 +1662,13 @@ fn test_gamma_glmm_fit_estimates_pearson_dispersion() {
 
     let sigma = model.dispersion(false);
     let phi = model.dispersion(true);
-    let expected_phi =
-        model.pearson_dispersion_numerator() / (model.nobs() - model.lmm.feterm.rank) as f64;
+    // lme4's sigma() for glmer: pwrss / n with pwrss = Pearson RSS + ||u||².
+    let u_sq: f64 = model
+        .u
+        .iter()
+        .map(|u| u.iter().map(|v| v * v).sum::<f64>())
+        .sum();
+    let expected_phi = (model.pearson_dispersion_numerator() + u_sq) / model.nobs() as f64;
 
     assert!(sigma.is_finite());
     assert!(sigma > 0.0);
@@ -6696,4 +6701,27 @@ fn binomial_response_counts_above_one_are_refused() {
     )
     .unwrap_err();
     assert!(matches!(err, MixedModelError::InvalidArgument(msg) if msg.contains("proportion")));
+}
+
+#[test]
+fn glmm_replicate_standard_errors_use_glmm_scale_covariance() {
+    let data = gamma_dispersion_fixture();
+    let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
+    let mut model =
+        GeneralizedLinearMixedModel::new(formula, &data, Family::Gamma, Some(LinkFunction::Log))
+            .unwrap();
+    model.fit_with_options(true, 1, false).unwrap();
+
+    let vcov = model.vcov();
+    let expected: Vec<f64> = (0..vcov.nrows()).map(|i| vcov[(i, i)].sqrt()).collect();
+    let replicate = model.bootstrap_replicate_standard_errors();
+    for (got, want) in replicate.iter().zip(&expected) {
+        assert_relative_eq!(*got, *want, max_relative = 1e-12);
+    }
+    // The unscaled working-LMM SEs are on a different (inner sigma) scale.
+    let working = model.lmm.stderror();
+    assert!(
+        (working[0] - expected[0]).abs() > 1e-6 * expected[0],
+        "fixture should distinguish the working and GLMM scales"
+    );
 }

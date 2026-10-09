@@ -457,13 +457,34 @@ impl GeneralizedLinearMixedModel {
     /// inference: downstream summaries use their finiteness to separate
     /// successful refits from failed ones. When the refit carries a fully
     /// certified Wald table its SEs are recorded; otherwise (fast-PIRLS
-    /// fits, refused or partially refused tables) the working-covariance
-    /// standard errors are recorded instead of NaN refusals.
+    /// fits, refused or partially refused tables) the standard errors of
+    /// [`vcov`](MixedModelFit::vcov) — the working covariance rescaled to
+    /// the GLMM dispersion convention — are recorded instead of NaN
+    /// refusals.
     pub(crate) fn bootstrap_replicate_standard_errors(&self) -> DVector<f64> {
         match self.fixed_effect_inference_standard_errors() {
             Some(se) if se.iter().all(|value| value.is_finite()) => se,
-            _ => self.lmm.stderror(),
+            _ => self.covariance_standard_errors(),
         }
+    }
+
+    /// Standard errors from [`vcov`](MixedModelFit::vcov): the recorded
+    /// (joint) covariance, else the PIRLS working covariance rescaled to the
+    /// GLMM dispersion convention. The unscaled working-LMM covariance is
+    /// used only when no GLMM-scale covariance can be formed.
+    fn covariance_standard_errors(&self) -> DVector<f64> {
+        let vcov = self.vcov();
+        DVector::from_iterator(
+            vcov.nrows(),
+            (0..vcov.nrows()).map(|i| {
+                let variance = vcov[(i, i)];
+                if variance.is_finite() && variance >= 0.0 {
+                    variance.sqrt()
+                } else {
+                    f64::NAN
+                }
+            }),
+        )
     }
 
     unstable_internal_method! {
@@ -1751,7 +1772,8 @@ impl MixedModelFit for GeneralizedLinearMixedModel {
     }
 
     fn coef(&self) -> DVector<f64> {
-        let mut full = DVector::from_element(self.lmm.feterm.piv.len(), 0.0);
+        // Dropped (aliased) columns are NaN, not 0: they were not estimated.
+        let mut full = DVector::from_element(self.lmm.feterm.piv.len(), f64::NAN);
         for (i, &val) in self.beta.iter().enumerate() {
             if i < self.lmm.feterm.piv.len() {
                 full[self.lmm.feterm.piv[i]] = val;
@@ -1763,6 +1785,10 @@ impl MixedModelFit for GeneralizedLinearMixedModel {
     fn fixef(&self) -> DVector<f64> {
         self.beta.clone()
     }
+
+    fn dropped_coef_names(&self) -> Vec<String> {
+        self.lmm.feterm.dropped_coef_names()
+    }
     fn coef_names(&self) -> Vec<String> {
         self.lmm.coef_names()
     }
@@ -1772,8 +1798,11 @@ impl MixedModelFit for GeneralizedLinearMixedModel {
             .unwrap_or_else(|| self.lmm.vcov())
     }
     fn stderror(&self) -> DVector<f64> {
+        // A recorded inference table is authoritative, including its NaN
+        // refusals; without one, use the GLMM-scale covariance (never the
+        // unscaled working-LMM standard errors).
         self.fixed_effect_inference_standard_errors()
-            .unwrap_or_else(|| self.lmm.stderror())
+            .unwrap_or_else(|| self.covariance_standard_errors())
     }
     fn fitted(&self) -> DVector<f64> {
         self.mu.clone()

@@ -969,12 +969,21 @@ pub(crate) fn no_intercept_full_coding_target(
     formula: &Formula,
     data: &DataFrame,
 ) -> Option<(usize, String)> {
-    if formula.has_intercept() {
+    no_intercept_full_coding_target_for_terms(&formula.fixed_terms, formula.has_intercept(), data)
+}
+
+/// [`no_intercept_full_coding_target`] over a bare fixed-term list (used by
+/// the compiler's design audit, which works from the semantic term list).
+pub(crate) fn no_intercept_full_coding_target_for_terms(
+    fixed_terms: &[FixedTerm],
+    has_intercept: bool,
+    data: &DataFrame,
+) -> Option<(usize, String)> {
+    if has_intercept {
         return None;
     }
-    let variable_order = fixed_effect_variable_order(formula);
-    let mut terms = formula
-        .fixed_terms
+    let variable_order = fixed_effect_variable_order_for_terms(fixed_terms);
+    let mut terms = fixed_terms
         .iter()
         .enumerate()
         .filter_map(|(index, term)| fixed_term_variables(term).map(|vars| (index, vars)))
@@ -1124,8 +1133,15 @@ fn interaction_treatment_variables(
     formula: &Formula,
     vars: &[String],
 ) -> std::collections::BTreeSet<String> {
-    let lower_terms = formula
-        .fixed_terms
+    interaction_treatment_variables_for_terms(&formula.fixed_terms, vars)
+}
+
+/// [`interaction_treatment_variables`] over a bare fixed-term list.
+pub(crate) fn interaction_treatment_variables_for_terms(
+    fixed_terms: &[FixedTerm],
+    vars: &[String],
+) -> std::collections::BTreeSet<String> {
+    let lower_terms = fixed_terms
         .iter()
         .filter_map(fixed_term_variables)
         .filter(|term| {
@@ -1148,8 +1164,13 @@ fn fixed_term_variables(term: &FixedTerm) -> Option<Vec<String>> {
 }
 
 fn fixed_effect_variable_order(formula: &Formula) -> Vec<&str> {
+    fixed_effect_variable_order_for_terms(&formula.fixed_terms)
+}
+
+/// Variables in order of first appearance across a fixed-term list.
+pub(crate) fn fixed_effect_variable_order_for_terms(fixed_terms: &[FixedTerm]) -> Vec<&str> {
     let mut order = Vec::new();
-    for term in &formula.fixed_terms {
+    for term in fixed_terms {
         match term {
             FixedTerm::Column(name) => {
                 if !order.contains(&name.as_str()) {

@@ -932,10 +932,21 @@ fn audit_fixed_effects_with_matrix(
     semantic_model: &SemanticModel,
     data: &DataFrame,
 ) -> (FixedEffectAudit, DMatrix<f64>, Vec<usize>) {
+    // Code categorical columns exactly as the fitted design does (R's
+    // model.matrix rules shared with `model::fixed_design`): the
+    // no-intercept full-indicator factor, and per-interaction contrast vs
+    // indicator coding by marginality.
+    let fixed_terms = semantic_fixed_terms(&semantic_model.fixed_terms);
+    let has_intercept = semantic_model.fixed_terms.iter().any(|term| term == "1");
     let mut builder = FixedDesignBuilder::new(data);
-    builder.full_coded_main_effect = no_intercept_full_coded_main_effect(semantic_model, data);
-    for term in &semantic_model.fixed_terms {
-        builder.push_term(term);
+    builder.full_coding = crate::model::fixed_design::no_intercept_full_coding_target_for_terms(
+        &fixed_terms,
+        has_intercept,
+        data,
+    );
+    builder.fixed_terms = fixed_terms;
+    for (index, term) in semantic_model.fixed_terms.iter().enumerate() {
+        builder.push_term(index, term);
     }
 
     let FixedDesignBuild {
@@ -1069,39 +1080,21 @@ fn audit_fixed_effects_with_matrix(
     (audit, matrix, rank_pivot)
 }
 
-/// Mirror of the model's no-intercept coding rule (R's `model.matrix()`):
-/// without an intercept, the first factor found -- terms by increasing
-/// degree, variables by first appearance -- gets full indicator columns.
-/// Returns the factor only when that first factor occurs as a main effect;
-/// the audit's interaction expansion does not model per-term codings.
-fn no_intercept_full_coded_main_effect(
-    semantic_model: &SemanticModel,
-    data: &DataFrame,
-) -> Option<String> {
-    let terms = &semantic_model.fixed_terms;
-    if terms.iter().any(|term| term == "1") {
-        return None;
-    }
-    let mut variable_order: Vec<&str> = Vec::new();
-    for term in terms {
-        for name in term.split(':') {
-            if !variable_order.contains(&name) {
-                variable_order.push(name);
+/// Parse the semantic model's fixed-term labels back into formula terms.
+fn semantic_fixed_terms(terms: &[String]) -> Vec<crate::formula::FixedTerm> {
+    use crate::formula::FixedTerm;
+    terms
+        .iter()
+        .map(|term| {
+            if term == "1" {
+                FixedTerm::Intercept
+            } else if term.contains(':') {
+                FixedTerm::Interaction(term.split(':').map(str::to_string).collect())
+            } else {
+                FixedTerm::Column(term.clone())
             }
-        }
-    }
-    let mut by_degree = terms.iter().collect::<Vec<_>>();
-    by_degree.sort_by_key(|term| term.split(':').count());
-    let (term, name) = by_degree.into_iter().find_map(|term| {
-        variable_order
-            .iter()
-            .find(|name| {
-                term.split(':').any(|var| var == **name)
-                    && matches!(data.column(name), Some(Column::Categorical(_)))
-            })
-            .map(|name| (term, *name))
-    })?;
-    (term == name).then(|| name.to_string())
+        })
+        .collect()
 }
 
 fn format_factor_level_assignment(factors: &[String], levels: &[String]) -> String {
@@ -1119,7 +1112,8 @@ struct FixedDesignBuilder<'a> {
     term_ranges: Vec<TermColumnRange>,
     empty_cells: Vec<EmptyCellAudit>,
     diagnostics: Vec<Diagnostic>,
-    full_coded_main_effect: Option<String>,
+    fixed_terms: Vec<crate::formula::FixedTerm>,
+    full_coding: Option<(usize, String)>,
 }
 
 struct FixedDesignBuild {
@@ -1151,11 +1145,19 @@ impl<'a> FixedDesignBuilder<'a> {
             term_ranges: Vec::new(),
             empty_cells: Vec::new(),
             diagnostics: Vec::new(),
-            full_coded_main_effect: None,
+            fixed_terms: Vec::new(),
+            full_coding: None,
         }
     }
 
-    fn push_term(&mut self, term: &str) {
+    fn full_coded_variable(&self, term_index: usize) -> Option<&str> {
+        self.full_coding
+            .as_ref()
+            .filter(|(index, _)| *index == term_index)
+            .map(|(_, name)| name.as_str())
+    }
+
+    fn push_term(&mut self, term_index: usize, term: &str) {
         let start = self.columns.len();
         if term == "1" {
             self.columns.push(DesignColumn {
@@ -1167,9 +1169,9 @@ impl<'a> FixedDesignBuilder<'a> {
                 values: DVector::from_element(self.data.nrow(), 1.0),
             });
         } else if term.contains(':') {
-            self.push_interaction_term(term);
+            self.push_interaction_term(term_index, term);
         } else {
-            self.push_main_effect(term);
+            self.push_main_effect(term_index, term);
         }
 
         let end = self.columns.len();
@@ -1180,7 +1182,7 @@ impl<'a> FixedDesignBuilder<'a> {
         });
     }
 
-    fn push_main_effect(&mut self, name: &str) {
+    fn push_main_effect(&mut self, term_index: usize, name: &str) {
         match self.data.column(name) {
             Some(Column::Numeric(values)) => self.columns.push(DesignColumn {
                 audit: FixedEffectColumnAudit {
@@ -1191,7 +1193,7 @@ impl<'a> FixedDesignBuilder<'a> {
                 values: DVector::from_column_slice(values),
             }),
             Some(Column::Categorical(cat)) => {
-                let coding = if self.full_coded_main_effect.as_deref() == Some(name) {
+                let coding = if self.full_coded_variable(term_index) == Some(name) {
                     CategoricalCoding::CellMeans
                 } else {
                     CategoricalCoding::Treatment
@@ -1215,14 +1217,40 @@ impl<'a> FixedDesignBuilder<'a> {
         }
     }
 
-    fn push_interaction_term(&mut self, term: &str) {
+    fn push_interaction_term(&mut self, term_index: usize, term: &str) {
         let factors = term.split(':').map(str::to_string).collect::<Vec<_>>();
         self.empty_cells
             .extend(empty_cells_for_interaction(term, &factors, self.data));
 
+        // Same per-variable coding and variable order as the fitted design
+        // (`model::fixed_design::append_streamed_interaction`).
+        let mut treatment = crate::model::fixed_design::interaction_treatment_variables_for_terms(
+            &self.fixed_terms,
+            &factors,
+        );
+        if let Some(name) = self.full_coded_variable(term_index) {
+            treatment.remove(name);
+        }
+        let ordered: Vec<String> =
+            crate::model::fixed_design::fixed_effect_variable_order_for_terms(&self.fixed_terms)
+                .into_iter()
+                .filter(|name| factors.iter().any(|factor| factor == name))
+                .map(str::to_string)
+                .collect();
+        let ordered = if ordered.len() == factors.len() {
+            ordered
+        } else {
+            factors.clone()
+        };
+
         let mut factor_columns = Vec::new();
-        for factor in &factors {
-            match design_columns_for_factor(factor, term, self.data) {
+        for factor in &ordered {
+            let coding = if treatment.contains(factor) {
+                CategoricalCoding::Treatment
+            } else {
+                CategoricalCoding::CellMeans
+            };
+            match design_columns_for_factor(factor, term, self.data, coding) {
                 Some(columns) => factor_columns.push(columns),
                 None => {
                     self.missing_fixed_column(factor, term);
@@ -1268,6 +1296,7 @@ fn design_columns_for_factor(
     factor: &str,
     source_term: &str,
     data: &DataFrame,
+    coding: CategoricalCoding,
 ) -> Option<Vec<DesignColumn>> {
     match data.column(factor)? {
         Column::Numeric(values) => Some(vec![DesignColumn {
@@ -1280,7 +1309,7 @@ fn design_columns_for_factor(
         }]),
         Column::Categorical(cat) => {
             let columns = cat
-                .encoded_columns(factor, CategoricalCoding::Treatment)
+                .encoded_columns(factor, coding)
                 .into_iter()
                 .map(|encoded| DesignColumn {
                     audit: FixedEffectColumnAudit {
@@ -2418,17 +2447,17 @@ fn zerocorr_factor_decorrelation_diagnostics(
                 DiagnosticSeverity::Info,
                 DiagnosticStage::DesignAudit,
                 format!(
-                    "zero-correlation syntax fully decorrelates factor '{name}' within '{group}': \
-                     each treatment-coded level contrast of '{name}' receives an independent \
-                     variance and no within-factor level covariances are estimated"
+                    "zero-correlation syntax with factor '{name}' within '{group}' expands like \
+                     lme4: '{name}' is fitted as its own block `(0 + {name} | {group})` with full \
+                     indicator coding and an unstructured covariance among its levels; only the \
+                     intercept and numeric terms get independent variances"
                 ),
             )
             .with_affected_terms(vec![term.source_syntax.user_text().to_string()])
             .with_suggested_actions(vec![
                 format!(
-                    "to estimate within-factor level covariances for '{name}', give it its own \
-                     correlated cell-means block `(0 + {name} | {group})` and keep the remaining \
-                     coefficients under zero-correlation terms"
+                    "to give each level contrast of '{name}' an independent variance instead \
+                     (MixedModels.jl zerocorr semantics), write `diag(1 + {name} | {group})`"
                 ),
                 "zero-correlation expansions of factor terms differ across mixed-model \
                  implementations; when matching an external fit, write the intended expansion \
@@ -2449,8 +2478,8 @@ fn zerocorr_factor_decorrelation_diagnostics(
                 serde_json::json!("double_bar_factor_term"),
             );
             diagnostic.payload.insert(
-                "dropped".to_string(),
-                serde_json::json!("within_factor_level_covariances"),
+                "expansion".to_string(),
+                serde_json::json!("lme4_double_vert"),
             );
             diagnostic.payload.insert(
                 "correlated_block_equivalent".to_string(),
@@ -3343,6 +3372,50 @@ mod tests {
                 }
                 assert!(crate::model::snapshot::encode_snapshot(&certificate).is_ok());
             }
+        }
+    }
+
+    #[test]
+    fn design_audit_interaction_coding_matches_fitted_design() {
+        use crate::model::fixed_design::FixedDesignBackend;
+        let mut data = DataFrame::new();
+        let n = 24;
+        data.add_numeric("y", (0..n).map(|i| (i as f64 * 0.37).sin()).collect())
+            .unwrap();
+        data.add_numeric("x", (0..n).map(|i| i as f64 * 0.5).collect())
+            .unwrap();
+        data.add_categorical("a", (0..n).map(|i| format!("a{}", i % 2)).collect())
+            .unwrap();
+        data.add_categorical("b", (0..n).map(|i| format!("b{}", (i / 2) % 3)).collect())
+            .unwrap();
+        data.add_categorical("subject", (0..n).map(|i| format!("s{}", i % 4)).collect())
+            .unwrap();
+        for formula in [
+            "y ~ a + a:b + (1 | subject)",
+            "y ~ 0 + a:b + (1 | subject)",
+            "y ~ 0 + a + a:b + (1 | subject)",
+            "y ~ b + x:a + (1 | subject)",
+            "y ~ a*b + (1 | subject)",
+        ] {
+            let formula = parse_formula(formula).unwrap();
+            let semantic = compile_formula_ir(&formula);
+            let audit = audit_design(&semantic, &data);
+            let fitted =
+                crate::model::fixed_design::build_streamed_fixed_effects_design(&formula, &data)
+                    .unwrap();
+            let audit_names = audit
+                .fixed_effects
+                .columns
+                .iter()
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(audit_names, fitted.column_names(), "{formula}");
+            let dense = fitted.materialize_dense();
+            assert_eq!(
+                audit.fixed_effect_rank.rank,
+                Some(crate::linalg::stats_rank(&dense).0),
+                "{formula}"
+            );
         }
     }
 

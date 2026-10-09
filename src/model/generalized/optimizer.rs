@@ -213,7 +213,6 @@ impl GeneralizedLinearMixedModel {
     ) -> Result<&mut Self> {
         let initial_theta = self.require_negative_binomial_theta()?;
         let mut current_theta = clamp_negative_binomial_theta(initial_theta);
-        let mut last_fit_theta = f64::NAN;
         let mut update_iterations = 0usize;
         let mut converged = false;
 
@@ -223,7 +222,6 @@ impl GeneralizedLinearMixedModel {
             }
             self.negative_binomial_theta = Some(current_theta);
             self.fit_negative_binomial_conditional(fast, n_agq, verbose)?;
-            last_fit_theta = current_theta;
 
             let next_theta = self.estimate_negative_binomial_theta_given_fit()?;
             update_iterations = iteration + 1;
@@ -244,14 +242,68 @@ impl GeneralizedLinearMixedModel {
             }
         }
 
-        if relative_theta_change(last_fit_theta, current_theta)
-            > NEGATIVE_BINOMIAL_THETA_FINAL_REFIT_TOL
-        {
-            self.reset_for_refit(None)?;
-            self.negative_binomial_theta = Some(current_theta);
-            self.fit_negative_binomial_conditional(fast, n_agq, verbose)?;
-            last_fit_theta = current_theta;
+        // The alternation above maximizes the NB likelihood *given* the
+        // fitted means, which ignores the random-effect integral. Like
+        // lme4::glmer.nb (`optTheta`), finish by maximizing the GLMM's own
+        // (Laplace/AGQ) log-likelihood over log θ_NB in
+        // [log θ₀ − 3, log θ₀ + 3], refitting the model at every trial value.
+        let start_log = clamp_negative_binomial_theta(current_theta).ln();
+        let lo = (start_log - 3.0).max(NEGATIVE_BINOMIAL_THETA_MIN.ln());
+        let hi = (start_log + 3.0).min(NEGATIVE_BINOMIAL_THETA_MAX.ln());
+        let mut profile_evaluations = 0usize;
+        let mut neg2ll = |model: &mut Self, log_theta: f64| -> Result<f64> {
+            profile_evaluations += 1;
+            model.reset_for_refit(None)?;
+            model.negative_binomial_theta = Some(log_theta.exp());
+            match model.fit_negative_binomial_conditional(fast, n_agq, false) {
+                Ok(()) => {
+                    let value = -2.0 * model.loglikelihood();
+                    Ok(if value.is_finite() {
+                        value
+                    } else {
+                        f64::INFINITY
+                    })
+                }
+                Err(error @ MixedModelError::Interrupted(_)) => Err(error),
+                Err(_) => Ok(f64::INFINITY),
+            }
+        };
+        let inv_phi = (5.0_f64.sqrt() - 1.0) / 2.0;
+        let (mut a, mut b) = (lo, hi);
+        let mut c = b - inv_phi * (b - a);
+        let mut d = a + inv_phi * (b - a);
+        let mut fc = neg2ll(self, c)?;
+        let mut fd = neg2ll(self, d)?;
+        while (b - a) > 5.0e-5 {
+            if fc <= fd {
+                b = d;
+                d = c;
+                fd = fc;
+                c = b - inv_phi * (b - a);
+                fc = neg2ll(self, c)?;
+            } else {
+                a = c;
+                c = d;
+                fc = fd;
+                d = a + inv_phi * (b - a);
+                fd = neg2ll(self, d)?;
+            }
         }
+        let best_log = if fc <= fd { c } else { d };
+        if verbose {
+            eprintln!(
+                "  NB theta Laplace profile: theta = {:.6} after {profile_evaluations} refits",
+                best_log.exp()
+            );
+        }
+        current_theta = clamp_negative_binomial_theta(best_log.exp());
+        if (best_log - lo).abs() < 1e-3 || (hi - best_log).abs() < 1e-3 {
+            converged = false;
+        }
+        self.reset_for_refit(None)?;
+        self.negative_binomial_theta = Some(current_theta);
+        self.fit_negative_binomial_conditional(fast, n_agq, verbose)?;
+        let last_fit_theta = current_theta;
 
         self.negative_binomial_theta = Some(last_fit_theta);
         self.refresh_dispersion();

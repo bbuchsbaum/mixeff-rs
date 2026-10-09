@@ -6,6 +6,13 @@ use serde::{Deserialize, Serialize};
 use crate::types::{ConvergenceStatus, OptSummary};
 
 /// Structural summary of one random-effects term.
+///
+/// Each entry describes one *unstructured* covariance block: all variances of
+/// `columns` and all covariances among them are free parameters. A block with
+/// a diagonal covariance (`(1 + x || g)`) is reported as one single-column
+/// entry per basis column, i.e. lme4's `(1 | g) + (0 + x | g)` expansion, so
+/// model-comparison helpers can see both random-effect nesting and which
+/// variance/covariance parameters a comparison adds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RandomEffectTermInfo {
     /// Grouping factor name.
@@ -271,6 +278,14 @@ pub trait MixedModelFit {
 
     /// Random effects (conditional modes), one matrix per grouping factor.
     fn ranef(&self) -> Vec<DMatrix<f64>>;
+
+    /// Names of fixed-effect columns dropped from the fit because they are
+    /// linear combinations of earlier columns (rank deficiency), in
+    /// coefficient order. Their [`coef`](Self::coef) entries are `NaN` (R's
+    /// `NA`, as in `lme4::fixef(fit, add.dropped = TRUE)`).
+    fn dropped_coef_names(&self) -> Vec<String> {
+        Vec::new()
+    }
 
     /// Random-effects term structure, used by model-comparison helpers to
     /// reject obviously non-nested comparisons before computing LRT statistics.

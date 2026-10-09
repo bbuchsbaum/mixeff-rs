@@ -1239,6 +1239,10 @@ impl LinearMixedModel {
         );
         let materialized = formula.materialize_cow(data)?;
         let data: &DataFrame = &materialized;
+        // lme4-style `||` expansion for terms that contain a factor; needs the
+        // data to know which variables are factors.
+        let mut formula = formula;
+        expand_zerocorr_factor_terms(&mut formula, data);
 
         let semantic_model = compile_formula_ir(&formula);
         let mut compiler_artifact = CompiledModelArtifact::new_with_policy(
@@ -1260,6 +1264,8 @@ impl LinearMixedModel {
                 &mut effective_formula,
                 &compiler_artifact.policy_recommendations,
             )?;
+            // A covariance reduction may have made a factor term `||`.
+            expand_zerocorr_factor_terms(&mut effective_formula, data);
             if !reductions.is_empty() {
                 let effective_semantic_model = compile_formula_ir(&effective_formula);
                 compiler_artifact.set_effective_model(
@@ -2199,12 +2205,19 @@ impl LinearMixedModel {
         let pwrss = last_diag * last_diag;
 
         if reml {
+            // `X` is reduced to its full-rank pivoted columns before the
+            // factorization, so every diagonal of `L_XX` must be strictly
+            // positive. A non-positive or non-finite pivot means the
+            // factorization broke down at this θ; skipping it would silently
+            // drop a term from the REML criterion, so mark the point as
+            // infeasible (objective +∞) instead.
             let mut logdet_lxx = 0.0;
             for i in 0..(pp1 - 1) {
                 let d = l_dense[(i, i)];
-                if d > 0.0 {
-                    logdet_lxx += d.ln();
+                if !(d.is_finite() && d > 0.0) {
+                    return (f64::INFINITY, pwrss);
                 }
+                logdet_lxx += d.ln();
             }
             logdet += 2.0 * logdet_lxx;
         }
@@ -4297,8 +4310,9 @@ impl MixedModelFit for LinearMixedModel {
     }
 
     fn coef(&self) -> DVector<f64> {
+        // Dropped (aliased) columns are NaN, not 0: they were not estimated.
         let beta = self.fixef();
-        let mut full = DVector::from_element(self.feterm.piv.len(), 0.0);
+        let mut full = DVector::from_element(self.feterm.piv.len(), f64::NAN);
         for (i, &val) in beta.iter().enumerate() {
             if i < self.feterm.piv.len() {
                 full[self.feterm.piv[i]] = val;
@@ -4309,6 +4323,10 @@ impl MixedModelFit for LinearMixedModel {
 
     fn fixef(&self) -> DVector<f64> {
         self.beta()
+    }
+
+    fn dropped_coef_names(&self) -> Vec<String> {
+        self.feterm.dropped_coef_names()
     }
 
     fn coef_names(&self) -> Vec<String> {
@@ -4408,6 +4426,41 @@ impl MixedModelFit for LinearMixedModel {
     fn ranef(&self) -> Vec<DMatrix<f64>> {
         self.ranef_b()
     }
+
+    fn random_effect_terms(&self) -> Vec<crate::model::traits::RandomEffectTermInfo> {
+        random_effect_term_infos(&self.reterms)
+    }
+}
+
+/// Structural summary of the random-effect terms for model comparison.
+///
+/// Each returned entry is one unstructured covariance block. A diagonal
+/// (`||` / `diag(...)`) block is reported as one scalar entry per basis
+/// column, which is exactly lme4's `||` expansion `(1|g) + (0+x|g)`; this lets
+/// model-comparison helpers see that `(1 + x || g)` is nested in
+/// `(1 + x | g)` (it omits the covariance) and not the other way round.
+pub(crate) fn random_effect_term_infos(
+    reterms: &[ReMat],
+) -> Vec<crate::model::traits::RandomEffectTermInfo> {
+    use crate::model::traits::RandomEffectTermInfo;
+    let mut out = Vec::new();
+    for rt in reterms {
+        let diagonal = rt.vsize > 1 && rt.inds.len() == rt.vsize;
+        if diagonal {
+            for name in &rt.cnames {
+                out.push(RandomEffectTermInfo {
+                    group: rt.grouping_name.clone(),
+                    columns: vec![name.clone()],
+                });
+            }
+        } else {
+            out.push(RandomEffectTermInfo {
+                group: rt.grouping_name.clone(),
+                columns: rt.cnames.clone(),
+            });
+        }
+    }
+    out
 }
 
 pub(crate) fn prediction_interval_cutoff(level: f64) -> Result<f64> {
@@ -4723,51 +4776,21 @@ fn expand_interaction_factors(
     data: &DataFrame,
     n: usize,
 ) -> Result<Vec<Vec<(DVector<f64>, String)>>> {
-    expand_interaction_factors_with_coding(vars, data, n, BasisCoding::Treatment)
-}
-
-fn expand_interaction_factors_with_coding(
-    vars: &[String],
-    data: &DataFrame,
-    n: usize,
-    coding: BasisCoding,
-) -> Result<Vec<Vec<(DVector<f64>, String)>>> {
-    let mut per_var: Vec<Vec<(DVector<f64>, String)>> = Vec::with_capacity(vars.len());
-    for v in vars {
-        per_var.push(expand_factor_columns_with_coding(
-            v,
-            data,
-            "interaction term",
-            coding,
-        )?);
-    }
     let _ = n; // n only used by callers for sanity checks
-    Ok(per_var)
+    vars.iter()
+        .map(|v| expand_factor_columns(v, data, "interaction term"))
+        .collect()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BasisCoding {
-    Treatment,
-    CellMeans,
-}
-
-fn categorical_coding(coding: BasisCoding) -> CategoricalCoding {
-    match coding {
-        BasisCoding::Treatment => CategoricalCoding::Treatment,
-        BasisCoding::CellMeans => CategoricalCoding::CellMeans,
-    }
-}
-
-fn expand_factor_columns_with_coding(
+fn expand_factor_columns(
     name: &str,
     data: &DataFrame,
     context: &str,
-    coding: BasisCoding,
 ) -> Result<Vec<(DVector<f64>, String)>> {
     match data.column(name) {
         Some(Column::Numeric(arr)) => Ok(vec![(DVector::from_column_slice(arr), name.to_string())]),
         Some(Column::Categorical(cat)) => Ok(cat
-            .encoded_columns(name, categorical_coding(coding))
+            .encoded_columns(name, CategoricalCoding::Treatment)
             .into_iter()
             .map(|column| (DVector::from_column_slice(&column.values), column.name))
             .collect()),
@@ -4809,36 +4832,132 @@ fn cartesian_interaction(
     acc
 }
 
-fn random_effect_basis_columns(
-    term: &crate::formula::FixedTerm,
+/// Random-effect basis columns and names for one random term, coded by R's
+/// `model.matrix()` rules exactly like a fixed-effect design with the same
+/// terms (`lme4::mkReTrms` builds Z from `model.matrix(~ <lhs>, fr)`):
+/// with an intercept every factor uses contrasts; without one, the first
+/// factor gets full indicator columns and later factors use contrasts;
+/// interactions follow marginality.
+pub(super) fn random_term_basis(
+    rt: &crate::formula::RandomTerm,
     data: &DataFrame,
-    n: usize,
-    coding: BasisCoding,
-) -> Result<Vec<(DVector<f64>, String)>> {
+) -> Result<(Vec<DVector<f64>>, Vec<String>)> {
     use crate::formula::FixedTerm;
+    use crate::model::fixed_design::FixedDesignBackend;
 
+    let mut terms = rt.terms.clone();
+    if terms.is_empty() {
+        terms.push(FixedTerm::Intercept);
+    }
+    let basis_formula = Formula {
+        response: String::new(),
+        fixed_terms: terms,
+        random_terms: Vec::new(),
+        derived: Vec::new(),
+    };
+    let design =
+        crate::model::fixed_design::build_streamed_fixed_effects_design(&basis_formula, data)
+            .map_err(|err| match err {
+                MixedModelError::InvalidArgument(message) => MixedModelError::InvalidArgument(
+                    format!("random-effect basis for `{rt}`: {message}"),
+                ),
+                other => other,
+            })?;
+    let x = design.materialize_dense();
+    let columns = (0..x.ncols()).map(|j| x.column(j).into_owned()).collect();
+    Ok((columns, design.column_names().to_vec()))
+}
+
+/// Whether a random term's basis involves a categorical variable.
+fn random_term_has_factor(term: &crate::formula::FixedTerm, data: &DataFrame) -> bool {
+    use crate::formula::FixedTerm;
+    let is_factor = |name: &String| matches!(data.column(name), Some(Column::Categorical(_)));
     match term {
-        FixedTerm::Intercept | FixedTerm::NoIntercept => Ok(Vec::new()),
-        FixedTerm::Column(name) => {
-            expand_factor_columns_with_coding(name, data, "random-effect basis", coding)
-        }
-        FixedTerm::Interaction(vars) => {
-            let per_var = expand_interaction_factors_with_coding(vars, data, n, coding)?;
-            Ok(cartesian_interaction(&per_var, n))
-        }
+        FixedTerm::Column(name) => is_factor(name),
+        FixedTerm::Interaction(vars) => vars.iter().any(is_factor),
+        FixedTerm::Intercept | FixedTerm::NoIntercept => false,
     }
 }
 
-fn random_effect_basis_coding(rt: &crate::formula::RandomTerm) -> BasisCoding {
-    if rt
-        .terms
-        .iter()
-        .any(|term| matches!(term, crate::formula::FixedTerm::NoIntercept))
-    {
-        BasisCoding::CellMeans
-    } else {
-        BasisCoding::Treatment
+/// Expand zero-correlation (`||`) terms that contain a factor the way lme4
+/// does (`expandDoubleVerts`): `(1 + x + f || g)` becomes
+/// `(1 + x || g) + (0 + f | g)`. The intercept and numeric terms keep
+/// independent variances (one diagonal block, equivalent to lme4's separate
+/// scalar terms); each factor term becomes its own block with full
+/// indicator coding and an unstructured covariance among its levels.
+/// Without this, a factor inside `||` would be treatment-coded with
+/// independent contrast variances, a different model from lme4's.
+///
+/// Returns whether the formula changed. The expansion is recorded on each
+/// produced term's source so the compiler reports it.
+pub(crate) fn expand_zerocorr_factor_terms(formula: &mut Formula, data: &DataFrame) -> bool {
+    use crate::formula::{FixedTerm, RandomTermExpansion, RandomTermSource};
+
+    let mut changed = false;
+    let mut expanded = Vec::with_capacity(formula.random_terms.len());
+    for rt in formula.random_terms.drain(..) {
+        let splits = rt.zerocorr
+            && rt
+                .terms
+                .iter()
+                .any(|term| random_term_has_factor(term, data));
+        if !splits {
+            expanded.push(rt);
+            continue;
+        }
+        changed = true;
+        let source = Some(RandomTermSource {
+            written: rt
+                .source
+                .as_ref()
+                .map(|source| source.written.clone())
+                .unwrap_or_else(|| rt.to_string()),
+            expansion: Some(RandomTermExpansion::ZeroCorrelationFactorSplit),
+        });
+        let has_intercept = rt
+            .terms
+            .iter()
+            .any(|term| matches!(term, FixedTerm::Intercept));
+        let numeric_terms: Vec<FixedTerm> = rt
+            .terms
+            .iter()
+            .filter(|term| {
+                matches!(term, FixedTerm::Column(_) | FixedTerm::Interaction(_))
+                    && !random_term_has_factor(term, data)
+            })
+            .cloned()
+            .collect();
+        if has_intercept || !numeric_terms.is_empty() {
+            let mut terms = vec![if has_intercept {
+                FixedTerm::Intercept
+            } else {
+                FixedTerm::NoIntercept
+            }];
+            terms.extend(numeric_terms);
+            expanded.push(crate::formula::RandomTerm {
+                terms,
+                grouping: rt.grouping.clone(),
+                zerocorr: true,
+                covariance: RandomCovariance::Diagonal,
+                source: source.clone(),
+            });
+        }
+        for term in rt
+            .terms
+            .iter()
+            .filter(|term| random_term_has_factor(term, data))
+        {
+            expanded.push(crate::formula::RandomTerm {
+                terms: vec![FixedTerm::NoIntercept, term.clone()],
+                grouping: rt.grouping.clone(),
+                zerocorr: false,
+                covariance: RandomCovariance::Full,
+                source: source.clone(),
+            });
+        }
     }
+    formula.random_terms = expanded;
+    changed
 }
 
 fn refuse_unsupported_random_covariance(formula: &Formula) -> Result<()> {
@@ -4855,7 +4974,7 @@ fn refuse_unsupported_random_covariance(formula: &Formula) -> Result<()> {
 
 /// Build a ReMat from a random term specification and data.
 fn build_re_mat(rt: &crate::formula::RandomTerm, data: &DataFrame, n: usize) -> Result<ReMat> {
-    use crate::formula::{FixedTerm, GroupingFactor};
+    use crate::formula::GroupingFactor;
 
     // Get grouping factor
     let (group_name, refs, levels) = match &rt.grouping {
@@ -4866,7 +4985,13 @@ fn build_re_mat(rt: &crate::formula::RandomTerm, data: &DataFrame, n: usize) -> 
                     name
                 ))
             })?;
-            (name.clone(), cat.refs.clone(), cat.levels.clone())
+            // lme4 drops unused grouping-factor levels (`factor(g)[,
+            // drop = TRUE]` in mkReTrms): a declared level with no
+            // observations would be an empty random-effect level that only
+            // inflates ngrps/ranef/condVar. Keep observed levels in their
+            // declared order.
+            let (refs, levels) = drop_unused_grouping_levels(&cat.refs, &cat.levels);
+            (name.clone(), refs, levels)
         }
         GroupingFactor::Interaction(names) | GroupingFactor::Cell(names) => {
             // Create interaction levels
@@ -4939,25 +5064,10 @@ fn build_re_mat(rt: &crate::formula::RandomTerm, data: &DataFrame, n: usize) -> 
         }
     };
 
-    // Build the Z matrix (transposed: s × n)
-    let mut z_rows: Vec<DVector<f64>> = Vec::new();
-    let mut cnames: Vec<String> = Vec::new();
-
-    let has_re_intercept =
-        rt.terms.iter().any(|t| matches!(t, FixedTerm::Intercept)) || rt.terms.is_empty();
-
-    if has_re_intercept {
-        z_rows.push(DVector::from_element(n, 1.0));
-        cnames.push("(Intercept)".to_string());
-    }
-
-    let basis_coding = random_effect_basis_coding(rt);
-    for term in &rt.terms {
-        for (col, name) in random_effect_basis_columns(term, data, n, basis_coding)? {
-            z_rows.push(col);
-            cnames.push(name);
-        }
-    }
+    // Build the Z matrix (transposed: s × n) from R's model.matrix coding
+    // of the random-effect basis.
+    let (z_rows, cnames) = random_term_basis(rt, data)?;
+    let _ = n;
 
     // `z` is `vsize × n` column-major, so basis row `i` occupies every
     // `vsize`-th slot starting at `i`; write it straight from the basis
@@ -4980,6 +5090,26 @@ fn build_re_mat(rt: &crate::formula::RandomTerm, data: &DataFrame, n: usize) -> 
     }
 
     Ok(remat)
+}
+
+/// Compact a grouping factor to its observed levels (declared order kept).
+fn drop_unused_grouping_levels(refs: &[u32], levels: &[String]) -> (Vec<u32>, Vec<String>) {
+    let mut used = vec![false; levels.len()];
+    for &r in refs {
+        used[r as usize] = true;
+    }
+    if used.iter().all(|&u| u) {
+        return (refs.to_vec(), levels.to_vec());
+    }
+    let mut remap = vec![u32::MAX; levels.len()];
+    let mut kept = Vec::new();
+    for (index, level) in levels.iter().enumerate() {
+        if used[index] {
+            remap[index] = kept.len() as u32;
+            kept.push(level.clone());
+        }
+    }
+    (refs.iter().map(|&r| remap[r as usize]).collect(), kept)
 }
 
 /// Build the parameter map: Vec<(block_idx, row, col)> for each θ element.

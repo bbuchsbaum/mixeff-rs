@@ -950,7 +950,7 @@ fn test_random_effect_no_intercept_factor_uses_cell_means_with_explicit_contrast
 }
 
 #[test]
-fn test_random_effect_categorical_cell_means_preserves_zero_correlation_map() {
+fn test_random_effect_factor_in_double_bar_gets_full_covariance_like_lme4() {
     let mut data = DataFrame::new();
     data.add_numeric("y", vec![1.0, 2.0, 3.0, 1.5, 2.5, 3.5])
         .unwrap();
@@ -971,6 +971,8 @@ fn test_random_effect_categorical_cell_means_preserves_zero_correlation_map() {
     )
     .unwrap();
 
+    // lme4 expands `(0 + cond || subj)` to `(0 + cond | subj)`: a factor
+    // inside `||` keeps an unstructured covariance among its indicators.
     let formula = parse_formula("y ~ cond + (0 + cond || subj)").unwrap();
     let model = LinearMixedModel::new(formula, &data, None).unwrap();
 
@@ -978,12 +980,12 @@ fn test_random_effect_categorical_cell_means_preserves_zero_correlation_map() {
         model.reterms[0].cnames,
         vec!["cond: A", "cond: B", "cond: C"]
     );
-    assert_eq!(model.theta().len(), 3);
-    assert!(matches!(
+    assert_eq!(model.theta().len(), 6);
+    assert!(!matches!(
         model.compiler_artifact().theta_maps[0],
         ThetaMap::Diagonal(_)
     ));
-    assert_eq!(model.compiler_artifact().theta_maps[0].n_free(), 3);
+    assert_eq!(model.compiler_artifact().theta_maps[0].n_free(), 6);
 }
 
 #[test]
@@ -1045,10 +1047,25 @@ fn test_zerocorr_factor_split_terms_record_no_error_diagnostics() {
     data.add_categorical("g", (0..n).map(|i| format!("g{}", i / 6)).collect())
         .unwrap();
 
+    // lme4: (1 + f + x || g) -> (1 | g) + (0 + f | g) + (0 + x | g). The
+    // engine keeps the intercept and x as one diagonal block.
     let formula = parse_formula("y ~ x + f + (1 + f + x || g)").unwrap();
     let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
 
-    assert_eq!(model.reterms[0].cnames, vec!["(Intercept)", "f: b", "x"]);
+    let mut bases = model
+        .reterms
+        .iter()
+        .map(|term| term.cnames.clone())
+        .collect::<Vec<_>>();
+    bases.sort();
+    assert_eq!(
+        bases,
+        vec![
+            vec!["(Intercept)".to_string(), "x".to_string()],
+            vec!["f: a".to_string(), "f: b".to_string()],
+        ]
+    );
+    assert_eq!(model.theta().len(), 2 + 3);
     let artifact = model.compiler_artifact();
     let errors = artifact
         .diagnostics
@@ -1060,10 +1077,18 @@ fn test_zerocorr_factor_split_terms_record_no_error_diagnostics() {
         errors.is_empty(),
         "||-with-factor construction should not record error diagnostics: {errors:?}"
     );
+    // Two scalar maps for the diagonal (Intercept, x) block plus one
+    // unstructured map for the factor block.
     assert_eq!(artifact.theta_maps.len(), 3);
-    let factor_map = &artifact.theta_maps[1];
+    let factor_map = &artifact.theta_maps[2];
+    assert!(matches!(factor_map, ThetaMap::FullCholesky(_)));
     assert_eq!(factor_map.block().user_basis, vec!["f".to_string()]);
-    assert_eq!(factor_map.block().theta_slots[0].lambda_row, 1);
+    assert_eq!(
+        factor_map.block().optimizer_basis,
+        vec!["f: a".to_string(), "f: b".to_string()]
+    );
+    assert_eq!(factor_map.n_free(), 3);
+    assert_eq!(factor_map.block().theta_slots[0].lambda_row, 0);
     let total_free: usize = artifact.theta_maps.iter().map(|map| map.n_free()).sum();
     assert_eq!(total_free, model.theta().len());
 
@@ -7382,4 +7407,71 @@ fn weighted_lmm_simulation_scales_residual_noise_by_weights() {
         }
     }
     assert!(light > 2.0 * heavy, "light={light} heavy={heavy}");
+}
+
+#[test]
+fn reml_logdet_treats_non_positive_lxx_pivot_as_infeasible() {
+    let df = dyestuff_fixture();
+    let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+    let mut model = LinearMixedModel::new(formula, &df, None).unwrap();
+    model.fit(true).unwrap();
+    let (logdet, _) = model.determinant_term_and_pwrss_for_reml(true);
+    assert!(logdet.is_finite());
+
+    let k = model.reterms.len();
+    let mut last = model.l_blocks[block_index(k, k)].as_dense();
+    last[(0, 0)] = 0.0;
+    model.l_blocks[block_index(k, k)] = MatrixBlock::Dense(last);
+    let (logdet, _) = model.determinant_term_and_pwrss_for_reml(true);
+    assert_eq!(logdet, f64::INFINITY);
+    // ML ignores L_XX and is unaffected.
+    let (ml_logdet, _) = model.determinant_term_and_pwrss_for_reml(false);
+    assert!(ml_logdet.is_finite());
+}
+
+#[test]
+fn unused_grouping_levels_are_dropped_like_lme4() {
+    let base = dyestuff_fixture();
+    let batch = base.categorical("batch").unwrap();
+    let mut declared = batch.levels.clone();
+    declared.insert(1, "unused_a".to_string());
+    declared.push("unused_b".to_string());
+    let mut df = DataFrame::new();
+    df.add_numeric("yield", base.numeric("yield").unwrap().to_vec())
+        .unwrap();
+    df.add_categorical_with_levels("batch", batch.values.clone(), declared)
+        .unwrap();
+
+    let formula = parse_formula("yield ~ 1 + (1 | batch)").unwrap();
+    let mut with_unused = LinearMixedModel::new(formula.clone(), &df, None).unwrap();
+    with_unused.fit(true).unwrap();
+    let mut reference = LinearMixedModel::new(formula, &base, None).unwrap();
+    reference.fit(true).unwrap();
+
+    assert_eq!(with_unused.reterms[0].n_levels(), batch.levels.len());
+    assert_eq!(with_unused.reterms[0].levels, batch.levels);
+    assert_relative_eq!(
+        with_unused.objective(),
+        reference.objective(),
+        epsilon = 1e-8
+    );
+    assert_eq!(with_unused.ranef_b()[0].ncols(), batch.levels.len());
+
+    // A level that was declared but never observed is a new level at
+    // prediction time.
+    let mut newdata = DataFrame::new();
+    newdata.add_numeric("yield", vec![0.0, 0.0]).unwrap();
+    newdata
+        .add_categorical(
+            "batch",
+            vec![batch.levels[0].clone(), "unused_a".to_string()],
+        )
+        .unwrap();
+    assert!(with_unused
+        .predict_new(&newdata, NewReLevels::Error)
+        .is_err());
+    let pred = with_unused
+        .predict_new(&newdata, NewReLevels::Population)
+        .unwrap();
+    assert_eq!(pred.len(), 2);
 }

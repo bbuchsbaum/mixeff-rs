@@ -631,11 +631,53 @@ impl BoundaryLikelihoodRatioTest {
             }
         };
 
-        if values.chisq_dof != 1 {
+        let added = added_covariance_parameters(
+            &smaller.random_effect_terms(),
+            &larger.random_effect_terms(),
+        );
+        let Some(added) = added.filter(|added| added.total() == values.chisq_dof) else {
+            return Self::refusal(
+                BoundaryLrtStatus::NotAssessed,
+                "boundary_lrt_parameter_geometry_not_certified",
+                "boundary_lrt could not identify which variance/covariance parameters the larger model adds; use the parametric-bootstrap LRT (stats::parametric_bootstrap_lrt)",
+                comparison_class,
+                references,
+            );
+        };
+
+        if added.variances == 0 {
+            // Only covariance (correlation) parameters are added. A zero
+            // correlation is an interior point of the parameter space, so the
+            // ordinary chi-square(df) reference applies; no boundary mixture.
+            return Self {
+                schema_name: BOUNDARY_LRT_SCHEMA.to_string(),
+                schema_version: BOUNDARY_LRT_SCHEMA_VERSION.to_string(),
+                status: BoundaryLrtStatus::Available,
+                reason_code: None,
+                reason: None,
+                comparison_class,
+                statistic: Some(values.chisq),
+                ordinary_chisq_dof: Some(values.chisq_dof),
+                pvalue: Some(values.pvalue),
+                loglik_within_optimizer_tol: Some(values.loglik_within_optimizer_tol),
+                mixture: vec![BoundaryLrtMixtureComponent {
+                    weight: 1.0,
+                    chisq_df: Some(values.chisq_dof),
+                    point_mass_at: None,
+                }],
+                references,
+                notes: vec![
+                    "the larger model adds only covariance (correlation) parameters; a zero correlation is interior to the parameter space, so the ordinary chi-square reference is used without a boundary mixture".to_string(),
+                    "this route is for variance-component comparisons and must not be surfaced as fixed-effect inference".to_string(),
+                ],
+            };
+        }
+
+        if added.variances != 1 || added.covariances != 0 {
             return Self::refusal(
                 BoundaryLrtStatus::NotAssessed,
                 "boundary_lrt_mixture_weights_not_certified",
-                "boundary_lrt v1 certifies only one added boundary variance/covariance parameter; for higher-dimensional boundaries use the boundary-robust parametric-bootstrap LRT (stats::parametric_bootstrap_lrt) or a simulation-calibrated mixture",
+                "boundary_lrt v1 certifies only one added boundary variance parameter; for higher-dimensional boundaries use the boundary-robust parametric-bootstrap LRT (stats::parametric_bootstrap_lrt) or a simulation-calibrated mixture",
                 comparison_class,
                 references,
             );
@@ -656,7 +698,7 @@ impl BoundaryLikelihoodRatioTest {
             mixture: self_liang_one_parameter_mixture(),
             references,
             notes: vec![
-                "p-value uses a 50:50 mixture of point mass at zero and chi-square(1) for a single boundary variance/covariance parameter".to_string(),
+                "p-value uses a 50:50 mixture of point mass at zero and chi-square(1) for a single added boundary variance parameter".to_string(),
                 "this route is for variance-component comparisons and must not be surfaced as fixed-effect inference".to_string(),
             ],
         }
@@ -1571,6 +1613,66 @@ fn likelihood_ratio_values(
         chisq_dof,
         pvalue,
         loglik_within_optimizer_tol,
+    })
+}
+
+/// Counts of covariance parameters a larger model adds over a smaller one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AddedCovarianceParameters {
+    variances: usize,
+    covariances: usize,
+}
+
+impl AddedCovarianceParameters {
+    fn total(self) -> usize {
+        self.variances + self.covariances
+    }
+}
+
+/// Variance (diagonal) and covariance (off-diagonal) parameter keys implied by
+/// a set of unstructured random-effect blocks.
+fn covariance_parameter_keys(
+    terms: &[RandomEffectTermInfo],
+) -> Option<(
+    std::collections::BTreeSet<(String, String)>,
+    std::collections::BTreeSet<(String, String, String)>,
+)> {
+    let mut variances = std::collections::BTreeSet::new();
+    let mut covariances = std::collections::BTreeSet::new();
+    for term in terms {
+        for (i, column) in term.columns.iter().enumerate() {
+            if !variances.insert((term.group.clone(), column.clone())) {
+                // The same basis column appears in two blocks of one grouping
+                // factor; the parameter geometry is not identifiable here.
+                return None;
+            }
+            for other in &term.columns[..i] {
+                let (a, b) = if other < column {
+                    (other.clone(), column.clone())
+                } else {
+                    (column.clone(), other.clone())
+                };
+                covariances.insert((term.group.clone(), a, b));
+            }
+        }
+    }
+    Some((variances, covariances))
+}
+
+/// Which covariance parameters `larger` adds over `smaller`, or `None` when
+/// the smaller model's parameters are not a subset of the larger model's.
+fn added_covariance_parameters(
+    smaller: &[RandomEffectTermInfo],
+    larger: &[RandomEffectTermInfo],
+) -> Option<AddedCovarianceParameters> {
+    let (small_var, small_cov) = covariance_parameter_keys(smaller)?;
+    let (large_var, large_cov) = covariance_parameter_keys(larger)?;
+    if !small_var.is_subset(&large_var) || !small_cov.is_subset(&large_cov) {
+        return None;
+    }
+    Some(AddedCovarianceParameters {
+        variances: large_var.len() - small_var.len(),
+        covariances: large_cov.len() - small_cov.len(),
     })
 }
 
