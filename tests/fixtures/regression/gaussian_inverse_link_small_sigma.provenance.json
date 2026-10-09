@@ -1,4 +1,5 @@
 {
+  "schema_version": "1.0",
   "fixture": "gaussian_inverse_link_small_sigma.csv",
   "purpose": "Regression guard: joint-Laplace Gaussian/inverse-link GLMM whose fast-PIRLS start collapses to theta = 0. The Laplace objective is even in a diagonal theta, so theta = 0 is a stationary point the joint optimizer could not leave; it reported a converged fit at theta = 1 (one stencil step) while lme4::glmer reaches theta ~ 28.18.",
   "reference_engine": "R 4.3.3, lme4 1.1.35.1: glmer(y ~ x + (1 | g), family = gaussian(link = 'inverse')) -> theta 28.17989103, fixef (10.40928479, 1.62307014), sigma 0.04554231227",

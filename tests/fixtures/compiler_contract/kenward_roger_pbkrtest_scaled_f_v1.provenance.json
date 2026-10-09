@@ -1,4 +1,5 @@
 {
+  "schema_version": "1.0",
   "fixture": "kenward_roger_pbkrtest_scaled_f_v1.json",
   "generated_at": "2026-10-09",
   "purpose": "Reference values for the Kenward-Roger multi-df F scaling (pbkrtest KRmodcomp Ftest row: F = F.scaling * FtestU, ndf, ddf, p) plus the unscaled FtestU row.",
