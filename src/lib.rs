@@ -164,6 +164,7 @@ pub mod guide;
 pub(crate) mod linalg;
 pub mod model;
 mod optimizer;
+pub(crate) mod parallel;
 
 #[cfg(feature = "unstable-internals")]
 pub mod pathology;

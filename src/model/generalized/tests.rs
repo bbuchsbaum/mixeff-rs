@@ -862,6 +862,7 @@ fn agq_restore_guard_restores_state_on_panic() {
         let mut work = AgqRestoreGuard {
             glmm: &mut model,
             u0_flat: u0_flat.clone(),
+            fixed: None,
         };
         // Desync state the way the AGQ sweep would, then blow up mid-sweep.
         for g in 0..n_levels {

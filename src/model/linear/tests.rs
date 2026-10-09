@@ -1,7 +1,7 @@
 use super::*;
 use approx::assert_relative_eq;
 use rand::rngs::StdRng;
-use rand::SeedableRng;
+use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, Normal};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -4569,6 +4569,86 @@ fn test_jac_vcov_beta_varpar_returns_symmetric_matrices_and_sigma_derivative() {
 }
 
 #[test]
+fn test_analytic_jac_vcov_beta_varpar_matches_central_differences() {
+    let mut rng = StdRng::seed_from_u64(91);
+    let n = 240;
+    let mut synthetic = DataFrame::new();
+    let g: Vec<String> = (0..n).map(|i| format!("g{}", i % 12)).collect();
+    let h: Vec<String> = (0..n)
+        .map(|_| format!("h{}", rng.gen_range(0..9)))
+        .collect();
+    let x: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let z: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let y: Vec<f64> = (0..n)
+        .map(|i| {
+            1.0 + 0.5 * x[i] - 0.3 * z[i]
+                + 0.4 * ((i % 12) as f64 - 6.0) / 6.0 * (1.0 + x[i])
+                + rng.gen_range(-1.0..1.0)
+        })
+        .collect();
+    let weights: Vec<f64> = (0..n).map(|_| rng.gen_range(0.5..2.0)).collect();
+    synthetic.add_categorical("g", g).unwrap();
+    synthetic.add_categorical("h", h).unwrap();
+    synthetic.add_numeric("x", x).unwrap();
+    synthetic.add_numeric("z", z).unwrap();
+    synthetic.add_numeric("y", y).unwrap();
+
+    let cases: Vec<(DataFrame, &str, Option<Vec<f64>>)> = vec![
+        (
+            sleepstudy_fixture(),
+            "reaction ~ 1 + days + (1 + days | subj)",
+            None,
+        ),
+        (
+            sleepstudy_fixture(),
+            "reaction ~ 1 + days + (1 | subj)",
+            None,
+        ),
+        (
+            pastes_fixture(),
+            "strength ~ 1 + (1 | batch) + (1 | batch_cask)",
+            None,
+        ),
+        (
+            synthetic.clone(),
+            "y ~ 1 + x + z + (1 + x | g) + (1 | h)",
+            None,
+        ),
+        (
+            synthetic,
+            "y ~ 1 + x + z + (1 + x | g) + (1 | h)",
+            Some(weights),
+        ),
+    ];
+    for (data, formula, weights) in cases {
+        let mut model =
+            LinearMixedModel::new(parse_formula(formula).unwrap(), &data, weights.as_deref())
+                .unwrap();
+        model.fit(true).unwrap();
+        let fitted = fitted_varpar(&model);
+        // At the optimum and at a nearby interior point.
+        let perturbed: Vec<f64> = fitted.iter().map(|v| v * 1.07 + 0.01).collect();
+        for varpar in [fitted, perturbed] {
+            let theta_before = model.theta();
+            let analytic = model.jac_vcov_beta_varpar(&varpar).unwrap();
+            let numeric = model
+                .jac_vcov_beta_varpar_finite_difference(&varpar)
+                .unwrap();
+            assert_eq!(model.theta(), theta_before);
+            assert_eq!(analytic.len(), numeric.len());
+            for (index, (a, b)) in analytic.iter().zip(&numeric).enumerate() {
+                let scale = b.amax().max(1e-12);
+                let diff = (a - b).amax() / scale;
+                assert!(
+                    diff < 1e-6,
+                    "{formula} varpar[{index}]: relative diff {diff:e}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn test_vcov_varpar_estimate_returns_hessian_diagnostics_and_restores_state() {
     let data = sleepstudy_fixture();
     let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
@@ -4706,6 +4786,97 @@ fn test_kenward_roger_sigma_g_vector_random_effect_components() {
         residual_variance,
         epsilon = 1e-6
     );
+}
+
+/// The Woodbury (no `n x n`) Kenward-Roger ingredients and adjusted
+/// covariance must match the original dense formulation.
+#[test]
+fn test_kenward_roger_low_rank_matches_dense_reference() {
+    let mut rng = StdRng::seed_from_u64(1234);
+    let n = 150;
+    let mut synthetic = DataFrame::new();
+    let g: Vec<String> = (0..n).map(|i| format!("g{}", i % 10)).collect();
+    let h: Vec<String> = (0..n)
+        .map(|_| format!("h{}", rng.gen_range(0..7)))
+        .collect();
+    let x: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
+    let y: Vec<f64> = (0..n)
+        .map(|i| {
+            2.0 + 0.7 * x[i]
+                + ((i % 10) as f64 - 4.5) * 0.4 * (1.0 + 0.5 * x[i])
+                + rng.gen_range(-1.0..1.0)
+        })
+        .collect();
+    synthetic.add_categorical("g", g).unwrap();
+    synthetic.add_categorical("h", h).unwrap();
+    synthetic.add_numeric("x", x).unwrap();
+    synthetic.add_numeric("y", y).unwrap();
+
+    let cases: Vec<(DataFrame, &str)> = vec![
+        (
+            sleepstudy_fixture(),
+            "reaction ~ 1 + days + (1 + days | subj)",
+        ),
+        (sleepstudy_fixture(), "reaction ~ 1 + days + (1 | subj)"),
+        (
+            pastes_fixture(),
+            "strength ~ 1 + (1 | batch) + (1 | batch_cask)",
+        ),
+        (
+            penicillin_fixture(),
+            "diameter ~ 1 + (1 | plate) + (1 | sample)",
+        ),
+        (synthetic.clone(), "y ~ 1 + x + (1 + x | g) + (1 | h)"),
+        (synthetic, "y ~ 1 + x + (1 | g) + (0 + x | g) + (1 | h)"),
+    ];
+    let rel = |a: &DMatrix<f64>, b: &DMatrix<f64>| (a - b).amax() / b.amax().max(1e-300);
+    for (data, formula) in cases {
+        let mut model =
+            LinearMixedModel::new(parse_formula(formula).unwrap(), &data, None).unwrap();
+        model.fit(true).unwrap();
+        let x = model.feterm.full_rank_x().into_owned();
+        let low = model.kenward_roger_ingredients(&x).unwrap();
+        let dense = model.kenward_roger_ingredients_dense(&x).unwrap();
+        assert_eq!(low.component_labels, dense.component_labels, "{formula}");
+        assert!(rel(&low.ktrace, &dense.ktrace) < 1e-9, "{formula}: ktrace");
+        for (a, b) in low.p_matrices.iter().zip(&dense.p_matrices) {
+            assert!(rel(a, b) < 1e-9, "{formula}: P {:e}", rel(a, b));
+        }
+        assert_eq!(low.q_matrices.len(), dense.q_matrices.len());
+        for (a, b) in low.q_matrices.iter().zip(&dense.q_matrices) {
+            assert!(rel(a, b) < 1e-9, "{formula}: Q {:e}", rel(a, b));
+        }
+
+        let adjusted = model.kenward_roger_adjusted_vcov().unwrap();
+        let phi = adjusted.unadjusted_vcov_active.clone();
+        let reference = model
+            .kenward_roger_adjusted_from_ingredients(phi, dense)
+            .unwrap();
+        assert!(
+            rel(
+                &adjusted.adjusted_vcov_active,
+                &reference.adjusted_vcov_active
+            ) < 1e-9,
+            "{formula}: adjusted vcov"
+        );
+        assert!(rel(&adjusted.w, &reference.w) < 1e-8, "{formula}: W");
+        for row in 0..model.coef_names().len() {
+            let mut l = DMatrix::zeros(1, model.coef_names().len());
+            l[(0, row)] = 1.0;
+            let a = model
+                .kenward_roger_lbddf_with_adjusted(&l, &adjusted)
+                .unwrap();
+            let b = model
+                .kenward_roger_lbddf_with_adjusted(&l, &reference)
+                .unwrap();
+            assert!(
+                (a.denominator_df - b.denominator_df).abs() <= 1e-8 * b.denominator_df.abs(),
+                "{formula}: ddf {} vs {}",
+                a.denominator_df,
+                b.denominator_df
+            );
+        }
+    }
 }
 
 #[test]

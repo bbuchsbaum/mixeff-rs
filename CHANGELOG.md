@@ -46,6 +46,27 @@ vs. `unstable-internals` surface inventory.
 - `stats::profile_sdcor` / `profile_sdcors`: profile-likelihood intervals on
   lme4's `.sig01`/`.sigma` (SD/correlation) scale; included in `profile()`
   and the profile CI payload next to the θ rows.
+### Added
+
+- Opt-in, bit-identical parallelism for parametric bootstrap and profile
+  likelihood (no new dependencies): `BootstrapExecutionOptions { threads }`
+  with `parametricbootstrap_with_options` / `parametricbootstrap_glmm_with_options`,
+  `FixedEffectBootstrapOptions::threads`, and `stats::profile::ProfileOptions`
+  with `profile_with_options`. Default 1 (serial). Responses are simulated
+  serially; workers never invoke host callbacks. Adding
+  `FixedEffectBootstrapOptions::threads` breaks exhaustive struct literals.
+
+### Changed
+
+- Faster dense kernels in the blocked factorization: blocked Cholesky, column
+  triangular solve and lower-triangle downdate for dense blocks; bit-identical
+  up to 256 columns, rounding-level (~1e-13) differences above.
+- Kenward-Roger adjusted covariance via the Woodbury identity in O(q² + n·p)
+  memory instead of dense `n × n` component matrices (results agree to ~1e-10).
+- Satterthwaite uses an analytic `vcov_beta` Jacobian (agrees with the former
+  finite-difference one to ~1e-9) and computes its ingredients once per fit.
+- GLMM PIRLS rebuilds A blocks in place and drops per-iteration allocations
+  (bit-identical results).
 
 ## [1.0.0-rc.5] - 2026-10-07
 

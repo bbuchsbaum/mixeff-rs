@@ -474,50 +474,94 @@ impl LinearMixedModel {
         let mut fits = Vec::with_capacity(options.requested_replicates);
         let mut statistics = Vec::with_capacity(options.requested_replicates);
         let mut last_progress = 0usize;
+        crate::parallel::validate_threads(options.threads)?;
 
-        for replicate in 0..options.requested_replicates {
-            if let Some(callback) = &self.progress_callback {
-                callback.report_if_due(
-                    FitProgressPhase::Bootstrap,
-                    replicate + 1,
-                    Some(options.requested_replicates),
-                    &mut last_progress,
-                )?;
-            }
-            let y_sim = self.simulate_fixed_effect_null(&mut rng, target)?;
-            let mut work = self.clone();
-            work.suppress_derivative_diagnostics = true;
-            match work.refit_with_start(y_sim.as_slice(), RefitStart::Fitted) {
-                Ok(()) => {
-                    statistics.push(
-                        fixed_effect_bootstrap_statistic(&work, hypothesis)
-                            .map(|statistic| statistic.value)
-                            .unwrap_or(f64::NAN),
-                    );
-                    fits.push(BootstrapReplicate {
-                        objective: work.objective(),
-                        sigma: work.sigma(),
-                        beta: work.beta(),
-                        se: work.stderror(),
-                        theta: work.theta(),
-                    });
+        if options.threads == 1 {
+            for replicate in 0..options.requested_replicates {
+                if let Some(callback) = &self.progress_callback {
+                    callback.report_if_due(
+                        FitProgressPhase::Bootstrap,
+                        replicate + 1,
+                        Some(options.requested_replicates),
+                        &mut last_progress,
+                    )?;
                 }
-                Err(error @ MixedModelError::Interrupted(_)) => return Err(error),
-                Err(_) => {
-                    let beta = work.beta();
-                    statistics.push(f64::NAN);
-                    fits.push(BootstrapReplicate {
-                        objective: f64::NAN,
-                        sigma: f64::NAN,
-                        se: DVector::from_element(beta.len(), f64::NAN),
-                        beta,
-                        theta: work.theta(),
-                    });
-                    if options.failed_refit_policy == BootstrapFailedRefitPolicy::Abort {
-                        break;
+                let y_sim = self.simulate_fixed_effect_null(&mut rng, target)?;
+                let mut work = self.clone();
+                work.suppress_derivative_diagnostics = true;
+                let (replicate, statistic, outcome) =
+                    null_bootstrap_refit(&mut work, &y_sim, hypothesis);
+                if let Err(error @ MixedModelError::Interrupted(_)) = outcome {
+                    return Err(error);
+                }
+                let failed = outcome.is_err();
+                fits.push(replicate);
+                statistics.push(statistic);
+                if failed && options.failed_refit_policy == BootstrapFailedRefitPolicy::Abort {
+                    break;
+                }
+            }
+        } else {
+            // Parallel refits: responses are simulated serially on this
+            // thread in the serial RNG order; each refit starts from a
+            // fresh clone of the fitted model (as the serial loop does), so
+            // replicates are bit-identical for every thread count. Host
+            // callbacks run only here, in replicate order.
+            let mut template = self.clone();
+            template.progress_callback = None;
+            template.suppress_derivative_diagnostics = true;
+            let total = options.requested_replicates;
+            // The serial loop reports progress for a replicate before
+            // simulating it, and stops (Abort policy) before simulating any
+            // later one. A simulation error is therefore deferred to its
+            // replicate's turn in the in-order consumer below.
+            let simulation_error = std::cell::RefCell::new(None);
+            let rng = &mut rng;
+            crate::parallel::pipeline(
+                options.threads,
+                total,
+                &mut |_| {
+                    if simulation_error.borrow().is_some() {
+                        return Ok(None);
                     }
-                }
-            }
+                    match self.simulate_fixed_effect_null(rng, target) {
+                        Ok(y_sim) => Ok(Some(y_sim)),
+                        Err(error) => {
+                            *simulation_error.borrow_mut() = Some(error);
+                            Ok(None)
+                        }
+                    }
+                },
+                || (),
+                |_, y_sim: Option<DVector<f64>>| {
+                    y_sim.map(|y_sim| {
+                        let mut work = template.clone();
+                        null_bootstrap_refit(&mut work, &y_sim, hypothesis)
+                    })
+                },
+                &mut |index, outcome: Option<(BootstrapReplicate, f64, Result<()>)>| {
+                    if let Some(callback) = &self.progress_callback {
+                        callback.report_if_due(
+                            FitProgressPhase::Bootstrap,
+                            index + 1,
+                            Some(total),
+                            &mut last_progress,
+                        )?;
+                    }
+                    let Some((replicate, statistic, outcome)) = outcome else {
+                        return Err(simulation_error.borrow_mut().take().unwrap_or_else(|| {
+                            MixedModelError::InvalidArgument(
+                                "fixed-effect null bootstrap simulation failed".to_string(),
+                            )
+                        }));
+                    };
+                    let failed = outcome.is_err();
+                    fits.push(replicate);
+                    statistics.push(statistic);
+                    Ok(!(failed
+                        && options.failed_refit_policy == BootstrapFailedRefitPolicy::Abort))
+                },
+            )?;
         }
 
         let bootstrap = MixedModelBootstrap { fits };
@@ -1111,6 +1155,36 @@ impl LinearMixedModel {
         }
     }
 
+    /// The hypothesis-independent Satterthwaite ingredients at the fitted
+    /// `varpar = c(θ̂, σ̂)`: the `vcov_beta` Jacobian and the `vcov_varpar`
+    /// Hessian estimate. Computed once per fitted state and shared by every
+    /// row of an inference table (each row used to clone the model and redo
+    /// both, which dominated table cost); the cache is keyed on the bits of
+    /// θ, σ, β, the objective and the REML flag, so any refit or state
+    /// change recomputes.
+    fn satterthwaite_ingredients(&self) -> std::sync::Arc<SatterthwaiteIngredients> {
+        let mut varpar = self.theta();
+        varpar.push(self.sigma());
+        let mut key: Vec<u64> = varpar.iter().map(|v| v.to_bits()).collect();
+        key.extend(self.beta().iter().map(|v| v.to_bits()));
+        key.push(self.optsum.fmin.to_bits());
+        key.push(u64::from(self.optsum.reml));
+        if let Some(hit) = self.satterthwaite_cache.get(&key) {
+            return hit;
+        }
+        let mut evaluator = self.clone();
+        let computed = match evaluator.jac_vcov_beta_varpar(&varpar) {
+            Err(error) => Err(SatterthwaiteIngredientError::Jacobian(error.to_string())),
+            Ok(jacobian) => match evaluator.vcov_varpar(&varpar, self.optsum.reml) {
+                Err(error) => Err(SatterthwaiteIngredientError::VcovVarpar(error.to_string())),
+                Ok(estimate) => Ok((jacobian, estimate)),
+            },
+        };
+        let computed = std::sync::Arc::new(computed);
+        self.satterthwaite_cache.set(key, computed.clone());
+        computed
+    }
+
     fn satterthwaite_fixed_effect_test(
         &self,
         hypothesis: FixedEffectHypothesis,
@@ -1138,12 +1212,10 @@ impl LinearMixedModel {
             );
         }
 
-        let mut varpar = self.theta();
-        varpar.push(self.sigma());
-        let mut evaluator = self.clone();
-        let jacobian = match evaluator.jac_vcov_beta_varpar(&varpar) {
-            Ok(jacobian) => jacobian,
-            Err(error) => {
+        let ingredients = self.satterthwaite_ingredients();
+        let (jacobian, vcov_varpar) = match &*ingredients {
+            Ok((jacobian, vcov_varpar)) => (jacobian, vcov_varpar.clone()),
+            Err(SatterthwaiteIngredientError::Jacobian(error)) => {
                 return fixed_effect_test_not_assessed_with_method(
                     hypothesis,
                     estimates,
@@ -1154,10 +1226,7 @@ impl LinearMixedModel {
                     format!("Satterthwaite fixed-effect inference could not compute vcov_beta derivatives: {error}"),
                 );
             }
-        };
-        let vcov_varpar = match evaluator.vcov_varpar(&varpar, self.optsum.reml) {
-            Ok(estimate) => estimate,
-            Err(error) => {
+            Err(SatterthwaiteIngredientError::VcovVarpar(error)) => {
                 return fixed_effect_test_not_assessed_with_method(
                     hypothesis,
                     estimates,
@@ -1316,7 +1385,7 @@ impl LinearMixedModel {
             };
 
             let mut notes = vec![
-                "Satterthwaite multi-df F row computed from eigen-directions of L V_beta L' and finite-difference vcov_beta Jacobian over varpar"
+                "Satterthwaite multi-df F row computed from eigen-directions of L V_beta L' and analytic vcov_beta Jacobian over varpar"
                     .to_string(),
             ];
             if q < hypothesis.n_contrasts() {
@@ -1433,7 +1502,7 @@ impl LinearMixedModel {
         };
 
         let mut notes = vec![
-            "Satterthwaite denominator df computed from finite-difference vcov_beta Jacobian and deviance Hessian over varpar"
+            "Satterthwaite denominator df computed from analytic vcov_beta Jacobian and finite-difference deviance Hessian over varpar"
                 .to_string(),
         ];
         notes.extend(vcov_varpar.notes);
@@ -2172,6 +2241,7 @@ impl LinearMixedModel {
     }
 }
 
+#[cfg_attr(not(any(test, feature = "unstable-internals")), allow(dead_code))]
 pub(super) fn kenward_roger_covariance_component_count(reterm: &ReMat) -> usize {
     reterm.inds.len()
 }
@@ -2188,6 +2258,7 @@ pub(super) fn kenward_roger_covariance_component_indices(reterm: &ReMat) -> Vec<
         .collect()
 }
 
+#[cfg_attr(not(any(test, feature = "unstable-internals")), allow(dead_code))]
 pub(super) fn kenward_roger_response_component(
     reterm: &ReMat,
     row: usize,
@@ -3196,5 +3267,96 @@ mod tests {
             unavailable.status,
             InferenceStatus::PValueUnavailable { .. }
         ));
+    }
+}
+
+/// Hypothesis-independent Satterthwaite inputs (see
+/// `LinearMixedModel::satterthwaite_ingredients`).
+pub(crate) type SatterthwaiteIngredients =
+    std::result::Result<(Vec<DMatrix<f64>>, VcovVarparEstimate), SatterthwaiteIngredientError>;
+
+/// Which Satterthwaite ingredient could not be computed (with the error
+/// text the row's not-assessed reason quotes).
+#[derive(Debug, Clone)]
+pub(crate) enum SatterthwaiteIngredientError {
+    Jacobian(String),
+    VcovVarpar(String),
+}
+
+/// Per-model memo of [`SatterthwaiteIngredients`] keyed on the fitted
+/// state's bits. Cloning a model starts with an empty cache.
+#[derive(Default)]
+pub(crate) struct SatterthwaiteCache(
+    std::sync::Mutex<Option<(Vec<u64>, std::sync::Arc<SatterthwaiteIngredients>)>>,
+);
+
+impl SatterthwaiteCache {
+    fn get(&self, key: &[u64]) -> Option<std::sync::Arc<SatterthwaiteIngredients>> {
+        let guard = self.0.lock().ok()?;
+        guard
+            .as_ref()
+            .filter(|(cached_key, _)| cached_key.as_slice() == key)
+            .map(|(_, value)| value.clone())
+    }
+
+    fn set(&self, key: Vec<u64>, value: std::sync::Arc<SatterthwaiteIngredients>) {
+        if let Ok(mut guard) = self.0.lock() {
+            *guard = Some((key, value));
+        }
+    }
+}
+
+impl Clone for SatterthwaiteCache {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl std::fmt::Debug for SatterthwaiteCache {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SatterthwaiteCache")
+    }
+}
+
+/// One fixed-effect-null bootstrap refit: the replicate record, its test
+/// statistic (NaN on failure), and the refit outcome (an `Interrupted`
+/// error is only possible when the model carries a host callback, i.e.
+/// never on worker threads).
+fn null_bootstrap_refit(
+    work: &mut LinearMixedModel,
+    y_sim: &DVector<f64>,
+    hypothesis: &FixedEffectHypothesis,
+) -> (BootstrapReplicate, f64, Result<()>) {
+    match work.refit_with_start(y_sim.as_slice(), RefitStart::Fitted) {
+        Ok(()) => {
+            let statistic = fixed_effect_bootstrap_statistic(work, hypothesis)
+                .map(|statistic| statistic.value)
+                .unwrap_or(f64::NAN);
+            (
+                BootstrapReplicate {
+                    objective: work.objective(),
+                    sigma: work.sigma(),
+                    beta: work.beta(),
+                    se: work.stderror(),
+                    theta: work.theta(),
+                },
+                statistic,
+                Ok(()),
+            )
+        }
+        Err(error) => {
+            let beta = work.beta();
+            (
+                BootstrapReplicate {
+                    objective: f64::NAN,
+                    sigma: f64::NAN,
+                    se: DVector::from_element(beta.len(), f64::NAN),
+                    beta,
+                    theta: work.theta(),
+                },
+                f64::NAN,
+                Err(error),
+            )
+        }
     }
 }

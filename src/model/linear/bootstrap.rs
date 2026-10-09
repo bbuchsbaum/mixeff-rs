@@ -159,6 +159,13 @@ pub struct FixedEffectBootstrapOptions {
     pub failed_refit_policy: BootstrapFailedRefitPolicy,
     /// Optional deterministic seed for `StdRng`.
     pub seed: Option<u64>,
+    /// Worker threads for the replicate refits (default 1 = serial).
+    /// Responses are always simulated serially on the calling thread in
+    /// the serial RNG order, so results are bit-identical for every
+    /// thread count; host callbacks are only invoked on the calling
+    /// thread.
+    #[serde(default = "default_bootstrap_threads")]
+    pub threads: usize,
 }
 
 impl Default for FixedEffectBootstrapOptions {
@@ -167,7 +174,32 @@ impl Default for FixedEffectBootstrapOptions {
             requested_replicates: 999,
             failed_refit_policy: BootstrapFailedRefitPolicy::Exclude,
             seed: None,
+            threads: 1,
         }
+    }
+}
+
+fn default_bootstrap_threads() -> usize {
+    1
+}
+
+/// Execution controls for [`parametricbootstrap_with_options`] and the GLMM
+/// bootstrap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootstrapExecutionOptions {
+    /// Worker threads for the replicate refits (default 1 = serial). The
+    /// simulated responses are drawn serially on the calling thread in
+    /// the serial RNG order and every replicate refits from the template
+    /// optimum, so the replicates are bit-identical for every thread
+    /// count. Workers never invoke the host progress/interrupt callback;
+    /// it is invoked on the calling thread as replicates complete.
+    #[serde(default = "default_bootstrap_threads")]
+    pub threads: usize,
+}
+
+impl Default for BootstrapExecutionOptions {
+    fn default() -> Self {
+        Self { threads: 1 }
     }
 }
 
@@ -924,6 +956,91 @@ pub fn try_parametricbootstrap<R: rand::Rng>(
     model: &LinearMixedModel,
 ) -> Result<MixedModelBootstrap> {
     run_parametricbootstrap(rng, n_rep, model, true)
+}
+
+/// [`try_parametricbootstrap`] with execution options (worker threads).
+///
+/// With `threads > 1`, responses are simulated serially on the calling
+/// thread (same RNG stream and order as the serial run) and streamed to
+/// scoped worker threads, each refitting its own copy of the template from
+/// the template optimum. The replicates are bit-identical to the serial
+/// run's for every thread count. The host progress/interrupt callback (if
+/// any) is only invoked on the calling thread, as replicates complete (in
+/// replicate order).
+pub fn parametricbootstrap_with_options<R: rand::Rng>(
+    rng: &mut R,
+    n_rep: usize,
+    model: &LinearMixedModel,
+    options: &BootstrapExecutionOptions,
+) -> Result<MixedModelBootstrap> {
+    crate::parallel::validate_threads(options.threads)?;
+    if options.threads == 1 {
+        return run_parametricbootstrap(rng, n_rep, model, true);
+    }
+
+    // Worker template: no host callback (never invoked off the calling
+    // thread), derivative diagnostics skipped as in the serial loop.
+    let mut template = model.clone();
+    template.progress_callback = None;
+    template.suppress_derivative_diagnostics = true;
+    let template_theta = model.theta();
+
+    let mut fits = Vec::with_capacity(n_rep);
+    let mut last_progress = 0usize;
+    crate::parallel::pipeline(
+        options.threads,
+        n_rep,
+        &mut |_| Ok(model.simulate(rng)),
+        || template.clone(),
+        |work: &mut LinearMixedModel, y_sim: DVector<f64>| {
+            let refit =
+                work.refit_with_start(y_sim.as_slice(), RefitStart::From(template_theta.clone()));
+            let replicate = bootstrap_replicate_after_refit(work, refit.is_ok());
+            if refit.is_err() {
+                // As in the serial loop: never carry a partially updated
+                // state into the next replicate.
+                *work = template.clone();
+            }
+            replicate
+        },
+        &mut |index, replicate| {
+            fits.push(replicate);
+            if let Some(callback) = &model.progress_callback {
+                callback.report_if_due(
+                    FitProgressPhase::Bootstrap,
+                    index + 1,
+                    Some(n_rep),
+                    &mut last_progress,
+                )?;
+            }
+            Ok(true)
+        },
+    )?;
+    Ok(MixedModelBootstrap { fits })
+}
+
+/// The replicate record for a refit that succeeded (`ok`) or failed
+/// numerically (NaN objective/σ/SE, current β and θ), exactly as the
+/// serial bootstrap loop records it.
+fn bootstrap_replicate_after_refit(work: &LinearMixedModel, ok: bool) -> BootstrapReplicate {
+    if ok {
+        BootstrapReplicate {
+            objective: work.objective(),
+            sigma: work.sigma(),
+            beta: work.beta(),
+            se: work.stderror(),
+            theta: work.theta(),
+        }
+    } else {
+        let beta = work.beta();
+        BootstrapReplicate {
+            objective: f64::NAN,
+            sigma: f64::NAN,
+            se: DVector::from_element(beta.len(), f64::NAN),
+            beta,
+            theta: work.theta(),
+        }
+    }
 }
 
 fn run_parametricbootstrap<R: rand::Rng>(
