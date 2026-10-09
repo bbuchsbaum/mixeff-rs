@@ -1034,6 +1034,95 @@ pub(crate) fn create_structural_al(
     Ok((a, l))
 }
 
+/// [`compute_re_cross_product`] written into an existing block.
+///
+/// When `target` already has the variant and shape the product produces
+/// (every PIRLS iteration after the first), its storage is reused instead
+/// of allocating a fresh block (for a vector-valued term that was one small
+/// matrix per grouping level per iteration). Each output cell accumulates
+/// exactly the products, in exactly the observation order, of
+/// [`compute_re_cross_product`], so the values are bit-identical; the
+/// same-term vector branch forms only the lower triangle of each level
+/// block and mirrors it (the mirrored products are the same products
+/// with commuted factors).
+pub(super) fn compute_re_cross_product_into(a: &ReMat, b: &ReMat, target: &mut MatrixBlock) {
+    let a_wtz = a.wtz.as_slice();
+    let b_wtz = b.wtz.as_slice();
+    let same = std::ptr::eq(a, b);
+    match target {
+        MatrixBlock::Diagonal(diag) if same && a.vsize == 1 && diag.len() == a.n_levels() => {
+            let out = diag.as_mut_slice();
+            out.fill(0.0);
+            for (&ref_idx, &z) in a.refs.iter().zip(a_wtz) {
+                out[ref_idx as usize] += z * z;
+            }
+        }
+        MatrixBlock::BlockDiagonal(blocks)
+            if same
+                && a.vsize > 1
+                && blocks.len() == a.n_levels()
+                && blocks.iter().all(|blk| blk.shape() == (a.vsize, a.vsize)) =>
+        {
+            let s = a.vsize;
+            for blk in blocks.iter_mut() {
+                blk.fill(0.0);
+            }
+            if s == 2 {
+                for (col, &ref_idx) in a_wtz.chunks_exact(2).zip(&a.refs) {
+                    let (c0, c1) = (col[0], col[1]);
+                    if let [b00, b10, _, b11] = blocks[ref_idx as usize].as_mut_slice() {
+                        *b00 += c0 * c0;
+                        *b10 += c1 * c0;
+                        *b11 += c1 * c1;
+                    }
+                }
+            } else {
+                for (col, &ref_idx) in a_wtz.chunks_exact(s).zip(&a.refs) {
+                    // `s × s` column-major: (si, sj) -> sj * s + si; lower only.
+                    let blk = blocks[ref_idx as usize].as_mut_slice();
+                    for (sj, &wtz_sj) in col.iter().enumerate() {
+                        let dst = &mut blk[sj * s + sj..(sj + 1) * s];
+                        for (d, &wtz_si) in dst.iter_mut().zip(&col[sj..]) {
+                            *d += wtz_si * wtz_sj;
+                        }
+                    }
+                }
+            }
+            for blk in blocks.iter_mut() {
+                let data = blk.as_mut_slice();
+                for sj in 0..s {
+                    for si in (sj + 1)..s {
+                        data[si * s + sj] = data[sj * s + si];
+                    }
+                }
+            }
+        }
+        MatrixBlock::Dense(result)
+            if !same
+                && !(a.vsize == 1 && b.vsize == 1)
+                && result.shape() == (a.n_ranef(), b.n_ranef()) =>
+        {
+            let (va, vb) = (a.vsize, b.vsize);
+            let nranef_a = a.n_ranef();
+            result.fill(0.0);
+            let out = result.as_mut_slice();
+            for (obs, (&ri, &rj)) in a.refs.iter().zip(b.refs.iter()).enumerate() {
+                let row0 = ri as usize * va;
+                let col0 = rj as usize * vb;
+                let ca = &a_wtz[obs * va..(obs + 1) * va];
+                let cb = &b_wtz[obs * vb..(obs + 1) * vb];
+                for (sj, &cb_sj) in cb.iter().enumerate() {
+                    let dst = &mut out[(col0 + sj) * nranef_a + row0..][..va];
+                    for (d, &ca_si) in dst.iter_mut().zip(ca) {
+                        *d += ca_si * cb_sj;
+                    }
+                }
+            }
+        }
+        _ => *target = compute_re_cross_product(a, b),
+    }
+}
+
 /// Compute Z_i' Z_j for two random effects terms.
 pub(super) fn compute_re_cross_product(a: &ReMat, b: &ReMat) -> MatrixBlock {
     let nranef_a = a.n_ranef();
@@ -1288,6 +1377,67 @@ impl ScalarCrossPattern {
         }
         MatrixBlock::Sparse(self.csc.clone())
     }
+
+    /// [`refresh`](Self::refresh) written into `target` when it already
+    /// holds a sparse block with this structural pattern (the case on every
+    /// PIRLS iteration after the first), instead of cloning the pattern's
+    /// CSC matrix each time. Values are bit-identical to `refresh`.
+    pub(super) fn refresh_into(&mut self, a: &ReMat, b: &ReMat, target: &mut MatrixBlock) {
+        let same_pattern = matches!(
+            target,
+            MatrixBlock::Sparse(existing)
+                if existing.nrows() == self.csc.nrows()
+                    && existing.ncols() == self.csc.ncols()
+                    && existing.col_offsets() == self.csc.col_offsets()
+                    && existing.row_indices() == self.csc.row_indices()
+        );
+        if !same_pattern {
+            *target = self.refresh(a, b);
+            return;
+        }
+        let MatrixBlock::Sparse(existing) = target else {
+            unreachable!("pattern match checked above");
+        };
+        let a_wtz = a.wtz.as_slice();
+        let b_wtz = b.wtz.as_slice();
+        let values = existing.values_mut();
+        values.fill(0.0);
+        for ((&entry, &za), &zb) in self.entry_of_obs.iter().zip(a_wtz).zip(b_wtz) {
+            let value = za * zb;
+            if value != 0.0 {
+                values[entry as usize] += value;
+            }
+        }
+    }
+}
+
+/// Row-major copy of the weighted `[X|y]` (`n × (p+1)`, column-major) into
+/// `rows`, so the observation-outer cross-product kernels read each
+/// observation's `p + 1` values contiguously instead of striding across
+/// `p + 1` columns.
+pub(super) fn wtxy_to_rows(wtxy: &DMatrix<f64>, rows: &mut Vec<f64>) {
+    const CHUNK: usize = 64;
+    let n = wtxy.nrows();
+    let pp1 = wtxy.ncols();
+    if rows.len() != n * pp1 {
+        rows.clear();
+        rows.resize(n * pp1, 0.0);
+    }
+    if pp1 == 0 {
+        return;
+    }
+    let data = wtxy.as_slice();
+    // Cache-blocked transpose: `CHUNK` observations at a time.
+    for (chunk, row_chunk) in rows.chunks_mut(CHUNK * pp1).enumerate() {
+        let obs0 = chunk * CHUNK;
+        let m = row_chunk.len() / pp1;
+        for col in 0..pp1 {
+            let src = &data[col * n + obs0..col * n + obs0 + m];
+            for (row, &value) in row_chunk.chunks_exact_mut(pp1).zip(src) {
+                row[col] = value;
+            }
+        }
+    }
 }
 
 /// `[X|y]' Z_j` straight from the already-weighted `[X|y]` matrix
@@ -1300,31 +1450,58 @@ impl ScalarCrossPattern {
 /// increasing observation order, and the products `sw·x · wtz` are the
 /// same ones the `FixedDesign` route forms, so the block is bit-identical
 /// to `compute_fixed_response_re_cross_product` on the weighted design.
+#[cfg(test)]
 pub(super) fn compute_wtxy_re_cross_product(wtxy: &DMatrix<f64>, re: &ReMat) -> DMatrix<f64> {
-    let pp1 = wtxy.ncols();
+    let mut rows = Vec::new();
+    wtxy_to_rows(wtxy, &mut rows);
+    let mut result = DMatrix::zeros(0, 0);
+    compute_wtxy_re_cross_product_into(&rows, wtxy.ncols(), re, &mut result);
+    result
+}
+
+/// `[X|y]' Z_j` from the row-major weighted `[X|y]` ([`wtxy_to_rows`]),
+/// written into `result` (reused when already `(p+1) × n_ranef`).
+///
+/// Observation-outer: when rows are sorted by group, a column-outer pass
+/// hits the same output cell on consecutive iterations and serializes on
+/// the load/store chain. Each cell still sums its products in increasing
+/// observation order, so the result is bit-identical to the column-major
+/// formulation; the row-major input makes the inner loop a contiguous,
+/// bounds-check-free `p + 1`-wide axpy.
+pub(super) fn compute_wtxy_re_cross_product_into(
+    rows: &[f64],
+    pp1: usize,
+    re: &ReMat,
+    result: &mut DMatrix<f64>,
+) {
     let nranef = re.n_ranef();
     let vsize = re.vsize;
-    let mut result = DMatrix::zeros(pp1, nranef);
-    // `pp1 × nranef` column-major: (col, k) -> k * pp1 + col.
+    if result.shape() == (pp1, nranef) {
+        result.fill(0.0);
+    } else {
+        *result = DMatrix::zeros(pp1, nranef);
+    }
+    if pp1 == 0 {
+        return;
+    }
+    // `pp1 × nranef` column-major: (col, k) -> k * pp1 + col, so the
+    // `pp1` cells of one (level, coefficient) pair are contiguous.
     let out = result.as_mut_slice();
     let wtz = re.wtz.as_slice();
-    let x = wtxy.as_slice();
-    let n = wtxy.nrows();
-    // Observation-outer: when rows are sorted by group, a column-outer pass
-    // hits the same output cell on consecutive iterations and serializes on
-    // the load/store chain. Each cell still sums in increasing observation
-    // order, so the result is unchanged.
-    for (obs, (&ref_idx, z)) in re.refs.iter().zip(wtz.chunks_exact(vsize)).enumerate() {
+    for ((&ref_idx, z), row) in re
+        .refs
+        .iter()
+        .zip(wtz.chunks_exact(vsize))
+        .zip(rows.chunks_exact(pp1))
+    {
         let level_base = ref_idx as usize * vsize * pp1;
-        for col in 0..pp1 {
-            let x_value = x[col * n + obs];
-            let base = level_base + col;
-            for (s, &z_value) in z.iter().enumerate() {
-                out[base + s * pp1] += x_value * z_value;
+        for (s, &z_value) in z.iter().enumerate() {
+            let dst = &mut out[level_base + s * pp1..][..pp1];
+            for (d, &x_value) in dst.iter_mut().zip(row) {
+                *d += x_value * z_value;
             }
         }
     }
-    result
 }
 
 /// `[X|y]' [X|y]` straight from the already-weighted `[X|y]` matrix.
@@ -1334,49 +1511,94 @@ pub(super) fn compute_wtxy_re_cross_product(wtxy: &DMatrix<f64>, re: &ReMat) -> 
 /// `NALGEBRA_SEQUENTIAL_GEMM_MAX_DIM` columns and nalgebra's product above
 /// it (on column views with the same memory layout as the owned weighted
 /// matrix), `X'y` sequential dots, and `y'y` nalgebra's `dot`.
+#[cfg(test)]
 pub(super) fn compute_wtxy_cross_product(wtxy: &DMatrix<f64>) -> DMatrix<f64> {
+    let mut rows = Vec::new();
+    wtxy_to_rows(wtxy, &mut rows);
+    let mut result = DMatrix::zeros(0, 0);
+    compute_wtxy_cross_product_into(wtxy, &rows, &mut result);
+    result
+}
+
+/// [`compute_wtxy_cross_product`] written into `result` (reused when
+/// already `(p+1) × (p+1)`), given the row-major copy `rows` of `wtxy`.
+///
+/// Bit-identical to the column-dot formulation: for `p` up to
+/// `NALGEBRA_SEQUENTIAL_GEMM_MAX_DIM` every `X'X` and `X'y` cell is the
+/// sequential sum of its products in increasing observation order, here
+/// accumulated as one observation-outer pass over the lower triangle (the
+/// per-cell order is unchanged, the cells are independent, and the upper
+/// triangle is mirrored from identical commuted products); above it the
+/// `X'X` corner is nalgebra's product on a zero-copy transposed view (the
+/// gemm packs both operands, so this equals the product on an owned
+/// transpose without materializing it); `y'y` is nalgebra's `dot`.
+pub(super) fn compute_wtxy_cross_product_into(
+    wtxy: &DMatrix<f64>,
+    rows: &[f64],
+    result: &mut DMatrix<f64>,
+) {
     let pp1 = wtxy.ncols();
     let p = pp1.saturating_sub(1);
-    let mut result = DMatrix::zeros(pp1, pp1);
-    if pp1 == 0 {
-        return result;
+    if result.shape() == (pp1, pp1) {
+        result.fill(0.0);
+    } else {
+        *result = DMatrix::zeros(pp1, pp1);
     }
-    if p > crate::model::fixed_design::NALGEBRA_SEQUENTIAL_GEMM_MAX_DIM {
+    if pp1 == 0 {
+        return;
+    }
+    let sequential_xtx = p <= crate::model::fixed_design::NALGEBRA_SEQUENTIAL_GEMM_MAX_DIM;
+    {
+        // Lower triangle, column-major (i, j) -> j * pp1 + i with i >= j.
+        // Column `p` (y) only contributes the `X'y` row (i = p, j < p);
+        // `y'y` is taken from nalgebra's dot below.
+        let out = result.as_mut_slice();
+        for row in rows.chunks_exact(pp1) {
+            let y = row[p];
+            if sequential_xtx {
+                for j in 0..p {
+                    let xj = row[j];
+                    let dst = &mut out[j * pp1 + j..j * pp1 + p];
+                    for (d, &xi) in dst.iter_mut().zip(&row[j..p]) {
+                        *d += xi * xj;
+                    }
+                }
+            }
+            // X'y: acc += x_col * y in increasing observation order.
+            for (j, &xj) in row[..p].iter().enumerate() {
+                out[j * pp1 + p] += xj * y;
+            }
+        }
+    }
+    if !sequential_xtx {
         let x = wtxy.columns(0, p);
-        let xtx = x.transpose() * x;
-        for row in 0..p {
-            for col in 0..p {
+        let n = wtxy.nrows();
+        let x_t: nalgebra::DMatrixView<'_, f64, nalgebra::Dyn, nalgebra::Dyn> =
+            nalgebra::DMatrixView::from_slice_with_strides_generic(
+                &wtxy.as_slice()[..n * p],
+                nalgebra::Dyn(p),
+                nalgebra::Dyn(n),
+                nalgebra::Dyn(n),
+                nalgebra::Dyn(1),
+            );
+        let xtx = x_t * x;
+        for col in 0..p {
+            for row in 0..p {
                 result[(row, col)] = xtx[(row, col)];
             }
         }
     } else {
-        for i in 0..p {
-            let xi = wtxy.column(i);
-            let xi = xi.as_slice();
-            for j in 0..p {
-                let xj = wtxy.column(j);
-                let xj = xj.as_slice();
-                let mut acc = 0.0;
-                for (&a, &b) in xi.iter().zip(xj) {
-                    acc += a * b;
-                }
-                result[(i, j)] = acc;
+        for j in 0..p {
+            for i in (j + 1)..p {
+                result[(j, i)] = result[(i, j)];
             }
         }
     }
-    let y = wtxy.column(p);
-    let y_slice = y.as_slice();
-    for col in 0..p {
-        let x_col = wtxy.column(col);
-        let mut acc = 0.0;
-        for (&a, &b) in x_col.as_slice().iter().zip(y_slice) {
-            acc += a * b;
-        }
-        result[(col, p)] = acc;
-        result[(p, col)] = acc;
+    for j in 0..p {
+        result[(j, p)] = result[(p, j)];
     }
+    let y = wtxy.column(p);
     result[(p, p)] = y.dot(&y);
-    result
 }
 
 /// `y'Z_j` for a single response vector: length `n_ranef`, accumulated in
@@ -2546,6 +2768,13 @@ pub(super) fn rank_k_downdate(c: &mut MatrixBlock, a: &DMatrix<f64>) {
                 && a.ncols() >= 512
             {
                 rank_k_downdate_small_dense(c_mat, a);
+            } else if c_mat.nrows() == c_mat.ncols()
+                && c_mat.nrows() == a.nrows()
+                && super::dense_kernels::use_symmetric_downdate(a.nrows(), a.ncols())
+            {
+                // Only the lower triangle feeds the dense Cholesky that
+                // follows every diagonal-block downdate; half the flops.
+                super::dense_kernels::symmetric_rank_k_downdate_lower(c_mat, a);
             } else {
                 gemm_sub_abt(c_mat, a, a);
             }
@@ -2814,44 +3043,11 @@ pub(super) fn cholesky_block_with_tolerance(
             Ok(())
         }
         MatrixBlock::Dense(mat) => {
-            let n = mat.nrows();
             let tol = cholesky_zero_pad_abs_tolerance(
                 diagonal_abs_max_matrix(mat),
                 cholesky_zero_pad_tolerance,
             );
-            for j in 0..n {
-                // Compute L[j,j]
-                let mut s = mat[(j, j)];
-                for k in 0..j {
-                    s -= mat[(j, k)] * mat[(j, k)];
-                }
-                if s <= 0.0 {
-                    if s < -tol {
-                        return Err(MixedModelError::PosDefException);
-                    }
-                    // Zero row (singular RE)
-                    for i in j..n {
-                        mat[(i, j)] = 0.0;
-                    }
-                    continue;
-                }
-                mat[(j, j)] = s.sqrt();
-
-                // Compute L[i,j] for i > j
-                for i in (j + 1)..n {
-                    let mut s = mat[(i, j)];
-                    for k in 0..j {
-                        s -= mat[(i, k)] * mat[(j, k)];
-                    }
-                    mat[(i, j)] = s / mat[(j, j)];
-                }
-
-                // Zero out upper triangle
-                for i in 0..j {
-                    mat[(i, j)] = 0.0;
-                }
-            }
-            Ok(())
+            super::dense_kernels::dense_cholesky_lower_in_place(mat, tol)
         }
         MatrixBlock::Sparse(_) => {
             let dense = block.as_dense();
@@ -3045,21 +3241,7 @@ pub(super) fn rdiv_lower_transpose(a: &mut MatrixBlock, l: &MatrixBlock) {
 
             match a {
                 MatrixBlock::Dense(a_mat) => {
-                    for j in 0..n {
-                        if l_dense[(j, j)].abs() < BLOCK_TRIANGULAR_SOLVE_ZERO_TOLERANCE {
-                            for i in 0..a_mat.nrows() {
-                                a_mat[(i, j)] = 0.0;
-                            }
-                            continue;
-                        }
-                        for i in 0..a_mat.nrows() {
-                            let mut s = a_mat[(i, j)];
-                            for k in 0..j {
-                                s -= a_mat[(i, k)] * l_dense[(j, k)];
-                            }
-                            a_mat[(i, j)] = s / l_dense[(j, j)];
-                        }
-                    }
+                    super::dense_kernels::dense_rdiv_lower_transpose_in_place(a_mat, l_dense);
                 }
                 MatrixBlock::Diagonal(a_diag) => match l {
                     MatrixBlock::Diagonal(l_diag) => {
@@ -3713,7 +3895,11 @@ mod wtxy_re_cross_product {
     use rand::rngs::StdRng;
     use rand::{Rng, SeedableRng};
 
-    use super::{compute_fe_re_cross_product, compute_wtxy_re_cross_product};
+    use super::{
+        compute_fe_re_cross_product, compute_fixed_response_cross_product,
+        compute_re_cross_product, compute_re_cross_product_into, compute_wtxy_cross_product,
+        compute_wtxy_re_cross_product, weighted_fixed_design_for_solver, ScalarCrossPattern,
+    };
     use crate::formula::parse_formula;
     use crate::model::data::DataFrame;
     use crate::model::linear::LinearMixedModel;
@@ -3754,6 +3940,79 @@ mod wtxy_re_cross_product {
                 assert_eq!(fast.shape(), reference.shape());
                 for (a, b) in fast.iter().zip(reference.iter()) {
                     assert_eq!(a.to_bits(), b.to_bits(), "sorted={sorted}");
+                }
+            }
+        }
+    }
+
+    fn weighted_model(formula: &str, seed: u64) -> LinearMixedModel {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let n = 300;
+        let mut df = DataFrame::new();
+        let (mut g, mut h) = (vec![], vec![]);
+        for _ in 0..n {
+            g.push(format!("g{}", rng.gen_range(0..17)));
+            h.push(format!("h{}", rng.gen_range(0..5)));
+        }
+        df.add_categorical("g", g).unwrap();
+        df.add_categorical("h", h).unwrap();
+        for name in ["x1", "x2", "x3", "x4", "x5", "x6", "y"] {
+            let col: Vec<f64> = (0..n).map(|_| rng.gen_range(-2.0..2.0)).collect();
+            df.add_numeric(name, col).unwrap();
+        }
+        let weights: Vec<f64> = (0..n).map(|_| rng.gen_range(0.2..3.0)).collect();
+        LinearMixedModel::new(parse_formula(formula).unwrap(), &df, Some(&weights)).unwrap()
+    }
+
+    /// The row-major `[X|y]'[X|y]` kernel must equal the `FixedDesign`
+    /// route on the weighted design bit for bit, on both sides of the
+    /// sequential/nalgebra `X'X` switch.
+    #[test]
+    fn wtxy_cross_product_matches_fixed_design_route_bitwise() {
+        for (formula, seed) in [
+            ("y ~ 1 + x1 + (1 | g)", 5),
+            (
+                "y ~ 1 + x1 + x2 + x3 + x4 + x5 + x6 + (1 + x1 | g) + (1 | h)",
+                6,
+            ),
+        ] {
+            let model = weighted_model(formula, seed);
+            let sqrtwts = nalgebra::DVector::from_column_slice(&model.sqrtwts);
+            let design =
+                weighted_fixed_design_for_solver(&model.fixed_design, Some(&sqrtwts)).unwrap();
+            let rank = model.feterm.rank;
+            let response = model.xy_mat.wtxy.column(rank).into_owned();
+            let reference = compute_fixed_response_cross_product(&design, &response).unwrap();
+            let fast = compute_wtxy_cross_product(&model.xy_mat.wtxy);
+            assert_eq!(fast.shape(), reference.shape());
+            for (a, b) in fast.iter().zip(reference.iter()) {
+                assert_eq!(a.to_bits(), b.to_bits(), "{formula}");
+            }
+        }
+    }
+
+    /// Writing RE x RE products into existing blocks (the PIRLS path) must
+    /// reproduce the allocating kernel bit for bit, including on reuse.
+    #[test]
+    fn re_cross_product_into_matches_allocating_kernel_bitwise() {
+        let model = weighted_model("y ~ 1 + x1 + (1 + x1 + x2 | g) + (1 + x3 | h) + (1 | g)", 8);
+        let terms = &model.reterms;
+        for i in 0..terms.len() {
+            for j in 0..=i {
+                let (a, b) = (&terms[i], &terms[j]);
+                let reference = compute_re_cross_product(a, b);
+                let mut target = MatrixBlock::Dense(nalgebra::DMatrix::zeros(1, 1));
+                for _ in 0..2 {
+                    if a.vsize == 1 && b.vsize == 1 && i != j {
+                        ScalarCrossPattern::new(a, b).refresh_into(a, b, &mut target);
+                    } else {
+                        compute_re_cross_product_into(a, b, &mut target);
+                    }
+                    let (x, y) = (target.as_dense(), reference.as_dense());
+                    assert_eq!(x.shape(), y.shape());
+                    for (u, v) in x.iter().zip(y.iter()) {
+                        assert_eq!(u.to_bits(), v.to_bits(), "block ({i}, {j})");
+                    }
                 }
             }
         }

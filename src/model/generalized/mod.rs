@@ -457,13 +457,34 @@ impl GeneralizedLinearMixedModel {
     /// inference: downstream summaries use their finiteness to separate
     /// successful refits from failed ones. When the refit carries a fully
     /// certified Wald table its SEs are recorded; otherwise (fast-PIRLS
-    /// fits, refused or partially refused tables) the working-covariance
-    /// standard errors are recorded instead of NaN refusals.
+    /// fits, refused or partially refused tables) the standard errors of
+    /// [`vcov`](MixedModelFit::vcov) — the working covariance rescaled to
+    /// the GLMM dispersion convention — are recorded instead of NaN
+    /// refusals.
     pub(crate) fn bootstrap_replicate_standard_errors(&self) -> DVector<f64> {
         match self.fixed_effect_inference_standard_errors() {
             Some(se) if se.iter().all(|value| value.is_finite()) => se,
-            _ => self.lmm.stderror(),
+            _ => self.covariance_standard_errors(),
         }
+    }
+
+    /// Standard errors from [`vcov`](MixedModelFit::vcov): the recorded
+    /// (joint) covariance, else the PIRLS working covariance rescaled to the
+    /// GLMM dispersion convention. The unscaled working-LMM covariance is
+    /// used only when no GLMM-scale covariance can be formed.
+    fn covariance_standard_errors(&self) -> DVector<f64> {
+        let vcov = self.vcov();
+        DVector::from_iterator(
+            vcov.nrows(),
+            (0..vcov.nrows()).map(|i| {
+                let variance = vcov[(i, i)];
+                if variance.is_finite() && variance >= 0.0 {
+                    variance.sqrt()
+                } else {
+                    f64::NAN
+                }
+            }),
+        )
     }
 
     unstable_internal_method! {
@@ -1096,14 +1117,29 @@ impl GeneralizedLinearMixedModel {
 
         // Add random effects: η += Z_i * b_i
         for (i, rt) in self.lmm.reterms.iter().enumerate() {
-            // b_i = λ_i * u_i
-            self.b[i] = &rt.lambda * &self.u[i];
-            // Multiply Z * vec(b) using refs for sparse multiplication
-            let bvec = DVector::from_column_slice(self.b[i].as_slice());
-            for (obs, &ref_idx) in rt.refs.iter().enumerate() {
-                let r = ref_idx as usize;
-                for s in 0..rt.vsize {
-                    self.eta[obs] += rt.z[(s, obs)] * bvec[r * rt.vsize + s];
+            // b_i = λ_i * u_i, written into the existing buffer (this runs
+            // on every η update of every PIRLS iteration and AGQ node).
+            let u = &self.u[i];
+            let b = &mut self.b[i];
+            if b.shape() == (rt.lambda.nrows(), u.ncols()) {
+                rt.lambda.mul_to(u, b);
+            } else {
+                *b = &rt.lambda * u;
+            }
+            // η += Z vec(b) via the grouping references; `z` is
+            // `vsize × n` column-major, so observation `obs` is one
+            // contiguous chunk.
+            let vsize = rt.vsize;
+            let b = b.as_slice();
+            let eta = self.eta.as_mut_slice();
+            for ((eta_obs, &ref_idx), z_obs) in eta
+                .iter_mut()
+                .zip(&rt.refs)
+                .zip(rt.z.as_slice().chunks_exact(vsize))
+            {
+                let base = ref_idx as usize * vsize;
+                for (s, &z) in z_obs.iter().enumerate() {
+                    *eta_obs += z * b[base + s];
                 }
             }
         }
@@ -1663,6 +1699,9 @@ struct AgqRestoreGuard<'a> {
     glmm: &'a mut GeneralizedLinearMixedModel,
     /// `u[0]` snapshot at the conditional modes (flat, length `n_levels`).
     u0_flat: Vec<f64>,
+    /// `offset + Xβ`, constant over the sweep (β is not perturbed), or
+    /// `None` to recompute it on restore.
+    fixed: Option<DVector<f64>>,
 }
 
 impl std::ops::Deref for AgqRestoreGuard<'_> {
@@ -1683,7 +1722,10 @@ impl Drop for AgqRestoreGuard<'_> {
         for (g, &uv) in self.u0_flat.iter().enumerate() {
             self.glmm.u[0][(0, g)] = uv;
         }
-        self.glmm.update_eta();
+        match self.fixed.take() {
+            Some(fixed) => self.glmm.update_eta_given_fixed(Some(&fixed)),
+            None => self.glmm.update_eta(),
+        }
     }
 }
 
@@ -1751,6 +1793,9 @@ impl MixedModelFit for GeneralizedLinearMixedModel {
     }
 
     fn coef(&self) -> DVector<f64> {
+        // Dropped (aliased) columns are 0, the value every contrast and
+        // prediction (L * coef) needs; `dropped_coef_names()` identifies them
+        // so hosts can report NA, as lme4's fixef(add.dropped = TRUE) does.
         let mut full = DVector::from_element(self.lmm.feterm.piv.len(), 0.0);
         for (i, &val) in self.beta.iter().enumerate() {
             if i < self.lmm.feterm.piv.len() {
@@ -1763,6 +1808,10 @@ impl MixedModelFit for GeneralizedLinearMixedModel {
     fn fixef(&self) -> DVector<f64> {
         self.beta.clone()
     }
+
+    fn dropped_coef_names(&self) -> Vec<String> {
+        self.lmm.feterm.dropped_coef_names()
+    }
     fn coef_names(&self) -> Vec<String> {
         self.lmm.coef_names()
     }
@@ -1772,8 +1821,11 @@ impl MixedModelFit for GeneralizedLinearMixedModel {
             .unwrap_or_else(|| self.lmm.vcov())
     }
     fn stderror(&self) -> DVector<f64> {
+        // A recorded inference table is authoritative, including its NaN
+        // refusals; without one, use the GLMM-scale covariance (never the
+        // unscaled working-LMM standard errors).
         self.fixed_effect_inference_standard_errors()
-            .unwrap_or_else(|| self.lmm.stderror())
+            .unwrap_or_else(|| self.covariance_standard_errors())
     }
     fn fitted(&self) -> DVector<f64> {
         self.mu.clone()

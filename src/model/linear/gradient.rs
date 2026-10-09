@@ -206,6 +206,108 @@ const BLOCKED_GRADIENT_MAX_DENSE_ENTRIES: usize = 4_000_000;
 /// Triangular-solve guard, matching the block solve helpers.
 const GRADIENT_SOLVE_ZERO_TOLERANCE: f64 = 1e-30;
 
+impl LinearMixedModel {
+    /// Analytic `∂ vcov_active(θ, σ) / ∂θ_m` at the θ the current factor
+    /// `L` was built for, one `p × p` matrix per θ component (active,
+    /// pivoted fixed-effect basis).
+    ///
+    /// With `A = X'Σ̃⁻¹X = L_XX L_XX'` (`Σ̃ = I + ZΛΛ'Z'`) and
+    /// `vcov = σ²A⁻¹`, `∂vcov/∂θ_m = vcov · G'D_mG · vcov / σ²` where
+    /// `G = Z'Σ̃⁻¹X` and `D_m = ∂(ΛΛ')/∂θ_m = E_mΛ' + ΛE_m'`. Writing
+    /// `H = (Λ'Z'ZΛ + I)⁻¹Λ'Z'X = L_ZZ⁻ᵀ L_XZ'` (one blocked back
+    /// substitution with `p` right-hand sides) gives `Λ'G = H` and
+    /// `G = Z'X − Z'Z Λ H`, so `G'D_mG = G'E_mH + (G'E_mH)'`, and `G'E_mH`
+    /// is `Σ_levels g_r h_c'` over the rows of `G` and `H` that θ_m's
+    /// position `(r, c)` in Λ selects. Everything uses the θ-invariant `A`
+    /// blocks and the factor; no observation pass, no refactorization.
+    pub(super) fn vcov_active_theta_derivatives(&self, sigma: f64) -> Result<Vec<DMatrix<f64>>> {
+        let k = self.reterms.len();
+        let p = self.feterm.rank;
+        let vcov = self.vcov_active_with_sigma(sigma);
+        let n_theta: usize = self.reterms.iter().map(|re| re.inds.len()).sum();
+        if p == 0 {
+            return Ok(vec![DMatrix::zeros(0, 0); n_theta]);
+        }
+
+        // H_j = L_ZZ⁻ᵀ L_XZ' by blocked back substitution.
+        let mut h: Vec<DMatrix<f64>> = (0..k)
+            .map(|j| {
+                with_dense_block(&self.l_blocks[block_index(k, j)], |l_kj| {
+                    l_kj.rows(0, p).transpose()
+                })
+            })
+            .collect();
+        for j in (0..k).rev() {
+            let (done, rest) = h.split_at_mut(j + 1);
+            let h_j = &mut done[j];
+            for (offset, h_m) in rest.iter().enumerate() {
+                let m = j + 1 + offset;
+                subtract_left_block_transpose_product(h_j, &self.l_blocks[block_index(m, j)], h_m);
+            }
+            solve_upper_block_columns(h_j, &self.l_blocks[block_index(j, j)]);
+        }
+
+        // G_i = (Z'X)_i − Σ_j (Z_i'Z_j) (Λ H)_j.
+        let lambda_h: Vec<DMatrix<f64>> = h
+            .iter()
+            .zip(&self.reterms)
+            .map(|(h_j, re)| {
+                let mut lh = h_j.clone();
+                apply_lambda_to_rhs(&mut lh, re);
+                lh
+            })
+            .collect();
+        let mut g: Vec<DMatrix<f64>> = (0..k)
+            .map(|i| {
+                with_dense_block(&self.a_blocks[block_index(k, i)], |a_ki| {
+                    a_ki.rows(0, p).transpose()
+                })
+            })
+            .collect();
+        for (i, g_i) in g.iter_mut().enumerate() {
+            for (j, lh_j) in lambda_h.iter().enumerate() {
+                if j <= i {
+                    sub_block_times_dense(g_i, &self.a_blocks[block_index(i, j)], lh_j);
+                } else {
+                    subtract_left_block_transpose_product(
+                        g_i,
+                        &self.a_blocks[block_index(j, i)],
+                        lh_j,
+                    );
+                }
+            }
+        }
+
+        let scale = 1.0 / (sigma * sigma);
+        let mut derivatives = Vec::with_capacity(n_theta);
+        for ((re, g_t), h_t) in self.reterms.iter().zip(&g).zip(&h) {
+            let s = re.vsize;
+            for &idx in &re.inds {
+                let (r, c) = (idx % s, idx / s);
+                // M = Σ_levels g_{l,r} h_{l,c}'.
+                let mut m = DMatrix::<f64>::zeros(p, p);
+                for level in 0..re.n_levels() {
+                    let gr = level * s + r;
+                    let hc = level * s + c;
+                    for b in 0..p {
+                        let h_val = h_t[(hc, b)];
+                        if h_val == 0.0 {
+                            continue;
+                        }
+                        for a in 0..p {
+                            m[(a, b)] += g_t[(gr, a)] * h_val;
+                        }
+                    }
+                }
+                let kernel = &m + m.transpose();
+                let derivative = (&vcov * kernel * &vcov) * scale;
+                derivatives.push(symmetrize_matrix(&derivative));
+            }
+        }
+        Ok(derivatives)
+    }
+}
+
 #[inline]
 fn guarded_div(numerator: f64, denominator: f64) -> f64 {
     if denominator.abs() < GRADIENT_SOLVE_ZERO_TOLERANCE {

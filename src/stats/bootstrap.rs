@@ -10,7 +10,8 @@ use std::io::{Read, Write};
 use crate::error::{MixedModelError, Result};
 use crate::model::generalized::GeneralizedLinearMixedModel;
 pub use crate::model::linear::{
-    parametricbootstrap, try_parametricbootstrap, BootstrapFailedRefitPolicy, BootstrapInterval,
+    parametricbootstrap, parametricbootstrap_with_options, try_parametricbootstrap,
+    BootstrapExecutionOptions, BootstrapFailedRefitPolicy, BootstrapInterval,
     BootstrapIntervalMethod, BootstrapQuantile, BootstrapRefitOptions, BootstrapReplicate,
     BootstrapRunMetadata, BootstrapRunPayload, BootstrapSeedRecord, BootstrapTarget,
     BootstrapTargetKind, FixedEffectNullBootstrapTarget, FixedEffectNullCovariancePolicy,
@@ -82,7 +83,24 @@ pub fn parametricbootstrap_glmm<R: rand::Rng>(
     n_rep: usize,
     model: &GeneralizedLinearMixedModel,
 ) -> Result<MixedModelBootstrap> {
+    parametricbootstrap_glmm_with_options(rng, n_rep, model, &BootstrapExecutionOptions::default())
+}
+
+/// [`parametricbootstrap_glmm`] with execution options (worker threads).
+///
+/// Responses are simulated serially on the calling thread in the serial RNG
+/// order; with `threads > 1` the refits of each batch run on scoped worker
+/// threads, each from a fresh copy of the template (as the serial loop
+/// does), so the replicates are bit-identical for every thread count. The
+/// host progress/interrupt callback is only polled on the calling thread.
+pub fn parametricbootstrap_glmm_with_options<R: rand::Rng>(
+    rng: &mut R,
+    n_rep: usize,
+    model: &GeneralizedLinearMixedModel,
+    options: &BootstrapExecutionOptions,
+) -> Result<MixedModelBootstrap> {
     use crate::model::traits::MixedModelFit;
+    crate::parallel::validate_threads(options.threads)?;
 
     if !model.is_fitted() {
         return Err(MixedModelError::InvalidArgument(
@@ -103,6 +121,10 @@ pub fn parametricbootstrap_glmm<R: rand::Rng>(
                 model.family
             )));
         }
+    }
+
+    if options.threads > 1 {
+        return parametricbootstrap_glmm_parallel(rng, n_rep, model, options.threads);
     }
 
     let mut fits = Vec::with_capacity(n_rep);
@@ -151,6 +173,74 @@ pub fn parametricbootstrap_glmm<R: rand::Rng>(
     Ok(MixedModelBootstrap { fits })
 }
 
+/// One GLMM bootstrap refit from a fresh template copy (the serial loop's
+/// replicate record).
+fn glmm_bootstrap_replicate(
+    template: &GeneralizedLinearMixedModel,
+    y_sim: &[f64],
+) -> BootstrapReplicate {
+    use crate::model::traits::MixedModelFit;
+    let mut work = template.clone();
+    match work.refit_with_start(y_sim, crate::model::linear::RefitStart::Fitted) {
+        Ok(_) => {
+            let beta = MixedModelFit::coef(&work);
+            BootstrapReplicate {
+                objective: work.objective(),
+                sigma: work.dispersion(false),
+                se: work.bootstrap_replicate_standard_errors(),
+                beta,
+                theta: work.theta(),
+            }
+        }
+        Err(_) => {
+            let beta = MixedModelFit::coef(&work);
+            BootstrapReplicate {
+                objective: f64::NAN,
+                sigma: f64::NAN,
+                se: nalgebra::DVector::from_element(beta.len(), f64::NAN),
+                beta,
+                theta: work.theta(),
+            }
+        }
+    }
+}
+
+fn parametricbootstrap_glmm_parallel<R: rand::Rng>(
+    rng: &mut R,
+    n_rep: usize,
+    model: &GeneralizedLinearMixedModel,
+    threads: usize,
+) -> Result<MixedModelBootstrap> {
+    // Worker template without the host callback: it is never invoked off
+    // the calling thread.
+    let mut template = model.clone();
+    template.lmm.progress_callback = None;
+
+    let mut fits = Vec::with_capacity(n_rep);
+    let mut last_progress = 0usize;
+    crate::parallel::pipeline(
+        threads,
+        n_rep,
+        // As in the serial loop, a simulation error aborts the run.
+        &mut |_| model.simulate_response(rng),
+        || (),
+        |_, y_sim: Vec<f64>| glmm_bootstrap_replicate(&template, &y_sim),
+        &mut |index, replicate| {
+            fits.push(replicate);
+            if let Some(callback) = &model.lmm.progress_callback {
+                callback.report_if_due(
+                    FitProgressPhase::Bootstrap,
+                    index + 1,
+                    Some(n_rep),
+                    &mut last_progress,
+                )?;
+            }
+            Ok(true)
+        },
+    )?;
+    Ok(MixedModelBootstrap { fits })
+}
+
 /// Shortest coverage interval containing `level` proportion of values.
 ///
 /// Sorts `v` in place, then scans every contiguous window of size
@@ -167,11 +257,25 @@ pub fn parametricbootstrap_glmm<R: rand::Rng>(
 /// and non-finite ends are trimmed before the window scan. If there are
 /// fewer than `ceil(n*level)` finite values the degenerate full-range
 /// `(v[0], v[n-1])` is returned (Julia's fallback), never a crash.
+///
+/// A `level` outside the open interval `(0, 1)` returns `(NaN, NaN)`; use
+/// [`try_shortest_cov_int`] to get a typed error instead.
 pub fn shortest_cov_int(v: &mut [f64], level: f64) -> (f64, f64) {
-    assert!(
-        level > 0.0 && level < 1.0,
-        "level must be in the open interval (0, 1)"
-    );
+    try_shortest_cov_int(v, level).unwrap_or((f64::NAN, f64::NAN))
+}
+
+/// Fallible form of [`shortest_cov_int`]: errors when `level` is not in the
+/// open interval `(0, 1)`; otherwise identical.
+pub fn try_shortest_cov_int(v: &mut [f64], level: f64) -> crate::error::Result<(f64, f64)> {
+    if !(level > 0.0 && level < 1.0) {
+        return Err(crate::error::MixedModelError::InvalidArgument(format!(
+            "level must be in the open interval (0, 1); got {level}"
+        )));
+    }
+    Ok(shortest_cov_int_valid_level(v, level))
+}
+
+fn shortest_cov_int_valid_level(v: &mut [f64], level: f64) -> (f64, f64) {
     let n = v.len();
     if n == 0 {
         return (f64::NAN, f64::NAN);
@@ -283,6 +387,17 @@ mod tests {
     }
 
     #[test]
+    fn test_shortest_cov_int_invalid_level_is_not_a_panic() {
+        let mut v = vec![1.0, 2.0, 3.0];
+        let (lo, hi) = shortest_cov_int(&mut v, 1.5);
+        assert!(lo.is_nan() && hi.is_nan());
+        let (lo, hi) = shortest_cov_int(&mut v, 0.0);
+        assert!(lo.is_nan() && hi.is_nan());
+        assert!(try_shortest_cov_int(&mut v, f64::NAN).is_err());
+        assert_eq!(try_shortest_cov_int(&mut v, 0.6).unwrap(), (1.0, 2.0));
+    }
+
+    #[test]
     fn test_shortest_cov_int_all_nan_is_degenerate_not_panic() {
         let mut v = vec![f64::NAN, f64::NAN, f64::NAN];
         let (lo, hi) = shortest_cov_int(&mut v, 0.95);
@@ -388,6 +503,117 @@ mod tests {
             assert_eq!(a.beta.as_slice(), b.beta.as_slice());
             assert_eq!(a.theta, b.theta);
         }
+    }
+
+    fn assert_bootstrap_bit_identical(a: &MixedModelBootstrap, b: &MixedModelBootstrap) {
+        assert_eq!(a.fits.len(), b.fits.len());
+        let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        for (x, y) in a.fits.iter().zip(&b.fits) {
+            assert_eq!(x.objective.to_bits(), y.objective.to_bits());
+            assert_eq!(x.sigma.to_bits(), y.sigma.to_bits());
+            assert_eq!(bits(x.beta.as_slice()), bits(y.beta.as_slice()));
+            assert_eq!(bits(x.se.as_slice()), bits(y.se.as_slice()));
+            assert_eq!(bits(&x.theta), bits(&y.theta));
+        }
+    }
+
+    fn lmm_bootstrap_fixture() -> LinearMixedModel {
+        use rand::Rng;
+        let mut rng = StdRng::seed_from_u64(77);
+        let n = 120;
+        let mut data = DataFrame::new();
+        let g: Vec<String> = (0..n).map(|i| format!("g{}", i % 10)).collect();
+        let h: Vec<String> = (0..n).map(|i| format!("h{}", (i * 7) % 6)).collect();
+        let x: Vec<f64> = (0..n).map(|_| rng.gen_range(-1.0..1.0)).collect();
+        let y: Vec<f64> = (0..n)
+            .map(|i| 2.0 + x[i] + ((i % 10) as f64 - 4.5) * 0.3 + rng.gen_range(-1.0..1.0))
+            .collect();
+        data.add_categorical("g", g).unwrap();
+        data.add_categorical("h", h).unwrap();
+        data.add_numeric("x", x).unwrap();
+        data.add_numeric("y", y).unwrap();
+        let mut model = LinearMixedModel::new(
+            parse_formula("y ~ 1 + x + (1 + x | g) + (1 | h)").unwrap(),
+            &data,
+            None,
+        )
+        .unwrap();
+        model.fit(true).unwrap();
+        model
+    }
+
+    /// Parallel refits must reproduce the serial bootstrap bit for bit for
+    /// every thread count (responses are simulated serially).
+    #[test]
+    fn test_lmm_parametricbootstrap_threads_are_bit_identical() {
+        let model = lmm_bootstrap_fixture();
+        let mut rng = StdRng::seed_from_u64(11);
+        let legacy = parametricbootstrap(&mut rng, 23, &model);
+        for threads in [1, 2, 3] {
+            let mut rng = StdRng::seed_from_u64(11);
+            let boot = parametricbootstrap_with_options(
+                &mut rng,
+                23,
+                &model,
+                &BootstrapExecutionOptions { threads },
+            )
+            .unwrap();
+            assert_bootstrap_bit_identical(&legacy, &boot);
+        }
+        let mut rng = StdRng::seed_from_u64(11);
+        assert!(parametricbootstrap_with_options(
+            &mut rng,
+            2,
+            &model,
+            &BootstrapExecutionOptions { threads: 0 }
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_glmm_parametricbootstrap_threads_are_bit_identical() {
+        let model = poisson_glmm_fixture();
+        let mut rng = StdRng::seed_from_u64(20260515);
+        let serial = parametricbootstrap_glmm(&mut rng, 13, &model).unwrap();
+        for threads in [2, 4] {
+            let mut rng = StdRng::seed_from_u64(20260515);
+            let boot = parametricbootstrap_glmm_with_options(
+                &mut rng,
+                13,
+                &model,
+                &BootstrapExecutionOptions { threads },
+            )
+            .unwrap();
+            assert_bootstrap_bit_identical(&serial, &boot);
+        }
+    }
+
+    /// The fixed-effect null bootstrap honours `threads` with identical
+    /// replicates, statistics and p-value.
+    #[test]
+    fn test_fixed_effect_null_bootstrap_threads_are_bit_identical() {
+        use crate::compiler::estimability::FixedEffectHypothesis;
+        let model = lmm_bootstrap_fixture();
+        let hypothesis = FixedEffectHypothesis::single_coefficient("x = 0", 1, 2).unwrap();
+        let rows: Vec<String> = [1usize, 2, 3]
+            .iter()
+            .map(|&threads| {
+                let options = crate::model::linear::FixedEffectBootstrapOptions {
+                    requested_replicates: 9,
+                    seed: Some(5),
+                    threads,
+                    ..Default::default()
+                };
+                let row = model.fixed_effect_null_bootstrap_inference_row(
+                    crate::compiler::artifact::FixedEffectInferenceRowKind::Contrast,
+                    hypothesis.clone(),
+                    &options,
+                );
+                serde_json::to_string(&row).unwrap()
+            })
+            .collect();
+        assert_eq!(rows[0], rows[1]);
+        assert_eq!(rows[0], rows[2]);
     }
 
     #[test]

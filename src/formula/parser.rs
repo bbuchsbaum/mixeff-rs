@@ -671,8 +671,10 @@ impl Parser {
                     let terms = self.parse_term_expr()?;
                     if negate {
                         // Top-level term removal (lme4 `-` semantics).
+                        // Terms are sets of variables (R `terms()`
+                        // semantics): `- b:a` removes `a:b`.
                         for t in &terms {
-                            fixed.retain(|existing| existing != t);
+                            fixed.retain(|existing| !same_model_term(existing, t));
                         }
                     } else {
                         fixed.extend(terms);
@@ -980,6 +982,23 @@ impl Parser {
         } else {
             Ok(ParsedGrouping::new(vec![GroupingFactor::Single(first)]))
         }
+    }
+}
+
+/// Whether two fixed terms denote the same model term. Interaction terms are
+/// compared as variable sets, so `a:b` and `b:a` are the same term (as in R).
+fn same_model_term(lhs: &FixedTerm, rhs: &FixedTerm) -> bool {
+    match (lhs, rhs) {
+        (FixedTerm::Interaction(left), FixedTerm::Interaction(right)) => {
+            let mut left = left.clone();
+            let mut right = right.clone();
+            left.sort();
+            left.dedup();
+            right.sort();
+            right.dedup();
+            left == right
+        }
+        _ => lhs == rhs,
     }
 }
 
@@ -1882,6 +1901,25 @@ mod tests {
                 parse_formula(bad)
             );
         }
+    }
+
+    #[test]
+    fn minus_removes_interactions_regardless_of_variable_order() {
+        let f = parse_formula("y ~ a*b - b:a + (1 | g)").unwrap();
+        assert_eq!(
+            f.fixed_terms,
+            vec![
+                FixedTerm::Intercept,
+                FixedTerm::Column("a".into()),
+                FixedTerm::Column("b".into()),
+            ]
+        );
+        let f = parse_formula("y ~ a*b*c - c:a:b + (1 | g)").unwrap();
+        assert!(!f
+            .fixed_terms
+            .iter()
+            .any(|t| matches!(t, FixedTerm::Interaction(v) if v.len() == 3)));
+        assert_eq!(f.fixed_terms.len(), 7);
     }
 
     #[test]

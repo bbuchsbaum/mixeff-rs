@@ -152,6 +152,13 @@ pub enum RandomTermExpansion {
     NestedGrouping,
     /// `(b | a*b)` expanded to `(b | a) + (b | b) + (b | a:b)`.
     CrossedGrouping,
+    /// A zero-correlation term containing a factor, `(1 + x + f || g)`,
+    /// expanded like lme4's `||` to `(1 + x || g) + (0 + f | g)`: the
+    /// intercept and numeric terms get independent variances, and each
+    /// factor term is its own block with full indicator coding and an
+    /// unstructured covariance among its levels. Applied at model build
+    /// time, when the data show which variables are factors.
+    ZeroCorrelationFactorSplit,
 }
 
 impl Formula {

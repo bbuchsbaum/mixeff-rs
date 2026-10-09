@@ -159,6 +159,13 @@ pub struct FixedEffectBootstrapOptions {
     pub failed_refit_policy: BootstrapFailedRefitPolicy,
     /// Optional deterministic seed for `StdRng`.
     pub seed: Option<u64>,
+    /// Worker threads for the replicate refits (default 1 = serial).
+    /// Responses are always simulated serially on the calling thread in
+    /// the serial RNG order, so results are bit-identical for every
+    /// thread count; host callbacks are only invoked on the calling
+    /// thread.
+    #[serde(default = "default_bootstrap_threads")]
+    pub threads: usize,
 }
 
 impl Default for FixedEffectBootstrapOptions {
@@ -167,7 +174,32 @@ impl Default for FixedEffectBootstrapOptions {
             requested_replicates: 999,
             failed_refit_policy: BootstrapFailedRefitPolicy::Exclude,
             seed: None,
+            threads: 1,
         }
+    }
+}
+
+fn default_bootstrap_threads() -> usize {
+    1
+}
+
+/// Execution controls for [`parametricbootstrap_with_options`] and the GLMM
+/// bootstrap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BootstrapExecutionOptions {
+    /// Worker threads for the replicate refits (default 1 = serial). The
+    /// simulated responses are drawn serially on the calling thread in
+    /// the serial RNG order and every replicate refits from the template
+    /// optimum, so the replicates are bit-identical for every thread
+    /// count. Workers never invoke the host progress/interrupt callback;
+    /// it is invoked on the calling thread as replicates complete.
+    #[serde(default = "default_bootstrap_threads")]
+    pub threads: usize,
+}
+
+impl Default for BootstrapExecutionOptions {
+    fn default() -> Self {
+        Self { threads: 1 }
     }
 }
 
@@ -364,7 +396,7 @@ impl MixedModelBootstrap {
         self.parameter_series()?
             .into_iter()
             .map(|(parameter, mut values)| {
-                values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                values.sort_by(f64::total_cmp);
                 Ok(BootstrapQuantile {
                     parameter,
                     probability,
@@ -383,7 +415,7 @@ impl MixedModelBootstrap {
         self.parameter_series()?
             .into_iter()
             .map(|(parameter, mut values)| {
-                values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                values.sort_by(f64::total_cmp);
                 Ok(BootstrapInterval {
                     parameter,
                     level,
@@ -718,8 +750,13 @@ pub(super) fn validate_level(level: f64) -> Result<()> {
     }
 }
 
+/// Type-7 quantile of an already sorted slice. Returns `NaN` for an empty
+/// slice (e.g. a parameter whose replicates were all non-finite) or a
+/// probability outside `[0, 1]` instead of panicking.
 pub(super) fn quantile_sorted(values: &[f64], probability: f64) -> f64 {
-    debug_assert!(!values.is_empty());
+    if values.is_empty() || !(0.0..=1.0).contains(&probability) {
+        return f64::NAN;
+    }
     if values.len() == 1 {
         return values[0];
     }
@@ -733,10 +770,16 @@ pub(super) fn quantile_sorted(values: &[f64], probability: f64) -> f64 {
     }
 }
 
+/// Shortest window covering `level` of the (finite) `values`. Returns
+/// `(NaN, NaN)` for an empty slice or a level outside `(0, 1)` instead of
+/// panicking.
 fn shortest_interval(values: &mut [f64], level: f64) -> (f64, f64) {
-    values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    values.sort_by(f64::total_cmp);
     let n = values.len();
-    let ilen = ((n as f64) * level).ceil() as usize;
+    if n == 0 || !(level > 0.0 && level < 1.0) {
+        return (f64::NAN, f64::NAN);
+    }
+    let ilen = (((n as f64) * level).ceil() as usize).max(1);
     if ilen >= n {
         return (values[0], values[n - 1]);
     }
@@ -915,6 +958,91 @@ pub fn try_parametricbootstrap<R: rand::Rng>(
     run_parametricbootstrap(rng, n_rep, model, true)
 }
 
+/// [`try_parametricbootstrap`] with execution options (worker threads).
+///
+/// With `threads > 1`, responses are simulated serially on the calling
+/// thread (same RNG stream and order as the serial run) and streamed to
+/// scoped worker threads, each refitting its own copy of the template from
+/// the template optimum. The replicates are bit-identical to the serial
+/// run's for every thread count. The host progress/interrupt callback (if
+/// any) is only invoked on the calling thread, as replicates complete (in
+/// replicate order).
+pub fn parametricbootstrap_with_options<R: rand::Rng>(
+    rng: &mut R,
+    n_rep: usize,
+    model: &LinearMixedModel,
+    options: &BootstrapExecutionOptions,
+) -> Result<MixedModelBootstrap> {
+    crate::parallel::validate_threads(options.threads)?;
+    if options.threads == 1 {
+        return run_parametricbootstrap(rng, n_rep, model, true);
+    }
+
+    // Worker template: no host callback (never invoked off the calling
+    // thread), derivative diagnostics skipped as in the serial loop.
+    let mut template = model.clone();
+    template.progress_callback = None;
+    template.suppress_derivative_diagnostics = true;
+    let template_theta = model.theta();
+
+    let mut fits = Vec::with_capacity(n_rep);
+    let mut last_progress = 0usize;
+    crate::parallel::pipeline(
+        options.threads,
+        n_rep,
+        &mut |_| Ok(model.simulate(rng)),
+        || template.clone(),
+        |work: &mut LinearMixedModel, y_sim: DVector<f64>| {
+            let refit =
+                work.refit_with_start(y_sim.as_slice(), RefitStart::From(template_theta.clone()));
+            let replicate = bootstrap_replicate_after_refit(work, refit.is_ok());
+            if refit.is_err() {
+                // As in the serial loop: never carry a partially updated
+                // state into the next replicate.
+                *work = template.clone();
+            }
+            replicate
+        },
+        &mut |index, replicate| {
+            fits.push(replicate);
+            if let Some(callback) = &model.progress_callback {
+                callback.report_if_due(
+                    FitProgressPhase::Bootstrap,
+                    index + 1,
+                    Some(n_rep),
+                    &mut last_progress,
+                )?;
+            }
+            Ok(true)
+        },
+    )?;
+    Ok(MixedModelBootstrap { fits })
+}
+
+/// The replicate record for a refit that succeeded (`ok`) or failed
+/// numerically (NaN objective/σ/SE, current β and θ), exactly as the
+/// serial bootstrap loop records it.
+fn bootstrap_replicate_after_refit(work: &LinearMixedModel, ok: bool) -> BootstrapReplicate {
+    if ok {
+        BootstrapReplicate {
+            objective: work.objective(),
+            sigma: work.sigma(),
+            beta: work.beta(),
+            se: work.stderror(),
+            theta: work.theta(),
+        }
+    } else {
+        let beta = work.beta();
+        BootstrapReplicate {
+            objective: f64::NAN,
+            sigma: f64::NAN,
+            se: DVector::from_element(beta.len(), f64::NAN),
+            beta,
+            theta: work.theta(),
+        }
+    }
+}
+
 fn run_parametricbootstrap<R: rand::Rng>(
     rng: &mut R,
     n_rep: usize,
@@ -982,4 +1110,24 @@ fn run_parametricbootstrap<R: rand::Rng>(
     }
 
     Ok(MixedModelBootstrap { fits })
+}
+
+#[cfg(test)]
+mod interval_helper_tests {
+    use super::{quantile_sorted, shortest_interval};
+
+    #[test]
+    fn interval_helpers_do_not_panic_on_empty_input() {
+        assert!(quantile_sorted(&[], 0.5).is_nan());
+        assert!(quantile_sorted(&[1.0, 2.0], 1.5).is_nan());
+        let (lo, hi) = shortest_interval(&mut [], 0.95);
+        assert!(lo.is_nan() && hi.is_nan());
+        let (lo, hi) = shortest_interval(&mut [1.0, 2.0, 3.0], 2.0);
+        assert!(lo.is_nan() && hi.is_nan());
+        assert_eq!(quantile_sorted(&[1.0, 3.0], 0.5), 2.0);
+        assert_eq!(
+            shortest_interval(&mut [3.0, 1.0, 2.0, 10.0], 0.5),
+            (1.0, 2.0)
+        );
+    }
 }

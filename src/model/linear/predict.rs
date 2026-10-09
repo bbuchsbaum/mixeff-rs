@@ -755,26 +755,8 @@ fn random_term_z_for_obs(
     data: &DataFrame,
     obs: usize,
 ) -> Result<(Vec<f64>, Vec<String>)> {
-    use crate::formula::FixedTerm;
-
-    let mut z = Vec::new();
-    let mut cnames = Vec::new();
-    let has_intercept =
-        rt.terms.iter().any(|t| matches!(t, FixedTerm::Intercept)) || rt.terms.is_empty();
-    if has_intercept {
-        z.push(1.0);
-        cnames.push("(Intercept)".to_string());
-    }
-
-    let basis_coding = random_effect_basis_coding(rt);
-    for term in &rt.terms {
-        for (col, name) in random_effect_basis_columns(term, data, data.nrow(), basis_coding)? {
-            z.push(col[obs]);
-            cnames.push(name);
-        }
-    }
-
-    Ok((z, cnames))
+    let (columns, cnames) = super::random_term_basis(rt, data)?;
+    Ok((columns.iter().map(|column| column[obs]).collect(), cnames))
 }
 
 /// Build the fixed-effects model matrix from formula and data.

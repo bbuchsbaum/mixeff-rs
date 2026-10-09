@@ -53,6 +53,66 @@ thread_local! {
 /// Solve `D x = rhs` in place for a diagonal triangular factor `D`: the
 /// dense forward/back substitutions reduce to this when every off-diagonal
 /// entry is an exact zero.
+/// `L[j,j] x = rhs` (or `L[j,j]' x = rhs` when `transpose`) in place, for
+/// any diagonal-block storage, without densifying it.
+///
+/// The accumulation order per element is that of the dense
+/// `solve_dense_lower_against_rhs` / `solve_dense_upper_from_lower_transpose_against_rhs`
+/// on the densified block (whose off-block entries are exact zeros), so
+/// the solution is unchanged; the old route materialized a `q × q` dense
+/// copy of the block twice per PIRLS iteration.
+fn solve_l_diagonal_block_against_rhs(block: &MatrixBlock, rhs: &mut [f64], transpose: bool) {
+    match block {
+        MatrixBlock::Diagonal(diag) => solve_diagonal_against_rhs(diag.as_slice(), rhs),
+        MatrixBlock::Dense(l) => {
+            if transpose {
+                solve_dense_upper_from_lower_transpose_against_rhs(l, rhs);
+            } else {
+                solve_dense_lower_columnwise(l, rhs);
+            }
+        }
+        MatrixBlock::BlockDiagonal(blocks) => {
+            let mut offset = 0;
+            for l in blocks {
+                let s = l.nrows();
+                let part = &mut rhs[offset..offset + s];
+                if transpose {
+                    solve_dense_upper_from_lower_transpose_against_rhs(l, part);
+                } else {
+                    solve_dense_lower_columnwise(l, part);
+                }
+                offset += s;
+            }
+        }
+        MatrixBlock::Sparse(_) => {
+            let dense = block.as_dense();
+            if transpose {
+                solve_dense_upper_from_lower_transpose_against_rhs(&dense, rhs);
+            } else {
+                solve_dense_lower_columnwise(&dense, rhs);
+            }
+        }
+    }
+}
+
+/// Column-oriented forward substitution `L x = rhs`. Element `i`
+/// accumulates `rhs[i] - l[i,0] x[0] - l[i,1] x[1] - ...` in the same order
+/// as the row-oriented `solve_dense_lower_against_rhs`, so the result is
+/// bit-identical, but `L` is walked down its (contiguous) columns.
+fn solve_dense_lower_columnwise(l: &DMatrix<f64>, rhs: &mut [f64]) {
+    let n = rhs.len();
+    debug_assert_eq!(l.nrows(), n);
+    let data = l.as_slice();
+    for j in 0..n {
+        let col = &data[j * n..(j + 1) * n];
+        let x_j = rhs[j] / col[j];
+        rhs[j] = x_j;
+        for (value, &l_ij) in rhs[j + 1..].iter_mut().zip(&col[j + 1..]) {
+            *value -= l_ij * x_j;
+        }
+    }
+}
+
 fn solve_diagonal_against_rhs(diag: &[f64], rhs: &mut [f64]) {
     debug_assert_eq!(diag.len(), rhs.len());
     for (value, &d) in rhs.iter_mut().zip(diag) {
@@ -357,8 +417,6 @@ pub(crate) const NEGATIVE_BINOMIAL_THETA_MAX_ITERS: usize = 8;
 
 pub(crate) const NEGATIVE_BINOMIAL_THETA_TOL: f64 = 1.0e-5;
 
-pub(crate) const NEGATIVE_BINOMIAL_THETA_FINAL_REFIT_TOL: f64 = 1.0e-8;
-
 pub(crate) fn clamp_negative_binomial_theta(theta: f64) -> f64 {
     theta.clamp(NEGATIVE_BINOMIAL_THETA_MIN, NEGATIVE_BINOMIAL_THETA_MAX)
 }
@@ -637,12 +695,13 @@ pub(crate) fn validate_glmm_response_domain(
                 "bernoulli GLMM response must be exactly 0 or 1; index {idx} has {value}"
             )));
         }
-        if family == Family::Binomial
-            && !(0.0..=1.0).contains(&value)
-            && !is_nonnegative_integer_response(value)
-        {
+        // The binomial deviance, likelihood and simulator all work on the
+        // proportion scale (successes / trials, with trials as prior
+        // weights); a count above 1 would make log(1 - y) NaN and the fit
+        // return non-finite estimates instead of an error.
+        if family == Family::Binomial && !(0.0..=1.0).contains(&value) {
             return Err(MixedModelError::InvalidArgument(format!(
-                "binomial GLMM response must be a proportion in [0, 1] or a non-negative integer count; index {idx} has {value}"
+                "binomial GLMM response must be a proportion in [0, 1] (successes / trials, with the trial counts passed as weights); index {idx} has {value}"
             )));
         }
         if family == Family::Poisson && value < 0.0 {
@@ -805,9 +864,7 @@ impl GeneralizedLinearMixedModel {
                 u.fill(0.0);
             }
         }
-        for (i, rt) in self.lmm.reterms.iter().enumerate() {
-            self.b[i] = &rt.lambda * &self.u[i];
-        }
+        // (`update_eta_given_fixed` recomputes b = Λu in place.)
         // With β held fixed, `offset + Xβ` is the same vector on every
         // η update of this solve; form it once.
         let fixed_eta = (!vary_beta).then(|| self.fixed_linear_predictor());
@@ -836,6 +893,7 @@ impl GeneralizedLinearMixedModel {
 
         let mut sqrtwts = vec![0.0f64; n];
         let mut working_y = vec![0.0f64; n];
+        let mut score_buf: Vec<DMatrix<f64>> = Vec::new();
 
         // Whether PIRLS reached its convergence tolerance within `max_iter`.
         // Returned to the caller so a non-converged conditional-mode solve is
@@ -859,7 +917,7 @@ impl GeneralizedLinearMixedModel {
                 )?;
             }
             self.update_pirls_working_state(vary_beta, &mut sqrtwts, &mut working_y)?;
-            if !vary_beta && self.conditional_mode_score_max_abs() <= 1e-8 {
+            if !vary_beta && self.conditional_mode_score_max_abs_with(&mut score_buf) <= 1e-8 {
                 converged = true;
                 break;
             }
@@ -871,9 +929,8 @@ impl GeneralizedLinearMixedModel {
             } else {
                 self.ranef_u_given_beta(&self.beta)
             };
-            for (i, rt) in self.lmm.reterms.iter().enumerate() {
-                self.u[i].copy_from(&new_u[i]);
-                self.b[i] = &rt.lambda * &self.u[i];
+            for (u, new_u) in self.u.iter_mut().zip(&new_u) {
+                u.copy_from(new_u);
             }
             self.update_eta_given_fixed(fixed_eta.as_ref());
             let mut obj = if vary_beta {
@@ -896,9 +953,6 @@ impl GeneralizedLinearMixedModel {
                 }
                 if vary_beta {
                     self.beta = 0.5 * (&self.beta + &beta_prev);
-                }
-                for (i, rt) in self.lmm.reterms.iter().enumerate() {
-                    self.b[i] = &rt.lambda * &self.u[i];
                 }
                 self.update_eta_given_fixed(fixed_eta.as_ref());
                 obj = if vary_beta {
@@ -941,7 +995,7 @@ impl GeneralizedLinearMixedModel {
             // The Laplace determinant and AGQ scale must describe the final
             // modes, including after an exhausted or failed conditional solve.
             self.update_pirls_working_state(false, &mut sqrtwts, &mut working_y)?;
-            converged = self.conditional_mode_score_max_abs() <= 1e-8;
+            converged = self.conditional_mode_score_max_abs_with(&mut score_buf) <= 1e-8;
         }
         self.refresh_dispersion();
 
@@ -979,8 +1033,27 @@ impl GeneralizedLinearMixedModel {
     /// Score of half the conditional deviance plus the standard-normal
     /// random-effect penalty. Evaluate the actual mean/link, not the bounded
     /// working approximation; invalid derivatives cannot certify convergence.
+    #[cfg(test)]
     fn conditional_mode_score_max_abs(&self) -> f64 {
-        let mut score = self.u.clone();
+        self.conditional_mode_score_max_abs_with(&mut Vec::new())
+    }
+
+    /// [`conditional_mode_score_max_abs`](Self::conditional_mode_score_max_abs)
+    /// accumulating into a caller-owned buffer, so PIRLS reuses one
+    /// allocation across iterations instead of cloning `u` each time.
+    fn conditional_mode_score_max_abs_with(&self, score: &mut Vec<DMatrix<f64>>) -> f64 {
+        let reusable = score.len() == self.u.len()
+            && score
+                .iter()
+                .zip(&self.u)
+                .all(|(s, u)| s.shape() == u.shape());
+        if reusable {
+            for (s, u) in score.iter_mut().zip(&self.u) {
+                s.copy_from(u);
+            }
+        } else {
+            score.clone_from(&self.u);
+        }
         for obs in 0..self.y.len() {
             let mu = self.mu[obs];
             if !mu.is_finite() || !self.eta[obs].is_finite() {
@@ -1014,7 +1087,7 @@ impl GeneralizedLinearMixedModel {
             if !residual.is_finite() {
                 return f64::INFINITY;
             }
-            for (term, block) in self.lmm.reterms.iter().zip(&mut score) {
+            for (term, block) in self.lmm.reterms.iter().zip(score.iter_mut()) {
                 let level = term.refs[obs] as usize;
                 for col in 0..term.vsize {
                     let z_lambda: f64 = (0..term.vsize)
@@ -1102,17 +1175,12 @@ impl GeneralizedLinearMixedModel {
                 );
             }
 
-            let mut v_j = rhs.as_slice().to_vec();
-            match &self.lmm.l_blocks[glmm_block_index(j, j)] {
-                // Scalar random-intercept terms: L[j,j] is diagonal, so the
-                // triangular solve is a division (the dense solve's
-                // off-diagonal terms are exact zeros).
-                MatrixBlock::Diagonal(diag) => {
-                    solve_diagonal_against_rhs(diag.as_slice(), &mut v_j)
-                }
-                block => solve_dense_lower_against_rhs(&block.as_dense(), &mut v_j),
-            }
-            v_vecs.push(DVector::from_vec(v_j));
+            solve_l_diagonal_block_against_rhs(
+                &self.lmm.l_blocks[glmm_block_index(j, j)],
+                rhs.as_mut_slice(),
+                false,
+            );
+            v_vecs.push(rhs);
         }
 
         let mut u_vecs: Vec<DVector<f64>> = vec![DVector::zeros(0); k];
@@ -1129,16 +1197,12 @@ impl GeneralizedLinearMixedModel {
                 );
             }
 
-            let mut u_j = rhs.as_slice().to_vec();
-            match &self.lmm.l_blocks[glmm_block_index(j, j)] {
-                MatrixBlock::Diagonal(diag) => {
-                    solve_diagonal_against_rhs(diag.as_slice(), &mut u_j)
-                }
-                block => {
-                    solve_dense_upper_from_lower_transpose_against_rhs(&block.as_dense(), &mut u_j)
-                }
-            }
-            u_vecs[j] = DVector::from_vec(u_j);
+            solve_l_diagonal_block_against_rhs(
+                &self.lmm.l_blocks[glmm_block_index(j, j)],
+                rhs.as_mut_slice(),
+                true,
+            );
+            u_vecs[j] = rhs;
         }
 
         self.lmm
@@ -1230,15 +1294,38 @@ impl GeneralizedLinearMixedModel {
     /// constant inline.
     fn minus_two_loglik_sum(&self) -> f64 {
         let cached = self.current_response_log_constants();
+        let density_phi = self.conditional_density_dispersion();
         (0..self.y.len())
             .map(|i| {
                 let constant = match cached {
                     Some(values) => Some(values[i]),
                     None => self.response_log_constant_observation(i),
                 };
-                self.minus_two_loglik_observation_given_constant(i, constant)
+                self.minus_two_loglik_observation_given_constant(i, constant, density_phi)
             })
             .sum::<f64>()
+    }
+
+    /// Dispersion φ plugged into the conditional response density of the
+    /// log-likelihood.
+    ///
+    /// Gamma and inverse-Gaussian use lme4's convention (the family `aic()`
+    /// that `glmer`'s Laplace criterion calls): φ = Σ wᵢ dᵢ / Σ wᵢ, the mean
+    /// unit deviance at the current μ. Other dispersion families use the
+    /// stored dispersion (σ²).
+    pub(super) fn conditional_density_dispersion(&self) -> f64 {
+        match self.family {
+            Family::Gamma | Family::InverseGaussian => {
+                let (mut dev, mut total_weight) = (0.0, 0.0);
+                for i in 0..self.y.len() {
+                    let weight = self.case_weight(i);
+                    dev += weight * self.dev_resid_component(self.y[i], self.mu[i]);
+                    total_weight += weight;
+                }
+                (dev / total_weight.max(f64::MIN_POSITIVE)).max(f64::MIN_POSITIVE)
+            }
+            _ => self.dispersion(true).max(f64::MIN_POSITIVE),
+        }
     }
 
     /// `-2 log p(y_i | μ_i)` with the response-only constant supplied by the
@@ -1248,6 +1335,7 @@ impl GeneralizedLinearMixedModel {
         &self,
         index: usize,
         response_constant: Option<f64>,
+        density_phi: f64,
     ) -> f64 {
         let y = self.y[index];
         let mu = self.mu[index].max(f64::MIN_POSITIVE);
@@ -1290,7 +1378,7 @@ impl GeneralizedLinearMixedModel {
                 -2.0 * loglik
             }
             Family::Gamma => {
-                let phi = self.dispersion(true).max(f64::MIN_POSITIVE);
+                let phi = density_phi;
                 let shape = 1.0 / phi;
                 let scale = mu * phi;
                 -2.0 * ((shape - 1.0) * y.ln() - y / scale - shape * scale.ln() - ln_gamma(shape))
@@ -1301,7 +1389,7 @@ impl GeneralizedLinearMixedModel {
                 (2.0 * std::f64::consts::PI * variance).ln() + residual * residual / variance
             }
             Family::InverseGaussian => {
-                let phi = self.dispersion(true).max(f64::MIN_POSITIVE);
+                let phi = density_phi;
                 (2.0 * std::f64::consts::PI * phi * y.powi(3)).ln()
                     + (y - mu).powi(2) / (phi * y * mu * mu)
             }
@@ -1398,9 +1486,13 @@ impl GeneralizedLinearMixedModel {
 
         // From here on `u[0]`/`eta`/`mu` are perturbed at each node. The guard
         // restores them when this scope ends — including if the sweep panics.
+        // β is not perturbed by the sweep, so `offset + Xβ` is formed once
+        // instead of at every node.
+        let fixed = self.fixed_linear_predictor();
         let mut work = AgqRestoreGuard {
             glmm: self,
             u0_flat: u0_flat.clone(),
+            fixed: None,
         };
 
         for (&z, &w) in rule.z.iter().zip(rule.w.iter()) {
@@ -1418,7 +1510,7 @@ impl GeneralizedLinearMixedModel {
             for g in 0..n_levels {
                 work.u[0][(0, g)] = u0_flat[g] + z * sd[g];
             }
-            work.update_eta();
+            work.update_eta_given_fixed(Some(&fixed));
             // devc[g] = u[g]² + Σ devresid_i (per group)
             for (g, devc_g) in devc.iter_mut().enumerate() {
                 let uv = work.u[0][(0, g)];
@@ -1436,6 +1528,7 @@ impl GeneralizedLinearMixedModel {
         }
 
         // `work` drops here, restoring u and η/μ (also on a panic above).
+        work.fixed = Some(fixed);
         drop(work);
 
         let sum_devc0: f64 = devc0.iter().sum();
@@ -1556,7 +1649,7 @@ impl GeneralizedLinearMixedModel {
         }
         match self.update_pirls_at_theta(theta, true) {
             Ok(_) => {
-                let deviance = self.deviance(n_agq);
+                let deviance = self.profiled_outer_objective(n_agq);
                 if deviance.is_finite() {
                     deviance
                 } else {
@@ -1568,6 +1661,23 @@ impl GeneralizedLinearMixedModel {
                 f64::INFINITY
             }
             Err(_) => f64::INFINITY,
+        }
+    }
+
+    /// Objective the profiled (fast-PIRLS) outer θ search minimizes.
+    ///
+    /// For Gamma and inverse-Gaussian the response-constant offset depends
+    /// on θ through the dispersion φ = mean unit deviance, so the outer
+    /// criterion is the full Laplace `-2 logLik` (lme4's `nAGQ = 0`
+    /// criterion); minimizing the unit-φ deviance alone drives θ to the
+    /// boundary. Other families keep the dropped-constant deviance, which
+    /// differs from `-2 logLik` by a θ-free constant.
+    pub(super) fn profiled_outer_objective(&mut self, n_agq: usize) -> f64 {
+        let deviance = self.deviance(n_agq);
+        if matches!(self.family, Family::Gamma | Family::InverseGaussian) {
+            deviance + self.response_constants_offset()
+        } else {
+            deviance
         }
     }
 
@@ -1584,6 +1694,16 @@ impl GeneralizedLinearMixedModel {
         }
 
         let pearson = self.pearson_dispersion_numerator();
+        if matches!(self.family, Family::Gamma | Family::InverseGaussian) {
+            // lme4's `sigma()` for a glmer fit: sqrt(pwrss / n) with
+            // pwrss = Pearson weighted RSS + ||u||². The same scale rescales
+            // the fixed-effect covariance and the random-effect SDs, so the
+            // residual SD, VarCorr and vcov agree with each other and with
+            // lme4.
+            let n = self.y.len().max(1) as f64;
+            let variance = ((pearson + self.u_penalty()) / n).max(f64::MIN_POSITIVE);
+            return variance.sqrt();
+        }
         let denom = self.y.len().saturating_sub(self.lmm.feterm.rank).max(1) as f64;
         let variance = (pearson / denom).max(f64::MIN_POSITIVE);
         variance.sqrt()
@@ -1712,6 +1832,53 @@ mod nested_sparse_regression {
                     matches!(model.lmm.l_blocks[idx], MatrixBlock::Sparse(_)),
                     "L[{i},{j}] was densified by the fit"
                 );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod diagonal_block_solve_tests {
+    use super::*;
+    use crate::types::MatrixBlock;
+    use rand::{rngs::StdRng, Rng, SeedableRng};
+
+    fn random_lower(n: usize, rng: &mut StdRng) -> DMatrix<f64> {
+        DMatrix::from_fn(n, n, |i, j| {
+            if i == j {
+                1.0 + rng.gen::<f64>()
+            } else if i > j {
+                rng.gen::<f64>() - 0.5
+            } else {
+                0.0
+            }
+        })
+    }
+
+    #[test]
+    fn block_solves_are_bit_identical_to_densified_row_solves() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let blocks: Vec<DMatrix<f64>> = (0..9).map(|_| random_lower(3, &mut rng)).collect();
+        let dense_l = random_lower(27, &mut rng);
+        for block in [
+            MatrixBlock::BlockDiagonal(blocks),
+            MatrixBlock::Dense(dense_l),
+            MatrixBlock::Diagonal(DVector::from_fn(27, |i, _| 1.0 + i as f64)),
+        ] {
+            let rhs: Vec<f64> = (0..27).map(|_| rng.gen::<f64>() - 0.5).collect();
+            let dense = block.as_dense();
+            for transpose in [false, true] {
+                let mut expected = rhs.clone();
+                if transpose {
+                    solve_dense_upper_from_lower_transpose_against_rhs(&dense, &mut expected);
+                } else {
+                    solve_dense_lower_against_rhs(&dense, &mut expected);
+                }
+                let mut got = rhs.clone();
+                solve_l_diagonal_block_against_rhs(&block, &mut got, transpose);
+                for (g, e) in got.iter().zip(&expected) {
+                    assert_eq!(g.to_bits(), e.to_bits(), "transpose={transpose}");
+                }
             }
         }
     }

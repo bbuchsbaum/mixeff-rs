@@ -924,19 +924,81 @@ pub fn build_streamed_fixed_effects_design(
         }
     }
 
-    for term in &formula.fixed_terms {
+    let full_coding = no_intercept_full_coding_target(formula, data);
+    for (term_index, term) in formula.fixed_terms.iter().enumerate() {
+        let full_coded_variable = full_coding
+            .as_ref()
+            .filter(|(index, _)| *index == term_index)
+            .map(|(_, name)| name.as_str());
         match term {
             FixedTerm::Intercept | FixedTerm::NoIntercept => {}
             FixedTerm::Column(name) => {
-                append_streamed_main_effect(name, data, &mut column_names, &mut rows)?;
+                let coding = if full_coded_variable == Some(name.as_str()) {
+                    CategoricalCoding::CellMeans
+                } else {
+                    CategoricalCoding::Treatment
+                };
+                append_streamed_main_effect(name, data, coding, &mut column_names, &mut rows)?;
             }
             FixedTerm::Interaction(vars) => {
-                append_streamed_interaction(vars, formula, data, &mut column_names, &mut rows)?;
+                append_streamed_interaction(
+                    vars,
+                    formula,
+                    data,
+                    full_coded_variable,
+                    &mut column_names,
+                    &mut rows,
+                )?;
             }
         }
     }
 
     StreamedFixedDesign::new(n, column_names, rows)
+}
+
+/// R's `model.matrix()` rule for formulas without an intercept: the first
+/// factor found (terms in order of increasing degree, variables in order of
+/// first appearance) is coded by full indicator columns instead of
+/// contrasts, so `~ 0 + f` spans every level of `f` (one mean per level)
+/// rather than silently forcing the reference level's mean to zero.
+///
+/// Returns the index into `formula.fixed_terms` of the affected term and
+/// the variable name, or `None` when the formula has an intercept or no
+/// categorical fixed-effect variable.
+pub(crate) fn no_intercept_full_coding_target(
+    formula: &Formula,
+    data: &DataFrame,
+) -> Option<(usize, String)> {
+    no_intercept_full_coding_target_for_terms(&formula.fixed_terms, formula.has_intercept(), data)
+}
+
+/// [`no_intercept_full_coding_target`] over a bare fixed-term list (used by
+/// the compiler's design audit, which works from the semantic term list).
+pub(crate) fn no_intercept_full_coding_target_for_terms(
+    fixed_terms: &[FixedTerm],
+    has_intercept: bool,
+    data: &DataFrame,
+) -> Option<(usize, String)> {
+    if has_intercept {
+        return None;
+    }
+    let variable_order = fixed_effect_variable_order_for_terms(fixed_terms);
+    let mut terms = fixed_terms
+        .iter()
+        .enumerate()
+        .filter_map(|(index, term)| fixed_term_variables(term).map(|vars| (index, vars)))
+        .collect::<Vec<_>>();
+    // R's terms() orders terms by degree (stable within a degree).
+    terms.sort_by_key(|(_, vars)| vars.len());
+    terms.into_iter().find_map(|(index, vars)| {
+        variable_order
+            .iter()
+            .find(|name| {
+                vars.iter().any(|var| var == *name)
+                    && matches!(data.column(name), Some(Column::Categorical(_)))
+            })
+            .map(|name| (index, (*name).to_string()))
+    })
 }
 
 fn push_column_name(column_names: &mut Vec<String>, name: String) -> usize {
@@ -948,6 +1010,7 @@ fn push_column_name(column_names: &mut Vec<String>, name: String) -> usize {
 fn append_streamed_main_effect(
     name: &str,
     data: &DataFrame,
+    coding: CategoricalCoding,
     column_names: &mut Vec<String>,
     rows: &mut [Vec<(usize, f64)>],
 ) -> Result<()> {
@@ -962,7 +1025,7 @@ fn append_streamed_main_effect(
             Ok(())
         }
         Some(Column::Categorical(cat)) => {
-            let encoded = cat.encoded_columns(name, CategoricalCoding::Treatment);
+            let encoded = cat.encoded_columns(name, coding);
             let level_columns = encoded
                 .iter()
                 .map(|column| push_column_name(column_names, column.name.clone()))
@@ -993,11 +1056,15 @@ fn append_streamed_interaction(
     vars: &[String],
     formula: &Formula,
     data: &DataFrame,
+    full_coded_variable: Option<&str>,
     column_names: &mut Vec<String>,
     rows: &mut [Vec<(usize, f64)>],
 ) -> Result<()> {
     let n = data.nrow();
-    let treatment_variables = interaction_treatment_variables(formula, vars);
+    let mut treatment_variables = interaction_treatment_variables(formula, vars);
+    if let Some(name) = full_coded_variable {
+        treatment_variables.remove(name);
+    }
     let global_order = fixed_effect_variable_order(formula);
     let ordered_vars = global_order
         .into_iter()
@@ -1066,8 +1133,15 @@ fn interaction_treatment_variables(
     formula: &Formula,
     vars: &[String],
 ) -> std::collections::BTreeSet<String> {
-    let lower_terms = formula
-        .fixed_terms
+    interaction_treatment_variables_for_terms(&formula.fixed_terms, vars)
+}
+
+/// [`interaction_treatment_variables`] over a bare fixed-term list.
+pub(crate) fn interaction_treatment_variables_for_terms(
+    fixed_terms: &[FixedTerm],
+    vars: &[String],
+) -> std::collections::BTreeSet<String> {
+    let lower_terms = fixed_terms
         .iter()
         .filter_map(fixed_term_variables)
         .filter(|term| {
@@ -1090,8 +1164,13 @@ fn fixed_term_variables(term: &FixedTerm) -> Option<Vec<String>> {
 }
 
 fn fixed_effect_variable_order(formula: &Formula) -> Vec<&str> {
+    fixed_effect_variable_order_for_terms(&formula.fixed_terms)
+}
+
+/// Variables in order of first appearance across a fixed-term list.
+pub(crate) fn fixed_effect_variable_order_for_terms(fixed_terms: &[FixedTerm]) -> Vec<&str> {
     let mut order = Vec::new();
-    for term in &formula.fixed_terms {
+    for term in fixed_terms {
         match term {
             FixedTerm::Column(name) => {
                 if !order.contains(&name.as_str()) {
@@ -1786,6 +1865,74 @@ mod tests {
             ]
         );
         assert_eq!(streamed.materialize_dense(), expected);
+    }
+
+    fn no_intercept_test_data() -> DataFrame {
+        let mut data = DataFrame::new();
+        let f = ["a", "b", "c", "a", "b", "c"].map(str::to_string).to_vec();
+        let h = ["u", "u", "u", "v", "v", "v"].map(str::to_string).to_vec();
+        data.add_numeric("y", vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
+            .unwrap();
+        data.add_numeric("x", vec![0.5, 1.5, 2.5, 3.5, 4.5, 5.5])
+            .unwrap();
+        data.add_categorical("f", f).unwrap();
+        data.add_categorical("h", h).unwrap();
+        data
+    }
+
+    fn streamed_names(formula: &str, data: &DataFrame) -> Vec<String> {
+        build_streamed_fixed_effects_design(&parse_formula(formula).unwrap(), data)
+            .unwrap()
+            .column_names()
+            .to_vec()
+    }
+
+    /// R: `colnames(model.matrix(~ 0 + f + h))` is `fa fb fc hv`: without an
+    /// intercept the first factor is coded by full indicators, later ones by
+    /// contrasts. Treatment-coding `f` here would silently pin level `a`'s
+    /// mean to zero.
+    #[test]
+    fn no_intercept_first_factor_gets_full_indicator_coding() {
+        let data = no_intercept_test_data();
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        assert_eq!(
+            streamed_names("y ~ 0 + f", &data),
+            names(&["f: a", "f: b", "f: c"])
+        );
+        assert_eq!(
+            streamed_names("y ~ f - 1", &data),
+            names(&["f: a", "f: b", "f: c"])
+        );
+        assert_eq!(
+            streamed_names("y ~ 0 + f + h", &data),
+            names(&["f: a", "f: b", "f: c", "h: v"])
+        );
+        // A leading numeric term does not consume the full coding.
+        assert_eq!(
+            streamed_names("y ~ 0 + x + f", &data),
+            names(&["x", "f: a", "f: b", "f: c"])
+        );
+        // With an intercept nothing changes.
+        assert_eq!(
+            streamed_names("y ~ f + h", &data),
+            names(&["(Intercept)", "f: b", "f: c", "h: v"])
+        );
+        // R orders terms by degree, so the main effect of h is the first
+        // factor-bearing term even when written after the interaction.
+        let formula = parse_formula("y ~ 0 + x:f + h").unwrap();
+        let (index, name) = no_intercept_full_coding_target(&formula, &data).unwrap();
+        assert_eq!(name, "h");
+        assert_eq!(
+            formula.fixed_terms[index],
+            FixedTerm::Column("h".to_string())
+        );
+
+        let full_rank =
+            build_streamed_fixed_effects_design(&parse_formula("y ~ 0 + f + h").unwrap(), &data)
+                .unwrap()
+                .materialize_dense();
+        assert_eq!(FeTerm::new(full_rank, vec![String::new(); 4]).rank, 4);
     }
 
     #[test]

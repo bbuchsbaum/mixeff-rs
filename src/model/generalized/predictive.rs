@@ -496,6 +496,11 @@ impl GeneralizedLinearMixedModel {
         if !self.family.has_dispersion() {
             return Some(1.0);
         }
+        if matches!(self.family, Family::Gamma | Family::InverseGaussian) {
+            // Same scale as the reported residual SD (lme4's sigma()).
+            let scale = self.dispersion;
+            return (scale.is_finite() && scale > 0.0).then_some(scale);
+        }
         let pwrss = self.lmm.pwrss();
         if !pwrss.is_finite() || pwrss < 0.0 {
             return None;

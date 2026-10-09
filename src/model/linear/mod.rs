@@ -64,6 +64,10 @@ use crate::types::{FeMat, FeTerm, FitLogEntry, OptSummary, Optimizer, OptimizerS
 mod active_face;
 
 mod blocks;
+// Cache-friendly dense Cholesky / triangular-solve / downdate kernels.
+mod dense_kernels;
+// Kenward-Roger adjustment through the Woodbury identity (no n x n).
+mod kenward_roger;
 // Analytic profiled-deviance gradient (Phase 5).
 mod gradient;
 pub(crate) use blocks::*;
@@ -71,7 +75,8 @@ pub(crate) use gradient::ProfiledGradientInputs;
 
 mod bootstrap;
 pub use bootstrap::{
-    parametricbootstrap, try_parametricbootstrap, BootstrapFailedRefitPolicy, BootstrapInterval,
+    parametricbootstrap, parametricbootstrap_with_options, try_parametricbootstrap,
+    BootstrapExecutionOptions, BootstrapFailedRefitPolicy, BootstrapInterval,
     BootstrapIntervalMethod, BootstrapQuantile, BootstrapRefitOptions, BootstrapReplicate,
     BootstrapRunMetadata, BootstrapRunPayload, BootstrapSeedRecord, BootstrapTarget,
     BootstrapTargetKind, FixedEffectBootstrapOptions, FixedEffectNullBootstrapTarget,
@@ -101,6 +106,9 @@ pub enum FitProgressPhase {
     Pirls,
     /// A parametric or resampling bootstrap replicate loop.
     Bootstrap,
+    /// A profile-likelihood sweep running on worker threads; the calling
+    /// thread polls the callback while it waits (`current` counts polls).
+    Profile,
 }
 
 /// One throttled progress event emitted by a long-running fit loop.
@@ -269,6 +277,13 @@ pub struct LinearMixedModel {
     /// depend only on the grouping references, which never change.
     pub(crate) re_cross_sparse_patterns:
         std::collections::HashMap<usize, blocks::ScalarCrossPattern>,
+    /// Reused row-major copy of the weighted `[X|y]` for the weighted
+    /// A-block rebuild (scratch only; contents are meaningless between
+    /// rebuilds).
+    pub(crate) wtxy_rows_scratch: Vec<f64>,
+    /// Memo of the hypothesis-independent Satterthwaite ingredients for
+    /// the current fitted state (see `satterthwaite_ingredients`).
+    pub(crate) satterthwaite_cache: inference::SatterthwaiteCache,
     /// True while the `[X|y]` rows of `a_blocks` (`A[k, 0..=k]`) do not
     /// reflect the current `wtz`/`wtxy`. Set only by
     /// [`update_irls_weights_re_only`](Self::update_irls_weights_re_only)
@@ -1239,6 +1254,10 @@ impl LinearMixedModel {
         );
         let materialized = formula.materialize_cow(data)?;
         let data: &DataFrame = &materialized;
+        // lme4-style `||` expansion for terms that contain a factor; needs the
+        // data to know which variables are factors.
+        let mut formula = formula;
+        expand_zerocorr_factor_terms(&mut formula, data);
 
         let semantic_model = compile_formula_ir(&formula);
         let mut compiler_artifact = CompiledModelArtifact::new_with_policy(
@@ -1260,6 +1279,8 @@ impl LinearMixedModel {
                 &mut effective_formula,
                 &compiler_artifact.policy_recommendations,
             )?;
+            // A covariance reduction may have made a factor term `||`.
+            expand_zerocorr_factor_terms(&mut effective_formula, data);
             if !reductions.is_empty() {
                 let effective_semantic_model = compile_formula_ir(&effective_formula);
                 compiler_artifact.set_effective_model(
@@ -1361,6 +1382,7 @@ impl LinearMixedModel {
         // Apply weights: scale each row of X, Z, and y by sqrt(w_i).
         let mut sqrtwts_dvec = None;
         let sqrtwts = if let Some(wts) = weights {
+            validate_lmm_prior_weights(wts, y.len())?;
             let sw: Vec<f64> = wts.iter().map(|w| w.sqrt()).collect();
             let sw_dvec = DVector::from_vec(sw.clone());
             xy_mat.reweight(&sw_dvec);
@@ -1420,6 +1442,8 @@ impl LinearMixedModel {
             derivative_evidence_pending: false,
             inspection_artifact: std::sync::OnceLock::new(),
             re_cross_sparse_patterns: std::collections::HashMap::new(),
+            wtxy_rows_scratch: Vec::new(),
+            satterthwaite_cache: inference::SatterthwaiteCache::default(),
             fe_a_blocks_stale: false,
             fe_l_row_stale: false,
         };
@@ -2094,20 +2118,27 @@ impl LinearMixedModel {
         // references) and refresh their values in place; rebuilding the
         // pattern through a keyed map every PIRLS iteration dominated the
         // per-iteration cost on crossed Bernoulli fits.
+        // Every block is written into the existing A block's storage when
+        // its shape and variant are unchanged (bit-identical values).
         for i in 0..k {
             for j in 0..=i {
-                let block = if i == j {
-                    compute_re_cross_product(&self.reterms[i], &self.reterms[i])
+                let target = &mut self.a_blocks[idx];
+                if i == j {
+                    let a = &self.reterms[i];
+                    blocks::compute_re_cross_product_into(a, a, target);
                 } else if self.reterms[i].vsize == 1 && self.reterms[j].vsize == 1 {
                     let (a, b) = (&self.reterms[i], &self.reterms[j]);
                     self.re_cross_sparse_patterns
                         .entry(idx)
                         .or_insert_with(|| blocks::ScalarCrossPattern::new(a, b))
-                        .refresh(a, b)
+                        .refresh_into(a, b, target);
                 } else {
-                    compute_re_cross_product(&self.reterms[i], &self.reterms[j])
-                };
-                self.a_blocks[idx] = block;
+                    blocks::compute_re_cross_product_into(
+                        &self.reterms[i],
+                        &self.reterms[j],
+                        target,
+                    );
+                }
                 idx += 1;
             }
         }
@@ -2134,14 +2165,30 @@ impl LinearMixedModel {
             && self.fixed_design.storage() != FixedDesignStorage::Streamed
             && self.xy_mat.wtxy.ncols() == self.feterm.rank + 1;
         if weighted_dense {
-            let wtxy = &self.xy_mat.wtxy;
+            // One row-major copy of `wtxy` feeds every kernel (contiguous
+            // per-observation reads); blocks are written in place. Dense
+            // FE x RE blocks need no `finalize_fixed_re_block`.
+            let mut rows = std::mem::take(&mut self.wtxy_rows_scratch);
+            blocks::wtxy_to_rows(&self.xy_mat.wtxy, &mut rows);
+            let pp1 = self.xy_mat.wtxy.ncols();
             for j in 0..k {
-                let block =
-                    MatrixBlock::Dense(compute_wtxy_re_cross_product(wtxy, &self.reterms[j]));
-                self.a_blocks[idx] = finalize_fixed_re_block(block, k);
+                let target = &mut self.a_blocks[idx];
+                if !matches!(target, MatrixBlock::Dense(_)) {
+                    *target = MatrixBlock::Dense(DMatrix::zeros(0, 0));
+                }
+                if let MatrixBlock::Dense(out) = target {
+                    blocks::compute_wtxy_re_cross_product_into(&rows, pp1, &self.reterms[j], out);
+                }
                 idx += 1;
             }
-            self.a_blocks[idx] = MatrixBlock::Dense(compute_wtxy_cross_product(wtxy));
+            let target = &mut self.a_blocks[idx];
+            if !matches!(target, MatrixBlock::Dense(_)) {
+                *target = MatrixBlock::Dense(DMatrix::zeros(0, 0));
+            }
+            if let MatrixBlock::Dense(out) = target {
+                blocks::compute_wtxy_cross_product_into(&self.xy_mat.wtxy, &rows, out);
+            }
+            self.wtxy_rows_scratch = rows;
             return Ok(());
         }
 
@@ -2198,12 +2245,19 @@ impl LinearMixedModel {
         let pwrss = last_diag * last_diag;
 
         if reml {
+            // `X` is reduced to its full-rank pivoted columns before the
+            // factorization, so every diagonal of `L_XX` must be strictly
+            // positive. A non-positive or non-finite pivot means the
+            // factorization broke down at this θ; skipping it would silently
+            // drop a term from the REML criterion, so mark the point as
+            // infeasible (objective +∞) instead.
             let mut logdet_lxx = 0.0;
             for i in 0..(pp1 - 1) {
                 let d = l_dense[(i, i)];
-                if d > 0.0 {
-                    logdet_lxx += d.ln();
+                if !(d.is_finite() && d > 0.0) {
+                    return (f64::INFINITY, pwrss);
                 }
+                logdet_lxx += d.ln();
             }
             logdet += 2.0 * logdet_lxx;
         }
@@ -2472,6 +2526,9 @@ impl LinearMixedModel {
     }
 
     unstable_internal_method! {
+    // Engine paths now use the analytic Jacobian; this stays as unstable
+    // inspection surface (and the finite-difference test oracle's input).
+    #[cfg_attr(not(any(test, feature = "unstable-internals")), allow(dead_code))]
     /// Evaluate the fixed-effect covariance matrix at `varpar = c(theta, sigma)`.
     ///
     /// This is the Rust analogue of `lmerTestR::get_covbeta`: at a trial
@@ -2514,6 +2571,7 @@ impl LinearMixedModel {
     }
     }
 
+    #[cfg_attr(not(any(test, feature = "unstable-internals")), allow(dead_code))]
     fn vcov_beta_varpar_fast(&self, varpar: &[f64]) -> Option<DMatrix<f64>> {
         let n_theta = self.n_theta();
         let theta = &varpar[..n_theta];
@@ -2533,16 +2591,82 @@ impl LinearMixedModel {
     }
 
     unstable_internal_method! {
-    /// Numerically differentiate `vcov_beta_varpar` with respect to `varpar`.
+    /// Differentiate `vcov_beta_varpar` with respect to `varpar`.
     ///
-    /// Returns one `p x p` matrix per `varpar` component. The first
-    /// implementation intentionally requires a feasible central-difference
-    /// stencil; boundary-active parameters return an explicit unavailable
-    /// reason instead of silently producing one-sided derivatives.
+    /// Returns one `p x p` matrix per `varpar` component. The θ derivatives
+    /// are analytic (`vcov · G'D_mG · vcov / σ²`, see
+    /// `vcov_active_theta_derivatives`) from one factorization at the
+    /// requested θ; the σ derivative is `2 vcov / σ`. This replaced a
+    /// central-difference Jacobian that refactored `2·len(varpar)` times
+    /// and cloned every L block per evaluation; the two agree to the
+    /// finite-difference truncation error (~1e-8 relative).
+    ///
+    /// The feasibility gate of the former central-difference stencil is
+    /// kept: boundary-active parameters still return an explicit
+    /// unavailable reason, so which hypotheses are assessed is unchanged.
     ///
     /// Unstable internal surface: `pub` only with the `unstable-internals`
     /// feature; otherwise `pub(crate)`.
     unstable_vis fn jac_vcov_beta_varpar(&mut self, varpar: &[f64]) -> Result<Vec<DMatrix<f64>>> {
+        self.validate_varpar(varpar)?;
+        self.ensure_central_stencil_feasible(varpar)?;
+
+        let n_theta = self.n_theta();
+        let theta = &varpar[..n_theta];
+        let sigma = varpar[n_theta];
+
+        let original_theta = self.theta();
+        let original_l_blocks = self.l_blocks.clone();
+        let result = (|| {
+            self.set_theta(theta)?;
+            self.update_l()?;
+            let vcov_active = self.vcov_active_with_sigma(sigma);
+            let mut active = self.vcov_active_theta_derivatives(sigma)?;
+            active.push(&vcov_active * (2.0 / sigma));
+            let mut jacobian = Vec::with_capacity(active.len());
+            for (index, derivative) in active.iter().enumerate() {
+                let derivative = self.unpivot_fixed_effect_covariance(derivative);
+                if !matrix_is_finite(&derivative) {
+                    return Err(MixedModelError::InvalidArgument(format!(
+                        "jac_vcov_beta derivative for varpar[{index}] contains non-finite entries"
+                    )));
+                }
+                jacobian.push(symmetrize_matrix(&derivative));
+            }
+            Ok(jacobian)
+        })();
+        self.set_theta(&original_theta)?;
+        self.l_blocks = original_l_blocks;
+        result
+    }
+    }
+
+    /// The central-difference stencil gate shared by the varpar Jacobian:
+    /// every component must admit a feasible central step.
+    fn ensure_central_stencil_feasible(&self, varpar: &[f64]) -> Result<()> {
+        let lower_bounds = self.varpar_lower_bounds();
+        let steps = finite_difference_steps(varpar, &lower_bounds, 1e-5);
+        for index in 0..varpar.len() {
+            let lower = lower_bounds
+                .get(index)
+                .copied()
+                .unwrap_or(f64::NEG_INFINITY);
+            if feasible_central_step(varpar[index], lower, steps[index]).is_none() {
+                return Err(MixedModelError::InvalidArgument(format!(
+                    "cannot compute central finite-difference derivative for varpar[{index}]: \
+                     value is at or too near lower bound {lower}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// The former central-difference Jacobian, kept as a test oracle.
+    #[cfg(test)]
+    pub(crate) fn jac_vcov_beta_varpar_finite_difference(
+        &mut self,
+        varpar: &[f64],
+    ) -> Result<Vec<DMatrix<f64>>> {
         self.validate_varpar(varpar)?;
 
         let lower_bounds = self.varpar_lower_bounds();
@@ -2554,32 +2678,18 @@ impl LinearMixedModel {
                 .get(index)
                 .copied()
                 .unwrap_or(f64::NEG_INFINITY);
-            let step =
-                feasible_central_step(varpar[index], lower, steps[index]).ok_or_else(|| {
-                    MixedModelError::InvalidArgument(format!(
-                        "cannot compute central finite-difference derivative for varpar[{index}]: \
-                     value is at or too near lower bound {lower}"
-                    ))
-                })?;
-
+            let step = feasible_central_step(varpar[index], lower, steps[index])
+                .expect("feasible central step");
             let mut plus = varpar.to_vec();
             let mut minus = varpar.to_vec();
             plus[index] += step;
             minus[index] -= step;
-
             let vcov_plus = self.vcov_beta_varpar(&plus)?;
             let vcov_minus = self.vcov_beta_varpar(&minus)?;
             let derivative = (&vcov_plus - &vcov_minus) * (0.5 / step);
-            if !matrix_is_finite(&derivative) {
-                return Err(MixedModelError::InvalidArgument(format!(
-                    "jac_vcov_beta derivative for varpar[{index}] contains non-finite entries"
-                )));
-            }
             jacobian.push(symmetrize_matrix(&derivative));
         }
-
         Ok(jacobian)
-    }
     }
 
     /// Estimate `vcov(varpar)` from the Hessian of `deviance_varpar`.
@@ -2670,6 +2780,9 @@ impl LinearMixedModel {
     }
 
     unstable_internal_method! {
+    // The adjusted covariance uses the low-rank route; this explicit n x n
+    // decomposition stays as unstable inspection surface and test oracle.
+    #[cfg_attr(not(any(test, feature = "unstable-internals")), allow(dead_code))]
     /// Build the Kenward-Roger response-covariance component decomposition.
     ///
     /// The returned matrices follow the `pbkrtest::get_SigmaG()` convention:
@@ -2824,14 +2937,15 @@ impl LinearMixedModel {
     /// Unstable internal surface: `pub` only with the `unstable-internals`
     /// feature; otherwise `pub(crate)`.
     unstable_vis fn kenward_roger_adjusted_vcov(&self) -> Result<KenwardRogerAdjustedVcov> {
-        let sigma_g = self.kenward_roger_sigma_g()?;
-        if !sigma_g.sigma_positive_definite {
-            return Err(MixedModelError::Singular(
-                "Kenward-Roger adjusted covariance requires a positive-definite response covariance"
-                    .to_string(),
-            ));
-        }
+        let (phi, x) = self.kenward_roger_phi_and_x()?;
+        let ingredients = self.kenward_roger_ingredients(&x)?;
+        self.kenward_roger_adjusted_from_ingredients(phi, ingredients)
+    }
+    }
 
+    /// Fitted active fixed-effect covariance `Φ` and active design `X`,
+    /// after the shared Kenward-Roger prerequisites.
+    fn kenward_roger_phi_and_x(&self) -> Result<(DMatrix<f64>, DMatrix<f64>)> {
         let phi = self.vcov_active_with_sigma(self.sigma());
         if !matrix_is_finite(&phi) {
             return Err(MixedModelError::InvalidArgument(
@@ -2847,37 +2961,81 @@ impl LinearMixedModel {
                 x.ncols()
             )));
         }
+        Ok((phi, x))
+    }
 
+    /// The original dense (`n × n`) Kenward-Roger ingredients through
+    /// `kenward_roger_sigma_g`, kept as the test oracle for the low-rank
+    /// formulation in `kenward_roger.rs`.
+    #[cfg(test)]
+    fn kenward_roger_ingredients_dense(
+        &self,
+        x: &DMatrix<f64>,
+    ) -> Result<kenward_roger::KenwardRogerIngredients> {
+        let sigma_g = self.kenward_roger_sigma_g()?;
+        if !sigma_g.sigma_positive_definite {
+            return Err(MixedModelError::Singular(
+                "Kenward-Roger adjusted covariance requires a positive-definite response covariance"
+                    .to_string(),
+            ));
+        }
         let sigma_inv = invert_spd_matrix(&sigma_g.sigma, "Kenward-Roger response covariance")?;
-        let tt = &sigma_inv * &x;
+        let tt = &sigma_inv * x;
         let n_components = sigma_g.components.len();
-        let p = phi.ncols();
 
         let mut hh = Vec::with_capacity(n_components);
         let mut oo = Vec::with_capacity(n_components);
         let mut p_matrices = Vec::with_capacity(n_components);
         for component in &sigma_g.components {
             let h = component * &sigma_inv;
-            let o = &h * &x;
+            let o = &h * x;
             let p_matrix = symmetrize_matrix(&(-o.transpose() * &tt));
             hh.push(h);
             oo.push(o);
             p_matrices.push(p_matrix);
         }
-
         let mut q_matrices = Vec::with_capacity(n_components.saturating_mul(n_components + 1) / 2);
+        let mut ktrace = DMatrix::zeros(n_components, n_components);
+        for rr in 0..n_components {
+            for ss in rr..n_components {
+                q_matrices.push(oo[rr].transpose() * &sigma_inv * &oo[ss]);
+                let value = matrix_elementwise_dot(&hh[rr].transpose(), &hh[ss]);
+                ktrace[(rr, ss)] = value;
+                ktrace[(ss, rr)] = value;
+            }
+        }
+        Ok(kenward_roger::KenwardRogerIngredients {
+            p_matrices,
+            q_matrices,
+            ktrace,
+            component_labels: sigma_g.component_labels,
+        })
+    }
+
+    /// The `p × p` tail of `pbkrtest::vcovAdj_internal()`: information
+    /// matrix, its (generalized) inverse `W`, and `Φ + 2ΦUΦ`.
+    fn kenward_roger_adjusted_from_ingredients(
+        &self,
+        phi: DMatrix<f64>,
+        ingredients: kenward_roger::KenwardRogerIngredients,
+    ) -> Result<KenwardRogerAdjustedVcov> {
+        let kenward_roger::KenwardRogerIngredients {
+            p_matrices,
+            q_matrices,
+            ktrace,
+            component_labels,
+        } = ingredients;
+        let n_components = p_matrices.len();
+        let p = phi.ncols();
+
         let mut information_matrix = DMatrix::zeros(n_components, n_components);
         for rr in 0..n_components {
             for ss in rr..n_components {
-                let q_matrix = oo[rr].transpose() * &sigma_inv * &oo[ss];
-                let q_index = q_matrices.len();
-                q_matrices.push(q_matrix);
-
-                let ktrace = matrix_elementwise_dot(&hh[rr].transpose(), &hh[ss]);
+                let q_index = symmetric_pair_index(rr, ss, n_components);
                 let phi_q = matrix_elementwise_dot(&phi, &q_matrices[q_index]);
                 let phi_p_rr = &phi * &p_matrices[rr];
                 let pp_term = matrix_elementwise_dot(&phi_p_rr, &(&p_matrices[ss] * &phi));
-                let value = ktrace - 2.0 * phi_q + pp_term;
+                let value = ktrace[(rr, ss)] - 2.0 * phi_q + pp_term;
                 information_matrix[(rr, ss)] = value;
                 information_matrix[(ss, rr)] = value;
             }
@@ -2947,9 +3105,6 @@ impl LinearMixedModel {
                 "Kenward-Roger information matrix used a generalized inverse at tolerance {generalized_inverse_tolerance}"
             ));
         }
-        if sigma_g.reliability != ReliabilityGrade::Moderate {
-            notes.extend(sigma_g.notes.clone());
-        }
 
         let reliability = if used_generalized_inverse {
             ReliabilityGrade::Low
@@ -2968,11 +3123,10 @@ impl LinearMixedModel {
             information_eigenvalues,
             condition_min_abs_eigenvalue,
             used_generalized_inverse,
-            component_labels: sigma_g.component_labels,
+            component_labels,
             reliability,
             notes,
         })
-    }
     }
 
     unstable_internal_method! {
@@ -3214,20 +3368,35 @@ impl LinearMixedModel {
 
     /// Gradient of `deviance_varpar` at `varpar = c(theta, sigma)`: the
     /// analytic θ-gradient of the fixed-σ objective plus
-    /// `∂/∂σ = 2·denomdf/σ − 2·pwrss/σ³`. Restores the fitted state.
-    fn gradient_deviance_varpar(&mut self, varpar: &[f64], reml: bool) -> Result<Vec<f64>> {
+    /// `∂/∂σ = 2·denomdf/σ − 2·pwrss/σ³`, after the argument checks
+    /// (`varpar` shape/finiteness, positive σ). Leaves θ and `L` at the
+    /// evaluation point; the caller restores the fitted state.
+    fn gradient_deviance_varpar_checked_unrestored(
+        &mut self,
+        varpar: &[f64],
+        reml: bool,
+    ) -> Result<Vec<f64>> {
         self.validate_varpar(varpar)?;
         let n_theta = self.n_theta();
-        let theta = &varpar[..n_theta];
         let sigma = varpar[n_theta];
         if !(sigma.is_finite() && sigma > 0.0) {
             return Err(MixedModelError::InvalidArgument(format!(
                 "sigma must be positive and finite, got {sigma}"
             )));
         }
+        self.gradient_deviance_varpar_unrestored(&varpar[..n_theta], sigma, reml)
+    }
 
-        let original_theta = self.theta();
-        let original_l_blocks = self.l_blocks.clone();
+    /// Analytic varpar gradient of `deviance_varpar` at `(theta, sigma)`,
+    /// without a state save/restore: leaves θ and `L` at the evaluation
+    /// point. The Hessian sweep saves and restores once around all its
+    /// evaluations instead of cloning every L block per evaluation.
+    fn gradient_deviance_varpar_unrestored(
+        &mut self,
+        theta: &[f64],
+        sigma: f64,
+        reml: bool,
+    ) -> Result<Vec<f64>> {
         let result = (|| {
             self.set_theta(theta)?;
             self.update_l()?;
@@ -3257,8 +3426,6 @@ impl LinearMixedModel {
                 ))
             }
         })();
-        self.set_theta(&original_theta)?;
-        self.l_blocks = original_l_blocks;
         result
     }
 
@@ -3288,18 +3455,28 @@ impl LinearMixedModel {
 
         let n = varpar.len();
         let mut hessian = DMatrix::zeros(n, n);
-        for col in 0..n {
-            let h = central_steps[col];
-            let mut plus = varpar.to_vec();
-            let mut minus = varpar.to_vec();
-            plus[col] += h;
-            minus[col] -= h;
-            let g_plus = self.gradient_deviance_varpar(&plus, reml)?;
-            let g_minus = self.gradient_deviance_varpar(&minus, reml)?;
-            for row in 0..n {
-                hessian[(row, col)] = (g_plus[row] - g_minus[row]) / (2.0 * h);
+        // Save θ and L once for the whole sweep (each stencil point fully
+        // rebuilds L), instead of cloning every L block per evaluation.
+        let original_theta = self.theta();
+        let original_l_blocks = self.l_blocks.clone();
+        let sweep: Result<()> = (|| {
+            for col in 0..n {
+                let h = central_steps[col];
+                let mut plus = varpar.to_vec();
+                let mut minus = varpar.to_vec();
+                plus[col] += h;
+                minus[col] -= h;
+                let g_plus = self.gradient_deviance_varpar_checked_unrestored(&plus, reml)?;
+                let g_minus = self.gradient_deviance_varpar_checked_unrestored(&minus, reml)?;
+                for row in 0..n {
+                    hessian[(row, col)] = (g_plus[row] - g_minus[row]) / (2.0 * h);
+                }
             }
-        }
+            Ok(())
+        })();
+        self.set_theta(&original_theta)?;
+        self.l_blocks = original_l_blocks;
+        sweep?;
         let transposed = hessian.transpose();
         hessian += transposed;
         hessian *= 0.5;
@@ -3750,10 +3927,12 @@ impl LinearMixedModel {
             }
         }
 
-        // Residual noise ε ~ N(0, σ²)
-        let eps_dist = Normal::new(0.0, sigma).unwrap();
+        // Residual noise ε_i ~ N(0, σ² / w_i): prior weights scale the
+        // residual variance (lme4's simulate.merMod uses sigma / sqrt(w)).
+        // X and Z are stored unweighted, so y_new is on the data scale.
         for i in 0..n {
-            y_new[i] += eps_dist.sample(rng);
+            let sd = self.sqrtwts.get(i).map_or(sigma, |sw| sigma / sw);
+            y_new[i] += sd * normal01.sample(rng);
         }
 
         Ok(y_new)
@@ -4294,6 +4473,9 @@ impl MixedModelFit for LinearMixedModel {
     }
 
     fn coef(&self) -> DVector<f64> {
+        // Dropped (aliased) columns are 0, the value every contrast and
+        // prediction (L * coef) needs; `dropped_coef_names()` identifies them
+        // so hosts can report NA, as lme4's fixef(add.dropped = TRUE) does.
         let beta = self.fixef();
         let mut full = DVector::from_element(self.feterm.piv.len(), 0.0);
         for (i, &val) in beta.iter().enumerate() {
@@ -4306,6 +4488,10 @@ impl MixedModelFit for LinearMixedModel {
 
     fn fixef(&self) -> DVector<f64> {
         self.beta()
+    }
+
+    fn dropped_coef_names(&self) -> Vec<String> {
+        self.feterm.dropped_coef_names()
     }
 
     fn coef_names(&self) -> Vec<String> {
@@ -4405,6 +4591,41 @@ impl MixedModelFit for LinearMixedModel {
     fn ranef(&self) -> Vec<DMatrix<f64>> {
         self.ranef_b()
     }
+
+    fn random_effect_terms(&self) -> Vec<crate::model::traits::RandomEffectTermInfo> {
+        random_effect_term_infos(&self.reterms)
+    }
+}
+
+/// Structural summary of the random-effect terms for model comparison.
+///
+/// Each returned entry is one unstructured covariance block. A diagonal
+/// (`||` / `diag(...)`) block is reported as one scalar entry per basis
+/// column, which is exactly lme4's `||` expansion `(1|g) + (0+x|g)`; this lets
+/// model-comparison helpers see that `(1 + x || g)` is nested in
+/// `(1 + x | g)` (it omits the covariance) and not the other way round.
+pub(crate) fn random_effect_term_infos(
+    reterms: &[ReMat],
+) -> Vec<crate::model::traits::RandomEffectTermInfo> {
+    use crate::model::traits::RandomEffectTermInfo;
+    let mut out = Vec::new();
+    for rt in reterms {
+        let diagonal = rt.vsize > 1 && rt.inds.len() == rt.vsize;
+        if diagonal {
+            for name in &rt.cnames {
+                out.push(RandomEffectTermInfo {
+                    group: rt.grouping_name.clone(),
+                    columns: vec![name.clone()],
+                });
+            }
+        } else {
+            out.push(RandomEffectTermInfo {
+                group: rt.grouping_name.clone(),
+                columns: rt.cnames.clone(),
+            });
+        }
+    }
+    out
 }
 
 pub(crate) fn prediction_interval_cutoff(level: f64) -> Result<f64> {
@@ -4579,6 +4800,31 @@ fn streamed_rank_path_diagnostic(
     diagnostic
 }
 
+/// LMM prior weights scale the residual variance as sigma^2 / w_i, so each
+/// must be finite and strictly positive, and there must be one per
+/// observation. Checked before the weights reach the design (where a length
+/// mismatch would trip an assertion) or the log-determinant (where a zero
+/// weight would produce -inf).
+fn validate_lmm_prior_weights(weights: &[f64], n_obs: usize) -> Result<()> {
+    if weights.len() != n_obs {
+        return Err(MixedModelError::InvalidArgument(format!(
+            "prior weights length ({}) does not match number of observations ({n_obs})",
+            weights.len()
+        )));
+    }
+    if let Some((i, &w)) = weights
+        .iter()
+        .enumerate()
+        .find(|(_, w)| !w.is_finite() || **w <= 0.0)
+    {
+        return Err(MixedModelError::InvalidArgument(format!(
+            "prior weight at index {i} must be finite and positive (got {w}); \
+             drop observations with zero weight before fitting"
+        )));
+    }
+    Ok(())
+}
+
 fn use_direct_dense_fixed_design(
     formula: &Formula,
     data: &DataFrame,
@@ -4608,6 +4854,20 @@ fn build_fixed_effects_matrix(
 
 fn build_fixed_effects_design(formula: &Formula, data: &DataFrame) -> Result<DenseFixedDesign> {
     use crate::formula::FixedTerm;
+
+    // Categorical codings depend on R's marginality and no-intercept rules,
+    // which only the shared fixed-design builder implements. Fit-time and
+    // prediction-time designs must agree column for column (prediction looks
+    // coefficients up by name and treats an absent column as zero), so any
+    // design with a categorical term goes through that builder.
+    if !fixed_terms_are_numeric_only(formula, data) {
+        let streamed =
+            crate::model::fixed_design::build_streamed_fixed_effects_design(formula, data)?;
+        return DenseFixedDesign::new(
+            streamed.materialize_dense(),
+            streamed.column_names().to_vec(),
+        );
+    }
 
     let n = data.nrow();
     let mut columns: Vec<DVector<f64>> = Vec::new();
@@ -4681,51 +4941,21 @@ fn expand_interaction_factors(
     data: &DataFrame,
     n: usize,
 ) -> Result<Vec<Vec<(DVector<f64>, String)>>> {
-    expand_interaction_factors_with_coding(vars, data, n, BasisCoding::Treatment)
-}
-
-fn expand_interaction_factors_with_coding(
-    vars: &[String],
-    data: &DataFrame,
-    n: usize,
-    coding: BasisCoding,
-) -> Result<Vec<Vec<(DVector<f64>, String)>>> {
-    let mut per_var: Vec<Vec<(DVector<f64>, String)>> = Vec::with_capacity(vars.len());
-    for v in vars {
-        per_var.push(expand_factor_columns_with_coding(
-            v,
-            data,
-            "interaction term",
-            coding,
-        )?);
-    }
     let _ = n; // n only used by callers for sanity checks
-    Ok(per_var)
+    vars.iter()
+        .map(|v| expand_factor_columns(v, data, "interaction term"))
+        .collect()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BasisCoding {
-    Treatment,
-    CellMeans,
-}
-
-fn categorical_coding(coding: BasisCoding) -> CategoricalCoding {
-    match coding {
-        BasisCoding::Treatment => CategoricalCoding::Treatment,
-        BasisCoding::CellMeans => CategoricalCoding::CellMeans,
-    }
-}
-
-fn expand_factor_columns_with_coding(
+fn expand_factor_columns(
     name: &str,
     data: &DataFrame,
     context: &str,
-    coding: BasisCoding,
 ) -> Result<Vec<(DVector<f64>, String)>> {
     match data.column(name) {
         Some(Column::Numeric(arr)) => Ok(vec![(DVector::from_column_slice(arr), name.to_string())]),
         Some(Column::Categorical(cat)) => Ok(cat
-            .encoded_columns(name, categorical_coding(coding))
+            .encoded_columns(name, CategoricalCoding::Treatment)
             .into_iter()
             .map(|column| (DVector::from_column_slice(&column.values), column.name))
             .collect()),
@@ -4767,36 +4997,132 @@ fn cartesian_interaction(
     acc
 }
 
-fn random_effect_basis_columns(
-    term: &crate::formula::FixedTerm,
+/// Random-effect basis columns and names for one random term, coded by R's
+/// `model.matrix()` rules exactly like a fixed-effect design with the same
+/// terms (`lme4::mkReTrms` builds Z from `model.matrix(~ <lhs>, fr)`):
+/// with an intercept every factor uses contrasts; without one, the first
+/// factor gets full indicator columns and later factors use contrasts;
+/// interactions follow marginality.
+pub(super) fn random_term_basis(
+    rt: &crate::formula::RandomTerm,
     data: &DataFrame,
-    n: usize,
-    coding: BasisCoding,
-) -> Result<Vec<(DVector<f64>, String)>> {
+) -> Result<(Vec<DVector<f64>>, Vec<String>)> {
     use crate::formula::FixedTerm;
+    use crate::model::fixed_design::FixedDesignBackend;
 
+    let mut terms = rt.terms.clone();
+    if terms.is_empty() {
+        terms.push(FixedTerm::Intercept);
+    }
+    let basis_formula = Formula {
+        response: String::new(),
+        fixed_terms: terms,
+        random_terms: Vec::new(),
+        derived: Vec::new(),
+    };
+    let design =
+        crate::model::fixed_design::build_streamed_fixed_effects_design(&basis_formula, data)
+            .map_err(|err| match err {
+                MixedModelError::InvalidArgument(message) => MixedModelError::InvalidArgument(
+                    format!("random-effect basis for `{rt}`: {message}"),
+                ),
+                other => other,
+            })?;
+    let x = design.materialize_dense();
+    let columns = (0..x.ncols()).map(|j| x.column(j).into_owned()).collect();
+    Ok((columns, design.column_names().to_vec()))
+}
+
+/// Whether a random term's basis involves a categorical variable.
+fn random_term_has_factor(term: &crate::formula::FixedTerm, data: &DataFrame) -> bool {
+    use crate::formula::FixedTerm;
+    let is_factor = |name: &String| matches!(data.column(name), Some(Column::Categorical(_)));
     match term {
-        FixedTerm::Intercept | FixedTerm::NoIntercept => Ok(Vec::new()),
-        FixedTerm::Column(name) => {
-            expand_factor_columns_with_coding(name, data, "random-effect basis", coding)
-        }
-        FixedTerm::Interaction(vars) => {
-            let per_var = expand_interaction_factors_with_coding(vars, data, n, coding)?;
-            Ok(cartesian_interaction(&per_var, n))
-        }
+        FixedTerm::Column(name) => is_factor(name),
+        FixedTerm::Interaction(vars) => vars.iter().any(is_factor),
+        FixedTerm::Intercept | FixedTerm::NoIntercept => false,
     }
 }
 
-fn random_effect_basis_coding(rt: &crate::formula::RandomTerm) -> BasisCoding {
-    if rt
-        .terms
-        .iter()
-        .any(|term| matches!(term, crate::formula::FixedTerm::NoIntercept))
-    {
-        BasisCoding::CellMeans
-    } else {
-        BasisCoding::Treatment
+/// Expand zero-correlation (`||`) terms that contain a factor the way lme4
+/// does (`expandDoubleVerts`): `(1 + x + f || g)` becomes
+/// `(1 + x || g) + (0 + f | g)`. The intercept and numeric terms keep
+/// independent variances (one diagonal block, equivalent to lme4's separate
+/// scalar terms); each factor term becomes its own block with full
+/// indicator coding and an unstructured covariance among its levels.
+/// Without this, a factor inside `||` would be treatment-coded with
+/// independent contrast variances, a different model from lme4's.
+///
+/// Returns whether the formula changed. The expansion is recorded on each
+/// produced term's source so the compiler reports it.
+pub(crate) fn expand_zerocorr_factor_terms(formula: &mut Formula, data: &DataFrame) -> bool {
+    use crate::formula::{FixedTerm, RandomTermExpansion, RandomTermSource};
+
+    let mut changed = false;
+    let mut expanded = Vec::with_capacity(formula.random_terms.len());
+    for rt in formula.random_terms.drain(..) {
+        let splits = rt.zerocorr
+            && rt
+                .terms
+                .iter()
+                .any(|term| random_term_has_factor(term, data));
+        if !splits {
+            expanded.push(rt);
+            continue;
+        }
+        changed = true;
+        let source = Some(RandomTermSource {
+            written: rt
+                .source
+                .as_ref()
+                .map(|source| source.written.clone())
+                .unwrap_or_else(|| rt.to_string()),
+            expansion: Some(RandomTermExpansion::ZeroCorrelationFactorSplit),
+        });
+        let has_intercept = rt
+            .terms
+            .iter()
+            .any(|term| matches!(term, FixedTerm::Intercept));
+        let numeric_terms: Vec<FixedTerm> = rt
+            .terms
+            .iter()
+            .filter(|term| {
+                matches!(term, FixedTerm::Column(_) | FixedTerm::Interaction(_))
+                    && !random_term_has_factor(term, data)
+            })
+            .cloned()
+            .collect();
+        if has_intercept || !numeric_terms.is_empty() {
+            let mut terms = vec![if has_intercept {
+                FixedTerm::Intercept
+            } else {
+                FixedTerm::NoIntercept
+            }];
+            terms.extend(numeric_terms);
+            expanded.push(crate::formula::RandomTerm {
+                terms,
+                grouping: rt.grouping.clone(),
+                zerocorr: true,
+                covariance: RandomCovariance::Diagonal,
+                source: source.clone(),
+            });
+        }
+        for term in rt
+            .terms
+            .iter()
+            .filter(|term| random_term_has_factor(term, data))
+        {
+            expanded.push(crate::formula::RandomTerm {
+                terms: vec![FixedTerm::NoIntercept, term.clone()],
+                grouping: rt.grouping.clone(),
+                zerocorr: false,
+                covariance: RandomCovariance::Full,
+                source: source.clone(),
+            });
+        }
     }
+    formula.random_terms = expanded;
+    changed
 }
 
 fn refuse_unsupported_random_covariance(formula: &Formula) -> Result<()> {
@@ -4813,7 +5139,7 @@ fn refuse_unsupported_random_covariance(formula: &Formula) -> Result<()> {
 
 /// Build a ReMat from a random term specification and data.
 fn build_re_mat(rt: &crate::formula::RandomTerm, data: &DataFrame, n: usize) -> Result<ReMat> {
-    use crate::formula::{FixedTerm, GroupingFactor};
+    use crate::formula::GroupingFactor;
 
     // Get grouping factor
     let (group_name, refs, levels) = match &rt.grouping {
@@ -4824,7 +5150,13 @@ fn build_re_mat(rt: &crate::formula::RandomTerm, data: &DataFrame, n: usize) -> 
                     name
                 ))
             })?;
-            (name.clone(), cat.refs.clone(), cat.levels.clone())
+            // lme4 drops unused grouping-factor levels (`factor(g)[,
+            // drop = TRUE]` in mkReTrms): a declared level with no
+            // observations would be an empty random-effect level that only
+            // inflates ngrps/ranef/condVar. Keep observed levels in their
+            // declared order.
+            let (refs, levels) = drop_unused_grouping_levels(&cat.refs, &cat.levels);
+            (name.clone(), refs, levels)
         }
         GroupingFactor::Interaction(names) | GroupingFactor::Cell(names) => {
             // Create interaction levels
@@ -4897,25 +5229,10 @@ fn build_re_mat(rt: &crate::formula::RandomTerm, data: &DataFrame, n: usize) -> 
         }
     };
 
-    // Build the Z matrix (transposed: s × n)
-    let mut z_rows: Vec<DVector<f64>> = Vec::new();
-    let mut cnames: Vec<String> = Vec::new();
-
-    let has_re_intercept =
-        rt.terms.iter().any(|t| matches!(t, FixedTerm::Intercept)) || rt.terms.is_empty();
-
-    if has_re_intercept {
-        z_rows.push(DVector::from_element(n, 1.0));
-        cnames.push("(Intercept)".to_string());
-    }
-
-    let basis_coding = random_effect_basis_coding(rt);
-    for term in &rt.terms {
-        for (col, name) in random_effect_basis_columns(term, data, n, basis_coding)? {
-            z_rows.push(col);
-            cnames.push(name);
-        }
-    }
+    // Build the Z matrix (transposed: s × n) from R's model.matrix coding
+    // of the random-effect basis.
+    let (z_rows, cnames) = random_term_basis(rt, data)?;
+    let _ = n;
 
     // `z` is `vsize × n` column-major, so basis row `i` occupies every
     // `vsize`-th slot starting at `i`; write it straight from the basis
@@ -4938,6 +5255,26 @@ fn build_re_mat(rt: &crate::formula::RandomTerm, data: &DataFrame, n: usize) -> 
     }
 
     Ok(remat)
+}
+
+/// Compact a grouping factor to its observed levels (declared order kept).
+fn drop_unused_grouping_levels(refs: &[u32], levels: &[String]) -> (Vec<u32>, Vec<String>) {
+    let mut used = vec![false; levels.len()];
+    for &r in refs {
+        used[r as usize] = true;
+    }
+    if used.iter().all(|&u| u) {
+        return (refs.to_vec(), levels.to_vec());
+    }
+    let mut remap = vec![u32::MAX; levels.len()];
+    let mut kept = Vec::new();
+    for (index, level) in levels.iter().enumerate() {
+        if used[index] {
+            remap[index] = kept.len() as u32;
+            kept.push(level.clone());
+        }
+    }
+    (refs.iter().map(|&r| remap[r as usize]).collect(), kept)
 }
 
 /// Build the parameter map: Vec<(block_idx, row, col)> for each θ element.

@@ -213,7 +213,6 @@ impl GeneralizedLinearMixedModel {
     ) -> Result<&mut Self> {
         let initial_theta = self.require_negative_binomial_theta()?;
         let mut current_theta = clamp_negative_binomial_theta(initial_theta);
-        let mut last_fit_theta = f64::NAN;
         let mut update_iterations = 0usize;
         let mut converged = false;
 
@@ -223,7 +222,6 @@ impl GeneralizedLinearMixedModel {
             }
             self.negative_binomial_theta = Some(current_theta);
             self.fit_negative_binomial_conditional(fast, n_agq, verbose)?;
-            last_fit_theta = current_theta;
 
             let next_theta = self.estimate_negative_binomial_theta_given_fit()?;
             update_iterations = iteration + 1;
@@ -244,14 +242,68 @@ impl GeneralizedLinearMixedModel {
             }
         }
 
-        if relative_theta_change(last_fit_theta, current_theta)
-            > NEGATIVE_BINOMIAL_THETA_FINAL_REFIT_TOL
-        {
-            self.reset_for_refit(None)?;
-            self.negative_binomial_theta = Some(current_theta);
-            self.fit_negative_binomial_conditional(fast, n_agq, verbose)?;
-            last_fit_theta = current_theta;
+        // The alternation above maximizes the NB likelihood *given* the
+        // fitted means, which ignores the random-effect integral. Like
+        // lme4::glmer.nb (`optTheta`), finish by maximizing the GLMM's own
+        // (Laplace/AGQ) log-likelihood over log θ_NB in
+        // [log θ₀ − 3, log θ₀ + 3], refitting the model at every trial value.
+        let start_log = clamp_negative_binomial_theta(current_theta).ln();
+        let lo = (start_log - 3.0).max(NEGATIVE_BINOMIAL_THETA_MIN.ln());
+        let hi = (start_log + 3.0).min(NEGATIVE_BINOMIAL_THETA_MAX.ln());
+        let mut profile_evaluations = 0usize;
+        let mut neg2ll = |model: &mut Self, log_theta: f64| -> Result<f64> {
+            profile_evaluations += 1;
+            model.reset_for_refit(None)?;
+            model.negative_binomial_theta = Some(log_theta.exp());
+            match model.fit_negative_binomial_conditional(fast, n_agq, false) {
+                Ok(()) => {
+                    let value = -2.0 * model.loglikelihood();
+                    Ok(if value.is_finite() {
+                        value
+                    } else {
+                        f64::INFINITY
+                    })
+                }
+                Err(error @ MixedModelError::Interrupted(_)) => Err(error),
+                Err(_) => Ok(f64::INFINITY),
+            }
+        };
+        let inv_phi = (5.0_f64.sqrt() - 1.0) / 2.0;
+        let (mut a, mut b) = (lo, hi);
+        let mut c = b - inv_phi * (b - a);
+        let mut d = a + inv_phi * (b - a);
+        let mut fc = neg2ll(self, c)?;
+        let mut fd = neg2ll(self, d)?;
+        while (b - a) > 5.0e-5 {
+            if fc <= fd {
+                b = d;
+                d = c;
+                fd = fc;
+                c = b - inv_phi * (b - a);
+                fc = neg2ll(self, c)?;
+            } else {
+                a = c;
+                c = d;
+                fc = fd;
+                d = a + inv_phi * (b - a);
+                fd = neg2ll(self, d)?;
+            }
         }
+        let best_log = if fc <= fd { c } else { d };
+        if verbose {
+            eprintln!(
+                "  NB theta Laplace profile: theta = {:.6} after {profile_evaluations} refits",
+                best_log.exp()
+            );
+        }
+        current_theta = clamp_negative_binomial_theta(best_log.exp());
+        if (best_log - lo).abs() < 1e-3 || (hi - best_log).abs() < 1e-3 {
+            converged = false;
+        }
+        self.reset_for_refit(None)?;
+        self.negative_binomial_theta = Some(current_theta);
+        self.fit_negative_binomial_conditional(fast, n_agq, verbose)?;
+        let last_fit_theta = current_theta;
 
         self.negative_binomial_theta = Some(last_fit_theta);
         self.refresh_dispersion();
@@ -766,6 +818,7 @@ impl GeneralizedLinearMixedModel {
         n_agq: usize,
     ) -> Result<()> {
         LinearMixedModel::rectify_theta_columns(theta, &self.lmm.parmap, self.lmm.reterms.len());
+        self.snap_near_zero_variances_to_boundary(theta, n_agq);
 
         // Final PIRLS at optimal θ, after matching MixedModels.jl's
         // post-optimizer sign convention for Cholesky columns.
@@ -789,6 +842,34 @@ impl GeneralizedLinearMixedModel {
         self.lmm.optsum.fmin = self.deviance(n_agq);
         self.lmm.optsum.final_params = theta.to_vec();
         Ok(())
+    }
+
+    /// Boundary check, as the LMM path does after its optimizer: a diagonal
+    /// θ that the optimizer left just above its zero lower bound is set to
+    /// exactly 0 when the penalized deviance there is no worse. Derivative-
+    /// free optimizers often stop a hair inside a flat boundary (θ ≈ 1e-7),
+    /// which would otherwise hide a singular fit from boundary diagnostics.
+    fn snap_near_zero_variances_to_boundary(&mut self, theta: &mut [f64], n_agq: usize) {
+        const NEAR_ZERO: f64 = 1e-5;
+        let mut snapped = theta.to_vec();
+        let mut changed = false;
+        for (i, (_, row, col)) in self.lmm.parmap.iter().enumerate() {
+            if row == col && snapped[i] > 0.0 && snapped[i] < NEAR_ZERO {
+                snapped[i] = 0.0;
+                changed = true;
+            }
+        }
+        if !changed {
+            return;
+        }
+        let current = self.penalized_pirls_deviance_at_theta(theta, n_agq);
+        let at_zero = self.penalized_pirls_deviance_at_theta(&snapped, n_agq);
+        if at_zero.is_finite()
+            && current.is_finite()
+            && at_zero <= current + 1e-10 * (1.0 + current.abs())
+        {
+            theta.copy_from_slice(&snapped);
+        }
     }
 
     fn cobyla_success_status_label(status: cobyla::SuccessStatus) -> String {
