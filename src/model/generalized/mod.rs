@@ -44,6 +44,7 @@ use crate::optimizer::trust_bq::{
 use crate::stats::{BlockDescription, MixedModelProfile, ModelSummary, VarCorr};
 use crate::types::{gh_norm, FitLogEntry, MatrixBlock, OptSummary, Optimizer, ReMat};
 mod certify;
+mod dispersion;
 mod joint;
 mod metadata;
 mod optimizer;
@@ -51,6 +52,8 @@ mod pirls;
 mod predictive;
 mod verify;
 pub(crate) use certify::*;
+pub use dispersion::GlmmDispersionMethod;
+pub(crate) use dispersion::*;
 pub(crate) use joint::*;
 pub(crate) use optimizer::*;
 pub(crate) use pirls::*;
@@ -172,6 +175,20 @@ pub struct GeneralizedLinearMixedModel {
     /// response, a simulated response, or a direct write to the public
     /// `y`/`wt` fields can never read stale constants.
     response_log_constants: Option<pirls::ResponseLogConstants>,
+
+    /// lme4 2.1 `glmerControl` dispersion controls (`disp_method`,
+    /// `disp_dof_correction`, `maxPhiIter`).
+    dispersion_control: DispersionControl,
+    /// The dispersion φ the PIRLS working weights and criterion are divided
+    /// by. Profiled per objective evaluation for estimated-dispersion
+    /// families under [`GlmmDispersionMethod::Moment`]; otherwise unused (1).
+    pirls_phi: f64,
+    /// `rank([X, Z])` for the dispersion dof correction (`None` when too
+    /// costly to compute), computed on first use.
+    design_rank_cache: std::sync::OnceLock<Option<usize>>,
+    /// Transient tighter β-varying PIRLS tolerance, set only while the
+    /// surrogate φ trajectory samples its interpolation nodes.
+    pirls_tolerance_override: Option<f64>,
 }
 
 /// The artifact and profiled-optimum certificate as callers should see them
@@ -890,6 +907,10 @@ impl GeneralizedLinearMixedModel {
             warm_refit_step: None,
             pending_progress_error: None,
             response_log_constants: None,
+            dispersion_control: DispersionControl::default(),
+            pirls_phi: 1.0,
+            design_rank_cache: std::sync::OnceLock::new(),
+            pirls_tolerance_override: None,
         };
         model.initialize_beta_from_response();
         Ok(model)
@@ -926,7 +947,9 @@ impl GeneralizedLinearMixedModel {
     }
 
     pub(crate) fn random_effect_scale(&self) -> f64 {
-        if self.family.has_dispersion() {
+        // Under the moment method u ~ N(0, I) on the absolute link scale
+        // (lme4 2.1 VarCorr reports theta unscaled for every GLMM).
+        if self.family.has_dispersion() && !self.profiles_dispersion() {
             self.dispersion(false)
         } else {
             1.0
@@ -1154,7 +1177,7 @@ impl GeneralizedLinearMixedModel {
     pub fn varcorr(&self) -> VarCorr {
         let scale = self.random_effect_scale();
         let residual_sd = if self.family.has_dispersion() {
-            Some(scale)
+            Some(self.dispersion(false))
         } else {
             None
         };
@@ -1491,8 +1514,9 @@ impl GeneralizedLinearMixedModel {
         let outcome = self.certify_pirls_profiled_optimum_probes(&theta, n_agq, &lower_bounds);
         // Probes left PIRLS state at an off-optimum theta; restore the fitted
         // state exactly the way finalize_theta_after_optimizer leaves it.
+        // PIRLS leaves β at its accepted iterate (the working factorization
+        // is refreshed past it), so β is not re-read from the working LMM.
         let _ = self.penalized_pirls_deviance_at_theta(&theta, n_agq);
-        self.beta = self.lmm.beta();
         self.refresh_dispersion();
         outcome
     }

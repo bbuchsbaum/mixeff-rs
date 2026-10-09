@@ -1,9 +1,9 @@
 {
   "schema_version": "1.0",
-  "generated_at": "2026-05-03T00:42:31.206Z",
+  "generated_at": "2026-10-09T00:00:00Z",
   "crate_commit": "6b0e89d5a1702046ff2efcd50904bd3d517357ac",
-  "regenerator": "scripts/regenerate_julia_parity_fixtures.jl",
+  "regenerator": "scripts/regenerate_lme4_dispersion_glmm_fixtures.R (lme4 row) + engine fit (rust_reference); MixedModels.jl row from scripts/regenerate_julia_parity_fixtures.jl",
   "source_case": null,
-  "reference_engine": "MixedModels.jl 5.3.0",
-  "notes": "Julia 1.12.4"
+  "reference_engine": "lme4 2.1.0 (R 4.3.3); MixedModels.jl 5.3.0 (Julia 1.12.4, unchanged)",
+  "notes": "lme4 2.1-0 estimated-dispersion update: rust_reference and the lme4::glmer row regenerated; MixedModels.jl row kept from 2026-05-03."
 }

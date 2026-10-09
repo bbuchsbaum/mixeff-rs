@@ -23,11 +23,22 @@ vs. `unstable-internals` surface inventory.
 - `||` with a factor expands like lme4 (`(1 + x + f || g)` →
   `(1 + x || g) + (0 + f | g)`), and random-effect bases use R's
   `model.matrix()` coding (`(0 + f + h | g)` is full rank).
-- Gamma / inverse-Gaussian GLMMs follow glmer's scale conventions (density
-  φ = mean unit deviance; residual SD, vcov and random-effect SDs on
-  lme4's `sigma()` scale); the fast path no longer collapses θ to zero.
-  `logLik` is 1.0 above glmer's printed value (glmer includes the family
-  `aic()`'s `+2`).
+- Estimated-dispersion GLMMs (Gamma, inverse Gaussian, Gaussian with a
+  non-identity link) follow lme4 2.1-0's corrected handling
+  (`glmerControl(disp_method = "moment", disp_dof_correction = TRUE)`): φ is
+  profiled inside PIRLS with lme4's damped fixed-point iteration, the
+  working weights carry 1/φ, θ is the absolute random-effect SD (VarCorr is
+  θ), `sigma()` = sqrt(φ) with φ = deviance / (n − rank([X, Z])), and the
+  fixed-effect covariance is no longer rescaled by σ². θ, β, σ, logLik
+  (no longer offset from glmer's), deviance and AIC match lme4 2.1. The
+  working weights and factorization are refreshed at the accepted PIRLS mean
+  before the Laplace/AGQ evaluation (lme4 GH #998); for fixed-dispersion
+  families this moves estimates by < 1e-7. New
+  `GeneralizedLinearMixedModel::set_dispersion_method`
+  (`GlmmDispersionMethod::{Moment, Legacy}`),
+  `set_dispersion_dof_correction` and `set_max_phi_iter` mirror lme4's
+  controls; `Legacy` reproduces the previous (lme4 < 2.1) behaviour, and
+  GLMM snapshots written before this change restore as `Legacy`.
 - Estimated negative-binomial θ maximizes the GLMM log-likelihood like
   `glmer.nb` instead of a conditional update.
 - GLMM `stderror()` / bootstrap replicate SEs never fall back to unscaled

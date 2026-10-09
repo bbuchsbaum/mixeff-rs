@@ -36,8 +36,8 @@ pub use data::{
     EncodedCategoricalColumn,
 };
 pub use generalized::{
-    GeneralizedLinearMixedModel, GeneralizedLinearMixedModelBuilder, GlmmFitOptions,
-    GlmmPredictionScale,
+    GeneralizedLinearMixedModel, GeneralizedLinearMixedModelBuilder, GlmmDispersionMethod,
+    GlmmFitOptions, GlmmPredictionScale,
 };
 pub use linear::{
     parametricbootstrap, try_parametricbootstrap, ActiveFaceRefit, BootstrapFailedRefitPolicy,

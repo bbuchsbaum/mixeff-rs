@@ -1655,31 +1655,65 @@ fn test_glmm_constructor_accepts_normal_nonidentity_dispersion_family() {
 fn test_gamma_glmm_fit_estimates_lme4_sigma_dispersion() {
     let data = gamma_dispersion_fixture();
     let formula = parse_formula("y ~ 1 + x + (1 | group)").unwrap();
-    let mut model =
-        GeneralizedLinearMixedModel::new(formula, &data, Family::Gamma, Some(LinkFunction::Log))
-            .unwrap();
+    let mut model = GeneralizedLinearMixedModel::new(
+        formula.clone(),
+        &data,
+        Family::Gamma,
+        Some(LinkFunction::Log),
+    )
+    .unwrap();
 
     model.fit_with_options(true, 1, false).unwrap();
 
     let sigma = model.dispersion(false);
     let phi = model.dispersion(true);
-    // lme4's sigma() for glmer: pwrss / n with pwrss = Pearson RSS + ||u||².
-    let u_sq: f64 = model
-        .u
-        .iter()
-        .map(|u| u.iter().map(|v| v * v).sum::<f64>())
-        .sum();
-    let expected_phi = (model.pearson_dispersion_numerator() + u_sq) / model.nobs() as f64;
+    // lme4 2.1 sigma() for glmer: sqrt of the profiled moment estimate
+    // phi = deviance / (n - rank([X, Z])), reached by a damped fixed-point
+    // iteration capped at 100 steps (so within ~1e-3 of the fixed point).
+    let rank = model.dispersion_dof_rank();
+    assert_eq!(rank, (model.lmm.feterm.rank + 4 - 1) as f64);
+    let fixed_point = model.weighted_deviance() / (model.nobs() as f64 - rank);
 
     assert!(sigma.is_finite());
     assert!(sigma > 0.0);
     assert_relative_eq!(phi, sigma * sigma, epsilon = 1e-12);
-    assert_relative_eq!(phi, expected_phi, epsilon = 1e-12, max_relative = 1e-12);
+    assert_relative_eq!(phi, fixed_point, max_relative = 1e-3);
     assert_eq!(
         model.dof(),
         model.lmm.feterm.rank + model.lmm.parmap.len() + 1
     );
     assert_relative_eq!(model.varcorr().residual_sd.unwrap(), sigma, epsilon = 1e-12);
+    // theta is the absolute random-effect SD under the moment method.
+    assert_relative_eq!(
+        model.varcorr().components[0].std_dev[0],
+        model.theta()[0],
+        max_relative = 1e-12
+    );
+
+    // disp_method = "old/buggy": lme4 < 2.1's sigma() = sqrt(pwrss / n)
+    // with pwrss = Pearson RSS + ||u||^2, and theta relative to sigma.
+    let mut legacy =
+        GeneralizedLinearMixedModel::new(formula, &data, Family::Gamma, Some(LinkFunction::Log))
+            .unwrap();
+    legacy.set_dispersion_method(GlmmDispersionMethod::Legacy);
+    legacy.fit_with_options(true, 1, false).unwrap();
+    let u_sq: f64 = legacy
+        .u
+        .iter()
+        .map(|u| u.iter().map(|v| v * v).sum::<f64>())
+        .sum();
+    let expected_phi = (legacy.pearson_dispersion_numerator() + u_sq) / legacy.nobs() as f64;
+    assert_relative_eq!(
+        legacy.dispersion(true),
+        expected_phi,
+        epsilon = 1e-12,
+        max_relative = 1e-12
+    );
+    assert_relative_eq!(
+        legacy.varcorr().components[0].std_dev[0],
+        legacy.theta()[0] * legacy.dispersion(false),
+        max_relative = 1e-12
+    );
 }
 
 /// Difficult-model corpus row `gamma_near_zero_random_effect_unit`
@@ -3494,13 +3528,23 @@ fn test_glmm_predict_new_variance_reports_joint_laplace_conditional_rows_availab
         .predict_new_variance(&data, GlmmPredictionScale::Link, NewReLevels::Error)
         .unwrap();
 
-    // lme4 2.0.1 reference:
+    // lme4 2.1.0 reference:
     // glmer(y ~ 1 + x + (1 | group), data, family = Gamma(link = "log"),
     //       nAGQ = 1, control = glmerControl(optimizer = "bobyqa"))
     // predict(..., newdata = data[1:5,], re.form = NULL, se.fit = TRUE)
     // emits lme4's documented approximation warning for se.fit.
-    let lme4_response_fit = [0.9529792, 1.1645747, 1.4231520, 1.7391427, 2.1252947];
-    let lme4_response_se = [0.01402705, 0.01476743, 0.01696936, 0.02205325, 0.03128255];
+    // lme4 2.1's se.fit uses vcov_full(), which multiplies the already
+    // phi-weighted factorization by sigma() (= 0.01876655136) once more, so
+    // the references below are lme4's se.fit / sigma and its covariance
+    // components / sigma^2 (the engine keeps the phi-weighted scale).
+    let lme4_response_fit = [0.94692436, 1.15717518, 1.41410915, 1.72809159, 2.11178926];
+    let lme4_response_se = [
+        0.0097116875,
+        0.0102703750,
+        0.0118285703,
+        0.0153374778,
+        0.0216585805,
+    ];
     for (idx, (row, (expected_fit, expected_se))) in payload
         .rows
         .iter()
@@ -3520,23 +3564,29 @@ fn test_glmm_predict_new_variance_reports_joint_laplace_conditional_rows_availab
             );
     }
 
-    let lme4_link_fit = [-0.0481622, 0.1523560, 0.3528741, 0.5533923, 0.7539105];
-    let lme4_link_se = [0.01471916, 0.01268053, 0.01192378, 0.01268053, 0.01471916];
-    let lme4_link_fixed = [
-        0.0006883062,
-        0.0006324485,
-        0.0006138292,
-        0.0006324485,
-        0.0006883062,
+    let lme4_link_fit = [-0.05453606, 0.14598185, 0.34649976, 0.54701767, 0.74753558];
+    let lme4_link_se = [
+        0.0102560330,
+        0.0088753848,
+        0.0083646798,
+        0.0088753848,
+        0.0102560330,
     ];
-    let lme4_link_random = [0.0006815289; 5];
-    let lme4_link_cross = [-0.0005765908; 5];
+    let lme4_link_fixed = [
+        0.0020194473,
+        0.0019930335,
+        0.0019842289,
+        0.0019930335,
+        0.0020194473,
+    ];
+    let lme4_link_random = [0.0020189785; 5];
+    let lme4_link_cross = [-0.0019666198; 5];
     let lme4_link_combined = [
-        0.0002166536,
-        0.0001607959,
-        0.0001421766,
-        0.0001607959,
-        0.0002166536,
+        1.0518621e-04,
+        7.8772455e-05,
+        6.9967869e-05,
+        7.8772455e-05,
+        1.0518621e-04,
     ];
     for (idx, (row, (expected_fit, expected_se))) in link_payload
         .rows
@@ -6727,12 +6777,14 @@ fn glmm_replicate_standard_errors_use_glmm_scale_covariance() {
     );
 }
 
-/// A Gaussian inverse-link joint-Laplace fit whose fast-PIRLS start sits at
-/// θ = 0 must not stall at that stationary point (the Laplace objective is
-/// even in a diagonal θ): it reaches lme4::glmer's optimum. See the fixture's
-/// provenance for the data and the glmer reference.
+/// Gaussian inverse-link GLMM with a small residual scale (σ ≈ 0.05).
+/// Under lme4 < 2.1's unit-φ working weights its fast-PIRLS start collapsed
+/// to θ = 0, a stationary point the joint optimizer had to be taught to
+/// leave (θ ≈ 28.18 relative to σ). lme4 2.1 profiles φ inside PIRLS and
+/// both the profiled and the joint fit are interior; the engine matches
+/// both. See the fixture's provenance for the data and the glmer references.
 #[test]
-fn test_gaussian_inverse_link_joint_laplace_leaves_zero_theta_start() {
+fn test_gaussian_inverse_link_matches_lme4_2_1_profiled_and_joint() {
     let text =
         include_str!("../../../tests/fixtures/regression/gaussian_inverse_link_small_sigma.csv");
     let (mut y, mut x, mut g) = (Vec::new(), Vec::new(), Vec::new());
@@ -6756,20 +6808,35 @@ fn test_gaussian_inverse_link_joint_laplace_leaves_zero_theta_start() {
         .build()
         .unwrap()
     };
-    // The fast-PIRLS start that used to trap the joint fit.
+    // lme4 2.1 nAGQ = 0: theta 0.5725170689, fixef (10.26465715,
+    // 1.531300358), sigma 0.04940827903.
     let mut fast = build();
     fast.fit_with_glmm_options(GlmmFitOptions::fast_laplace())
         .unwrap();
-    assert!(fast.theta[0] < 1e-3, "fast start θ = {:?}", fast.theta);
+    assert!(
+        (fast.theta[0] - 0.5725170689).abs() < 1e-3,
+        "fast θ = {:?}",
+        fast.theta
+    );
+    assert!(
+        (fast.beta[0] - 10.26465715).abs() < 2e-3,
+        "fast β = {:?}",
+        fast.beta
+    );
+    assert!((fast.dispersion(false) - 0.04940827903).abs() < 1e-5);
 
     let mut model = build();
     model
         .fit_with_glmm_options(GlmmFitOptions::joint_laplace())
         .unwrap();
     let (theta, beta) = (model.theta[0], model.beta.as_slice().to_vec());
-    assert!((theta - 28.17989103).abs() < 0.05, "θ = {theta}");
-    assert!((beta[0] - 10.40928479).abs() < 2e-3, "β = {beta:?}");
-    assert!((beta[1] - 1.62307014).abs() < 2e-3, "β = {beta:?}");
+    // lme4 2.1 nAGQ = 1: theta 0.6112774968, fixef (10.31356369,
+    // 1.524810815), sigma 0.04936225298, logLik 198.3075623.
+    assert!((theta - 0.6112774968).abs() < 5e-4, "θ = {theta}");
+    assert!((beta[0] - 10.31356369).abs() < 2e-3, "β = {beta:?}");
+    assert!((beta[1] - 1.524810815).abs() < 2e-3, "β = {beta:?}");
+    assert!((model.dispersion(false) - 0.04936225298).abs() < 1e-6);
+    assert!((model.loglikelihood() - 198.3075623).abs() < 1e-5);
     let status = model
         .lmm
         .compiler_artifact

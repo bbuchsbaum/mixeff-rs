@@ -1,8 +1,8 @@
 {
   "schema_version": "1.0",
   "fixture": "gaussian_inverse_link_small_sigma.csv",
-  "purpose": "Regression guard: joint-Laplace Gaussian/inverse-link GLMM whose fast-PIRLS start collapses to theta = 0. The Laplace objective is even in a diagonal theta, so theta = 0 is a stationary point the joint optimizer could not leave; it reported a converged fit at theta = 1 (one stencil step) while lme4::glmer reaches theta ~ 28.18.",
-  "reference_engine": "R 4.3.3, lme4 1.1.35.1: glmer(y ~ x + (1 | g), family = gaussian(link = 'inverse')) -> theta 28.17989103, fixef (10.40928479, 1.62307014), sigma 0.04554231227",
+  "purpose": "Regression guard for a Gaussian/inverse-link GLMM with a small residual scale. Under lme4 < 2.1 (unit-phi PIRLS weights) the fast-PIRLS start collapsed to theta = 0, a stationary point the joint optimizer could not leave (lme4 1.1.35.1 reached theta ~ 28.18 relative to sigma). Under lme4 2.1's profiled-phi PIRLS both fits are interior.",
+  "reference_engine": "R 4.3.3, lme4 2.1.0 (default glmerControl: disp_method = 'moment', disp_dof_correction = TRUE): glmer(y ~ x + (1 | g), family = gaussian(link = 'inverse'), nAGQ = 0) -> theta 0.5725170689, fixef (10.26465715, 1.531300358), sigma 0.04940827903, logLik 198.3035782; nAGQ = 1 -> theta 0.6112774968, fixef (10.31356369, 1.524810815), sigma 0.04936225298, logLik 198.3075623. Superseded lme4 1.1.35.1 reference: theta 28.17989103, fixef (10.40928479, 1.62307014), sigma 0.04554231227.",
   "regenerate": "set.seed(1); ng <- 15; nper <- 8; g <- factor(rep(sprintf('g%02d', 1:ng), each = nper)); x <- runif(ng * nper); sig <- 0.05; u <- rnorm(ng, 0, 0.5 * sig)[as.integer(g)]; eta <- 10 + 2 * x + u; y <- 1 / eta + rnorm(ng * nper, 0, sig); write.csv(data.frame(y = y, x = x, g = g), 'gaussian_inverse_link_small_sigma.csv', row.names = FALSE)",
   "formula": "y ~ x + (1 | g)",
   "family": "gaussian(inverse)"

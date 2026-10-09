@@ -493,7 +493,9 @@ impl GeneralizedLinearMixedModel {
     }
 
     pub(super) fn glmm_conditional_prediction_covariance_scale(&self) -> Option<f64> {
-        if !self.family.has_dispersion() {
+        if !self.family.has_dispersion() || self.profiles_dispersion() {
+            // Moment method: the working weights already carry 1/φ, so the
+            // PIRLS RX covariance is on the GLMM scale as it stands.
             return Some(1.0);
         }
         if matches!(self.family, Family::Gamma | Family::InverseGaussian) {
