@@ -60,14 +60,23 @@ impl GeneralizedLinearMixedModel {
         self.fit_with_options_impl(n_agq, verbose)?;
         let fallback_fast_pirls = self.clone();
         let start_beta = self.beta.as_slice().to_vec();
-        let start_theta = self.theta.clone();
+        let mut start_theta = self.theta.clone();
         let mut start_params = start_beta.clone();
         start_params.extend_from_slice(&start_theta);
         // Compare every joint candidate against the same converged
         // conditional objective, rather than the fast-PIRLS approximation.
-        let profiled_start_objective =
+        let mut profiled_start_objective =
             self.joint_glmm_deviance_at_params(&start_params, start_beta.len(), n_agq);
         self.take_pending_interrupt()?;
+        if let Some((lifted_theta, lifted_objective)) = self.joint_boundary_lifted_start(
+            &start_beta,
+            &start_theta,
+            n_agq,
+            profiled_start_objective,
+        )? {
+            start_theta = lifted_theta;
+            profiled_start_objective = lifted_objective;
+        }
         let n_joint_params = start_beta.len() + start_theta.len();
         self.lmm.optsum.optimizer = joint_optimizer;
         self.lmm.optsum.backend = joint_optimizer.canonical_backend();
@@ -82,6 +91,67 @@ impl GeneralizedLinearMixedModel {
             n_agq,
             maxeval,
             Some(fallback_fast_pirls),
+        )
+    }
+
+    /// A start off the covariance boundary for the joint fit, when the
+    /// fast-PIRLS start has a variance-component θ on (or within 1e-3 of) its
+    /// lower bound and
+    /// moving it off the bound already lowers the joint objective.
+    ///
+    /// The Laplace/AGQ objective depends on a diagonal θ only through θ², so
+    /// a boundary θ = 0 is always a stationary point (zero gradient, possibly
+    /// negative curvature). The joint optimizers are gradient-model driven
+    /// and cannot leave such a saddle: a Gaussian inverse-link GLMM whose
+    /// fast-PIRLS start collapsed to θ = 0 stayed there (reported as
+    /// converged) while lme4::glmer, which starts from θ = 1, reached the
+    /// interior optimum. Every boundary entry is therefore probed at
+    /// `lower + 1` (lme4's default start for a diagonal θ) with β held at the
+    /// fast-PIRLS values; the probe is adopted only if it is strictly better
+    /// than the boundary start, so a genuine boundary optimum (where the
+    /// probe is worse) keeps the original start bit for bit. The probe is
+    /// evaluated on a copy, leaving the model state untouched.
+    fn joint_boundary_lifted_start(
+        &self,
+        start_beta: &[f64],
+        start_theta: &[f64],
+        n_agq: usize,
+        start_objective: f64,
+    ) -> Result<Option<(Vec<f64>, f64)>> {
+        const BOUNDARY_LIFT: f64 = 1.0;
+        // θ is on the relative (dimensionless) scale and the gradient
+        // vanishes like θ near the bound, so a start within this distance
+        // of it is as stuck as one exactly on it.
+        const BOUNDARY_TOL: f64 = 1e-3;
+        let lower = self.lmm.lower_bounds();
+        let on_boundary = |index: usize| {
+            lower.get(index).is_some_and(|bound| {
+                bound.is_finite() && start_theta[index] <= *bound + BOUNDARY_TOL
+            })
+        };
+        if !(0..start_theta.len()).any(on_boundary) || !start_objective.is_finite() {
+            return Ok(None);
+        }
+        let lifted_theta: Vec<f64> = (0..start_theta.len())
+            .map(|index| {
+                if on_boundary(index) {
+                    lower[index] + BOUNDARY_LIFT
+                } else {
+                    start_theta[index]
+                }
+            })
+            .collect();
+        let mut params = start_beta.to_vec();
+        params.extend_from_slice(&lifted_theta);
+        let mut probe = self.clone();
+        let lifted_objective =
+            probe.joint_glmm_deviance_at_params(&params, start_beta.len(), n_agq);
+        probe.take_pending_interrupt()?;
+        let (ftol_abs, ftol_rel) = self.joint_ftol();
+        let tolerance = ftol_abs + ftol_rel * start_objective.abs().max(1.0);
+        Ok(
+            (lifted_objective.is_finite() && lifted_objective < start_objective - tolerance)
+                .then_some((lifted_theta, lifted_objective)),
         )
     }
 

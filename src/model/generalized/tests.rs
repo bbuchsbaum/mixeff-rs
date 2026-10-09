@@ -6726,3 +6726,55 @@ fn glmm_replicate_standard_errors_use_glmm_scale_covariance() {
         "fixture should distinguish the working and GLMM scales"
     );
 }
+
+/// A Gaussian inverse-link joint-Laplace fit whose fast-PIRLS start sits at
+/// θ = 0 must not stall at that stationary point (the Laplace objective is
+/// even in a diagonal θ): it reaches lme4::glmer's optimum. See the fixture's
+/// provenance for the data and the glmer reference.
+#[test]
+fn test_gaussian_inverse_link_joint_laplace_leaves_zero_theta_start() {
+    let text =
+        include_str!("../../../tests/fixtures/regression/gaussian_inverse_link_small_sigma.csv");
+    let (mut y, mut x, mut g) = (Vec::new(), Vec::new(), Vec::new());
+    for line in text.lines().skip(1) {
+        let fields: Vec<&str> = line.split(',').collect();
+        y.push(fields[0].parse::<f64>().unwrap());
+        x.push(fields[1].parse::<f64>().unwrap());
+        g.push(fields[2].trim_matches('"').to_string());
+    }
+    let mut df = DataFrame::new();
+    df.add_numeric("y", y).unwrap();
+    df.add_numeric("x", x).unwrap();
+    df.add_categorical("g", g).unwrap();
+    let build = || {
+        GeneralizedLinearMixedModelBuilder::new(
+            parse_formula("y ~ x + (1 | g)").unwrap(),
+            &df,
+            Family::Normal,
+        )
+        .link(LinkFunction::Inverse)
+        .build()
+        .unwrap()
+    };
+    // The fast-PIRLS start that used to trap the joint fit.
+    let mut fast = build();
+    fast.fit_with_glmm_options(GlmmFitOptions::fast_laplace())
+        .unwrap();
+    assert!(fast.theta[0] < 1e-3, "fast start θ = {:?}", fast.theta);
+
+    let mut model = build();
+    model
+        .fit_with_glmm_options(GlmmFitOptions::joint_laplace())
+        .unwrap();
+    let (theta, beta) = (model.theta[0], model.beta.as_slice().to_vec());
+    assert!((theta - 28.17989103).abs() < 0.05, "θ = {theta}");
+    assert!((beta[0] - 10.40928479).abs() < 2e-3, "β = {beta:?}");
+    assert!((beta[1] - 1.62307014).abs() < 2e-3, "β = {beta:?}");
+    let status = model
+        .lmm
+        .compiler_artifact
+        .optimizer_certificate
+        .as_ref()
+        .map(|c| c.status);
+    assert_eq!(status, Some(crate::compiler::FitStatus::ConvergedInterior));
+}
