@@ -362,7 +362,9 @@ impl FitSummaryPayload {
             model.varcorr(),
             ModelSummary::from_generalized_model(model),
         );
-        if let Some(metadata) = model.compiler_artifact().glmm_fit_metadata.as_ref() {
+        // The fit metadata is untouched by deferred certificate completion;
+        // read it without forcing the certificate probes.
+        if let Some(metadata) = model.inference_artifact().glmm_fit_metadata.as_ref() {
             payload.family_parameters = metadata.family_parameters.clone();
             payload.family_parameter_sources = metadata.family_parameter_sources.clone();
         } else if let Some(theta) = model.negative_binomial_theta() {

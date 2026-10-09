@@ -85,6 +85,9 @@ pub use bootstrap::{
 };
 use bootstrap::{quantile_sorted, validate_level};
 
+mod compiled;
+pub use compiled::CompiledModelSpec;
+pub(crate) use compiled::RecipeFrame;
 mod predict;
 mod snapshot;
 
@@ -1252,40 +1255,40 @@ impl LinearMixedModel {
         compiler_policy: CompilerPolicy,
         fixed_design_policy: FixedDesignBuildPolicy,
     ) -> Result<Self> {
-        if formula.random_terms.is_empty() {
-            return Err(MixedModelError::NoRandomEffects);
-        }
+        // Construction is "compile, then build from the compiled spec": the
+        // compile-once route (`CompiledModelSpec` + `from_compiled`) is the
+        // same code, not a parallel implementation.
+        let spec = CompiledModelSpec::compile_with_policy(formula, data, compiler_policy)?;
+        Self::from_compiled_internal(spec, weights, fixed_design_policy, RecipeFrame::Source)
+    }
 
-        // Data-boundary seam: lower the stateless in-formula transforms
-        // (`I(days^2)`, `log(reaction)`, …) into synthetic numeric columns
-        // before any design construction. Above this point everything keeps
-        // seeing "a column by name"; the formula's term/response references
-        // already carry the canonical labels. See
-        // `docs/formula_transform_seam.md`.
+    pub(crate) fn from_compiled_internal(
+        spec: CompiledModelSpec<'_>,
+        weights: Option<&[f64]>,
+        fixed_design_policy: FixedDesignBuildPolicy,
+        recipe_frame: RecipeFrame,
+    ) -> Result<Self> {
+        let CompiledModelSpec {
+            source_formula,
+            source,
+            materialized,
+            formula,
+            artifact: mut compiler_artifact,
+            audit_fixed_matrix,
+            audit_fixed_pivot,
+        } = spec;
+        let design_data: &DataFrame = materialized.as_ref().unwrap_or(&source);
         let training_recipe = crate::model::snapshot::TrainingRecipe::new(
-            formula.clone(),
-            data,
-            compiler_policy.clone(),
+            source_formula,
+            match recipe_frame {
+                RecipeFrame::Source => &source,
+                RecipeFrame::Design => design_data,
+            },
+            compiler_artifact.compiler_policy.clone(),
             weights.map(ToOwned::to_owned),
         );
-        let materialized = formula.materialize_cow(data)?;
-        let data: &DataFrame = &materialized;
-        // lme4-style `||` expansion for terms that contain a factor; needs the
-        // data to know which variables are factors.
-        let mut formula = formula;
-        expand_zerocorr_factor_terms(&mut formula, data);
+        let data = design_data;
 
-        let semantic_model = compile_formula_ir(&formula);
-        let mut compiler_artifact = CompiledModelArtifact::new_with_policy(
-            formula.to_string(),
-            semantic_model,
-            compiler_policy,
-        );
-        // The audit factorizes the fixed-effect design it builds; keep that
-        // matrix so the model's own FeTerm can reuse the factorization when
-        // the two designs are the same matrix (see feterm_for_fixed_design).
-        let (audit_fixed_matrix, audit_fixed_pivot) =
-            compiler_artifact.attach_design_audit_with_matrix(data);
         let mut effective_formula = formula.clone();
         if compiler_artifact
             .compiler_policy
@@ -1539,6 +1542,40 @@ impl LinearMixedModel {
             }
             artifact
         })
+    }
+
+    unstable_internal_method! {
+    /// The stored compiler artifact, *without* completing deferred optimizer
+    /// certificate derivative evidence.
+    ///
+    /// A fit records its certificate's finite-difference gradient/Hessian
+    /// evidence as deferred ([`certificate_evidence_pending`](Self::certificate_evidence_pending))
+    /// and [`compiler_artifact`](Self::compiler_artifact) completes it on
+    /// first access. A host that keeps the fitted model alive can read this
+    /// view at fit time and complete the evidence only when the certificate
+    /// is actually inspected. While evidence is pending the certificate's
+    /// `status` is provisional: completed evidence can only add derivative
+    /// checks, and a material KKT/curvature failure downgrades the status to
+    /// `not_optimized` with an `optimizer_nonconvergence` warning. Every
+    /// other field is identical to the completed view.
+    #[allow(dead_code)]
+    unstable_vis fn compiler_artifact_deferred(&self) -> &CompiledModelArtifact {
+        &self.compiler_artifact
+    }
+    }
+
+    /// Whether the optimizer certificate's derivative evidence is still
+    /// deferred (completed lazily by [`compiler_artifact`](Self::compiler_artifact)
+    /// or in place by [`complete_certificate_evidence`](Self::complete_certificate_evidence)).
+    pub fn certificate_evidence_pending(&self) -> bool {
+        self.derivative_evidence_pending
+    }
+
+    /// Complete any deferred certificate derivative evidence in place, so
+    /// the stored artifact equals [`compiler_artifact`](Self::compiler_artifact).
+    /// No-op when nothing is pending. Does not change the fitted state.
+    pub fn complete_certificate_evidence(&mut self) {
+        self.ensure_derivative_evidence();
     }
 
     unstable_internal_method! {

@@ -97,6 +97,10 @@ name = "active_face_bench"
 required-features = ["unstable-internals"]
 
 [[example]]
+name = "bench_bridge_path"
+required-features = ["unstable-internals"]
+
+[[example]]
 name = "bench_compiler_contract"
 required-features = ["unstable-internals"]
 

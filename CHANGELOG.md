@@ -12,6 +12,30 @@ vs. `unstable-internals` surface inventory.
 
 ## [Unreleased]
 
+### Added (host-bridge performance; pre-CRAN audit §5.2(c), §5.4, §5.9)
+
+- `CompiledModelSpec` (`mixeff_rs::model`): compile and audit a formula
+  against its data once (`CompiledModelSpec::compile` /
+  `compile_with_policy`), inspect the pre-fit artifact (`artifact()`), keep
+  it alive (`into_owned()`), then build the model from it without a second
+  compile/audit — `LinearMixedModel::from_compiled(spec, weights)` and
+  `GeneralizedLinearMixedModelBuilder::from_compiled(spec, family)`.
+  `LinearMixedModel::new` and the GLMM constructors are now implemented as
+  "compile, then build from the spec", so both routes produce bit-identical
+  models, artifacts and fitted-state snapshots
+  (`tests/compiled_spec_equivalence.rs`).
+- Deferred-certificate hooks for hosts that keep a fitted model alive:
+  `certificate_evidence_pending()`, `complete_certificate_evidence()` (both
+  models), and, under `unstable-internals`, `compiler_artifact_deferred()`
+  — the stored artifact without forcing the deferred derivative /
+  profiled-optimum evidence (only the certificate's evidence, its status
+  and the PIRLS provenance diagnostic are provisional in that view).
+- `FitSummaryPayload::from_generalized_model` no longer forces a deferred
+  PIRLS certificate (it only reads the fit metadata).
+- `examples/bench_bridge_path.rs`: bridge cost model (two-call compile+fit
+  with and without the duplicate compile/audit, deferred certificate, and
+  follow-on inference cold vs on a live model).
+
 ### Fixed (lme4 parity; pre-CRAN audit section 2)
 
 - `LinearMixedModel::random_effect_terms()` now reports the random-effect
