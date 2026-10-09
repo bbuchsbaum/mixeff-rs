@@ -148,9 +148,11 @@ fn test_rank_deficient_sigma2_reml_matches_julia() {
     assert_relative_eq!(model.objective(), -0.6688243, epsilon = 1e-6);
     assert_eq!(model.dropped_coef_names(), vec!["x2".to_string()]);
     let coef = model.coef();
-    assert!(
-        coef[2].is_nan(),
-        "dropped coefficient must be NaN: {coef:?}"
+    // Dropped columns stay 0 in coef() so L * coef contrasts and predictions
+    // are unaffected; dropped_coef_names() identifies them (lme4's NA).
+    assert_eq!(
+        coef[2], 0.0,
+        "dropped coefficient is reported as 0: {coef:?}"
     );
     assert_relative_eq!(coef[1], 1.511667, epsilon = 1e-5);
     assert_relative_eq!(model.sigma(), expected.reml.sigma, epsilon = 2e-7);
