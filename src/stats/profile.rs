@@ -29,6 +29,7 @@ use crate::error::{MixedModelError, Result};
 use crate::model::traits::MixedModelFit;
 use crate::model::LinearMixedModel;
 use crate::stats::spline::NaturalCubicSpline;
+use crate::types::matrix_block::block_index;
 
 /// Stable schema name for serialized profile-likelihood CI payloads.
 pub const PROFILE_LIKELIHOOD_CI_SCHEMA: &str = "mixedmodels.profile_likelihood_ci";
@@ -1185,13 +1186,26 @@ fn optimize_theta_profile_point(
 ///
 /// The target β coordinate is fixed at each profile point while the remaining
 /// fixed effects, θ, and σ are profiled. The constrained objective is computed
-/// from the dense marginal covariance `V = I + ZΛΛ'Z'`, so this is deliberately
-/// limited to unweighted ML fits until the blocked PLS path exposes the same
-/// fixed-β constraint.
+/// from the blocked penalized Cholesky factor (no `n × n` matrix is formed;
+/// memory stays O(n·p + nnz(L))). It is limited to unweighted ML fits.
 pub fn profile_beta(
     m: &mut LinearMixedModel,
     index: usize,
     threshold: f64,
+) -> Result<MixedModelProfile> {
+    profile_beta_with(m, index, threshold, fixed_beta_profile_components)
+}
+
+/// Signature of the constrained fixed-β objective used by [`profile_beta`]
+/// (returns `(β, σ, objective)`).
+type FixedBetaComponents =
+    fn(&mut LinearMixedModel, &[f64], usize, f64) -> Result<(Vec<f64>, f64, f64)>;
+
+fn profile_beta_with(
+    m: &mut LinearMixedModel,
+    index: usize,
+    threshold: f64,
+    components: FixedBetaComponents,
 ) -> Result<MixedModelProfile> {
     let p = m.feterm.rank;
     if index >= p {
@@ -1222,7 +1236,7 @@ pub fn profile_beta(
     let saved_theta = theta_hat_vector.clone();
     let saved_fmin = m.optsum.fmin;
     let lower_bounds = m.lower_bounds();
-    let (_, _, obj_hat) = fixed_beta_profile_components(m, &theta_hat_vector, index, beta_hat)?;
+    let (_, _, obj_hat) = components(m, &theta_hat_vector, index, beta_hat)?;
 
     let se = m.stderror().get(index).copied().unwrap_or(f64::NAN);
     let initial_step = if se.is_finite() && se > 0.0 {
@@ -1238,7 +1252,7 @@ pub fn profile_beta(
                         negative_side: bool|
      -> Result<f64> {
         let (conditional_theta, beta, sigma, obj) =
-            optimize_beta_profile_point(m, index, fixed_value, start, &lower_bounds)?;
+            optimize_beta_profile_point(m, index, fixed_value, start, &lower_bounds, components)?;
         *start = conditional_theta.clone();
         let diff = (obj - obj_hat).max(0.0);
         let zeta = if negative_side {
@@ -1323,6 +1337,7 @@ fn optimize_beta_profile_point(
     fixed_value: f64,
     start: &[f64],
     lower_bounds: &[f64],
+    components: FixedBetaComponents,
 ) -> Result<(Vec<f64>, Vec<f64>, f64, f64)> {
     let n_theta = m.n_theta();
     let mut best_theta = start.to_vec();
@@ -1344,8 +1359,7 @@ fn optimize_beta_profile_point(
         }
     }
 
-    let (_, _, mut best_obj) =
-        fixed_beta_profile_components(m, &best_theta, fixed_index, fixed_value)?;
+    let (_, _, mut best_obj) = components(m, &best_theta, fixed_index, fixed_value)?;
     let mut steps = best_theta
         .iter()
         .map(|value| (value.abs() * 0.1).max(0.05))
@@ -1369,8 +1383,7 @@ fn optimize_beta_profile_point(
                 if (candidate[idx] - best_theta[idx]).abs() < 1e-12 {
                     continue;
                 }
-                let (_, _, obj) =
-                    fixed_beta_profile_components(m, &candidate, fixed_index, fixed_value)?;
+                let (_, _, obj) = components(m, &candidate, fixed_index, fixed_value)?;
                 if obj + 1e-8 < best_obj {
                     best_obj = obj;
                     best_theta = candidate;
@@ -1390,12 +1403,95 @@ fn optimize_beta_profile_point(
         }
     }
 
-    let (best_beta, best_sigma, best_obj) =
-        fixed_beta_profile_components(m, &best_theta, fixed_index, fixed_value)?;
+    let (best_beta, best_sigma, best_obj) = components(m, &best_theta, fixed_index, fixed_value)?;
     Ok((best_theta, best_beta, best_sigma, best_obj))
 }
 
+/// Constrained ML objective at `θ` with `β[fixed_index]` pinned to
+/// `fixed_value`: the remaining fixed effects are profiled out by
+/// generalized least squares and σ by its closed form.
+///
+/// Everything comes from the blocked penalized Cholesky factor `L` of
+/// `[ΛZ X y]`: with `L_XyXy = [L_XX 0; l_yX' l_yy]` its trailing
+/// `(p+1) × (p+1)` block, `[X y]'V⁻¹[X y] = L_XyXy L_XyXy'` where
+/// `V = I + ZΛΛ'Z'`, so for any β
+///
+/// ```text
+/// (y − Xβ)'V⁻¹(y − Xβ) = ‖L_XX'β − l_yX‖² + l_yy²,
+/// log|V| = log|Λ'Z'ZΛ + I| = 2 Σ log diag(L_ZZ).
+/// ```
+///
+/// Pinning `β_j` turns the GLS problem into a `p × (p − 1)` least-squares
+/// problem in the columns of `L_XX'` (solved by QR). The cost is one
+/// `update_l` (O(nnz(L))) plus O(p³) — no `n × n` matrix is formed. This is
+/// algebraically the dense `V`-based computation kept as a test oracle
+/// (`fixed_beta_profile_components_dense`).
 fn fixed_beta_profile_components(
+    m: &mut LinearMixedModel,
+    theta: &[f64],
+    fixed_index: usize,
+    fixed_value: f64,
+) -> Result<(Vec<f64>, f64, f64)> {
+    m.set_theta(theta)?;
+    m.update_l()?;
+    let k = m.reterms.len();
+    let l_last = m.l_blocks[block_index(k, k)].as_dense();
+    let p = l_last.nrows().saturating_sub(1);
+    if fixed_index >= p {
+        return Err(MixedModelError::InvalidArgument(format!(
+            "profile_beta index {fixed_index} is out of bounds for {p} active fixed effect(s)"
+        )));
+    }
+    let n = m.dims.n;
+
+    // A = L_XX' (upper triangular, p × p); c = l_yX; pwrss(β) = ‖Aβ − c‖² + l_yy².
+    let a = l_last.view((0, 0), (p, p)).transpose();
+    let l_yy = l_last[(p, p)];
+    let mut b = nalgebra::DVector::from_fn(p, |i, _| l_last[(p, i)]);
+    b.axpy(-fixed_value, &a.column(fixed_index), 1.0);
+
+    let free_p = p - 1;
+    let mut beta = vec![0.0; p];
+    beta[fixed_index] = fixed_value;
+    let residual = if free_p == 0 {
+        b
+    } else {
+        let free_cols = (0..p).filter(|&col| col != fixed_index).collect::<Vec<_>>();
+        let a_free = a.select_columns(free_cols.iter());
+        let qr = a_free.clone().qr();
+        let qtb = qr.q().transpose() * &b;
+        let beta_free = qr
+            .r()
+            .solve_upper_triangular(&qtb)
+            .filter(|v| v.iter().all(|x| x.is_finite()))
+            .ok_or_else(|| {
+                MixedModelError::Optimization(
+                    "profile_beta: constrained fixed-effects system is singular".into(),
+                )
+            })?;
+        for (&col, &value) in free_cols.iter().zip(beta_free.iter()) {
+            beta[col] = value;
+        }
+        b - a_free * beta_free
+    };
+
+    let pwrss = (residual.norm_squared() + l_yy * l_yy).max(0.0);
+    let denom = n as f64;
+    if pwrss <= 0.0 || !pwrss.is_finite() {
+        return Err(MixedModelError::Optimization(format!(
+            "profile_beta: invalid constrained pwrss {pwrss}"
+        )));
+    }
+    let logdet_v = m.logdet_re();
+    let objective = logdet_v + denom * (1.0 + (2.0 * std::f64::consts::PI * pwrss / denom).ln());
+    let sigma = (pwrss / denom).sqrt();
+    Ok((beta, sigma, objective))
+}
+
+/// Dense `V = I + ZΛΛ'Z'` reference for [`fixed_beta_profile_components`]
+/// (the pre-blocked implementation, O(n²) memory); test oracle only.
+#[cfg(test)]
+fn fixed_beta_profile_components_dense(
     m: &mut LinearMixedModel,
     theta: &[f64],
     fixed_index: usize,
@@ -1475,6 +1571,7 @@ fn fixed_beta_profile_components(
     Ok((beta, sigma, objective))
 }
 
+#[cfg(test)]
 fn marginal_relative_covariance(m: &LinearMixedModel) -> DMatrix<f64> {
     let n = m.dims.n;
     let mut v = DMatrix::<f64>::identity(n, n);
@@ -3396,5 +3493,212 @@ mod tests {
         let sigma = payload_row(&payload, "σ");
         assert_eq!(sigma.status, ProfileParameterStatus::Ok);
         assert!(sigma.lower < sigma.estimate && sigma.estimate < sigma.upper);
+    }
+
+    fn close_rel(a: f64, b: f64, tol: f64) -> bool {
+        (a - b).abs() <= tol * a.abs().max(b.abs()).max(1.0)
+    }
+
+    /// `y ~ 1 + x + (1 | s) + (1 | i)` with `n` observations on a crossed
+    /// subject × item design (deterministic LCG draws).
+    fn synthetic_crossed(n: usize, n_subj: usize, n_item: usize, seed: u64) -> DataFrame {
+        let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(17);
+        let mut uniform = || {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            ((state >> 11) as f64) / ((1u64 << 53) as f64)
+        };
+        let mut normal = || {
+            let (a, b) = (uniform().max(1e-300), uniform());
+            (-2.0 * a.ln()).sqrt() * (2.0 * std::f64::consts::PI * b).cos()
+        };
+        let u_s: Vec<f64> = (0..n_subj).map(|_| 0.8 * normal()).collect();
+        let u_i: Vec<f64> = (0..n_item).map(|_| 0.5 * normal()).collect();
+        let (mut y, mut x, mut s, mut it) = (
+            Vec::with_capacity(n),
+            Vec::with_capacity(n),
+            Vec::with_capacity(n),
+            Vec::with_capacity(n),
+        );
+        for obs in 0..n {
+            let subj = obs % n_subj;
+            let item = (obs / n_subj + 7 * obs) % n_item;
+            let xv = normal();
+            x.push(xv);
+            y.push(2.0 + 0.3 * xv + u_s[subj] + u_i[item] + normal());
+            s.push(format!("s{subj}"));
+            it.push(format!("i{item}"));
+        }
+        let mut df = DataFrame::new();
+        df.add_numeric("y", y).unwrap();
+        df.add_numeric("x", x).unwrap();
+        df.add_categorical("s", s).unwrap();
+        df.add_categorical("i", it).unwrap();
+        df
+    }
+
+    fn fit_ml(formula: &str, data: &DataFrame) -> LinearMixedModel {
+        let mut model = LinearMixedModel::new(parse_formula(formula).unwrap(), data, None).unwrap();
+        model.fit(false).unwrap();
+        model
+    }
+
+    /// The blocked-factor constrained objective agrees with the dense
+    /// `V = I + ZΛΛ'Z'` oracle away from the optimum (other θ, pinned β).
+    #[test]
+    fn fixed_beta_components_match_dense_oracle() {
+        let (sleep, _) = datasets::load("sleepstudy").unwrap();
+        let models = [
+            fit_ml("Reaction ~ Days + (Days | Subject)", &sleep),
+            fit_ml(
+                "Reaction ~ Days + (1 | Subject) + (0 + Days | Subject)",
+                &sleep,
+            ),
+            fit_ml(
+                "y ~ 1 + x + (1 | s) + (1 | i)",
+                &synthetic_crossed(240, 20, 12, 3),
+            ),
+            fit_ml("yield ~ 1 + (1 | batch)", &dyestuff_fixture()),
+        ];
+        for mut model in models {
+            let theta_hat = model.theta();
+            let beta_hat = model.beta();
+            let se = model.stderror();
+            for scale in [0.0, 0.5, 1.3] {
+                let theta: Vec<f64> = theta_hat
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        if model.parmap[i].1 == model.parmap[i].2 {
+                            t * (1.0 + 0.4 * scale) + 0.05 * scale
+                        } else {
+                            t + 0.1 * scale
+                        }
+                    })
+                    .collect();
+                for index in 0..beta_hat.len() {
+                    for shift in [-2.5, 0.0, 1.7] {
+                        let value = beta_hat[index] + shift * se[index];
+                        let (b_new, s_new, o_new) =
+                            fixed_beta_profile_components(&mut model, &theta, index, value)
+                                .unwrap();
+                        let (b_old, s_old, o_old) =
+                            fixed_beta_profile_components_dense(&mut model, &theta, index, value)
+                                .unwrap();
+                        assert!(close_rel(o_new, o_old, 1e-11), "{o_new} vs {o_old}");
+                        assert!(close_rel(s_new, s_old, 1e-10), "{s_new} vs {s_old}");
+                        for (a, b) in b_new.iter().zip(&b_old) {
+                            assert!(close_rel(*a, *b, 1e-9), "β {a} vs {b}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whole β profile tables and intervals from the blocked path agree with
+    /// the dense-oracle profile to 1e-8 (relative, unit floor).
+    fn assert_profile_beta_matches_dense_oracle(cases: Vec<LinearMixedModel>) {
+        for model in cases {
+            for index in 0..model.feterm.rank {
+                let mut fast_model = model.clone();
+                let mut dense_model = model.clone();
+                let fast = profile_beta(&mut fast_model, index, 4.0).unwrap();
+                let dense = profile_beta_with(
+                    &mut dense_model,
+                    index,
+                    4.0,
+                    fixed_beta_profile_components_dense,
+                )
+                .unwrap();
+                assert_eq!(fast.tbl.len(), dense.tbl.len());
+                for (a, b) in fast.tbl.iter().zip(&dense.tbl) {
+                    assert!(
+                        close_rel(a.zeta, b.zeta, 1e-8),
+                        "ζ {} vs {}",
+                        a.zeta,
+                        b.zeta
+                    );
+                    assert!(close_rel(a.sigma, b.sigma, 1e-8));
+                    for (x, y) in a
+                        .beta
+                        .iter()
+                        .zip(&b.beta)
+                        .chain(a.theta.iter().zip(&b.theta))
+                    {
+                        assert!(close_rel(*x, *y, 1e-8), "{x} vs {y}");
+                    }
+                }
+                let ci_fast = fast.confint(0.95).unwrap();
+                let ci_dense = dense.confint(0.95).unwrap();
+                for (a, b) in ci_fast.iter().zip(&ci_dense) {
+                    assert!(close_rel(a.lower, b.lower, 1e-8), "{a:?} vs {b:?}");
+                    assert!(close_rel(a.upper, b.upper, 1e-8), "{a:?} vs {b:?}");
+                }
+                // The fitted state is restored.
+                assert_eq!(fast_model.theta(), model.theta());
+                assert_eq!(fast_model.beta(), model.beta());
+            }
+        }
+    }
+
+    #[test]
+    fn profile_beta_tables_match_dense_oracle() {
+        assert_profile_beta_matches_dense_oracle(vec![
+            fit_ml("yield ~ 1 + (1 | batch)", &dyestuff_fixture()),
+            fit_ml(
+                "y ~ 1 + x + (1 | s) + (1 | i)",
+                &synthetic_crossed(80, 10, 8, 5),
+            ),
+            fit_synthetic_random_slope(2),
+        ]);
+    }
+
+    /// sleepstudy and a larger crossed design: the dense oracle costs
+    /// O(n³) per objective evaluation, so this runs in optimized builds only.
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "dense O(n^3) oracle; run with --release")]
+    fn profile_beta_tables_match_dense_oracle_sleepstudy() {
+        let (sleep, _) = datasets::load("sleepstudy").unwrap();
+        assert_profile_beta_matches_dense_oracle(vec![
+            fit_ml("Reaction ~ Days + (Days | Subject)", &sleep),
+            fit_ml(
+                "y ~ 1 + x + (1 | s) + (1 | i)",
+                &synthetic_crossed(400, 20, 15, 5),
+            ),
+        ]);
+    }
+
+    /// Peak resident set size of this process (`VmHWM`, bytes), if readable.
+    fn peak_rss_bytes() -> Option<u64> {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        let line = status.lines().find(|line| line.starts_with("VmHWM:"))?;
+        let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+        Some(kb * 1024)
+    }
+
+    /// Regression: β profiling used to build the dense `n × n` marginal
+    /// covariance (3.2 GB at n = 20 000, 28.8 GB at 60 000). At n = 20 000
+    /// it must complete without anything close to an `n²` allocation.
+    #[test]
+    fn profile_beta_large_n_stays_linear_in_memory() {
+        let n = 20_000;
+        let data = synthetic_crossed(n, 120, 80, 11);
+        let model = fit_ml("y ~ 1 + x + (1 | s) + (1 | i)", &data);
+        let before = peak_rss_bytes();
+        let mut work = model.clone();
+        let pr = profile_beta(&mut work, 1, 3.0).expect("β2 profile at n = 20 000");
+        let ci = pr.confint_for("β2", 0.95).unwrap();
+        let beta_hat = model.beta()[1];
+        assert!(ci.lower < beta_hat && beta_hat < ci.upper, "{ci:?}");
+        if let (Some(before), Some(after)) = (before, peak_rss_bytes()) {
+            let n_sq_bytes = (n * n * std::mem::size_of::<f64>()) as u64;
+            assert!(
+                after.saturating_sub(before) < n_sq_bytes / 4,
+                "peak RSS grew by {} bytes (n² f64 = {n_sq_bytes})",
+                after.saturating_sub(before)
+            );
+        }
     }
 }
