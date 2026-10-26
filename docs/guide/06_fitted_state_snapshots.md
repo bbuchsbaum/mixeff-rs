@@ -5,7 +5,7 @@
 ```rust,ignore
 let json = fitted.snapshot_json()?;
 // Persist `json`; the original model and its native handle may be dropped.
-let restored = LinearMixedModel::restore_json(&json)?;
+let mut restored = LinearMixedModel::restore_json(&json)?;
 ```
 
 Use `GeneralizedLinearMixedModel::restore_json` for a GLMM. The returned model
@@ -48,6 +48,20 @@ controls and diagnostic values rather than allowing JSON to silently turn them
 into missing values. Initial/trial optimizer objectives can legitimately be
 infinite; those history fields use an explicit IEEE-754 bit encoding. Finite
 floating-point values are round-tripped without decimal parsing loss.
+
+Host progress and interrupt callbacks are process-local and are not serialized.
+After restoration, a host can attach its callback without changing fitted state:
+
+```rust,ignore
+restored.set_progress_callback(Some(host_callback));
+// Passing None clears the callback again.
+```
+
+Both model types expose this setter. Bootstrap execution with worker threads
+continues to poll host callbacks only on the calling thread. Later calls to fit
+with explicit options may replace the callback. For LMM bootstrap, use the
+fallible `try_parametricbootstrap` or `parametricbootstrap_with_options` API;
+the legacy infallible `parametricbootstrap` deliberately ignores callbacks.
 
 A successful Rust round trip is provider evidence. Downstream wrappers must
 separately store this payload, restore it when a live handle is unavailable, and
