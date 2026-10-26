@@ -486,6 +486,18 @@ impl<'a> GeneralizedLinearMixedModelBuilder<'a> {
 }
 
 impl GeneralizedLinearMixedModel {
+    /// Attach, replace, or clear the host progress and interrupt callback.
+    ///
+    /// This changes only the host callback; it does not optimize, refactor,
+    /// or change fitted parameters, objective values, or certificates. Use it
+    /// after [`Self::restore_json`], because callbacks are process-local and
+    /// are not serialized in fitted-state snapshots. Passing `None` clears
+    /// the callback. Later fitting options may replace it.
+    pub fn set_progress_callback(&mut self, callback: Option<FitProgressCallback>) -> &mut Self {
+        self.lmm.set_progress_callback(callback);
+        self
+    }
+
     fn fixed_effect_inference_standard_errors(&self) -> Option<DVector<f64>> {
         let table = self
             .inference_artifact()

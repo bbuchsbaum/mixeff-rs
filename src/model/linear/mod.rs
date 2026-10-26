@@ -1212,6 +1212,18 @@ impl<'a> LinearMixedModelBuilder<'a> {
 }
 
 impl LinearMixedModel {
+    /// Attach, replace, or clear the host progress and interrupt callback.
+    ///
+    /// This changes only the host callback; it does not optimize, refactor,
+    /// or change fitted parameters, objective values, or certificates. Use it
+    /// after [`Self::restore_json`], because callbacks are process-local and
+    /// are not serialized in fitted-state snapshots. Passing `None` clears
+    /// the callback. Later fitting options may replace it.
+    pub fn set_progress_callback(&mut self, callback: Option<FitProgressCallback>) -> &mut Self {
+        self.progress_callback = callback;
+        self
+    }
+
     /// Construct a LinearMixedModel from a formula, data, and optional weights.
     pub fn new(formula: Formula, data: &DataFrame, weights: Option<&[f64]>) -> Result<Self> {
         Self::new_with_policy_internal(formula, data, weights, CompilerPolicy::default())
