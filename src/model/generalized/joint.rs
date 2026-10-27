@@ -497,6 +497,7 @@ impl GeneralizedLinearMixedModel {
             2.0e-2,
             beta_hessian.as_ref(),
         );
+        mark_joint_optimizer_hessian_not_assessed(&mut certificate);
         record_joint_ftol_confirmation(&mut certificate, &confirmation, "NLopt BOBYQA");
         me.take_pending_interrupt()?;
         if joint_certificate_requires_fallback(&certificate)
@@ -863,6 +864,7 @@ impl GeneralizedLinearMixedModel {
             2.0e-2,
             beta_hessian.as_ref(),
         );
+        mark_joint_optimizer_hessian_not_assessed(&mut certificate);
         record_joint_ftol_confirmation(&mut certificate, &confirmation, "TrustBQ");
         me.take_pending_interrupt()?;
         if joint_certificate_requires_fallback(&certificate)

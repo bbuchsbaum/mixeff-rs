@@ -7809,3 +7809,86 @@ fn unused_grouping_levels_are_dropped_like_lme4() {
         .unwrap();
     assert_eq!(pred.len(), 2);
 }
+
+#[test]
+fn scalar_tolerance_matches_explicit_vector_lmm() {
+    let data = sleepstudy_fixture();
+    let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+    for field in ["xtol_abs", "initial_step"] {
+        let fit =
+            |values: Vec<f64>| {
+                let mut model = LinearMixedModel::new(formula.clone(), &data, None).unwrap();
+                let tolerance = if field == "xtol_abs" {
+                    FitToleranceOverrides::default().with_xtol_abs(values)
+                } else {
+                    FitToleranceOverrides::default().with_initial_step(values)
+                };
+                model
+                    .fit_with_options(FitOptions::reml().with_optimizer_control(
+                        OptimizerControl::auto().with_tolerances(tolerance),
+                    ))
+                    .unwrap();
+                model
+            };
+        let value = if field == "xtol_abs" { 1e-8 } else { 0.1 };
+        let scalar = fit(vec![value]);
+        let vector = fit(vec![value; 3]);
+        assert_eq!(scalar.theta(), vector.theta(), "{field}");
+        assert_eq!(scalar.objective(), vector.objective(), "{field}");
+        assert_eq!(scalar.optsum.feval, vector.optsum.feval, "{field}");
+        assert!(scalar.optsum.caller_set_field(field));
+    }
+}
+
+#[test]
+fn scalar_tolerance_validation_preserves_vector_and_start_contracts() {
+    let data = sleepstudy_fixture();
+    let formula = parse_formula("reaction ~ 1 + days + (1 + days | subj)").unwrap();
+    for field in ["xtol_abs", "initial_step"] {
+        for values in [
+            vec![],
+            vec![1e-8; 2],
+            vec![0.0],
+            vec![-1.0],
+            vec![f64::NAN],
+            vec![f64::INFINITY],
+            vec![1e-8, 0.0, 1e-8],
+        ] {
+            let mut model = LinearMixedModel::new(formula.clone(), &data, None).unwrap();
+            let tolerance = if field == "xtol_abs" {
+                FitToleranceOverrides::default().with_xtol_abs(values)
+            } else {
+                FitToleranceOverrides::default().with_initial_step(values)
+            };
+            assert!(
+                model
+                    .apply_optimizer_control(&OptimizerControl::auto().with_tolerances(tolerance))
+                    .is_err(),
+                "{field}"
+            );
+        }
+        let mut model = LinearMixedModel::new(formula.clone(), &data, None).unwrap();
+        let values = vec![0.1, 0.2, 0.3];
+        let tolerance = if field == "xtol_abs" {
+            FitToleranceOverrides::default().with_xtol_abs(values.clone())
+        } else {
+            FitToleranceOverrides::default().with_initial_step(values.clone())
+        };
+        model
+            .apply_optimizer_control(&OptimizerControl::auto().with_tolerances(tolerance))
+            .unwrap();
+        let actual = if field == "xtol_abs" {
+            &model.optsum.xtol_abs
+        } else {
+            &model.optsum.initial_step
+        };
+        assert_eq!(actual, &values);
+    }
+    let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+    assert!(
+        model
+            .apply_optimizer_control(&OptimizerControl::auto().with_start_theta(vec![0.5]))
+            .is_err(),
+        "starting covariance must not be broadcast"
+    );
+}
