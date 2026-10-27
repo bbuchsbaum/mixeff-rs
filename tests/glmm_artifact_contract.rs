@@ -542,10 +542,10 @@ fn joint_laplace_glmm_artifact_reports_certified_wald_rows_when_hessian_passes()
     assert!(matrix[0][0] > 0.0);
     assert!(matrix[1][1] > 0.0);
     assert!((matrix[0][1] - matrix[1][0]).abs() < 1.0e-8);
-    assert!(covariance
-        .notes
-        .iter()
-        .any(|note| note.contains("inverse finite-difference Hessian")));
+    assert!(covariance.notes.iter().any(|note| note
+        .contains("twice the beta block of the inverse central-finite-difference Hessian")
+        && note.contains("-2 log L")
+        && note.contains("beta plus interior theta")));
 
     let inference = artifact
         .fixed_effect_inference_table
@@ -588,10 +588,10 @@ fn joint_laplace_glmm_artifact_reports_certified_wald_rows_when_hessian_passes()
         let p_value = row.p_value.unwrap();
         assert!((0.0..=1.0).contains(&p_value));
         assert_eq!(row.reason, None);
-        assert!(row
-            .notes
-            .iter()
-            .any(|note| note.contains("inverse finite-difference Hessian")));
+        assert!(row.notes.iter().any(|note| note
+            .contains("twice the beta block of the inverse central-finite-difference Hessian")
+            && note.contains("-2 log L")
+            && note.contains("beta plus interior theta")));
         assert!(row
             .notes
             .iter()
@@ -1044,10 +1044,10 @@ fn joint_laplace_glmm_boundary_theta_still_certifies_fixed_effect_rows() {
         FixedEffectCovarianceMethod::JointLaplaceActiveHessian
     );
     assert_eq!(covariance.status, FixedEffectCovarianceStatus::Available);
-    assert!(covariance
-        .notes
-        .iter()
-        .any(|note| note.contains("omitted from the active Hessian") && note.contains("theta 1")));
+    assert!(covariance.notes.iter().any(|note| note
+        .contains("excluded from the post-fit inference Hessian")
+        && note.contains("theta 1")
+        && note.contains("one-sided optimizer KKT")));
 
     let inference = artifact
         .fixed_effect_inference_table
@@ -1071,9 +1071,10 @@ fn joint_laplace_glmm_boundary_theta_still_certifies_fixed_effect_rows() {
             .is_some_and(|value| value.is_finite() && value > 0.0));
         assert!(row.statistic.is_some_and(f64::is_finite));
         assert!(row.reason.is_none());
-        assert!(row.notes.iter().any(
-            |note| note.contains("omitted from the active Hessian") && note.contains("theta 1")
-        ));
+        assert!(row.notes.iter().any(|note| note
+            .contains("excluded from the post-fit inference Hessian")
+            && note.contains("theta 1")
+            && note.contains("one-sided optimizer KKT")));
     }
 
     assert!(model
