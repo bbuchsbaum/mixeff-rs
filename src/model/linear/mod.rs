@@ -787,9 +787,9 @@ pub struct FitToleranceOverrides {
     pub ftol_abs: Option<f64>,
     /// Relative tolerance on optimizer parameters.
     pub xtol_rel: Option<f64>,
-    /// Per-parameter absolute tolerance on optimizer parameters.
+    /// Absolute tolerance on theta parameters: one value to broadcast, or one per theta.
     pub xtol_abs: Option<Vec<f64>>,
-    /// Per-parameter initial optimizer step size.
+    /// Initial theta step size: one value to broadcast, or one per theta.
     pub initial_step: Option<Vec<f64>>,
 }
 
@@ -812,13 +812,13 @@ impl FitToleranceOverrides {
         self
     }
 
-    /// Set per-parameter absolute tolerances.
+    /// Set absolute theta tolerances; a singleton is broadcast at fit time.
     pub fn with_xtol_abs(mut self, values: Vec<f64>) -> Self {
         self.xtol_abs = Some(values);
         self
     }
 
-    /// Set per-parameter initial optimizer steps.
+    /// Set initial theta steps; a singleton is broadcast at fit time.
     pub fn with_initial_step(mut self, values: Vec<f64>) -> Self {
         self.initial_step = Some(values);
         self
@@ -1124,15 +1124,19 @@ fn validate_positive_control_value(name: &str, value: f64) -> Result<()> {
     }
 }
 
-fn validate_control_vector(name: &str, values: &[f64], n_theta: usize) -> Result<()> {
-    if values.len() != n_theta {
+fn normalize_control_vector(name: &str, values: &[f64], n_theta: usize) -> Result<Vec<f64>> {
+    if values.len() != 1 && values.len() != n_theta {
         return Err(MixedModelError::InvalidArgument(format!(
             "{name} length {} does not match theta length {n_theta}",
             values.len()
         )));
     }
     if values.iter().all(|value| value.is_finite() && *value > 0.0) {
-        Ok(())
+        Ok(if values.len() == 1 {
+            vec![values[0]; n_theta]
+        } else {
+            values.to_vec()
+        })
     } else {
         Err(MixedModelError::InvalidArgument(format!(
             "{name} values must be finite and positive"
@@ -1821,12 +1825,10 @@ impl LinearMixedModel {
             self.optsum.xtol_rel = value;
         }
         if let Some(values) = &control.tolerances.xtol_abs {
-            validate_control_vector("xtol_abs", values, n_theta)?;
-            self.optsum.xtol_abs = values.clone();
+            self.optsum.xtol_abs = normalize_control_vector("xtol_abs", values, n_theta)?;
         }
         if let Some(values) = &control.tolerances.initial_step {
-            validate_control_vector("initial_step", values, n_theta)?;
-            self.optsum.initial_step = values.clone();
+            self.optsum.initial_step = normalize_control_vector("initial_step", values, n_theta)?;
         }
         if let Some(max_feval) = control.max_feval {
             if max_feval == 0 {

@@ -7009,3 +7009,63 @@ fn aphantasia_primary_joint_laplace_falls_back_to_rx_standard_errors() {
         );
     }
 }
+
+#[test]
+fn scalar_tolerance_matches_explicit_vector_glmm() {
+    let mut data = DataFrame::new();
+    let mut y = Vec::new();
+    let mut x = Vec::new();
+    let mut g = Vec::new();
+    let mut item = Vec::new();
+    for group in 0..8 {
+        for observation in 0..10 {
+            x.push((observation as f64 - 4.5) / 5.0);
+            y.push(if (group * 7 + observation * 3) % 11 < 5 {
+                1.0
+            } else {
+                0.0
+            });
+            g.push(format!("g{group}"));
+            item.push(format!("i{observation}"));
+        }
+    }
+    data.add_numeric("y", y).unwrap();
+    data.add_numeric("x", x).unwrap();
+    data.add_categorical("g", g).unwrap();
+    data.add_categorical("item", item).unwrap();
+    for fast in [true, false] {
+        let fit = |n: usize| {
+            let mut model = GeneralizedLinearMixedModel::new(
+                parse_formula("y ~ 1 + x + (1 | g) + (1 | item)").unwrap(),
+                &data,
+                Family::Bernoulli,
+                None,
+            )
+            .unwrap();
+            let controls = OptimizerControl::auto()
+                .with_max_feval(250)
+                .with_tolerances(
+                    FitToleranceOverrides::default()
+                        .with_xtol_abs(vec![1e-8; n])
+                        .with_initial_step(vec![0.1; n]),
+                );
+            let options = if fast {
+                GlmmFitOptions::fast_laplace()
+            } else {
+                GlmmFitOptions::joint_laplace()
+            };
+            model
+                .fit_with_glmm_options(options.with_optimizer_control(controls))
+                .unwrap();
+            model
+        };
+        let scalar = fit(1);
+        let vector = fit(2);
+        assert_eq!(scalar.theta, vector.theta);
+        assert_eq!(scalar.beta, vector.beta);
+        assert_eq!(scalar.objective(), vector.objective());
+        assert_eq!(scalar.lmm.optsum.feval, vector.lmm.optsum.feval);
+        assert!(scalar.lmm.optsum.caller_set_field("xtol_abs"));
+        assert!(scalar.lmm.optsum.caller_set_field("initial_step"));
+    }
+}

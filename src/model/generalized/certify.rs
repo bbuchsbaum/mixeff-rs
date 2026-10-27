@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::compiler::{
+    CertificateCheck, EvidenceMethod, HessianEvidence, IncompleteCheckStatus,
     NewtonDecrementEstimate, NewtonDecrementEvidence, NewtonDecrementExclusion,
     NewtonDecrementVariant, NewtonDecrementVerdict,
 };
@@ -15,6 +16,67 @@ pub(crate) fn joint_glmm_status_prefix(n_agq: usize) -> &'static str {
         "JOINT_LAPLACE"
     } else {
         "JOINT_AGQ"
+    }
+}
+
+/// Re-label the deliberately omitted fit-time full Hessian without confusing
+/// it with a failed derivative backend or with the later inference Hessian.
+///
+/// Joint GLMM optimization certifies stationarity from its finite-difference
+/// gradient and decrement probes. A full Hessian may be evaluated for
+/// optimizer polishing, but is intentionally not assessed in the optimizer
+/// certificate. Joint-Laplace inference separately attempts an active-space
+/// Hessian over beta plus interior theta parameters; that distinct computation
+/// must never retroactively alter fit status or optimizer certification quality.
+pub(crate) fn mark_joint_optimizer_hessian_not_assessed(certificate: &mut OptimizerCertificate) {
+    const BACKEND_REASON: &str =
+        "active-subspace Hessian could not be computed by the derivative backend";
+    const SCOPE_REASON: &str =
+        "full joint Hessian intentionally not assessed in the optimizer certificate; joint-Laplace inference separately attempts an active-space Hessian over beta plus interior theta parameters and does not revise optimizer certification";
+
+    let generic_backend_absence = matches!(
+        &certificate.evidence.hessian.quality,
+        EvidenceQuality::Unavailable { reason } if reason == BACKEND_REASON
+    );
+    if !generic_backend_absence {
+        return;
+    }
+
+    certificate.evidence.hessian = HessianEvidence {
+        method: EvidenceMethod::NotAssessed {
+            reason: SCOPE_REASON.to_string(),
+        },
+        quality: EvidenceQuality::NotAssessed {
+            reason: SCOPE_REASON.to_string(),
+        },
+        min_eigenvalue: None,
+        condition_number: None,
+        rank: None,
+    };
+    // Preserve an assessed failure or approximation from the optimizer
+    // certificate. Only replace the generic backend-absence explanation that
+    // `apply_derivative_evidence` emitted for this deliberately omitted stage.
+    if matches!(
+        &certificate.evidence.certification_quality,
+        EvidenceQuality::Unavailable { reason }
+            if reason == "Hessian evidence unavailable; gradient checks alone do not complete derivative certification"
+    ) {
+        certificate.evidence.certification_quality = EvidenceQuality::Unavailable {
+            reason: format!(
+                "{SCOPE_REASON}; gradient checks alone do not complete derivative certification"
+            ),
+        };
+    }
+    for check in &mut certificate.checks {
+        if let CertificateCheck::Incomplete { evidence } = check {
+            if evidence.check_name == "active_subspace_hessian_psd"
+                && evidence.status == IncompleteCheckStatus::Unavailable
+                && evidence.reason == BACKEND_REASON
+            {
+                evidence.status = IncompleteCheckStatus::NotAssessed;
+                evidence.reason = SCOPE_REASON.to_string();
+            }
+        }
     }
 }
 
@@ -1086,7 +1148,9 @@ pub(crate) fn glmm_joint_laplace_hessian_notes(
     omitted_boundary_theta_indices: &[usize],
 ) -> Vec<String> {
     let mut notes = vec![
-        "fixed-effect covariance derived from the beta block of the inverse finite-difference Hessian over joint-laplace beta plus interior theta parameters"
+        "fixed-effect covariance derived as twice the beta block of the inverse central-finite-difference Hessian of the joint-laplace -2 log L objective over beta plus interior theta parameters"
+            .to_string(),
+        "this post-fit inference Hessian is distinct from the fit-time optimizer certificate and does not revise optimizer convergence status or certification quality"
             .to_string(),
         format!(
             "joint Hessian certificate: min eigenvalue {:.6e}, condition number {:.6e}, rank {}",
@@ -1102,7 +1166,7 @@ pub(crate) fn glmm_joint_laplace_hessian_notes(
             .collect::<Vec<_>>()
             .join(", ");
         notes.push(format!(
-            "boundary covariance parameters held fixed at their lower bounds and omitted from the active Hessian: theta {labels}"
+            "boundary covariance parameters were excluded from the post-fit inference Hessian because they were too close to their lower bounds for the central finite-difference probes: theta {labels}; this exclusion is distinct from their one-sided optimizer KKT assessment"
         ));
     }
     notes
@@ -1516,4 +1580,45 @@ pub(crate) fn full_newton_decrement_estimate(
         g.dot(&solved),
         evidence.gap_tolerance,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn intentionally_unassessed_optimizer_hessian_preserves_assessed_quality() {
+        const BACKEND_REASON: &str =
+            "active-subspace Hessian could not be computed by the derivative backend";
+        for quality in [
+            EvidenceQuality::Approximate {
+                reason: "stationarity approximation remains qualified".to_string(),
+            },
+            EvidenceQuality::Failed {
+                reason: "assessed optimizer derivative failure".to_string(),
+            },
+        ] {
+            let mut certificate = OptimizerCertificate::not_assessed();
+            certificate.evidence.hessian = HessianEvidence {
+                method: EvidenceMethod::NotAvailable {
+                    reason: BACKEND_REASON.to_string(),
+                },
+                quality: EvidenceQuality::Unavailable {
+                    reason: BACKEND_REASON.to_string(),
+                },
+                min_eigenvalue: None,
+                condition_number: None,
+                rank: None,
+            };
+            certificate.evidence.certification_quality = quality.clone();
+
+            mark_joint_optimizer_hessian_not_assessed(&mut certificate);
+
+            assert_eq!(certificate.evidence.certification_quality, quality);
+            assert!(matches!(
+                certificate.evidence.hessian.quality,
+                EvidenceQuality::NotAssessed { .. }
+            ));
+        }
+    }
 }
