@@ -4525,6 +4525,10 @@ impl std::fmt::Display for LinearMixedModel {
 }
 
 impl MixedModelFit for LinearMixedModel {
+    fn case_weights(&self) -> Option<Vec<f64>> {
+        (!self.sqrtwts.is_empty()).then(|| self.sqrtwts.iter().map(|sw| sw * sw).collect())
+    }
+
     fn nobs(&self) -> usize {
         self.dims.n
     }

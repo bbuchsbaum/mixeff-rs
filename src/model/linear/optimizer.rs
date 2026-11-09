@@ -2850,6 +2850,11 @@ impl LinearMixedModel {
         let dims = self.dims;
         let is_reml = reml;
         let fixed_sigma = self.optsum.sigma;
+        // The hot path omits the theta-constant observation-weight term that
+        // `objective_value()` subtracts. Apply it to every trial value so the
+        // optimizer, the best-candidate tracker, `optsum.finitial`, the fit
+        // log and `finalize_fit_result` all work on the user-facing scale.
+        let weight_logdet_correction = self.weight_logdet_correction();
         let sample_reuse_control = self.trust_bq_sample_reuse;
         let gradient_oracle_control = self.trust_bq_gradient_oracle;
         let cholesky_zero_pad_tolerance = self
@@ -2879,6 +2884,7 @@ impl LinearMixedModel {
                     fixed_sigma,
                     cholesky_zero_pad_tolerance,
                 )
+                .map(|value| value - weight_logdet_correction)
                 .unwrap_or(invalid_objective)
             };
             // TrustBQ requires every objective value to be finite, unlike the
@@ -2962,7 +2968,9 @@ impl LinearMixedModel {
             // as in `objective_fn`; the non-finite gradient tells the
             // optimizer not to take secant information from the point.
             let (obj, gradient) = match evaluated {
-                Ok(Some((obj, gradient))) if obj.is_finite() => (obj, gradient),
+                Ok(Some((obj, gradient))) if obj.is_finite() => {
+                    (obj - weight_logdet_correction, gradient)
+                }
                 _ => (invalid_objective, vec![f64::NAN; theta.len()]),
             };
             fit_log.borrow_mut().push(FitLogEntry {
@@ -3245,6 +3253,11 @@ impl LinearMixedModel {
         let dims = self.dims;
         let is_reml = reml;
         let fixed_sigma = self.optsum.sigma;
+        // The hot path omits the theta-constant observation-weight term that
+        // `objective_value()` subtracts. Apply it to every trial value so the
+        // optimizer, the best-candidate tracker, `optsum.finitial`, the fit
+        // log and `finalize_fit_result` all work on the user-facing scale.
+        let weight_logdet_correction = self.weight_logdet_correction();
         let cholesky_zero_pad_tolerance = self
             .compiler_policy()
             .thresholds
@@ -3272,6 +3285,7 @@ impl LinearMixedModel {
                     fixed_sigma,
                     cholesky_zero_pad_tolerance,
                 )
+                .map(|value| value - weight_logdet_correction)
                 .unwrap_or(f64::INFINITY)
             };
 
@@ -3408,6 +3422,11 @@ impl LinearMixedModel {
         let dims = self.dims;
         let is_reml = reml;
         let fixed_sigma = self.optsum.sigma;
+        // The hot path omits the theta-constant observation-weight term that
+        // `objective_value()` subtracts. Apply it to every trial value so the
+        // optimizer, the best-candidate tracker, `optsum.finitial`, the fit
+        // log and `finalize_fit_result` all work on the user-facing scale.
+        let weight_logdet_correction = self.weight_logdet_correction();
         let cholesky_zero_pad_tolerance = self
             .compiler_policy()
             .thresholds
@@ -3436,6 +3455,7 @@ impl LinearMixedModel {
                     fixed_sigma,
                     cholesky_zero_pad_tolerance,
                 )
+                .map(|value| value - weight_logdet_correction)
                 .unwrap_or(invalid_objective)
             };
 
@@ -3582,6 +3602,11 @@ impl LinearMixedModel {
         let dims = self.dims;
         let is_reml = reml;
         let fixed_sigma = self.optsum.sigma;
+        // The hot path omits the theta-constant observation-weight term that
+        // `objective_value()` subtracts. Apply it to every trial value so the
+        // optimizer, the best-candidate tracker, `optsum.finitial`, the fit
+        // log and `finalize_fit_result` all work on the user-facing scale.
+        let weight_logdet_correction = self.weight_logdet_correction();
         let cholesky_zero_pad_tolerance = self
             .compiler_policy()
             .thresholds
@@ -3610,6 +3635,7 @@ impl LinearMixedModel {
                     fixed_sigma,
                     cholesky_zero_pad_tolerance,
                 )
+                .map(|value| value - weight_logdet_correction)
                 .unwrap_or(invalid_objective)
             };
 
