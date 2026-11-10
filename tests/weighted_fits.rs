@@ -221,6 +221,41 @@ fn boundary_lrt_of_a_weighted_model_uses_the_weighted_reference() {
         );
     }
 
+    // Explicit unit weights are the unweighted model: either side may omit them.
+    let ones = vec![1.0; data.y.len()];
+    let unit_full = fit("y ~ x + (1 | g)", &data, Some(&ones), None);
+    let plain_full = fit("y ~ x + (1 | g)", &data, None, None);
+    let plain_reduced =
+        LinearModelFit::fixed_effects_reference(&plain_full, Some("y ~ x".into())).unwrap();
+    let unit_reduced =
+        LinearModelFit::fixed_effects_reference(&unit_full, Some("y ~ x".into())).unwrap();
+    let mixed = [
+        BoundaryLikelihoodRatioTest::variance_component(&plain_reduced, &unit_full),
+        BoundaryLikelihoodRatioTest::variance_component(&unit_reduced, &plain_full),
+    ];
+    let plain = BoundaryLikelihoodRatioTest::variance_component(&plain_reduced, &plain_full);
+    for test in mixed {
+        assert_eq!(test.status, BoundaryLrtStatus::Available);
+        assert!((test.statistic.unwrap() - plain.statistic.unwrap()).abs() < 1e-6);
+    }
+
+    // Weights are compared relatively: tiny weights that differ by a factor
+    // of two on alternate rows are a different weighting scheme.
+    let tiny: Vec<f64> = vec![1e-12; data.y.len()];
+    let alternating: Vec<f64> = (0..data.y.len())
+        .map(|i| if i % 2 == 0 { 1e-12 } else { 2e-12 })
+        .collect();
+    let tiny_full = fit("y ~ x + (1 | g)", &data, Some(&tiny), None);
+    let design = tiny_full.model_matrix().clone();
+    let response = tiny_full.response().clone();
+    let same = LinearModelFit::fit_weighted(response.clone(), design.clone(), &tiny, None).unwrap();
+    let different = LinearModelFit::fit_weighted(response, design, &alternating, None).unwrap();
+    let accepted = BoundaryLikelihoodRatioTest::variance_component(&same, &tiny_full);
+    assert_eq!(accepted.status, BoundaryLrtStatus::Available);
+    let rejected = BoundaryLikelihoodRatioTest::variance_component(&different, &tiny_full);
+    assert_ne!(rejected.status, BoundaryLrtStatus::Available);
+    assert!(rejected.reason.as_deref().unwrap().contains("case weights"));
+
     // An unweighted reference for a weighted model is refused, not tested.
     let full = fit("y ~ x + (1 | g)", &data, Some(&data.weights), None);
     let unweighted =

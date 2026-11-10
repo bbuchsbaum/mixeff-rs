@@ -57,7 +57,7 @@ impl LinearModelFit {
     /// `weights` are case (precision) weights: observation `i` has residual
     /// variance `sigma^2 / weights[i]`. The log-likelihood includes the
     /// `0.5 * sum(log(weights))` term, so it is on the same scale as a
-    /// [`LinearMixedModel`](crate::model::LinearMixedModel) fitted with the
+    /// [`LinearMixedModel`] fitted with the
     /// same weights and is comparable with it.
     pub fn fit_weighted(
         response: DVector<f64>,
@@ -1666,18 +1666,21 @@ fn validate_model_comparison_options(
     Ok(())
 }
 
-/// Whether two fits used the same case weights (both unweighted, or equal
-/// weights up to rounding).
+/// Whether two fits used the same case weights.
+///
+/// An unweighted fit is a fit with unit weights, so `None` matches an
+/// explicit all-ones vector. Weights are compared with a purely relative
+/// tolerance: their overall scale is arbitrary, so an absolute floor would
+/// treat materially different small weights as equal.
 fn case_weights_match(a: &dyn MixedModelFit, b: &dyn MixedModelFit) -> bool {
+    const RELATIVE_TOLERANCE: f64 = 1e-10;
+    let close = |p: f64, q: f64| (p - q).abs() <= RELATIVE_TOLERANCE * p.abs().max(q.abs());
     match (a.case_weights(), b.case_weights()) {
         (None, None) => true,
-        (Some(x), Some(y)) => {
-            x.len() == y.len()
-                && x.iter()
-                    .zip(&y)
-                    .all(|(p, q)| (p - q).abs() <= 1e-10 * p.abs().max(q.abs()).max(1.0))
+        (Some(x), Some(y)) => x.len() == y.len() && x.iter().zip(&y).all(|(p, q)| close(*p, *q)),
+        (Some(weights), None) | (None, Some(weights)) => {
+            weights.iter().all(|weight| close(*weight, 1.0))
         }
-        _ => false,
     }
 }
 
