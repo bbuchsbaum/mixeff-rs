@@ -12,6 +12,39 @@ vs. `unstable-internals` surface inventory.
 
 ## [Unreleased]
 
+### Fixed (case-weighted LMMs; #15, #16)
+
+- Weighted LMM fits with `sum(log(weights)) > 0` no longer return the
+  starting `theta`. The TrustBQ, NLopt, PRIMA and COBYLA drivers evaluated
+  trial points on the internal profiled-objective scale, which omits the
+  theta-constant observation-weight term, while the best-candidate tracker,
+  the invalid-point barrier and `finalize_fit_result` used the user-facing
+  `optsum.finitial` / `objective_at` scale. Every trial therefore looked
+  worse than the start by `sum(log(weights))` and the default optimizer
+  (BOBYQA with NLopt, TrustBQ without) stopped at the initial point with
+  `converged() == true`. All drivers now apply the weight term to every
+  trial value, so one scale is used throughout. Unweighted fits are
+  bit-identical. For weighted fits `optsum.fmin` and `fit_log` objectives
+  from these drivers are now the user-facing objective (as pattern search
+  already reported), which also makes fitted-state snapshots of weighted
+  fits pass their objective check (`tests/weighted_fits.rs`).
+- `BoundaryLikelihoodRatioTest::variance_component` no longer reports a
+  statistic for a weighted mixed model against an unweighted
+  `LinearModelFit`. Likelihood-ratio comparisons (boundary LRT, comparison
+  tables, bootstrap LRT) refuse model pairs fitted with different case
+  weights.
+
+### Added (case-weighted LMMs; #16)
+
+- `LinearModelFit::fit_weighted` (weighted least squares with the
+  log-likelihood on the weighted-LMM scale) and
+  `LinearModelFit::fixed_effects_reference(model, formula)`, which builds
+  the fixed-effects-only reference of a mixed model with that model's case
+  weights. Wrappers testing the only random-effect term should use the
+  latter instead of `LinearModelFit::fit(response, model_matrix, ..)`.
+- `MixedModelFit::case_weights()` (default `None`), implemented for
+  `LinearMixedModel` and `LinearModelFit`.
+
 ### Added (host-bridge performance; pre-CRAN audit §5.2(c), §5.4, §5.9)
 
 - `CompiledModelSpec` (`mixeff_rs::model`): compile and audit a formula

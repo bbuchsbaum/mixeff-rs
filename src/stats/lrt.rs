@@ -29,6 +29,7 @@ pub const PARAMETRIC_BOOTSTRAP_LRT_SCHEMA_VERSION: &str = "1.0.0";
 pub struct LinearModelFit {
     response: DVector<f64>,
     model_matrix: DMatrix<f64>,
+    weights: Option<DVector<f64>>,
     coefficients: DVector<f64>,
     fitted_values: DVector<f64>,
     residual_values: DVector<f64>,
@@ -46,6 +47,59 @@ impl LinearModelFit {
     pub fn fit(
         response: DVector<f64>,
         model_matrix: DMatrix<f64>,
+        formula: Option<String>,
+    ) -> Result<Self, String> {
+        Self::fit_impl(response, model_matrix, None, formula)
+    }
+
+    /// Fit a Gaussian linear model by weighted least squares.
+    ///
+    /// `weights` are case (precision) weights: observation `i` has residual
+    /// variance `sigma^2 / weights[i]`. The log-likelihood includes the
+    /// `0.5 * sum(log(weights))` term, so it is on the same scale as a
+    /// [`LinearMixedModel`] fitted with the
+    /// same weights and is comparable with it.
+    pub fn fit_weighted(
+        response: DVector<f64>,
+        model_matrix: DMatrix<f64>,
+        weights: &[f64],
+        formula: Option<String>,
+    ) -> Result<Self, String> {
+        if weights.len() != response.len() {
+            return Err("weights length must match the response length".to_string());
+        }
+        if weights.iter().any(|w| !w.is_finite() || *w <= 0.0) {
+            return Err("weights must be finite and strictly positive".to_string());
+        }
+        Self::fit_impl(
+            response,
+            model_matrix,
+            Some(DVector::from_column_slice(weights)),
+            formula,
+        )
+    }
+
+    /// The fixed-effects-only reference model for `model`: its response and
+    /// fixed-effect design, fitted with its case weights when it has any.
+    ///
+    /// This is the reduced model for testing the only random-effect term of
+    /// a mixed model; see [`BoundaryLikelihoodRatioTest::variance_component`].
+    pub fn fixed_effects_reference(
+        model: &dyn MixedModelFit,
+        formula: Option<String>,
+    ) -> Result<Self, String> {
+        let response = model.response().clone();
+        let model_matrix = model.model_matrix().clone();
+        match model.case_weights() {
+            Some(weights) => Self::fit_weighted(response, model_matrix, &weights, formula),
+            None => Self::fit(response, model_matrix, formula),
+        }
+    }
+
+    fn fit_impl(
+        response: DVector<f64>,
+        model_matrix: DMatrix<f64>,
+        weights: Option<DVector<f64>>,
         formula: Option<String>,
     ) -> Result<Self, String> {
         if model_matrix.nrows() != response.len() {
@@ -68,8 +122,25 @@ impl LinearModelFit {
             );
         }
 
-        let xtx = model_matrix.transpose() * &model_matrix;
-        let xty = model_matrix.transpose() * &response;
+        // Weighted least squares is ordinary least squares on rows scaled by
+        // sqrt(w); the unweighted fit is the same computation with w = 1.
+        let (scaled_matrix, scaled_response, weight_log_sum) = match &weights {
+            Some(weights) => {
+                let mut scaled_matrix = model_matrix.clone();
+                let mut scaled_response = response.clone();
+                for (row, weight) in weights.iter().enumerate() {
+                    let sqrt_weight = weight.sqrt();
+                    scaled_matrix.row_mut(row).scale_mut(sqrt_weight);
+                    scaled_response[row] *= sqrt_weight;
+                }
+                let log_sum = weights.iter().map(|weight| weight.ln()).sum::<f64>();
+                (scaled_matrix, scaled_response, log_sum)
+            }
+            None => (model_matrix.clone(), response.clone(), 0.0),
+        };
+
+        let xtx = scaled_matrix.transpose() * &scaled_matrix;
+        let xty = scaled_matrix.transpose() * &scaled_response;
         let coefficients = xtx
             .clone()
             .lu()
@@ -77,12 +148,14 @@ impl LinearModelFit {
             .ok_or_else(|| "linear model least-squares solve failed".to_string())?;
         let fitted_values = &model_matrix * &coefficients;
         let residual_values = &response - &fitted_values;
-        let rss = residual_values.dot(&residual_values);
+        let scaled_residuals = &scaled_response - &scaled_matrix * &coefficients;
+        let rss = scaled_residuals.dot(&scaled_residuals);
         let n = response.len() as f64;
         let sigma_sq_mle = rss / n;
         let sigma = sigma_sq_mle.sqrt();
         let loglik = if sigma_sq_mle > 0.0 {
             -0.5 * n * ((2.0 * std::f64::consts::PI).ln() + 1.0 + sigma_sq_mle.ln())
+                + 0.5 * weight_log_sum
         } else {
             f64::INFINITY
         };
@@ -103,6 +176,7 @@ impl LinearModelFit {
         Ok(Self {
             response,
             model_matrix,
+            weights,
             coefficients,
             fitted_values,
             residual_values,
@@ -118,6 +192,12 @@ impl LinearModelFit {
 }
 
 impl MixedModelFit for LinearModelFit {
+    fn case_weights(&self) -> Option<Vec<f64>> {
+        self.weights
+            .as_ref()
+            .map(|weights| weights.iter().copied().collect())
+    }
+
     fn nobs(&self) -> usize {
         self.response.len()
     }
@@ -1586,10 +1666,36 @@ fn validate_model_comparison_options(
     Ok(())
 }
 
+/// Whether two fits used the same case weights.
+///
+/// An unweighted fit is a fit with unit weights, so `None` matches an
+/// explicit all-ones vector. Weights are compared with a purely relative
+/// tolerance: their overall scale is arbitrary, so an absolute floor would
+/// treat materially different small weights as equal.
+fn case_weights_match(a: &dyn MixedModelFit, b: &dyn MixedModelFit) -> bool {
+    const RELATIVE_TOLERANCE: f64 = 1e-10;
+    let close = |p: f64, q: f64| (p - q).abs() <= RELATIVE_TOLERANCE * p.abs().max(q.abs());
+    match (a.case_weights(), b.case_weights()) {
+        (None, None) => true,
+        (Some(x), Some(y)) => x.len() == y.len() && x.iter().zip(&y).all(|(p, q)| close(*p, *q)),
+        (Some(weights), None) | (None, Some(weights)) => {
+            weights.iter().all(|weight| close(*weight, 1.0))
+        }
+    }
+}
+
 fn likelihood_ratio_values(
     smaller: &dyn MixedModelFit,
     larger: &dyn MixedModelFit,
 ) -> Result<LrtValues, String> {
+    if !case_weights_match(smaller, larger) {
+        return Err(
+            "models were fitted with different case weights, so their likelihoods are not \
+             comparable; fit both with the same weights (for a fixed-effects reference model \
+             use LinearModelFit::fixed_effects_reference)"
+                .to_string(),
+        );
+    }
     let loglik_diff = larger.loglikelihood() - smaller.loglikelihood();
     if loglik_diff < -LOG_LIK_TOL {
         return Err(

@@ -214,6 +214,15 @@ pub trait MixedModelFit {
     /// Model matrix for fixed effects.
     fn model_matrix(&self) -> &DMatrix<f64>;
 
+    /// Per-observation case weights the likelihood was fitted with, or
+    /// `None` for an unweighted fit.
+    ///
+    /// Likelihoods of fits with different case weights are not comparable;
+    /// likelihood-ratio comparisons use this to refuse such pairs.
+    fn case_weights(&self) -> Option<Vec<f64>> {
+        None
+    }
+
     /// The objective function value (deviance or REML criterion).
     fn objective(&self) -> f64;
 
