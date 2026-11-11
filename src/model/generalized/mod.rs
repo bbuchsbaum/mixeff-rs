@@ -1923,6 +1923,13 @@ impl std::fmt::Display for GeneralizedLinearMixedModel {
 }
 
 impl MixedModelFit for GeneralizedLinearMixedModel {
+    fn case_weights(&self) -> Option<Vec<f64>> {
+        // Prior weights (e.g. binomial trial counts) enter the GLMM
+        // likelihood, so two fits with different prior weights are fits to
+        // different data and must not be compared by likelihood ratio.
+        (!self.wt.is_empty()).then(|| self.wt.clone())
+    }
+
     fn nobs(&self) -> usize {
         self.y.len()
     }
@@ -2023,6 +2030,11 @@ impl MixedModelFit for GeneralizedLinearMixedModel {
     }
     fn opt_summary(&self) -> &OptSummary {
         &self.lmm.optsum
+    }
+    fn is_reml(&self) -> bool {
+        // The summary belongs to the working LMM, whose `reml` flag keeps its
+        // default; a GLMM is always a likelihood (Laplace/AGQ) fit.
+        false
     }
     fn theta(&self) -> Vec<f64> {
         self.theta.clone()

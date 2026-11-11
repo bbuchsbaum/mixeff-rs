@@ -446,7 +446,7 @@ function gamma_glmm_engines_fixture()
     gamma_pin_boundary_optimum!(model, df)
     return JObj([
         "schema_version" => "1.0.0",
-        "source" => "Deterministic Gamma-log GLMM fixture cross-checked against MixedModels.jl 5.3.0 and lme4 2.0-1 on 2026-04-29. rust_reference.loglik updated 2026-05-18 (mote bd-01KRXCQ85SAMGEAH3HBZESJ16H, B1): MixedModelFit::loglikelihood now reports the full normalized -2logLik scale (response/dispersion constants retained) instead of -objective/2; the corrected value -23.9751 sits ~0.3% from the independent MixedModels.jl engine reference (-23.8936), the residual being the documented dispersion-family scale divergence — the prior -0.5151 was off the Julia oracle by ~46x. beta/theta/objective are unchanged by B1.",
+        "source" => "Deterministic Gamma-log GLMM fixture cross-checked against MixedModels.jl 5.3.0 and lme4 on 2026-04-29. Updated 2026-10-09 for lme4 2.1-0's estimated-dispersion fix (glmerControl(disp_method = 'moment', disp_dof_correction = TRUE)): rust_reference is the engine's fast-PIRLS (lme4 nAGQ = 0) fit with phi profiled inside PIRLS, and the lme4::glmer row is lme4 2.1.0 (scripts/regenerate_lme4_dispersion_glmm_fixtures.R). The MixedModels.jl row (unit-phi PIRLS) is unchanged.",
         "formula" => "y ~ 1 + x + (1 | group)",
         "family" => "gamma",
         "link" => "log",
@@ -463,20 +463,25 @@ function gamma_glmm_engines_fixture()
             "wiggle_step" => 0.06,
             "wiggle_modulus" => 3,
         ]),
+        # Not computed here: the engine's lme4-2.1 profiled-phi fast-PIRLS fit,
+        # recorded by scripts/regenerate_lme4_dispersion_glmm_fixtures.R and
+        # checked by tests/parity_gamma_glmm.rs. Keep in sync with the
+        # checked-in fixture so the drift gate (and --accept) compares only
+        # the MixedModels.jl row this script actually regenerates.
         "rust_reference" => JObj([
-            "beta" => [1.2801500995982815, 0.2500623869349765],
-            "theta" => [0.000000007500000000000006],
-            "dispersion_sigma" => 0.24113736806697922,
-            "dispersion_phi" => 0.05814723027826981,
-            "objective" => 1.0302950465115652,
-            "loglik" => -23.975120721071598,
+            "beta" => [1.2553913538587675, 0.25142403792783075],
+            "theta" => [0.22072483479446814],
+            "dispersion_sigma" => 0.0516120354008097,
+            "dispersion_phi" => 0.0026638021982144334,
+            "objective" => 37.0535038274362,
+            "loglik" => -2.3391374199493633,
             "fitted_mu_head" => [
-                2.181527513571749,
-                2.801311534418864,
-                3.5971796202652278,
-                4.6191582269466664,
-                5.931486602827991,
-                2.181527513571749,
+                1.6434892764596134,
+                2.1132892653582305,
+                2.717384033499093,
+                3.4941624445643904,
+                4.492987019314608,
+                2.376028449036644,
             ],
         ]),
         "engines" => [
@@ -489,20 +494,22 @@ function gamma_glmm_engines_fixture()
                 "dispersion" => getproperty(model, :sigma),
                 "objective" => objective(model),
                 "loglik" => loglikelihood(model),
-                "verdict" => "parity_reference",
-                "note" => "Matches the Rust profiled objective and fixed effects at fixture tolerance; MixedModels.jl warns that dispersion-family GLMM results are not yet reliable.",
+                "verdict" => "documented_divergence",
+                "note" => "MixedModels.jl fits Gamma GLMMs with unit-phi PIRLS weights and puts theta on the boundary here (theta = 0); lme4 2.1 and the engine profile phi inside PIRLS and reach an interior theta = 0.2207. Fixed effects differ at ~2e-2. MixedModels.jl warns that dispersion-family GLMM results are not yet reliable.",
             ]),
+            # Not computed here: recorded by
+            # scripts/regenerate_lme4_dispersion_glmm_fixtures.R (lme4 2.1.0).
             JObj([
                 "engine" => "lme4::glmer",
                 "status" => "fit",
-                "version" => "lme4 2.0-1; Matrix 1.7-3; R 4.5.1",
-                "beta" => [1.2525348960238136, 0.2514329570450088],
-                "theta" => [1.673899552748074],
-                "dispersion" => 0.005280706050124609,
+                "version" => "lme4 2.1.0; Matrix 1.6.5; R 4.3.3",
+                "beta" => [1.25539135381146, 0.251424036928887],
+                "theta" => [0.220724820244606],
+                "dispersion" => 0.0516120349499221,
                 "objective" => nothing,
-                "loglik" => 1.231780136165594,
-                "verdict" => "documented_divergence",
-                "note" => "glmer profiles Gamma dispersion differently and is recorded as a comparison point, not as the sole oracle for this fixture.",
+                "loglik" => -2.33913748139676,
+                "verdict" => "parity_reference",
+                "note" => "glmer(y ~ 1 + x + (1 | group), family = Gamma(link = 'log'), nAGQ = 0) under lme4 2.1.0 defaults (disp_method = 'moment', disp_dof_correction = TRUE); dispersion is sigma(). The superseded pre-2.1 glmer row (lme4 2.0-1, unit-phi PIRLS weights) was theta 1.673899552748074, beta (1.2525348960238136, 0.25143295704500879), dispersion 0.0052807060501246089, logLik 1.231780136165594.",
             ]),
             JObj([
                 "engine" => "glmmTMB",
@@ -520,6 +527,7 @@ function gamma_glmm_engines_fixture()
         "notes" => [
             "This compact fixture intentionally uses deterministic positive responses so Rust, R, and Julia can rebuild the same data without relying on language-specific Gamma RNG streams.",
             "glmer is preserved as a drift sentinel because its Gamma dispersion profiling can disagree with the MixedModels.jl-style PIRLS objective; it must not be promoted to the only oracle for this path.",
+            "2026-10-09: lme4 2.1-0 moved to profiled-phi PIRLS weights; the engine follows it (theta 0.2207, sigma 0.05161). MixedModels.jl still uses unit-phi weights and remains a documented divergence.",
         ],
     ])
 end

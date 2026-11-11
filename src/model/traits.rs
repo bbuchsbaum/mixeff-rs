@@ -261,6 +261,17 @@ pub trait MixedModelFit {
     /// Optimization summary.
     fn opt_summary(&self) -> &OptSummary;
 
+    /// Whether the fit maximised the REML criterion rather than the
+    /// likelihood.
+    ///
+    /// Likelihood-ratio comparisons use this to refuse REML fits whose fixed
+    /// effects differ. Defaults to [`OptSummary::reml`]; implementors whose
+    /// summary does not record the fit criterion (GLMMs, which are always
+    /// Laplace/AGQ likelihood fits) override it.
+    fn is_reml(&self) -> bool {
+        self.opt_summary().reml
+    }
+
     /// Typed classification of the optimizer's termination status.
     ///
     /// Use this (or [`converged`](Self::converged)) instead of string-matching
