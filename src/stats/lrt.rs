@@ -984,6 +984,9 @@ impl LikelihoodRatioTest {
                 dof[i] > dof[i - 1],
                 "comparison classifier should reject non-increasing degrees of freedom"
             );
+            if !case_weights_match(models[i - 1], models[i]) {
+                return Err(CASE_WEIGHTS_MISMATCH.to_string());
+            }
             let loglik_diff = loglik[i] - loglik[i - 1];
             if loglik_diff < -LOG_LIK_TOL {
                 return Err(
@@ -1325,7 +1328,7 @@ fn assess_model_pair(
         smaller.nobs() == larger.nobs() && vectors_equal(smaller.response(), larger.response());
     let same_family = smaller.family_kind() == larger.family_kind();
     let same_link = smaller.link_kind() == larger.link_kind();
-    let same_fit_criterion = smaller.opt_summary().reml == larger.opt_summary().reml;
+    let same_fit_criterion = smaller.is_reml() == larger.is_reml();
     let fixed_effects = fixed_effect_comparison(smaller.model_matrix(), larger.model_matrix());
     let random_effects = random_effect_comparison(
         &smaller.random_effect_terms(),
@@ -1375,7 +1378,7 @@ fn assess_model_pair(
         ModelComparisonClass::InvalidModelOrder
     };
 
-    let reml = smaller.opt_summary().reml;
+    let reml = smaller.is_reml();
     let fixed_effects_match = fixed_effects == FixedEffectComparison::Same;
     let structurally_nested = matches!(
         class,
@@ -1672,6 +1675,11 @@ fn validate_model_comparison_options(
 /// explicit all-ones vector. Weights are compared with a purely relative
 /// tolerance: their overall scale is arbitrary, so an absolute floor would
 /// treat materially different small weights as equal.
+const CASE_WEIGHTS_MISMATCH: &str =
+    "models were fitted with different case weights, so their likelihoods are not \
+     comparable; fit both with the same weights (for a fixed-effects reference model \
+     use LinearModelFit::fixed_effects_reference)";
+
 fn case_weights_match(a: &dyn MixedModelFit, b: &dyn MixedModelFit) -> bool {
     const RELATIVE_TOLERANCE: f64 = 1e-10;
     let close = |p: f64, q: f64| (p - q).abs() <= RELATIVE_TOLERANCE * p.abs().max(q.abs());
@@ -1689,12 +1697,7 @@ fn likelihood_ratio_values(
     larger: &dyn MixedModelFit,
 ) -> Result<LrtValues, String> {
     if !case_weights_match(smaller, larger) {
-        return Err(
-            "models were fitted with different case weights, so their likelihoods are not \
-             comparable; fit both with the same weights (for a fixed-effects reference model \
-             use LinearModelFit::fixed_effects_reference)"
-                .to_string(),
-        );
+        return Err(CASE_WEIGHTS_MISMATCH.to_string());
     }
     let loglik_diff = larger.loglikelihood() - smaller.loglikelihood();
     if loglik_diff < -LOG_LIK_TOL {

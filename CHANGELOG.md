@@ -45,6 +45,31 @@ vs. `unstable-internals` surface inventory.
 - `MixedModelFit::case_weights()` (default `None`), implemented for
   `LinearMixedModel` and `LinearModelFit`.
 
+### Fixed (likelihood-ratio follow-ups to #15/#16)
+
+- `LikelihoodRatioTest::test` / `test_with_formulas` now apply the same
+  case-weight guard as the other likelihood-ratio paths. They previously
+  returned a statistic for a weighted mixed model against an unweighted
+  `LinearModelFit`.
+- GLMMs report their prior weights through `MixedModelFit::case_weights()`,
+  so LRTs and comparison tables refuse GLMM pairs fitted with different
+  prior weights (e.g. different binomial trial counts). Unweighted GLMMs
+  still report `None`.
+- Fixed-effect likelihood-ratio tests between GLMMs are no longer refused
+  as "REML". A GLMM's `opt_summary()` is its working LMM's summary, whose
+  `reml` flag keeps its default of `true`; the comparison classifier now
+  reads the new `MixedModelFit::is_reml()` (default `opt_summary().reml`),
+  which GLMMs override to `false`. GLMM numerics are unchanged.
+
+### Fixed (CI)
+
+- The scheduled Julia parity job failed every week from 2026-10-12: the
+  generator still emitted the pre-lme4-2.1 `gamma_glmm_engines.json`
+  (`rust_reference`, lme4 row, verdicts and notes), while the checked-in
+  fixture had been updated for lme4 2.1. The generator now carries the
+  same static values, so the gate compares only the MixedModels.jl row it
+  regenerates, and `--accept` no longer reverts the lme4 2.1 update.
+
 ### Added (host-bridge performance; pre-CRAN audit §5.2(c), §5.4, §5.9)
 
 - `CompiledModelSpec` (`mixeff_rs::model`): compile and audit a formula

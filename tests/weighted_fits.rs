@@ -1,13 +1,19 @@
-//! Regression tests for case-weighted linear mixed models (issues #15, #16).
+//! Regression tests for case-weighted mixed models (issues #15, #16).
 //!
 //! The data are generated here so the tests need no fixtures: 15 groups of
 //! 16 rows with random intercepts and slopes, and case weights in (0.5, 2)
 //! whose logs sum to a positive number (the case issue #15 mishandled).
 
 use mixeff_rs::formula::parse_formula;
-use mixeff_rs::model::{DataFrame, FitOptions, LinearMixedModel, MixedModelFit, OptimizerControl};
+use mixeff_rs::model::{
+    DataFrame, Family, FitOptions, GeneralizedLinearMixedModel, GeneralizedLinearMixedModelBuilder,
+    LinearMixedModel, MixedModelFit, OptimizerControl,
+};
 use mixeff_rs::nalgebra::{DMatrix, DVector};
-use mixeff_rs::stats::{BoundaryLikelihoodRatioTest, BoundaryLrtStatus, LinearModelFit};
+use mixeff_rs::stats::{
+    BoundaryLikelihoodRatioTest, BoundaryLrtStatus, LikelihoodRatioTest, LinearModelFit,
+    ModelComparisonTable,
+};
 use mixeff_rs::types::Optimizer;
 
 /// Deterministic uniform draws in (0, 1).
@@ -264,4 +270,105 @@ fn boundary_lrt_of_a_weighted_model_uses_the_weighted_reference() {
     assert_ne!(refused.status, BoundaryLrtStatus::Available);
     assert!(refused.statistic.is_none() && refused.pvalue.is_none());
     assert!(refused.reason.as_deref().unwrap().contains("case weights"));
+}
+
+#[test]
+fn likelihood_ratio_test_refuses_models_fitted_with_different_case_weights() {
+    let data = data();
+    let full = fit("y ~ x + (1 | g)", &data, Some(&data.weights), None);
+
+    // The weighted reference gives the closed-form statistic.
+    let reduced = LinearModelFit::fixed_effects_reference(&full, Some("y ~ x".into())).unwrap();
+    let lrt = LikelihoodRatioTest::test(&[&reduced as &dyn MixedModelFit, &full]).unwrap();
+    let expected = 2.0 * (full.loglikelihood() - weighted_linear_loglik(&data, &data.weights));
+    assert!(
+        (lrt.chisq[0] - expected).abs() < 1e-6,
+        "statistic {} vs {expected}",
+        lrt.chisq[0]
+    );
+
+    // An unweighted reference is refused rather than tested.
+    let unweighted =
+        LinearModelFit::fit(full.response().clone(), full.model_matrix().clone(), None).unwrap();
+    let err = LikelihoodRatioTest::test(&[&unweighted as &dyn MixedModelFit, &full]).unwrap_err();
+    assert!(err.contains("case weights"), "{err}");
+}
+
+/// Binomial proportions with trial-count prior weights, generated here:
+/// 12 groups of 8 rows, 4 to 19 trials per row.
+fn binomial_frame() -> (DataFrame, Vec<f64>) {
+    let mut rng = Lcg(20261111);
+    let (mut proportion, mut x, mut g, mut trials) = (vec![], vec![], vec![], vec![]);
+    for group in 0..12 {
+        let b0 = 0.6 * rng.normal();
+        for i in 0..8 {
+            let xi = i as f64 / 3.5 - 1.0;
+            let p = 1.0 / (1.0 + (-(-0.3 + 0.8 * xi + b0)).exp());
+            let n = 4 + (rng.unif() * 16.0) as usize;
+            let successes = (0..n).filter(|_| rng.unif() < p).count();
+            proportion.push(successes as f64 / n as f64);
+            x.push(xi);
+            trials.push(n as f64);
+            g.push(format!("g{group:02}"));
+        }
+    }
+    let mut frame = DataFrame::new();
+    frame.add_numeric("proportion", proportion).unwrap();
+    frame.add_numeric("x", x).unwrap();
+    frame.add_categorical("g", g).unwrap();
+    (frame, trials)
+}
+
+fn binomial_glmm(
+    formula: &str,
+    weights: Option<&[f64]>,
+    frame: &DataFrame,
+) -> GeneralizedLinearMixedModel {
+    let builder = GeneralizedLinearMixedModelBuilder::new(
+        parse_formula(formula).unwrap(),
+        frame,
+        Family::Binomial,
+    );
+    match weights {
+        Some(weights) => builder.weights(weights.to_vec()),
+        None => builder,
+    }
+    .fit()
+    .unwrap()
+}
+
+#[test]
+fn glmm_comparisons_refuse_models_fitted_with_different_prior_weights() {
+    // Trial-count prior weights are part of the binomial data, so models
+    // fitted with different weights are not nested fits of the same data.
+    let (frame, trials) = binomial_frame();
+    let doubled: Vec<f64> = trials.iter().map(|n| 2.0 * n).collect();
+
+    let small = binomial_glmm("proportion ~ 1 + (1 | g)", Some(&trials), &frame);
+    let large = binomial_glmm("proportion ~ 1 + x + (1 | g)", Some(&trials), &frame);
+    let reweighted = binomial_glmm("proportion ~ 1 + x + (1 | g)", Some(&doubled), &frame);
+    assert_eq!(large.case_weights().as_deref(), Some(trials.as_slice()));
+
+    // GLMMs are likelihood fits, so a fixed-effect LRT between them is valid
+    // (their working-LMM summary must not make them look like REML fits).
+    assert!(!small.is_reml() && !large.is_reml());
+    let same = LikelihoodRatioTest::test(&[&small as &dyn MixedModelFit, &large]).unwrap();
+    let expected = 2.0 * (large.loglikelihood() - small.loglikelihood());
+    assert!(expected > 0.0 && (same.chisq[0] - expected).abs() < 1e-9);
+    let table = ModelComparisonTable::compare(&[&small as &dyn MixedModelFit, &large]).unwrap();
+    assert!(table.rows[1].lrt_available);
+
+    let err = LikelihoodRatioTest::test(&[&small as &dyn MixedModelFit, &reweighted]).unwrap_err();
+    assert!(err.contains("case weights"), "{err}");
+    let table =
+        ModelComparisonTable::compare(&[&small as &dyn MixedModelFit, &reweighted]).unwrap();
+    assert!(!table.rows[1].lrt_available);
+    assert!(table.rows[1].chisq.is_none() && table.rows[1].pvalue.is_none());
+
+    // Unweighted GLMMs report no case weights, and match explicit unit weights.
+    let ones = vec![1.0; trials.len()];
+    let unweighted = binomial_glmm("proportion ~ 1 + (1 | g)", None, &frame);
+    assert!(unweighted.case_weights().is_none());
+    let unit = binomial_glmm("proportion ~ 1 + x + (1 | g)", Some(&ones), &frame);
+    assert!(LikelihoodRatioTest::test(&[&unweighted as &dyn MixedModelFit, &unit]).is_ok());
 }
