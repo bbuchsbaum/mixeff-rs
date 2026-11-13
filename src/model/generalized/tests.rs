@@ -7226,3 +7226,38 @@ fn profiled_glmm_progress_is_throttled_and_interruptible() {
         assert_eq!(err.code(), "interrupted");
     }
 }
+
+#[test]
+fn glmm_verify_profiled_fallback_ignores_retained_initializer_budget() {
+    let mut profiled = small_joint_poisson_fixture();
+    profiled.fit_with_options(true, 1, false).unwrap();
+    // Reproduce the fallback retained by a joint attempt with a separate cap.
+    profiled.lmm.optsum.initializer_max_feval = Some(8);
+    let mut joint_optsum = profiled.opt_summary().clone();
+    joint_optsum.return_value = "JOINT_LAPLACE:MAXEVAL_REACHED".into();
+    let certificate = OptimizerCertificate::from_opt_summary_with_context(
+        &joint_optsum,
+        &profiled.theta,
+        &profiled.lmm.lower_bounds(),
+        Some(profiled.y.len()),
+    );
+    let mut fallback =
+        uncertified_joint_fallback(&certificate, &joint_optsum, Some(profiled)).unwrap();
+    assert!(!glmm_objective_includes_response_constants(
+        &fallback.opt_summary().return_value
+    ));
+    let verification = fallback.verify_convergence().unwrap();
+    assert!(
+        verification
+            .runs
+            .iter()
+            .all(|run| run.return_code.is_some()),
+        "verification never fitted the effective estimator: {:?}",
+        verification.runs
+    );
+    assert_eq!(
+        verification.status,
+        crate::compiler::ConvergenceVerificationStatus::RestartAgrees
+    );
+    assert_eq!(fallback.opt_summary().initializer_max_feval, Some(8));
+}
