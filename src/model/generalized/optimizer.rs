@@ -165,6 +165,7 @@ impl GeneralizedLinearMixedModel {
             fast,
             n_agq,
             verbose,
+            initializer_max_feval: None,
             optimizer_control: OptimizerControl::default(),
             progress_callback: None,
         })
@@ -177,6 +178,7 @@ impl GeneralizedLinearMixedModel {
             fast,
             n_agq,
             verbose,
+            initializer_max_feval,
             optimizer_control,
             progress_callback,
         } = options;
@@ -187,9 +189,24 @@ impl GeneralizedLinearMixedModel {
         if self.lmm.optsum.feval > 0 {
             return Err(MixedModelError::AlreadyFitted);
         }
+        if let Some(budget) = initializer_max_feval {
+            if fast || budget == 0 || budget > u32::MAX as usize {
+                return Err(MixedModelError::InvalidArgument(
+                    "initializer_max_feval requires a joint GLMM and a budget in 1..=u32::MAX"
+                        .into(),
+                ));
+            }
+        }
         self.pending_progress_error = None;
         self.lmm.progress_callback = progress_callback;
         self.lmm.apply_optimizer_control(&optimizer_control)?;
+        self.lmm.optsum.initializer_max_feval = initializer_max_feval;
+        if initializer_max_feval.is_some() {
+            self.lmm
+                .optsum
+                .caller_set_fields
+                .push("initializer_max_feval".into());
+        }
         if let Some(start_theta) = &optimizer_control.start_theta {
             self.theta = start_theta.clone();
         }
@@ -330,6 +347,24 @@ impl GeneralizedLinearMixedModel {
         Ok(())
     }
 
+    pub(super) fn report_glmm_evaluation(
+        &mut self,
+        phase: FitProgressPhase,
+        current: usize,
+        total: usize,
+    ) -> bool {
+        if self.pending_progress_error.is_some() {
+            return false;
+        }
+        if let Some(callback) = &self.lmm.progress_callback {
+            if let Err(error) = callback.report_evaluation(phase, current, Some(total)) {
+                self.pending_progress_error = Some(error.to_string());
+                return false;
+            }
+        }
+        true
+    }
+
     pub(super) fn configure_profile_start_optimizer(&mut self) {
         let optimizer = default_fast_glmm_optimizer();
         self.lmm.optsum.optimizer = optimizer;
@@ -454,9 +489,15 @@ impl GeneralizedLinearMixedModel {
         let model = std::cell::RefCell::new(self);
         let obj_fn = |theta: &[f64], _grad: Option<&mut [f64]>, _data: &mut ()| -> f64 {
             feval_count.set(feval_count.get() + 1);
-            let objective = model
-                .borrow_mut()
-                .penalized_pirls_deviance_at_theta(theta, n_agq);
+            let mut model = model.borrow_mut();
+            if !model.report_glmm_evaluation(
+                FitProgressPhase::ProfiledGlmmOptimizer,
+                feval_count.get() as usize,
+                maxeval as usize,
+            ) {
+                return f64::INFINITY;
+            }
+            let objective = model.penalized_pirls_deviance_at_theta(theta, n_agq);
             fit_log.borrow_mut().push(FitLogEntry {
                 theta: theta.to_vec(),
                 objective,
@@ -578,9 +619,15 @@ impl GeneralizedLinearMixedModel {
         let model = std::cell::RefCell::new(self);
         let objective_fn = |theta: &[f64], _data: &mut ()| -> f64 {
             feval_count.set(feval_count.get() + 1);
-            let objective = model
-                .borrow_mut()
-                .penalized_pirls_deviance_at_theta(theta, n_agq);
+            let mut model = model.borrow_mut();
+            if !model.report_glmm_evaluation(
+                FitProgressPhase::ProfiledGlmmOptimizer,
+                feval_count.get() as usize,
+                maxeval,
+            ) {
+                return f64::INFINITY;
+            }
+            let objective = model.penalized_pirls_deviance_at_theta(theta, n_agq);
             fit_log.borrow_mut().push(FitLogEntry {
                 theta: theta.to_vec(),
                 objective,
@@ -921,6 +968,18 @@ pub(crate) fn record_pattern_search_eval(
     best_fmin: &mut f64,
 ) -> Result<f64> {
     *feval_count += 1;
+    let maxeval = if model.lmm.optsum.max_feval > 0 {
+        model.lmm.optsum.max_feval as usize
+    } else {
+        500
+    };
+    if !model.report_glmm_evaluation(
+        FitProgressPhase::ProfiledGlmmOptimizer,
+        *feval_count as usize,
+        maxeval,
+    ) {
+        model.take_pending_interrupt()?;
+    }
     let objective = model.penalized_pirls_deviance_at_theta(theta, n_agq);
     fit_log.push(FitLogEntry {
         theta: theta.to_vec(),

@@ -56,8 +56,27 @@ impl GeneralizedLinearMixedModel {
         // Every conditional fit needs a fast-compatible prefit, including
         // later estimated-NB iterations that still record the auto-selected
         // joint backend from their previous iteration.
+        let joint_max_feval = self.lmm.optsum.max_feval;
+        let original_callback = self.lmm.progress_callback.clone();
+        self.lmm.progress_callback = original_callback.as_ref().map(|callback| {
+            callback.map_phase(
+                FitProgressPhase::ProfiledGlmmOptimizer,
+                FitProgressPhase::GlmmInitializer,
+            )
+        });
+        if let Some(budget) = self.lmm.optsum.initializer_max_feval {
+            self.lmm.optsum.max_feval = budget as i64;
+        }
+        self.lmm.optsum.initializer_feval = None;
+        self.lmm.optsum.initializer_return_value = None;
         self.configure_profile_start_optimizer();
-        self.fit_with_options_impl(n_agq, verbose)?;
+        let initialization = self.fit_with_options_impl(n_agq, verbose).map(|_| ());
+        // Restore the joint budget and callback even if initialization is interrupted.
+        self.lmm.optsum.max_feval = joint_max_feval;
+        self.lmm.progress_callback = original_callback;
+        initialization?;
+        self.lmm.optsum.initializer_feval = Some(self.lmm.optsum.feval.max(0) as usize);
+        self.lmm.optsum.initializer_return_value = Some(self.lmm.optsum.return_value.clone());
         let fallback_fast_pirls = self.clone();
         let start_beta = self.beta.as_slice().to_vec();
         let mut start_theta = self.theta.clone();
@@ -183,6 +202,9 @@ impl GeneralizedLinearMixedModel {
                 "joint GLMM starting conditional-mode solve did not converge".to_string(),
             ));
         }
+        if !self.report_glmm_evaluation(FitProgressPhase::JointGlmmOptimizer, 0, maxeval as usize) {
+            self.take_pending_interrupt()?;
+        }
         let optimizer = self
             .lmm
             .optsum
@@ -294,9 +316,15 @@ impl GeneralizedLinearMixedModel {
         let model = std::cell::RefCell::new(self);
         let obj_fn = |params: &[f64], _grad: Option<&mut [f64]>, _data: &mut ()| -> f64 {
             feval_count.set(feval_count.get() + 1);
-            let objective = model
-                .borrow_mut()
-                .joint_glmm_deviance_at_params(params, n_beta, n_agq);
+            let mut model = model.borrow_mut();
+            if !model.report_glmm_evaluation(
+                FitProgressPhase::JointGlmmOptimizer,
+                feval_count.get() as usize,
+                maxeval as usize,
+            ) {
+                return f64::INFINITY;
+            }
+            let objective = model.joint_glmm_deviance_at_params(params, n_beta, n_agq);
             fit_log.borrow_mut().push(FitLogEntry {
                 theta: params.to_vec(),
                 objective,
@@ -1006,7 +1034,7 @@ impl GeneralizedLinearMixedModel {
     }
 
     /// Returns a host interrupt held by `joint_glmm_deviance_at_params`.
-    fn take_pending_interrupt(&mut self) -> Result<()> {
+    pub(super) fn take_pending_interrupt(&mut self) -> Result<()> {
         match self.pending_progress_error.take() {
             Some(message) => Err(MixedModelError::Interrupted(message)),
             None => Ok(()),

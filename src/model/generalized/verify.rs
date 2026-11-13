@@ -169,6 +169,13 @@ impl GeneralizedLinearMixedModel {
                     fast,
                     n_agq,
                     verbose: false,
+                    // A labelled fallback retains the requested joint control,
+                    // but verification must fit its effective profiled estimator.
+                    initializer_max_feval: if fast {
+                        None
+                    } else {
+                        self.lmm.optsum.initializer_max_feval
+                    },
                     optimizer_control: OptimizerControl {
                         optimizer: caller_optimizer
                             .map(OptimizerChoice::Named)
