@@ -12,6 +12,55 @@ vs. `unstable-internals` surface inventory.
 
 ## [Unreleased]
 
+## [1.0.0-rc.6] - 2026-11-13
+
+Sixth 1.0 release candidate. Includes the boundary recovery and conditional
+inference changes below, plus the accumulated engine improvements since RC5.
+This starts a new RC soak period; it is not the final 1.0 release. The Julia
+parity reference remains MixedModels.jl 5.9.0 on Julia 1.12.4. Existing reporting
+schema versions and default inference choices are unchanged.
+
+### Fixed (numerical)
+
+- Native LMM optimization no longer collapses a weak variance component to
+  zero when another independent component is at its boundary (#19). On the
+  supplied 816-row fixture the REML criterion improves from
+  `2313.004551863` to `2311.445601582`, matching the lme4 reference. Bounded
+  variance-space recovery covers scalar and independent diagonal components;
+  an invalid boundary cannot receive a converged certificate.
+- Boundary score checks use normalized variance coordinates. Conditional
+  inference uses dimensionless stationarity, curvature and snap checks, with
+  predictor/response rescaling regressions for Satterthwaite and Kenward-Roger
+  degrees of freedom and p-values.
+
+### Added (conditional boundary inference)
+
+- `LinearMixedModel::test_contrast_with_boundary_policy` and
+  `BoundaryInferencePolicy::{Default, ActiveSet}` provide an explicit opt-in
+  for Satterthwaite or Kenward-Roger inference conditional on certified zero
+  variance components (#20). Supported boundary fits are unweighted REML
+  models with estimated residual sigma and independent scalar or diagonal
+  covariance blocks. Existing numerical and p-value safeguards still apply;
+  unsupported explicit requests return a refusal without changing methods.
+- Results report the selected components, whether conditioning occurred, and
+  `Low` reliability. Selection uncertainty is not accounted for: the guide's
+  exploratory calibration includes 6/58 conditional rejections at nominal 5%
+  when the true component is nonzero. See the
+  [boundary inference guide](docs/guide/boundary_inference.md) for interpretation,
+  supported cases, numerical qualification and benchmark details. R-wrapper
+  adoption requires a separate engine pin and interface update.
+
+### Changed (boundary certification cost)
+
+- Additional post-fit covariance score evidence follows the existing deferred,
+  cached certificate path. Recovery checks still run during optimization.
+  Valid zero-variance benchmark fit medians are 0.114 ms (816 rows) and 0.958 ms
+  (8,160 rows), versus 0.114/0.936 ms before this change; first inspection adds
+  0.014/0.057 ms. These are local native release measurements, not R timings.
+- Failed recovery probes are recorded as diagnostics. Redundant restart
+  cloning was removed, and conditional KR validates covariance-component
+  labels and dimensions before selecting its active subset.
+
 ### Fixed (case-weighted LMMs; #15, #16)
 
 - Weighted LMM fits with `sum(log(weights)) > 0` no longer return the

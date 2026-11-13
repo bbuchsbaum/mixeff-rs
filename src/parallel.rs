@@ -198,7 +198,7 @@ pub(crate) fn with_r_host_x87_precision<R>(f: impl FnOnce() -> R) -> R {
 }
 
 /// x87 control word after `fninit` (R's `Rwin_fpset`).
-#[cfg(test)]
+#[cfg(all(test, any(target_arch = "x86", target_arch = "x86_64")))]
 const R_HOST_X87_CONTROL_WORD: u16 = 0x037F;
 
 /// Validate a caller-supplied thread count (`0` is rejected; `1` is serial).

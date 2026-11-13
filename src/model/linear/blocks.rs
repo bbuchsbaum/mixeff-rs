@@ -1098,8 +1098,7 @@ pub(super) fn compute_re_cross_product_into(a: &ReMat, b: &ReMat, target: &mut M
             }
         }
         MatrixBlock::Dense(result)
-            if !same
-                && !(a.vsize == 1 && b.vsize == 1)
+            if !(same || a.vsize == 1 && b.vsize == 1)
                 && result.shape() == (a.n_ranef(), b.n_ranef()) =>
         {
             let (va, vb) = (a.vsize, b.vsize);
