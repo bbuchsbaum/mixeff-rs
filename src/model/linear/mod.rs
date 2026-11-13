@@ -3392,8 +3392,7 @@ impl LinearMixedModel {
         if l.ncols() == active_p && l.ncols() != full_p {
             return Ok(l.clone());
         }
-        for dropped_position in active_p..full_p {
-            let original_col = self.feterm.piv[dropped_position];
+        for &original_col in &self.feterm.piv[active_p..full_p] {
             for row in 0..l.nrows() {
                 if l[(row, original_col)].abs() > 1e-12 {
                     return Err(MixedModelError::InvalidArgument(format!(
