@@ -7069,3 +7069,160 @@ fn scalar_tolerance_matches_explicit_vector_glmm() {
         assert!(scalar.lmm.optsum.caller_set_field("initial_step"));
     }
 }
+
+#[test]
+fn joint_initializer_budget_progress_and_refit_are_separate() {
+    use std::sync::Mutex;
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&events);
+    let callback = FitProgressCallback::new(move |event| {
+        if matches!(
+            event.phase,
+            FitProgressPhase::GlmmInitializer | FitProgressPhase::JointGlmmOptimizer
+        ) {
+            recorded.lock().unwrap().push(event);
+        }
+        Ok(())
+    });
+    let mut model = small_joint_poisson_fixture();
+    model
+        .fit_with_glmm_options(
+            GlmmFitOptions::joint_laplace()
+                .with_initializer_max_feval(8)
+                .with_optimizer_control(OptimizerControl::default().with_max_feval(1500))
+                .with_progress_callback(callback),
+        )
+        .unwrap();
+    assert_eq!(model.opt_summary().initializer_max_feval, Some(8));
+    assert!(model
+        .opt_summary()
+        .initializer_feval
+        .is_some_and(|n| n > 0 && n <= 8));
+    assert_eq!(model.opt_summary().max_feval, 1500);
+    assert!(model
+        .opt_summary()
+        .caller_set_field("initializer_max_feval"));
+    assert!(model.opt_summary().initializer_return_value.is_some());
+    let observed = events.lock().unwrap().clone();
+    assert_eq!(observed[0].phase, FitProgressPhase::GlmmInitializer);
+    assert_eq!(observed[0].current, 1);
+    let joint = observed
+        .iter()
+        .position(|e| e.phase == FitProgressPhase::JointGlmmOptimizer)
+        .unwrap();
+    assert!(observed[..joint]
+        .iter()
+        .all(|e| e.total == Some(8) && e.current <= 8));
+    assert!(observed[joint..]
+        .iter()
+        .all(|e| e.phase == FitProgressPhase::JointGlmmOptimizer && e.total == Some(1500)));
+    let y = model.y.as_slice().to_vec();
+    // The serialized fitted state and native refit retain the separate budget.
+    let mut restored =
+        GeneralizedLinearMixedModel::restore_json(&model.snapshot_json().unwrap()).unwrap();
+    restored.refit(&y).unwrap();
+    assert_eq!(restored.opt_summary().initializer_max_feval, Some(8));
+    assert!(restored.opt_summary().initializer_feval.unwrap() <= 8);
+    assert_eq!(restored.opt_summary().max_feval, 1500);
+}
+
+#[test]
+fn joint_initializer_unset_preserves_shared_budget_and_result() {
+    let mut legacy = small_joint_poisson_fixture();
+    let mut explicit = legacy.clone();
+    let options = GlmmFitOptions::joint_laplace()
+        .with_optimizer_control(OptimizerControl::default().with_max_feval(1000));
+    legacy.fit_with_glmm_options(options.clone()).unwrap();
+    explicit
+        .fit_with_glmm_options(options.with_initializer_max_feval(1000))
+        .unwrap();
+    assert_eq!(legacy.theta(), explicit.theta());
+    assert_eq!(legacy.coef(), explicit.coef());
+    assert_eq!(legacy.objective(), explicit.objective());
+    assert_eq!(
+        legacy.opt_summary().initializer_feval,
+        explicit.opt_summary().initializer_feval
+    );
+    assert_eq!(legacy.opt_summary().initializer_max_feval, None);
+}
+
+#[test]
+fn joint_initializer_rejects_invalid_controls_and_is_interruptible() {
+    for options in [
+        GlmmFitOptions::joint_laplace().with_initializer_max_feval(0),
+        GlmmFitOptions::fast_laplace().with_initializer_max_feval(8),
+    ] {
+        let mut model = small_joint_poisson_fixture();
+        assert!(model
+            .fit_with_glmm_options(options)
+            .unwrap_err()
+            .to_string()
+            .contains("initializer_max_feval"));
+        assert!(model.opt_summary().feval <= 0);
+    }
+    let mut model = small_joint_poisson_fixture();
+    let callback = FitProgressCallback::new(|event| {
+        if event.phase == FitProgressPhase::GlmmInitializer {
+            return Err(MixedModelError::Interrupted("initializer cancelled".into()));
+        }
+        Ok(())
+    });
+    let error = model
+        .fit_with_glmm_options(
+            GlmmFitOptions::joint_laplace()
+                .with_initializer_max_feval(8)
+                .with_optimizer_control(OptimizerControl::default().with_max_feval(1500))
+                .with_progress_callback(callback),
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), "interrupted");
+    assert_eq!(model.opt_summary().max_feval, 1500);
+    assert!(model.opt_summary().initializer_feval.is_none());
+}
+
+#[test]
+fn profiled_glmm_progress_is_throttled_and_interruptible() {
+    use std::sync::Mutex;
+    for optimizer in [Optimizer::Cobyla, Optimizer::PatternSearch] {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&events);
+        let callback = FitProgressCallback::new(move |event| {
+            if event.phase == FitProgressPhase::ProfiledGlmmOptimizer {
+                recorded.lock().unwrap().push(event.current);
+            }
+            Ok(())
+        })
+        .with_interval(3);
+        let mut model = small_joint_poisson_fixture();
+        model
+            .fit_with_glmm_options(
+                GlmmFitOptions::fast_laplace()
+                    .with_optimizer_control(
+                        OptimizerControl::default()
+                            .with_optimizer(optimizer)
+                            .with_max_feval(8),
+                    )
+                    .with_progress_callback(callback),
+            )
+            .unwrap();
+        let observed = events.lock().unwrap();
+        assert_eq!(observed.first(), Some(&1));
+        assert!(observed.iter().all(|n| *n == 1 || *n % 3 == 0 || *n == 8));
+        drop(observed);
+        let callback = FitProgressCallback::new(|event| {
+            if event.phase == FitProgressPhase::ProfiledGlmmOptimizer {
+                return Err(MixedModelError::Interrupted("profiled cancelled".into()));
+            }
+            Ok(())
+        });
+        let mut model = small_joint_poisson_fixture();
+        let err = model
+            .fit_with_glmm_options(
+                GlmmFitOptions::fast_laplace()
+                    .with_optimizer(optimizer)
+                    .with_progress_callback(callback),
+            )
+            .unwrap_err();
+        assert_eq!(err.code(), "interrupted");
+    }
+}

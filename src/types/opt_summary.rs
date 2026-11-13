@@ -211,6 +211,16 @@ pub struct OptSummary {
     /// Maximum number of function evaluations. Default `-1` (unlimited).
     pub max_feval: i64,
 
+    /// Optional separate budget for a joint GLMM's profiled initializer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initializer_max_feval: Option<usize>,
+    /// Objective evaluations used by the most recent joint GLMM initializer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initializer_feval: Option<usize>,
+    /// Stop code from the most recent joint GLMM initializer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initializer_return_value: Option<String>,
+
     /// Maximum wall-clock time (seconds). Default `-1.0` (unlimited).
     pub max_time: f64,
 
@@ -295,6 +305,9 @@ impl OptSummary {
             xtol_abs: vec![1e-10; n],
             initial_step: vec![0.75; n],
             max_feval: -1,
+            initializer_max_feval: None,
+            initializer_feval: None,
+            initializer_return_value: None,
             max_time: -1.0,
             final_trust_radius: None,
 

@@ -212,6 +212,10 @@ pub struct GlmmFitOptions {
     pub n_agq: usize,
     /// Whether to emit verbose progress from paths that support it.
     pub verbose: bool,
+    /// Optional evaluation budget for the profiled initializer of a joint fit.
+    /// `None` preserves the shared `optimizer_control.max_feval` behavior.
+    /// Does not cap PIRLS iterations, certification, or wall time. Refits retain it.
+    pub initializer_max_feval: Option<usize>,
     /// Optional audit-recorded optimizer controls.
     pub optimizer_control: OptimizerControl,
     /// Optional throttled host progress/interrupt callback.
@@ -234,6 +238,7 @@ impl Default for GlmmFitOptions {
             fast: true,
             n_agq: 1,
             verbose: false,
+            initializer_max_feval: None,
             optimizer_control: OptimizerControl::default(),
             progress_callback: None,
         }
@@ -263,6 +268,13 @@ impl GlmmFitOptions {
     /// Set verbose progress reporting.
     pub fn with_verbose(mut self, verbose: bool) -> Self {
         self.verbose = verbose;
+        self
+    }
+
+    /// Give the joint fit's profiled initializer its own positive evaluation budget.
+    /// Rejected for profiled-only fits; the joint optimizer keeps its own budget.
+    pub fn with_initializer_max_feval(mut self, max_feval: usize) -> Self {
+        self.initializer_max_feval = Some(max_feval);
         self
     }
 

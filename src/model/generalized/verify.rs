@@ -169,6 +169,7 @@ impl GeneralizedLinearMixedModel {
                     fast,
                     n_agq,
                     verbose: false,
+                    initializer_max_feval: self.lmm.optsum.initializer_max_feval,
                     optimizer_control: OptimizerControl {
                         optimizer: caller_optimizer
                             .map(OptimizerChoice::Named)

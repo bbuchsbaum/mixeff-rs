@@ -108,6 +108,10 @@ use inference::*;
 pub enum FitProgressPhase {
     /// Profiled LMM covariance-parameter optimization.
     LmmOptimizer,
+    /// Profiled GLMM covariance-parameter optimization (outer objective evaluations).
+    ProfiledGlmmOptimizer,
+    /// Profiled initializer of a joint GLMM (outer objective evaluations).
+    GlmmInitializer,
     /// Joint GLMM fixed-effect/covariance-parameter optimization.
     JointGlmmOptimizer,
     /// A PIRLS conditional-mode solve.
@@ -136,8 +140,8 @@ pub struct FitProgress {
 /// Returning an error stops the active engine loop immediately. Hosts can use
 /// this to translate their native interrupt mechanism (for example,
 /// `R_CheckUserInterrupt`) into [`MixedModelError::Interrupted`]. The callback
-/// is invoked at most once per `every` units of progress, and when a known
-/// total is reached.
+/// is invoked at most once per `every` units of progress, with additional
+/// events at phase entry, the first outer evaluation, and a known total.
 #[derive(Clone)]
 pub struct FitProgressCallback {
     callback: Arc<dyn Fn(FitProgress) -> Result<()> + Send + Sync + 'static>,
@@ -169,6 +173,41 @@ impl FitProgressCallback {
     pub fn with_interval(mut self, every: usize) -> Self {
         self.every = every.max(1);
         self
+    }
+
+    /// Report the first evaluation and subsequent interval boundaries before
+    /// entering an expensive objective. Each phase owns its evaluation counter.
+    pub(crate) fn report_evaluation(
+        &self,
+        phase: FitProgressPhase,
+        current: usize,
+        total: Option<usize>,
+    ) -> Result<()> {
+        if current != 1 && current % self.every != 0 && total.is_none_or(|total| current < total) {
+            return Ok(());
+        }
+        (self.callback)(FitProgress {
+            phase,
+            current,
+            total,
+        })
+        .map_err(|error| match error {
+            MixedModelError::Interrupted(_) => error,
+            other => MixedModelError::Interrupted(other.to_string()),
+        })
+    }
+
+    pub(crate) fn map_phase(&self, from: FitProgressPhase, to: FitProgressPhase) -> Self {
+        let callback = Arc::clone(&self.callback);
+        Self {
+            callback: Arc::new(move |mut progress| {
+                if progress.phase == from {
+                    progress.phase = to;
+                }
+                callback(progress)
+            }),
+            every: self.every,
+        }
     }
 
     pub(crate) fn report_if_due(
