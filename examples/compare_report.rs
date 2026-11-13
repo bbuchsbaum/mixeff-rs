@@ -85,10 +85,7 @@ impl Tol {
             return true;
         }
         let r = reference.abs();
-        if r > 0.0 && d / r <= self.rel_tol {
-            return true;
-        }
-        false
+        r > 0.0 && d / r <= self.rel_tol
     }
 }
 

@@ -199,7 +199,7 @@
         {
           "label": "convergence interpretation",
           "status": "warning",
-          "detail": "optimizer reported an acceptable stop; effective covariance is reduced rank; unsupported directions are weakly identified, not proof of zero population variance; stationarity is not certified: one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged; Hessian weak-identification check is unavailable: boundary fit, not by itself an optimizer failure; bounded verification is fragile; compare objectives and theta before routine inference"
+          "detail": "optimizer reported an acceptable stop; effective covariance is reduced rank; unsupported directions are weakly identified, not proof of zero population variance; stationarity is not certified: one or more covariance parameters are on a variance-component boundary (parameter indices: 2); theta-space derivatives are skipped; variance-space boundary checks are recorded separately where supported; Hessian weak-identification check is unavailable: boundary fit, not by itself an optimizer failure; bounded verification is fragile; compare objectives and theta before routine inference"
         },
         {
           "label": "optimizer",

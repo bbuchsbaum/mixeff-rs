@@ -1197,6 +1197,25 @@ impl LinearMixedModel {
         statistics: Vec<Option<f64>>,
         estimability: FixedContrastEstimability,
     ) -> FixedEffectTest {
+        self.satterthwaite_fixed_effect_test_with_ingredients(
+            hypothesis,
+            estimates,
+            standard_errors,
+            statistics,
+            estimability,
+            None,
+        )
+    }
+
+    pub(super) fn satterthwaite_fixed_effect_test_with_ingredients(
+        &self,
+        hypothesis: FixedEffectHypothesis,
+        estimates: Vec<f64>,
+        standard_errors: Vec<Option<f64>>,
+        statistics: Vec<Option<f64>>,
+        estimability: FixedContrastEstimability,
+        supplied_ingredients: Option<std::sync::Arc<SatterthwaiteIngredients>>,
+    ) -> FixedEffectTest {
         use statrs::distribution::{ContinuousCDF, FisherSnedecor, StudentsT};
 
         let method = InferenceMethod::Satterthwaite;
@@ -1216,7 +1235,7 @@ impl LinearMixedModel {
             );
         }
 
-        let ingredients = self.satterthwaite_ingredients();
+        let ingredients = supplied_ingredients.unwrap_or_else(|| self.satterthwaite_ingredients());
         let (jacobian, vcov_varpar) = match &*ingredients {
             Ok((jacobian, vcov_varpar)) => (jacobian, vcov_varpar.clone()),
             Err(SatterthwaiteIngredientError::Jacobian(error)) => {
@@ -1538,6 +1557,33 @@ impl LinearMixedModel {
         statistics: Vec<Option<f64>>,
         estimability: FixedContrastEstimability,
     ) -> FixedEffectTest {
+        let adjusted = if self.optsum.reml {
+            self.kenward_roger_adjusted_vcov()
+        } else {
+            Err(MixedModelError::InvalidArgument(
+                "Kenward-Roger fixed-effect inference is certified only for REML LMM fits"
+                    .to_string(),
+            ))
+        };
+        self.kenward_roger_fixed_effect_test_with_adjusted(
+            hypothesis,
+            estimates,
+            standard_errors,
+            statistics,
+            estimability,
+            adjusted,
+        )
+    }
+
+    pub(super) fn kenward_roger_fixed_effect_test_with_adjusted(
+        &self,
+        hypothesis: FixedEffectHypothesis,
+        estimates: Vec<f64>,
+        standard_errors: Vec<Option<f64>>,
+        statistics: Vec<Option<f64>>,
+        estimability: FixedContrastEstimability,
+        adjusted: Result<KenwardRogerAdjustedVcov>,
+    ) -> FixedEffectTest {
         use statrs::distribution::{ContinuousCDF, FisherSnedecor, StudentsT};
 
         let method = InferenceMethod::KenwardRoger;
@@ -1554,7 +1600,7 @@ impl LinearMixedModel {
             );
         }
 
-        let adjusted = match self.kenward_roger_adjusted_vcov() {
+        let adjusted = match adjusted {
             Ok(adjusted) => adjusted,
             Err(error) => {
                 return fixed_effect_test_not_assessed_with_method(
@@ -2226,7 +2272,7 @@ impl LinearMixedModel {
         );
     }
 
-    fn fixed_effect_p_value_policy(&self) -> CoefTablePValuePolicy {
+    pub(super) fn fixed_effect_p_value_policy(&self) -> CoefTablePValuePolicy {
         if self
             .compiler_artifact
             .reductions

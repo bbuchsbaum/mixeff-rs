@@ -28,15 +28,18 @@ use crate::compiler::{
     DiagnosticSeverity, DiagnosticStage, DominantLoading, EffectiveCovarianceSummary,
     EffectiveRankStatus, EstimabilityAssessment, EstimabilityStatus, EvidenceMethod, FitStatus,
     FixedContrastEstimability, FixedEffectCovarianceDetails, FixedEffectCovarianceMatrix,
-    FixedEffectCovarianceMethod, FixedEffectHypothesis, FixedEffectInferenceDetails,
-    FixedEffectInferenceMethod, FixedEffectInferenceRow, FixedEffectInferenceRowKind,
-    FixedEffectInferenceStatus, FixedEffectInferenceTable, FixedEffectNullTargetSummary,
-    FixedEffectReliabilityReason, FixedEffectStatisticName, FixedEffectTermTestType,
-    FixedEffectTest, FixedEffectTestMethod, InferenceMethod, InferenceStatus,
-    InterpretableSubmodel, KenwardRogerInferenceDetails, ModelAuditReport, ModelStateChange,
-    ModelStateSummary, OptimizerCertificate, OptimizerDerivativeEvidence, PolicyAction,
-    PolicyRecommendation, ReductionRecord, ReductionTrigger, ReliabilityGrade,
-    SupportedCovarianceDirection, DOMINANT_LOADING_THRESHOLD, INTERPRETABLE_GAP_TOLERANCE,
+    FixedEffectCovarianceMethod, FixedEffectInferenceDetails, FixedEffectInferenceMethod,
+    FixedEffectInferenceRow, FixedEffectInferenceRowKind, FixedEffectInferenceStatus,
+    FixedEffectInferenceTable, FixedEffectNullTargetSummary, FixedEffectReliabilityReason,
+    FixedEffectStatisticName, FixedEffectTermTestType, InterpretableSubmodel,
+    KenwardRogerInferenceDetails, ModelAuditReport, ModelStateChange, ModelStateSummary,
+    OptimizerCertificate, OptimizerDerivativeEvidence, PolicyAction, PolicyRecommendation,
+    ReductionRecord, ReductionTrigger, SupportedCovarianceDirection, DOMINANT_LOADING_THRESHOLD,
+    INTERPRETABLE_GAP_TOLERANCE,
+};
+pub use crate::compiler::{
+    ContrastMatrix, ContrastRhs, FixedEffectHypothesis, FixedEffectTest, FixedEffectTestMethod,
+    InferenceMethod, InferenceStatus, ReliabilityGrade,
 };
 use crate::error::{MixedModelError, Result};
 use crate::formula::{FixedTerm, Formula, RandomCovariance, RandomTerm};
@@ -62,6 +65,8 @@ use crate::types::opt_summary::OptimizerBackend;
 use crate::types::{FeMat, FeTerm, FitLogEntry, OptSummary, Optimizer, OptimizerSource, ReMat};
 
 mod active_face;
+mod boundary_inference;
+pub use boundary_inference::{BoundaryFixedEffectTest, BoundaryInferencePolicy};
 
 mod blocks;
 // Cache-friendly dense Cholesky / triangular-solve / downdate kernels.
@@ -265,8 +270,8 @@ pub struct LinearMixedModel {
     /// only; never part of any parity or serialized contract.
     pub(crate) fit_phase_timings: Option<FitPhaseTimings>,
     /// True while the optimizer certificate in `compiler_artifact` still
-    /// lacks its finite-difference gradient/Hessian evidence. The fit tail
-    /// defers that evidence (≈2·d² objective evaluations) until something
+    /// lacks its gradient/Hessian or covariance-boundary score evidence.
+    /// The fit tail defers that evidence until something
     /// inspects the certificate; see `inspection_artifact`.
     pub(crate) derivative_evidence_pending: bool,
     /// Lazily completed copy of `compiler_artifact` with the deferred
@@ -566,6 +571,10 @@ pub struct ScalarCovarianceKktBlock {
     pub theta: f64,
     pub variance: f64,
     pub score: f64,
+    /// Variance in units of mean induced response covariance (v / scale).
+    pub normalized_variance: f64,
+    /// Derivative with respect to normalized variance (scale * dF/dv).
+    pub normalized_score: f64,
     pub complementarity: f64,
     pub residual: f64,
     pub classification: CovarianceKktClassification,
@@ -577,7 +586,9 @@ pub struct ScalarCovarianceKktBlock {
 pub struct ScalarCovarianceKktCertificate {
     pub blocks: Vec<ScalarCovarianceKktBlock>,
     pub residual: f64,
+    /// Tolerance applied to each block's normalized variance.
     pub variance_tolerance: f64,
+    /// Tolerance applied to each block's normalized score.
     pub score_tolerance: f64,
     pub objective: f64,
 }
@@ -1541,7 +1552,7 @@ impl LinearMixedModel {
 
     /// The artifact as callers should see it. While derivative evidence is
     /// pending, the first call clones the artifact, completes the
-    /// certificate's finite-difference gradient/Hessian evidence from
+    /// certificate's derivative and covariance-boundary score evidence from
     /// `&self`, and caches the result; otherwise the stored artifact is
     /// returned directly. Mutating fit paths call
     /// `ensure_derivative_evidence` instead, which completes in place.
@@ -2677,7 +2688,13 @@ impl LinearMixedModel {
     unstable_vis fn jac_vcov_beta_varpar(&mut self, varpar: &[f64]) -> Result<Vec<DMatrix<f64>>> {
         self.validate_varpar(varpar)?;
         self.ensure_central_stencil_feasible(varpar)?;
+        self.jac_vcov_beta_varpar_analytic(varpar)
+    }
+    }
 
+    // The explicit active-set route validates only retained directions.
+    fn jac_vcov_beta_varpar_analytic(&mut self, varpar: &[f64]) -> Result<Vec<DMatrix<f64>>> {
+        // Both callers validate varpar before reaching this analytic kernel.
         let n_theta = self.n_theta();
         let theta = &varpar[..n_theta];
         let sigma = varpar[n_theta];
@@ -2705,7 +2722,6 @@ impl LinearMixedModel {
         self.set_theta(&original_theta)?;
         self.l_blocks = original_l_blocks;
         result
-    }
     }
 
     /// The central-difference stencil gate shared by the varpar Jacobian:
@@ -2765,6 +2781,11 @@ impl LinearMixedModel {
     /// Moore-Penrose inverse of the Hessian over positive eigen-directions.
     pub fn vcov_varpar(&mut self, varpar: &[f64], reml: bool) -> Result<VcovVarparEstimate> {
         let hessian = self.hessian_deviance_varpar(varpar, reml)?;
+        Self::vcov_varpar_from_hessian(hessian)
+    }
+
+    fn vcov_varpar_from_hessian(hessian: DMatrix<f64>) -> Result<VcovVarparEstimate> {
+        let dimension = hessian.nrows();
         let hessian = symmetrize_matrix(&hessian);
         let eig = SymmetricEigen::new(hessian.clone());
         let eigenvalues = eig.eigenvalues.as_slice().to_vec();
@@ -2794,7 +2815,7 @@ impl LinearMixedModel {
             ));
         }
 
-        let mut inverse = DMatrix::zeros(varpar.len(), varpar.len());
+        let mut inverse = DMatrix::zeros(dimension, dimension);
         for (index, &eigenvalue) in eigenvalues.iter().enumerate() {
             if eigenvalue > tolerance {
                 let column = eig.eigenvectors.column(index);
@@ -2810,7 +2831,7 @@ impl LinearMixedModel {
             ));
         }
 
-        let used_reduced_rank = positive_eigenvalues < varpar.len();
+        let used_reduced_rank = positive_eigenvalues < dimension;
         let mut notes = Vec::new();
         if near_zero_eigenvalues > 0 {
             notes.push(format!(
@@ -3371,8 +3392,7 @@ impl LinearMixedModel {
         if l.ncols() == active_p && l.ncols() != full_p {
             return Ok(l.clone());
         }
-        for dropped_position in active_p..full_p {
-            let original_col = self.feterm.piv[dropped_position];
+        for &original_col in &self.feterm.piv[active_p..full_p] {
             for row in 0..l.nrows() {
                 if l[(row, original_col)].abs() > 1e-12 {
                     return Err(MixedModelError::InvalidArgument(format!(
@@ -3500,18 +3520,63 @@ impl LinearMixedModel {
     /// analytic varpar gradient (two gradient evaluations per coordinate
     /// instead of four objective evaluations per entry).
     fn hessian_deviance_varpar(&mut self, varpar: &[f64], reml: bool) -> Result<DMatrix<f64>> {
-        self.validate_varpar(varpar)?;
-        let lower_bounds = self.varpar_lower_bounds();
-        let steps = finite_difference_steps(varpar, &lower_bounds, 1e-4);
+        self.hessian_deviance_varpar_on_indices(
+            varpar,
+            reml,
+            &(0..varpar.len()).collect::<Vec<_>>(),
+        )
+    }
 
-        let mut central_steps = Vec::with_capacity(varpar.len());
-        for index in 0..varpar.len() {
+    fn hessian_deviance_varpar_on_indices(
+        &mut self,
+        varpar: &[f64],
+        reml: bool,
+        indices: &[usize],
+    ) -> Result<DMatrix<f64>> {
+        self.hessian_deviance_varpar_scaled_on_indices(
+            varpar,
+            reml,
+            indices,
+            &vec![1.0; varpar.len()],
+        )
+    }
+
+    // Frozen linear coordinates u_j = varpar_j / scale_j. The returned
+    // curvature is D H D, paired with Jacobian J D in the ActiveSet path.
+    fn hessian_deviance_varpar_scaled_on_indices(
+        &mut self,
+        varpar: &[f64],
+        reml: bool,
+        indices: &[usize],
+        scales: &[f64],
+    ) -> Result<DMatrix<f64>> {
+        self.validate_varpar(varpar)?;
+        if scales.len() != varpar.len() || scales.iter().any(|s| !s.is_finite() || *s <= 0.0) {
+            return Err(MixedModelError::InvalidArgument(
+                "varpar coordinate scales must be finite and positive".to_string(),
+            ));
+        }
+        let normalized = varpar
+            .iter()
+            .zip(scales)
+            .map(|(v, s)| v / s)
+            .collect::<Vec<_>>();
+        let lower_bounds = self
+            .varpar_lower_bounds()
+            .iter()
+            .zip(scales)
+            .map(|(v, s)| v / s)
+            .collect::<Vec<_>>();
+        let steps = finite_difference_steps(&normalized, &lower_bounds, 1e-4);
+
+        let mut central_steps = Vec::with_capacity(indices.len());
+        for &index in indices {
             let lower = lower_bounds
                 .get(index)
                 .copied()
                 .unwrap_or(f64::NEG_INFINITY);
             let step =
-                feasible_central_step(varpar[index], lower, steps[index]).ok_or_else(|| {
+                feasible_central_step(normalized[index], lower, steps[index]).ok_or_else(|| {
                     MixedModelError::InvalidArgument(format!(
                         "cannot compute central finite-difference Hessian for varpar[{index}]: \
                      value is at or too near lower bound {lower}"
@@ -3520,23 +3585,24 @@ impl LinearMixedModel {
             central_steps.push(step);
         }
 
-        let n = varpar.len();
+        let n = indices.len();
         let mut hessian = DMatrix::zeros(n, n);
         // Save θ and L once for the whole sweep (each stencil point fully
         // rebuilds L), instead of cloning every L block per evaluation.
         let original_theta = self.theta();
         let original_l_blocks = self.l_blocks.clone();
         let sweep: Result<()> = (|| {
-            for col in 0..n {
+            for (col, &parameter) in indices.iter().enumerate() {
                 let h = central_steps[col];
                 let mut plus = varpar.to_vec();
                 let mut minus = varpar.to_vec();
-                plus[col] += h;
-                minus[col] -= h;
+                plus[parameter] += h * scales[parameter];
+                minus[parameter] -= h * scales[parameter];
                 let g_plus = self.gradient_deviance_varpar_checked_unrestored(&plus, reml)?;
                 let g_minus = self.gradient_deviance_varpar_checked_unrestored(&minus, reml)?;
-                for row in 0..n {
-                    hessian[(row, col)] = (g_plus[row] - g_minus[row]) / (2.0 * h);
+                for (row, &source_row) in indices.iter().enumerate() {
+                    hessian[(row, col)] =
+                        scales[source_row] * (g_plus[source_row] - g_minus[source_row]) / (2.0 * h);
                 }
             }
             Ok(())

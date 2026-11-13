@@ -94,15 +94,15 @@ subset:
 | `y ~ x1 : x2` | Interaction only | Stable |
 | `y ~ x1 / x2` | Nesting (`x1 + x1:x2`) | Stable |
 | `0 + …`, `-1 + …`, `1 + …` | Explicit intercept handling | Stable |
-| `(re | g)` | Correlated random effects in group `g` | Stable |
-| `(re || g)` | Zero-correlation random effects (lme4 expansion; see below for factors) | Stable |
-| `(re | g1 & g2)` | Interaction grouping factor | Stable |
-| `(re | g1:g2)` | Cell-level grouping factor | Stable |
-| `(re | g1/g2)` | Nested grouping expansion | Stable |
-| `(re | g1*g2)` | Main grouping factors plus cell expansion | Stable |
-| `us(re | g)` | Explicit unstructured random-effect covariance | Stable alias for `(re | g)` |
-| `diag(re | g)` | Diagonal random-effect covariance | Stable |
-| `cs(re | g)`, `ar1(re | g)` | Structured random-effect covariance syntax | Parsed and refused for fitting in v1.0 |
+| `(re \| g)` | Correlated random effects in group `g` | Stable |
+| `(re \|\| g)` | Zero-correlation random effects (lme4 expansion; see below for factors) | Stable |
+| `(re \| g1 & g2)` | Interaction grouping factor | Stable |
+| `(re \| g1:g2)` | Cell-level grouping factor | Stable |
+| `(re \| g1/g2)` | Nested grouping expansion | Stable |
+| `(re \| g1*g2)` | Main grouping factors plus cell expansion | Stable |
+| `us(re \| g)` | Explicit unstructured random-effect covariance | Stable alias for `(re \| g)` |
+| `diag(re \| g)` | Diagonal random-effect covariance | Stable |
+| `cs(re \| g)`, `ar1(re \| g)` | Structured random-effect covariance syntax | Parsed and refused for fitting in v1.0 |
 | `I(expr)` and other in-formula transforms | Stateless arithmetic subset | Stable (minimal subset) |
 | Full `I()` / model.matrix transformations | — | Out of scope |
 

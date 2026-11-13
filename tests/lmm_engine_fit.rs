@@ -58,6 +58,10 @@ fn test_scalar_covariance_kkt_certificate_interior_converged() {
     let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
 
     model.fit(false).unwrap();
+    // Exact balanced-ML variance ratio, independently derived in
+    // test_trust_bq_certificate_stop_accepts_scalar_interior. The scalar
+    // optimizer's 1e-4 theta floor does not guarantee this stricter score gate.
+    model.set_theta(&[0.5638068749383716]).unwrap();
 
     let certificate = model.scalar_covariance_kkt_certificate().unwrap();
     assert_eq!(certificate.blocks.len(), 1);

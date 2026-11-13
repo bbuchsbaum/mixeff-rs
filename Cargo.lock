@@ -688,7 +688,7 @@ dependencies = [
 
 [[package]]
 name = "mixeff-rs"
-version = "1.0.0-rc.5"
+version = "1.0.0-rc.6"
 dependencies = [
  "approx",
  "cobyla",

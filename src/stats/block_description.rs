@@ -123,7 +123,7 @@ impl BlockDescription {
 
         for (i, row_count) in self.block_rows.iter().enumerate() {
             let mut row = vec![row_count.to_string()];
-            for j in 0..self.block_names.len() {
+            for (j, _) in self.block_names.iter().enumerate() {
                 if j <= i {
                     row.push(self.al_types[i][j].clone());
                 } else {
@@ -164,8 +164,8 @@ impl fmt::Display for BlockDescription {
 
         for (i, row_count) in self.block_rows.iter().enumerate() {
             write!(f, "{:>width$}", format!("{row_count}:"), width = row_width)?;
-            for j in 0..=i {
-                write!(f, "{:^col_width$}", self.al_types[i][j])?;
+            for block_type in &self.al_types[i][..=i] {
+                write!(f, "{block_type:^col_width$}")?;
             }
             writeln!(f)?;
         }

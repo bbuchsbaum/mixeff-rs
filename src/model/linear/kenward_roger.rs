@@ -96,8 +96,24 @@ impl LinearMixedModel {
         &self,
         x: &DMatrix<f64>,
     ) -> Result<KenwardRogerIngredients> {
+        self.kenward_roger_ingredients_with_response_unit(x, 1.0)
+    }
+
+    /// ActiveSet checks response covariance in residual-SD units; the
+    /// ordinary path keeps its existing absolute-unit qualification gate.
+    pub(super) fn kenward_roger_ingredients_with_response_unit(
+        &self,
+        x: &DMatrix<f64>,
+        response_unit: f64,
+    ) -> Result<KenwardRogerIngredients> {
         let sigma = self.kenward_roger_prerequisites()?;
+        if !response_unit.is_finite() || response_unit <= 0.0 {
+            return Err(MixedModelError::InvalidArgument(
+                "KR response unit must be finite and positive".to_string(),
+            ));
+        }
         let sigma_sq = sigma * sigma;
+        let gate_sigma_sq = (sigma / response_unit).powi(2);
         let inv_sigma_sq = 1.0 / sigma_sq;
         let n = self.dims.n;
         let p = x.ncols();
@@ -212,9 +228,9 @@ impl LinearMixedModel {
         // λ_min(Σ) ≥ σ² and λ_max(Σ) = σ² λ_max(LL') ≤ σ² tr(LL'), so the
         // bound decides it unless the margin is tiny.
         let trace_bound: f64 = (0..q).map(|i| factor[(i, i)]).sum::<f64>().max(1.0);
-        let bound_tolerance = (1e-10 * (sigma_sq * trace_bound).max(1.0)).max(1e-12);
-        if !(sigma_sq > bound_tolerance) {
-            Self::kr_exact_positive_definite_gate(&factor, sigma_sq, n)?;
+        let bound_tolerance = (1e-10 * (gate_sigma_sq * trace_bound).max(1.0)).max(1e-12);
+        if !(gate_sigma_sq > bound_tolerance) {
+            Self::kr_exact_positive_definite_gate(&factor, gate_sigma_sq, n)?;
         }
         drop(factor);
 

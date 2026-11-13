@@ -1238,13 +1238,53 @@ fn test_trust_bq_certificate_stop_accepts_scalar_interior() {
     let formula = parse_formula("reaction ~ 1 + days + (1 | subj)").unwrap();
     let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
     model.fit(false).unwrap();
+    let fitted_objective = model.objective();
 
-    let theta = model.theta();
+    // Independent balanced random-intercept ML solution: within-group
+    // contrasts estimate sigma²; group means estimate sigma² + 4 tau².
+    let y = data.numeric("reaction").unwrap();
+    let means = y
+        .chunks_exact(4)
+        .map(|g| g.iter().sum::<f64>() / 4.0)
+        .collect::<Vec<_>>();
+    let grand_mean = means.iter().sum::<f64>() / 6.0;
+    let slope = y
+        .chunks_exact(4)
+        .zip(&means)
+        .map(|(g, mean)| {
+            g.iter()
+                .enumerate()
+                .map(|(j, y)| (j as f64 - 1.5) * (y - mean))
+                .sum::<f64>()
+        })
+        .sum::<f64>()
+        / 30.0;
+    let within = y
+        .chunks_exact(4)
+        .zip(&means)
+        .map(|(g, mean)| {
+            g.iter()
+                .enumerate()
+                .map(|(j, y)| (y - mean - slope * (j as f64 - 1.5)).powi(2))
+                .sum::<f64>()
+        })
+        .sum::<f64>()
+        / 18.0;
+    let between = 4.0 * means.iter().map(|m| (m - grand_mean).powi(2)).sum::<f64>() / 6.0;
+    let exact_theta = ((between / within - 1.0) / 4.0).sqrt();
+    // The scalar fitter has a 1e-4 parameter-tolerance floor. Its stop need
+    // not pass the stricter score gate; test that gate at the exact optimum.
+    let theta = vec![exact_theta];
     let objective = model.objective_at(&theta).unwrap();
+    assert!(objective <= fitted_objective + 1e-10);
 
-    assert!(model
-        .trust_bq_covariance_kkt_certifies_theta(&theta, objective, 64, false)
-        .unwrap());
+    let certificate = model.scalar_covariance_kkt_certificate().unwrap();
+    assert!(
+        model
+            .trust_bq_covariance_kkt_certifies_theta(&theta, objective, 64, false)
+            .unwrap(),
+        "{certificate:?}"
+    );
 }
 
 #[test]

@@ -2,7 +2,7 @@
   "schema": {
     "schema_name": "mixedmodels.compiled_model_artifact",
     "schema_version": 1,
-    "crate_version": "1.0.0-rc.5"
+    "crate_version": "1.0.0-rc.6"
   },
   "model_boundary": {
     "model_kind": "linear_mixed_model",
@@ -24,7 +24,7 @@
   "fixed_effect_inference_table": {
     "schema_name": "mixedmodels.fixed_effect_inference_table",
     "schema_version": "1.2.0",
-    "crate_version": "1.0.0-rc.5",
+    "crate_version": "1.0.0-rc.6",
     "rows": [
       {
         "label": "(Intercept)",
@@ -91,7 +91,7 @@
   "fixed_effect_covariance_matrix": {
     "schema_name": "mixedmodels.fixed_effect_covariance_matrix",
     "schema_version": "1.1.0",
-    "crate_version": "1.0.0-rc.5",
+    "crate_version": "1.0.0-rc.6",
     "coef_names": [
       "(Intercept)",
       "x"
@@ -772,7 +772,7 @@
       "gradient": {
         "method": {
           "not_assessed": {
-            "reason": "one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged"
+            "reason": "one or more covariance parameters are on a variance-component boundary (parameter indices: 2); theta-space derivatives are skipped; variance-space boundary checks are recorded separately where supported"
           }
         },
         "raw_gradient_norm": null,
@@ -784,12 +784,12 @@
       "hessian": {
         "method": {
           "not_assessed": {
-            "reason": "one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged"
+            "reason": "one or more covariance parameters are on a variance-component boundary (parameter indices: 2); theta-space derivatives are skipped; variance-space boundary checks are recorded separately where supported"
           }
         },
         "quality": {
           "not_assessed": {
-            "reason": "one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged"
+            "reason": "one or more covariance parameters are on a variance-component boundary (parameter indices: 2); theta-space derivatives are skipped; variance-space boundary checks are recorded separately where supported"
           }
         },
         "min_eigenvalue": null,
@@ -798,7 +798,7 @@
       },
       "certification_quality": {
         "not_assessed": {
-          "reason": "one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged"
+          "reason": "one or more covariance parameters are on a variance-component boundary (parameter indices: 2); theta-space derivatives are skipped; variance-space boundary checks are recorded separately where supported"
         }
       }
     },
@@ -883,7 +883,7 @@
           "evidence": {
             "check_name": "derivative_inspection",
             "status": "skipped",
-            "reason": "one or more covariance parameters are on a variance-component boundary (parameter indices: 2); boundary fits are reported as singular/boundary, not non-converged"
+            "reason": "one or more covariance parameters are on a variance-component boundary (parameter indices: 2); theta-space derivatives are skipped; variance-space boundary checks are recorded separately where supported"
           }
         }
       }
