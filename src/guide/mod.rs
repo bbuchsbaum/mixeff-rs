@@ -16,6 +16,8 @@
 //! 5. [What is supported](crate::guide::what_is_supported) — a concrete
 //!    inventory of fits, families/links, formula syntax, inference paths,
 //!    and what is deliberately out of scope.
+//! 6. [Boundary inference](crate::guide::boundary_inference) — explicitly
+//!    conditional Satterthwaite and Kenward–Roger tests at zero variances.
 
 #[doc = include_str!("../../docs/guide/01_getting_started.md")]
 pub mod getting_started {}
@@ -31,3 +33,6 @@ pub mod when_the_crate_refuses {}
 
 #[doc = include_str!("../../docs/guide/05_what_is_supported.md")]
 pub mod what_is_supported {}
+
+#[doc = include_str!("../../docs/guide/boundary_inference.md")]
+pub mod boundary_inference {}

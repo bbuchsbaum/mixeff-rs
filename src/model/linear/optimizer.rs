@@ -338,7 +338,25 @@ impl LinearMixedModel {
     ) -> Result<()> {
         let post_fit_start = std::time::Instant::now();
         let optimizer = post_fit_start.duration_since(optimizer_start);
-        self.apply_kkt_guided_boundary_restart(reml)?;
+        self.compiler_artifact.diagnostics.retain(|diagnostic| {
+            !diagnostic
+                .payload
+                .contains_key("boundary_restart_probe_failures")
+        });
+        // A restart can recover one variance while leaving another at an
+        // invalid zero. Give independent components a bounded number of
+        // improving recovery attempts; certification still rejects any
+        // unresolved descent direction after the budget is exhausted.
+        let restart_budget = if self.independent_variance_parameters() {
+            self.n_theta().clamp(1, 8)
+        } else {
+            1
+        };
+        for _ in 0..restart_budget {
+            if !self.apply_kkt_guided_boundary_restart(reml)? {
+                break;
+            }
+        }
         self.apply_active_face_refit()?;
         self.refresh_optimizer_certificate();
         self.refresh_effective_covariance_summaries();
@@ -407,8 +425,100 @@ impl LinearMixedModel {
                 self.derivative_evidence_pending = true;
             }
         }
+        // Boundary certification is also deferred. Recovery has already
+        // used the scores needed to find an optimum; replicas that are never
+        // inspected need not repeat all covariance-space probes here.
+        if certificate.evidence.optimizer_stop.acceptable_stop
+            && self.independent_variance_parameters()
+            && theta.iter().enumerate().any(|(i, v)| {
+                v * v / self.independent_variance_coordinate_scale(i)
+                    <= SCALAR_KKT_VARIANCE_TOLERANCE
+            })
+        {
+            certificate.checks.push(CertificateCheck::Incomplete {
+                evidence: IncompleteCheckEvidence::new(
+                    "covariance_boundary_score",
+                    IncompleteCheckStatus::Deferred,
+                    Self::DEFERRED_DERIVATIVE_EVIDENCE_REASON,
+                ),
+            });
+            self.derivative_evidence_pending = true;
+        }
         self.reword_optimizer_certificate_diagnostics(&mut certificate);
         self.compiler_artifact.optimizer_certificate = Some(certificate);
+    }
+
+    fn complete_covariance_boundary_evidence(&self, certificate: &mut OptimizerCertificate) {
+        certificate.checks.retain(|check| {
+            !matches!(check,
+            CertificateCheck::Incomplete { evidence }
+                if evidence.check_name == "covariance_boundary_score")
+        });
+        match self.scalar_covariance_kkt_certificate() {
+            Ok(kkt) => {
+                for diagnostic in &mut certificate.diagnostics {
+                    if diagnostic.code != DiagnosticCode::BoundaryParameter {
+                        continue;
+                    }
+                    if let Some(block) = diagnostic
+                        .payload
+                        .get("theta_index")
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|i| kkt.blocks.iter().find(|b| b.theta_index == i as usize))
+                    {
+                        diagnostic.payload.insert(
+                            "covariance_score".to_string(),
+                            serde_json::json!(block.score),
+                        );
+                        diagnostic.payload.insert(
+                            "covariance_score_tolerance".to_string(),
+                            serde_json::json!(
+                                kkt.score_tolerance
+                                    / self.independent_variance_coordinate_scale(block.theta_index)
+                            ),
+                        );
+                        diagnostic.payload.insert(
+                            "normalized_covariance_score".to_string(),
+                            serde_json::json!(block.normalized_score),
+                        );
+                    }
+                }
+                let violation = kkt
+                    .blocks
+                    .iter()
+                    .filter(|b| b.normalized_variance <= kkt.variance_tolerance)
+                    .map(|b| (-b.normalized_score).max(0.0))
+                    .fold(0.0, f64::max);
+                if violation <= kkt.score_tolerance {
+                    certificate
+                        .checks
+                        .push(CertificateCheck::BoundaryGradientOk {
+                            tolerance: kkt.score_tolerance,
+                            value: violation,
+                        });
+                } else {
+                    certificate.status = FitStatus::NotOptimized;
+                    certificate.checks.push(CertificateCheck::Failed {
+                        code: "covariance_boundary_kkt_failed".to_string(),
+                        message: "independent variance boundary has an inward descent direction"
+                            .to_string(),
+                    });
+                    certificate.diagnostics.push(Diagnostic::new(
+                        DiagnosticCode::OptimizerNonconvergence,
+                        DiagnosticSeverity::Warning,
+                        DiagnosticStage::Certification,
+                        format!("variance-space boundary score rejects convergence: violation {violation} exceeds {}", kkt.score_tolerance),
+                    ));
+                }
+            }
+            Err(error) => {
+                certificate.mark_derivative_checks_incomplete(IncompleteCheckEvidence::new(
+                    "covariance_boundary_score",
+                    IncompleteCheckStatus::Unavailable,
+                    error.to_string(),
+                ))
+            }
+        }
     }
 
     /// Complete a certificate's deferred derivative evidence from `&self`
@@ -417,6 +527,24 @@ impl LinearMixedModel {
     /// not-assessed checks exactly as the eager path filled them.
     pub(crate) fn complete_certificate_derivatives(&self, certificate: &mut OptimizerCertificate) {
         if !certificate.evidence.optimizer_stop.acceptable_stop {
+            return;
+        }
+        let theta_pending = certificate.checks.iter().any(|check| {
+            matches!(check,
+            CertificateCheck::Incomplete { evidence }
+                if evidence.check_name == "derivative_inspection"
+                    && evidence.status == IncompleteCheckStatus::Deferred)
+        });
+        let boundary_pending = certificate.checks.iter().any(|check| {
+            matches!(check,
+            CertificateCheck::Incomplete { evidence }
+                if evidence.check_name == "covariance_boundary_score"
+                    && evidence.status == IncompleteCheckStatus::Deferred)
+        });
+        if boundary_pending {
+            self.complete_covariance_boundary_evidence(certificate);
+        }
+        if !theta_pending {
             return;
         }
         let theta = self.theta();
@@ -470,7 +598,8 @@ impl LinearMixedModel {
     pub(crate) fn certificate_derivatives_deferred(certificate: &OptimizerCertificate) -> bool {
         certificate.checks.iter().any(|check| {
             matches!(check, CertificateCheck::Incomplete { evidence }
-                if evidence.status == IncompleteCheckStatus::Deferred && evidence.check_name == "derivative_inspection")
+                if evidence.status == IncompleteCheckStatus::Deferred
+                    && matches!(evidence.check_name.as_str(), "derivative_inspection" | "covariance_boundary_score"))
         })
     }
 
@@ -570,7 +699,7 @@ impl LinearMixedModel {
 
         if certificate.evidence.parameter_space.n_boundary > 0 {
             return Some(format!(
-                "one or more covariance parameters are on a variance-component boundary (parameter indices: {}); boundary fits are reported as singular/boundary, not non-converged",
+                "one or more covariance parameters are on a variance-component boundary (parameter indices: {}); theta-space derivatives are skipped; variance-space boundary checks are recorded separately where supported",
                 certificate
                     .evidence
                     .parameter_space
@@ -1108,8 +1237,8 @@ impl LinearMixedModel {
     }
     /// Post-fit covariance-cone KKT diagnostic for scalar random-effect terms.
     ///
-    /// This first certificate works in covariance space for terms of the form
-    /// `(1 | group)`. It estimates `dF/dv` for `v = theta^2` by directional
+    /// Works in covariance space for independent scalar or diagonal terms.
+    /// It estimates `dF/dv` for `v = theta^2` by directional
     /// objective differences through the existing profiled LMM objective. No
     /// dense marginal covariance matrix is formed.
     pub fn scalar_covariance_kkt_certificate(&self) -> Result<ScalarCovarianceKktCertificate> {
@@ -1119,13 +1248,9 @@ impl LinearMixedModel {
         if self.reterms.is_empty() {
             return Err(MixedModelError::NoRandomEffects);
         }
-        if self
-            .reterms
-            .iter()
-            .any(|term| term.vsize != 1 || term.n_theta() != 1)
-        {
+        if !self.independent_variance_parameters() {
             return Err(MixedModelError::Unsupported(
-                "scalar covariance KKT certificate currently supports only scalar random-effect terms"
+                "scalar covariance KKT certificate supports only independent scalar or diagonal random-effect terms"
                     .to_string(),
             ));
         }
@@ -1134,25 +1259,28 @@ impl LinearMixedModel {
         let mut evaluator = self.clone();
         let objective = evaluator.objective_at(&theta)?;
         let variance_tolerance = SCALAR_KKT_VARIANCE_TOLERANCE;
-        let score_tolerance = (1e-5 * (1.0 + objective.abs())).max(1e-6);
+        let score_tolerance = 1e-5 * self.dof_residual().max(1) as f64;
         let mut blocks = Vec::with_capacity(self.reterms.len());
 
-        for (term_index, term) in self.reterms.iter().enumerate() {
-            let theta_index = term_index;
+        for (theta_index, &(term_index, _, _)) in self.parmap.iter().enumerate() {
+            let term = &self.reterms[term_index];
             let theta_value = theta[theta_index].max(0.0);
             let variance = theta_value * theta_value;
             let score =
                 Self::scalar_covariance_score(&mut evaluator, theta_index, &theta, objective)?;
+            let coordinate_scale = self.independent_variance_coordinate_scale(theta_index);
+            let normalized_variance = variance / coordinate_scale;
+            let normalized_score = score * coordinate_scale;
             let complementarity = (variance * score).abs() / (1.0 + variance.abs() * score.abs());
             let classification = classify_scalar_covariance_kkt(
-                variance,
-                score,
+                normalized_variance,
+                normalized_score,
                 variance_tolerance,
                 score_tolerance,
             );
             let residual = scalar_covariance_kkt_residual(
-                variance,
-                score,
+                normalized_variance,
+                normalized_score,
                 complementarity,
                 variance_tolerance,
             );
@@ -1168,6 +1296,8 @@ impl LinearMixedModel {
                 theta: theta_value,
                 variance,
                 score,
+                normalized_variance,
+                normalized_score,
                 complementarity,
                 residual,
                 classification,
@@ -1206,7 +1336,12 @@ impl LinearMixedModel {
         objective: f64,
     ) -> Result<f64> {
         let variance = theta[theta_index].max(0.0).powi(2);
-        let mut step = scalar_covariance_variance_step(variance);
+        // Work on the scale of the induced response covariance. A fixed
+        // variance step can jump over the entire improving region when a
+        // random-slope predictor is large, reversing the boundary score.
+        let coordinate_scale = evaluator.independent_variance_coordinate_scale(theta_index);
+        let mut step =
+            scalar_covariance_variance_step(variance / coordinate_scale) * coordinate_scale;
 
         for _ in 0..8 {
             let plus =
@@ -1483,10 +1618,7 @@ impl LinearMixedModel {
         if !objective.is_finite() {
             return Ok(false);
         }
-        let supported_scalar = self
-            .reterms
-            .iter()
-            .all(|term| term.vsize == 1 && term.n_theta() == 1);
+        let supported_scalar = self.independent_variance_parameters();
         let supported_two_by_two = self
             .reterms
             .iter()
@@ -1545,7 +1677,14 @@ impl LinearMixedModel {
         // grouping levels) the certificate's finite-difference score probes
         // can fail to evaluate; that must skip the restart, not turn an
         // otherwise completed fit into an error.
-        let Some(candidate) = self.kkt_boundary_restart_candidate().unwrap_or(None) else {
+        let candidate = match self.kkt_boundary_restart_candidate() {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                self.record_boundary_restart_probe_failures(1, error.to_string());
+                None
+            }
+        };
+        let Some(candidate) = candidate else {
             return Ok(false);
         };
 
@@ -1609,6 +1748,24 @@ impl LinearMixedModel {
             }
         }
 
+        // A restart must not discard an already evaluated improving point.
+        // If its optimizer stops elsewhere with a worse value, retain the
+        // probe and report an incomplete optimization, not convergence.
+        let restarted_objective = self.objective_at(&self.theta())?;
+        // The candidate was already evaluated by this same objective kernel.
+        let candidate_objective = candidate.objective;
+        let roundoff =
+            64.0 * f64::EPSILON * (1.0 + restarted_objective.abs().max(candidate_objective.abs()));
+        if !restarted_objective.is_finite() || restarted_objective > candidate_objective + roundoff
+        {
+            self.set_theta(&candidate.theta)?;
+            self.update_l()?;
+            self.optsum.final_params = candidate.theta.clone();
+            self.optsum.fmin = candidate_objective;
+            self.optsum.return_value = "BOUNDARY_RESTART_INCOMPLETE".to_string();
+        } else {
+            self.optsum.fmin = restarted_objective;
+        }
         let restart_return = self.optsum.return_value.clone();
         if previous_feval > 0 {
             self.optsum.feval += previous_feval;
@@ -1629,16 +1786,12 @@ impl LinearMixedModel {
         Ok(true)
     }
 
-    fn kkt_boundary_restart_candidate(&self) -> Result<Option<KktBoundaryRestartCandidate>> {
+    fn kkt_boundary_restart_candidate(&mut self) -> Result<Option<KktBoundaryRestartCandidate>> {
         if self.reterms.is_empty() || !self.optsum.is_fitted() {
             return Ok(None);
         }
 
-        if self
-            .reterms
-            .iter()
-            .all(|term| term.vsize == 1 && term.n_theta() == 1)
-        {
+        if self.independent_variance_parameters() {
             return self.scalar_kkt_boundary_restart_candidate();
         }
 
@@ -1653,17 +1806,46 @@ impl LinearMixedModel {
         Ok(None)
     }
 
-    fn scalar_kkt_boundary_restart_candidate(&self) -> Result<Option<KktBoundaryRestartCandidate>> {
+    pub(super) fn independent_variance_parameters(&self) -> bool {
+        !self.parmap.is_empty() && self.parmap.iter().all(|&(_, row, col)| row == col)
+    }
+
+    pub(super) fn independent_variance_coordinate_scale(&self, theta_index: usize) -> f64 {
+        let (term, row, _) = self.parmap[theta_index];
+        let z = &self.reterms[term].wtz;
+        let mean_square = z.row(row).norm_squared() / z.ncols().max(1) as f64;
+        if mean_square.is_finite() && mean_square > 0.0 && mean_square.recip().is_finite() {
+            mean_square.recip()
+        } else {
+            1.0
+        }
+    }
+
+    fn record_boundary_restart_probe_failures(&mut self, count: usize, first_error: String) {
+        let mut diagnostic = Diagnostic::new(
+            DiagnosticCode::OptimizerRecovery,
+            DiagnosticSeverity::Warning,
+            DiagnosticStage::Optimization,
+            format!("boundary recovery skipped {count} failed objective probe(s); first failure: {first_error}"),
+        );
+        diagnostic.payload.insert(
+            "boundary_restart_probe_failures".into(),
+            serde_json::json!(count),
+        );
+        self.compiler_artifact.diagnostics.push(diagnostic);
+    }
+
+    fn scalar_kkt_boundary_restart_candidate(
+        &mut self,
+    ) -> Result<Option<KktBoundaryRestartCandidate>> {
         let base_theta = self.theta();
-        // An InvalidBoundaryStop classification requires a block variance at
-        // or below the certificate's variance tolerance, so a fit with every
-        // scalar variance strictly interior can never produce a restart
-        // candidate. Checking that in theta space skips the certificate's
-        // finite-difference probes entirely on non-boundary fits.
-        if base_theta
-            .iter()
-            .all(|&value| value.max(0.0).powi(2) > SCALAR_KKT_VARIANCE_TOLERANCE)
-        {
+        // Native gradient starts can lift zero theta to 1e-4 without escaping
+        // its flat neighborhood. Probe that neighborhood as well as certified
+        // boundaries, without relaxing the inference/certification tolerance.
+        if base_theta.iter().enumerate().all(|(i, &value)| {
+            value.max(0.0).powi(2) / self.independent_variance_coordinate_scale(i)
+                > SCALAR_KKT_RESTART_VARIANCE_LIMIT
+        }) {
             return Ok(None);
         }
 
@@ -1672,21 +1854,72 @@ impl LinearMixedModel {
         let mut best_theta = base_theta.clone();
         let mut best_objective = base_objective;
         let mut reason = None;
+        let mut best_index = None;
         let mut evaluator = self.clone();
+        let mut probe_failures = 0;
+        let mut first_probe_error = None;
 
         for block in certificate.blocks.iter().filter(|block| {
-            block.classification == CovarianceKktClassification::InvalidBoundaryStop
+            block.normalized_variance <= SCALAR_KKT_RESTART_VARIANCE_LIMIT
+                && block.normalized_score < -certificate.score_tolerance
         }) {
-            let scale = 1.0 + block.variance.abs().max((-block.score).max(0.0));
-            for delta in kkt_restart_delta_grid(scale) {
+            // A large negative score can mean a narrow improving region.
+            // Scaling the *smallest* probe by |score| skipped weak slopes
+            // entirely (#19). Backtrack below the ordinary variance grid.
+            let coordinate_scale = self.independent_variance_coordinate_scale(block.theta_index);
+            let scale = 1.0 + block.variance.abs() / coordinate_scale;
+            let smaller = (1..=8).map(|i| 1e-4 * scale * 0.1_f64.powi(i));
+            for normalized_delta in kkt_restart_delta_grid(scale).into_iter().chain(smaller) {
+                let delta = normalized_delta * coordinate_scale;
                 let mut trial = base_theta.clone();
                 trial[block.theta_index] = delta.sqrt();
-                let objective = evaluator.objective_at(&trial)?;
+                let objective = match evaluator.objective_at(&trial) {
+                    Ok(value) if value.is_finite() => value,
+                    result => {
+                        probe_failures += 1;
+                        first_probe_error.get_or_insert_with(|| match result {
+                            Err(error) => error.to_string(),
+                            Ok(_) => "non-finite objective".to_string(),
+                        });
+                        continue;
+                    }
+                };
                 if objective + self.optsum.ftol_abs.max(1e-10) < best_objective {
                     best_objective = objective;
                     best_theta = trial;
                     reason = Some(format!("scalar theta[{}]", block.theta_index));
+                    best_index = Some(block.theta_index);
                 }
+            }
+        }
+
+        if let Some(error) = first_probe_error {
+            self.record_boundary_restart_probe_failures(probe_failures, error);
+        }
+
+        // Refine the offending coordinate in design-normalized theta units.
+        // This keeps the restart useful even when the main optimizer's
+        // absolute theta tolerance is coarse relative to a scaled predictor.
+        if let Some(index) = best_index {
+            let scale = self.independent_variance_coordinate_scale(index).sqrt();
+            let start = best_theta[index] / scale;
+            let outcome = Self::run_multivariate_pattern_search(
+                vec![start],
+                best_objective,
+                &[0.0],
+                vec![0.1 * (1.0 + start)],
+                &[1e-9],
+                200,
+                1e-12,
+                |point| {
+                    let mut trial = base_theta.clone();
+                    trial[index] = point[0] * scale;
+                    evaluator.objective_at(&trial)
+                },
+            )?;
+            if outcome.best_fmin < best_objective {
+                best_theta[index] = outcome.best_theta[0] * scale;
+                best_objective = outcome.best_fmin;
             }
         }
 
@@ -3923,6 +4156,9 @@ impl LinearMixedModel {
 /// theta-space pre-check that gates the KKT-guided boundary restart.
 const SCALAR_KKT_VARIANCE_TOLERANCE: f64 = 1e-8;
 
+// Recovery-only neighborhood; not a license to classify these variances as zero.
+const SCALAR_KKT_RESTART_VARIANCE_LIMIT: f64 = 1e-6;
+
 /// Covariance-eigenvalue tolerance shared by the 2x2 covariance KKT
 /// certificate and the theta-space pre-check that gates the KKT-guided
 /// boundary restart.
@@ -4697,5 +4933,119 @@ pub(in crate::model) fn verification_message(
         ConvergenceVerificationStatus::Unstable => {
             "restart from fitted theta did not reproduce the recorded optimum".to_string()
         }
+    }
+}
+
+#[cfg(test)]
+mod boundary_certificate_tests {
+    use super::*;
+
+    #[test]
+    fn boundary_certificate_is_deferred_cached_and_matches_eager_evidence() {
+        let mut data = DataFrame::new();
+        data.add_numeric(
+            "y",
+            (0..48).map(|i| [-2.0, -1.0, 1.0, 2.0][i % 4]).collect(),
+        )
+        .unwrap();
+        data.add_categorical("g", (0..48).map(|i| format!("g{}", i / 4)).collect())
+            .unwrap();
+        let mut model = LinearMixedModel::new(
+            crate::formula::parse_formula("y ~ 1 + (1 | g)").unwrap(),
+            &data,
+            None,
+        )
+        .unwrap();
+        model.fit(true).unwrap();
+        assert!(model.derivative_evidence_pending);
+        assert!(model.inspection_artifact.get().is_none());
+        let mut eager = model
+            .compiler_artifact
+            .optimizer_certificate
+            .clone()
+            .unwrap();
+        assert!(LinearMixedModel::certificate_derivatives_deferred(&eager));
+        model.complete_certificate_derivatives(&mut eager);
+        let inspected = model.optimizer_certificate().unwrap();
+        assert_eq!(inspected, &eager);
+        assert!(!LinearMixedModel::certificate_derivatives_deferred(
+            inspected
+        ));
+        assert!(std::ptr::eq(
+            inspected,
+            model.optimizer_certificate().unwrap()
+        ));
+        model.ensure_derivative_evidence();
+        assert!(!model.derivative_evidence_pending);
+        assert_eq!(model.optimizer_certificate().unwrap(), &eager);
+    }
+
+    #[test]
+    fn invalid_boundary_classification_is_independent_of_predictor_units() {
+        let mut scores = Vec::new();
+        for scale in [1e-3, 1.0, 1e3] {
+            let mut data = DataFrame::new();
+            data.add_numeric("z", vec![scale; 48]).unwrap();
+            data.add_numeric(
+                "y",
+                (0..48)
+                    .map(|i| (i / 6) as f64 + [0.1, -0.2, 0.3, -0.1, 0.2, -0.3][i % 6])
+                    .collect(),
+            )
+            .unwrap();
+            data.add_categorical("g", (0..48).map(|i| format!("g{}", i / 6)).collect())
+                .unwrap();
+            let mut model = LinearMixedModel::new(
+                crate::formula::parse_formula("y ~ 1 + (0 + z | g)").unwrap(),
+                &data,
+                None,
+            )
+            .unwrap();
+            model.fit(true).unwrap();
+            model.objective_at(&[0.0]).unwrap();
+            let certificate = model.scalar_covariance_kkt_certificate().unwrap();
+            assert_eq!(
+                certificate.blocks[0].classification,
+                CovarianceKktClassification::InvalidBoundaryStop,
+                "scale={scale}: {certificate:?}"
+            );
+            scores.push(certificate.blocks[0].normalized_score);
+        }
+        assert!((scores[0] - scores[1]).abs() < 1e-5);
+        assert!((scores[2] - scores[1]).abs() < 1e-5);
+    }
+
+    #[test]
+    fn invalid_zero_variance_cannot_receive_converged_certificate() {
+        let mut data = DataFrame::new();
+        data.add_numeric(
+            "y",
+            (0..48)
+                .map(|i| (i / 6) as f64 + [0.1, -0.2, 0.3, -0.1, 0.2, -0.3][i % 6])
+                .collect(),
+        )
+        .unwrap();
+        data.add_categorical("g", (0..48).map(|i| format!("g{}", i / 6)).collect())
+            .unwrap();
+        let mut model = LinearMixedModel::new(
+            crate::formula::parse_formula("y ~ 1 + (1 | g)").unwrap(),
+            &data,
+            None,
+        )
+        .unwrap();
+        model.fit(true).unwrap();
+        let objective = model.objective_at(&[0.0]).unwrap();
+        model.optsum.final_params = vec![0.0];
+        model.optsum.fmin = objective;
+        model.optsum.return_value = "FTOL_REACHED".to_string();
+        model.refresh_optimizer_certificate();
+        let certificate = model.optimizer_certificate().unwrap();
+        assert_eq!(certificate.status, FitStatus::NotOptimized);
+        assert!(certificate.checks.iter().any(|check| matches!(check,
+            CertificateCheck::Failed { code, .. } if code == "covariance_boundary_kkt_failed")));
+        assert!(certificate
+            .diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::OptimizerNonconvergence));
     }
 }
