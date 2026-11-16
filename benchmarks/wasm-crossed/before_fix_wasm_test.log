@@ -1,0 +1,6 @@
+test crossed_lmm_fits_and_refits_under_wasm32 ... FAIL
+        panicked at library/std/src/sys/pal/wasm/../unsupported/time.rs:13:9:
+        time not implemented on this platform
+            at wasm_crossed_fit-6aff0263d0ed7303.wasm.std::time::Instant::now::h8cc72c4d8ca5c88f (wasm://wasm/wasm_crossed_fit-6aff0263d0ed7303.wasm-0f589e6e:wasm-function[13402]:0x3dcb30)
+            at wasm_crossed_fit-6aff0263d0ed7303.wasm.mixeff_rs::model::linear::optimizer::<impl mixeff_rs::model::linear::LinearMixedModel>::fit_with_current_controls::h1dfdbf8872679cc0 (wasm://wasm/wasm_crossed_fit-6aff0263d0ed7303.wasm-0f589e6e:wasm-function[547]:0x159838)
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 filtered out; finished in 0.07s

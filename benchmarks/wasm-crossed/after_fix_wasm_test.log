@@ -1,0 +1,4 @@
+test threaded_profile_runs_serially_under_wasm32 ... ok
+test threaded_bootstrap_runs_serially_under_wasm32 ... ok
+test crossed_lmm_fits_and_refits_under_wasm32 ... ok
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 filtered out; finished in 0.68s
