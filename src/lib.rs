@@ -161,6 +161,7 @@ pub mod guide;
 // Numerical primitives (blocked Cholesky, pivoted QR, rank updates). Internal
 // to the crate's fit path; not part of the stable public API. Demoted from
 // `pub` for v1.0 — see docs/v1_0_release_roadmap.md Phase A.
+pub(crate) mod clock;
 pub(crate) mod linalg;
 pub mod model;
 mod optimizer;

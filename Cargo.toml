@@ -84,6 +84,14 @@ approx = "0.5"
 # benches build with no system graphics deps.
 criterion = { version = "0.5", default-features = false }
 
+# wasm32 smoke test (`tests/wasm_crossed_fit.rs`, run by `.github/workflows/wasm.yml`).
+# `getrandom/js` selects the browser/Node entropy backend that rand 0.8's
+# `getrandom` 0.2 requires on wasm32-unknown-unknown; as with any library, a
+# downstream wasm32 binary must make the same selection itself.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+getrandom = { version = "0.2", features = ["js"] }
+
 [[bench]]
 name = "pls_kernel"
 harness = false
