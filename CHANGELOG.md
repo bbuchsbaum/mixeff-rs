@@ -12,6 +12,32 @@ vs. `unstable-internals` surface inventory.
 
 ## [Unreleased]
 
+### Fixed
+
+- LMM fits no longer panic on `wasm32-unknown-unknown`. Since the fit-phase
+  timing diagnostics landed, every fit called `std::time::Instant::now()`,
+  which aborts with "time not implemented on this platform" on that target.
+  Timing now goes through an internal stopwatch that is inert on `wasm`
+  targets, so `LinearMixedModel::fit_phase_timings()` returns `None` there;
+  timing never influenced a fit, so results are unchanged.
+- Threaded parametric bootstrap and profiling (`threads > 1`) run serially on
+  `wasm` targets instead of panicking on thread spawn; results are
+  bit-identical to the serial path, as on native.
+
+### Added
+
+- `wasm32` CI job (`.github/workflows/wasm.yml`) that builds with
+  `--no-default-features` and runs a crossed LMM fit, a warm refit, and the
+  threaded bootstrap/profile entry points under Node via `wasm-bindgen-test`.
+  A wasm32 binary must still select a `getrandom` 0.2 backend itself
+  (`getrandom/js`), as rand 0.8 requires.
+- `benchmarks/wasm-crossed/`: native vs wasm32 (Node) fit-time benchmark for a
+  crossed `(1 + condition || participant) + (1 + condition || item)` REML model.
+
+### Changed
+
+- `Cargo.lock`: `cobyla` 1.0.0 → 1.0.2 (1.0.0 does not compile for wasm32).
+
 ## [1.0.0-rc.6] - 2026-11-13
 
 Sixth 1.0 release candidate. Includes the boundary recovery and conditional

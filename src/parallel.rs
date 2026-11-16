@@ -221,6 +221,10 @@ pub(crate) fn validate_threads(threads: usize) -> Result<()> {
 /// must run on the calling thread). When `poll` fails, `cancel` is raised,
 /// workers take no further jobs (and jobs that watch `cancel` can stop
 /// early), and the poll error is returned once every worker has stopped.
+///
+/// On targets without threads (`wasm`; see [`crate::clock`]) the jobs run
+/// serially on the calling thread, with `poll` checked before each job;
+/// results are identical because every job is a pure function of its item.
 pub(crate) fn map_with_workers_polled<T, S, R, I, F>(
     threads: usize,
     items: Vec<T>,
@@ -239,6 +243,23 @@ where
     const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(25);
 
     let n = items.len();
+    if !crate::clock::THREADS_AVAILABLE {
+        let mut state = init();
+        let mut out = Vec::with_capacity(n);
+        for item in items {
+            if let Err(error) = poll() {
+                cancel.store(true, std::sync::atomic::Ordering::Release);
+                return Err(error);
+            }
+            if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(MixedModelError::Interrupted(
+                    "parallel job cancelled".to_string(),
+                ));
+            }
+            out.push(run(&mut state, item));
+        }
+        return Ok(out);
+    }
     let workers = threads.min(n).max(1);
     let queue = std::sync::Mutex::new(items.into_iter().enumerate());
     let running = AtomicUsize::new(workers);
@@ -317,6 +338,9 @@ where
 ///
 /// An error from `produce` or `on_result` stops the run: workers take no
 /// further jobs and the error is returned after they finish.
+///
+/// On targets without threads (`wasm`; see [`crate::clock`]) every run is
+/// serial regardless of `threads`, with identical results.
 pub(crate) fn pipeline<T, S, R, I, F>(
     threads: usize,
     total: usize,
@@ -335,7 +359,7 @@ where
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
 
-    if threads <= 1 || total <= 1 {
+    if threads <= 1 || total <= 1 || !crate::clock::THREADS_AVAILABLE {
         let mut state = init();
         for index in 0..total {
             let job = produce(index)?;

@@ -1824,7 +1824,9 @@ impl LinearMixedModel {
     /// Wall-clock split of the most recent fit into optimizer search and
     /// post-optimizer finalization, or `None` before any fit. Diagnostic
     /// only (benchmarks and profiling); it is not part of any parity or
-    /// serialized contract. Construction time is not included.
+    /// serialized contract. Construction time is not included. Always
+    /// `None` on `wasm` targets, which have no clock in `std`; timing never
+    /// influences the fit, so results are identical there.
     pub fn fit_phase_timings(&self) -> Option<FitPhaseTimings> {
         self.fit_phase_timings
     }

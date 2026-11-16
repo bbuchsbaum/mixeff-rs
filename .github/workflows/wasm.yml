@@ -1,0 +1,50 @@
+name: wasm32
+
+# Browser consumers build this crate for wasm32-unknown-unknown with default
+# features off (pure-Rust TrustBQ optimizer, no NLopt). That target has no
+# clock and no threads in std, so `Instant::now()` or a thread spawn on a fit
+# path panics at runtime, which a compile-only check cannot catch. This job
+# compiles the library for the target and RUNS a crossed LMM fit, a warm
+# refit, and threaded bootstrap/profile entry points under Node via
+# wasm-bindgen-test (tests/wasm_crossed_fit.rs).
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  wasm32-unknown-unknown:
+    name: wasm32-unknown-unknown (no default features, Node)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install wasm-bindgen-test-runner (version locked in Cargo.lock)
+        run: |
+          version=$(cargo metadata --format-version 1 --locked \
+            | jq -r '.packages[] | select(.name == "wasm-bindgen") | .version')
+          echo "wasm-bindgen $version"
+          cargo install wasm-bindgen-cli --version "$version" --locked
+      # Compiles the library for wasm32 as a dependency of the test target.
+      # A wasm32 binary must select a getrandom 0.2 backend (`getrandom/js`);
+      # the test target does so through its wasm32 dev-dependencies, as any
+      # downstream browser crate must.
+      - name: Build for wasm32
+        run: >-
+          cargo test --locked --target wasm32-unknown-unknown
+          --no-default-features --test wasm_crossed_fit --no-run
+      - name: Run crossed LMM fit under wasm32 (Node)
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+        run: >-
+          cargo test --locked --target wasm32-unknown-unknown
+          --no-default-features --test wasm_crossed_fit
