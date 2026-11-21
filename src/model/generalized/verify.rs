@@ -23,11 +23,14 @@ impl GeneralizedLinearMixedModel {
     /// effective estimator's own optimum (the profiled objective the returned
     /// numbers came from), not the failed joint attempt.
     ///
-    /// Joint-route caveat: the joint driver always re-derives its start from
-    /// a fresh profiled fast-PIRLS prefit, so a jittered theta perturbs that
-    /// prefit's start rather than the joint stage directly; with the default
-    /// small jitter the prefit re-converges and the jitter run is close to a
-    /// second restart-from-optimum run.
+    /// For a joint Laplace/AGQ fit, `restart_from_optimum` starts the joint
+    /// stage at the stored fitted `(β, θ)` (the profiled initializer is not
+    /// re-run), so it tests whether the joint optimizer stays at the reported
+    /// optimum. Each `jitter_restart_*` run supplies its jittered θ as a
+    /// `start_theta` warm start: one profiled PIRLS solve at that θ gives the
+    /// fixed effects and the joint stage starts there, so the jitter perturbs
+    /// the joint stage directly (see
+    /// [`OptimizerControl::start_theta`](crate::model::OptimizerControl)).
     pub fn verify_convergence(&mut self) -> Result<ConvergenceVerification> {
         self.verify_convergence_with_options(ConvergenceVerificationOptions::glmm_defaults())
     }
@@ -159,7 +162,53 @@ impl GeneralizedLinearMixedModel {
         // optimizer (for a joint fit, the joint-stage backend), which the
         // profiled prefit dispatch cannot run.
         let caller_optimizer = self.lmm.optsum.caller_selected_optimizer();
+        let optimizer_control = OptimizerControl {
+            optimizer: caller_optimizer
+                .map(OptimizerChoice::Named)
+                .unwrap_or(OptimizerChoice::Auto),
+            start_theta: Some(start_theta.to_vec()),
+            max_feval: Some(options.max_function_evaluations),
+            ..OptimizerControl::default()
+        };
         let mut candidate = self.clone();
+        // A joint restart from the optimum starts the joint stage at the
+        // stored (β, θ) with the fitted conditional modes, rather than
+        // re-deriving its start from a profiled prefit. The estimated-θ
+        // negative binomial outer loop has no single joint stage to restart
+        // and keeps the full refit.
+        let restart_joint_at_optimum = !fast
+            && label == "restart_from_optimum"
+            && !(self.family == Family::NegativeBinomial && self.negative_binomial_estimate_theta);
+        if restart_joint_at_optimum {
+            let joint_optimizer = caller_optimizer.unwrap_or(self.lmm.optsum.optimizer);
+            let result = validate_joint_glmm_optimizer(joint_optimizer)
+                .and_then(|_| candidate.reset_for_refit_with_start(None, Some(start_theta.to_vec())))
+                .and_then(|_| {
+                    candidate.pending_progress_error = None;
+                    candidate.lmm.progress_callback = None;
+                    candidate.lmm.apply_optimizer_control(&optimizer_control)?;
+                    candidate
+                        .fit_joint_glmm_from_supplied_start(
+                            reference_beta.to_vec(),
+                            start_theta.to_vec(),
+                            n_agq,
+                            joint_optimizer,
+                            JointSuppliedStart::FittedOptimum,
+                        )
+                        .map(|_| ())
+                });
+            return self.glmm_verification_run_from_result(
+                label,
+                fast,
+                result,
+                &candidate,
+                reference_theta,
+                reference_beta,
+                reference_objective,
+                reference_effective_ranks,
+                options,
+            );
+        }
         let result = candidate.reset_for_refit(None).and_then(|_| {
             if caller_optimizer.is_none() {
                 candidate.configure_profile_start_optimizer();
@@ -176,19 +225,37 @@ impl GeneralizedLinearMixedModel {
                     } else {
                         self.lmm.optsum.initializer_max_feval
                     },
-                    optimizer_control: OptimizerControl {
-                        optimizer: caller_optimizer
-                            .map(OptimizerChoice::Named)
-                            .unwrap_or(OptimizerChoice::Auto),
-                        start_theta: Some(start_theta.to_vec()),
-                        max_feval: Some(options.max_function_evaluations),
-                        ..OptimizerControl::default()
-                    },
+                    optimizer_control,
                     progress_callback: None,
                 })
                 .map(|_| ())
         });
+        self.glmm_verification_run_from_result(
+            label,
+            fast,
+            result,
+            &candidate,
+            reference_theta,
+            reference_beta,
+            reference_objective,
+            reference_effective_ranks,
+            options,
+        )
+    }
 
+    #[allow(clippy::too_many_arguments)]
+    fn glmm_verification_run_from_result(
+        &self,
+        label: &str,
+        fast: bool,
+        result: Result<()>,
+        candidate: &Self,
+        reference_theta: &[f64],
+        reference_beta: &[f64],
+        reference_objective: Option<f64>,
+        reference_effective_ranks: &[usize],
+        options: &ConvergenceVerificationOptions,
+    ) -> ConvergenceVerificationRun {
         match result {
             Ok(()) => {
                 // A joint verification refit can itself fail certification and

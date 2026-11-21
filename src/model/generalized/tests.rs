@@ -7261,3 +7261,70 @@ fn glmm_verify_profiled_fallback_ignores_retained_initializer_budget() {
     );
     assert_eq!(fallback.opt_summary().initializer_max_feval, Some(8));
 }
+
+/// GH#24 item 5: a caller-supplied θ replaces the profiled initializer (one
+/// profiled PIRLS β solve at θ), for the fit and its refits.
+#[test]
+fn joint_start_theta_replaces_profiled_initializer() {
+    use std::sync::Mutex;
+    let mut cold = small_joint_poisson_fixture();
+    cold.fit_with_options(false, 1, false).unwrap();
+    assert!(cold.opt_summary().return_value.starts_with("JOINT_LAPLACE:"));
+    assert!(cold.opt_summary().initializer_feval.unwrap() > 1);
+
+    let initializer_events = Arc::new(Mutex::new(0usize));
+    let counter = initializer_events.clone();
+    let callback = FitProgressCallback::new(move |event| {
+        if event.phase == FitProgressPhase::GlmmInitializer {
+            *counter.lock().unwrap() += 1;
+        }
+        Ok(())
+    });
+    let mut warm = small_joint_poisson_fixture();
+    warm.fit_with_glmm_options(
+        GlmmFitOptions::joint_laplace()
+            .with_optimizer_control(OptimizerControl::default().with_start_theta(cold.theta.clone()))
+            .with_progress_callback(callback),
+    )
+    .unwrap();
+    assert_eq!(*initializer_events.lock().unwrap(), 0);
+    assert_eq!(warm.opt_summary().initializer_feval, Some(1));
+    assert_eq!(
+        warm.opt_summary().initializer_return_value.as_deref(),
+        Some("SKIPPED:START_THETA_PIRLS_BETA")
+    );
+    assert!(warm.opt_summary().return_value.starts_with("JOINT_LAPLACE:"));
+    assert!(
+        (warm.objective() - cold.objective()).abs() <= 1e-6,
+        "warm {} vs cold {}",
+        warm.objective(),
+        cold.objective()
+    );
+
+    // A refit of the warm-started template starts the same way.
+    let y = warm.y.as_slice().to_vec();
+    warm.refit(&y).unwrap();
+    assert_eq!(warm.opt_summary().initializer_feval, Some(1));
+    assert!((warm.objective() - cold.objective()).abs() <= 1e-6);
+}
+
+/// GH#24 item 4: a joint `restart_from_optimum` starts the joint stage at the
+/// stored (β, θ), so even a budget far too small for a full refit (profiled
+/// initializer plus joint stage) reproduces the optimum without substituting
+/// the fast-PIRLS estimator.
+#[test]
+fn glmm_verify_joint_restart_from_optimum_starts_at_the_fitted_optimum() {
+    let mut model = small_joint_poisson_fixture();
+    model.fit_with_options(false, 1, false).unwrap();
+    assert!(model.opt_summary().return_value.starts_with("JOINT_LAPLACE:"));
+    let mut options = crate::model::linear::ConvergenceVerificationOptions::glmm_defaults();
+    options.max_function_evaluations = 25;
+    options.jitter_starts = 0;
+    let verification = model.verify_convergence_with_options(options).unwrap();
+    let run = &verification.runs[0];
+    assert_eq!(run.label, "restart_from_optimum");
+    let code = run.return_code.as_deref().unwrap();
+    assert!(code.starts_with("JOINT_LAPLACE"), "{code}");
+    assert!(run.agrees, "{run:?}");
+    assert!(run.objective_delta.unwrap().abs() <= 1e-8, "{run:?}");
+}

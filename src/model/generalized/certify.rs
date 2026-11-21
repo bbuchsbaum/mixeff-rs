@@ -902,6 +902,14 @@ pub(crate) struct JointLaplaceCertificationGradient {
 }
 
 impl JointLaplaceCertificationGradient {
+    /// Objective evaluations the probe spent: two per probe (a central pair,
+    /// or a forward probe and its base), the base point, and the closing
+    /// evaluation that restores the state after escalated probes.
+    pub(crate) fn evaluation_count(&self) -> usize {
+        let probes = self.curvature_probes.iter().map(Vec::len).sum::<usize>();
+        2 * probes + 1 + usize::from(self.was_escalated())
+    }
+
     fn was_escalated(&self) -> bool {
         !self.escalated_indices.is_empty() || !self.unassessable_indices.is_empty()
     }

@@ -47,6 +47,9 @@ impl GeneralizedLinearMixedModel {
             .caller_selected_optimizer()
             .unwrap_or_else(default_joint_glmm_optimizer);
         validate_joint_glmm_optimizer(joint_optimizer)?;
+        if self.lmm.optsum.caller_set_field("start_theta") {
+            return self.fit_joint_glmm_from_start_theta(n_agq, joint_optimizer);
+        }
         let saved_optimizer_source = self.lmm.optsum.optimizer_source;
         let saved_caller_set_fields = self.lmm.optsum.caller_set_fields.clone();
 
@@ -127,6 +130,105 @@ impl GeneralizedLinearMixedModel {
         )
     }
 
+    /// Joint fit from a caller-supplied θ (`start_theta`), without the
+    /// profiled fast-PIRLS initializer.
+    ///
+    /// The profiled initializer exists to find a θ start for the joint stage;
+    /// a supplied θ already is one (typically a previous or external fit), so
+    /// re-running the full profiled optimization would spend its whole budget
+    /// re-deriving what the caller provided. Instead a single profiled PIRLS
+    /// solve at the supplied θ (β and conditional modes varying, as in one
+    /// initializer evaluation) supplies the matching fixed effects, and the
+    /// joint optimizer starts from that `(β̂(θ), θ)`. Refits of a template
+    /// fitted this way start the same way from the recorded initial θ.
+    ///
+    /// No fast-PIRLS profiled optimum is computed, so there is no labelled
+    /// fast-PIRLS fallback: a joint stop that fails certification is returned
+    /// as the joint candidate with its uncertified status.
+    fn fit_joint_glmm_from_start_theta(
+        &mut self,
+        n_agq: usize,
+        joint_optimizer: Optimizer,
+    ) -> Result<&mut Self> {
+        let start_theta = self.theta.clone();
+        self.update_pirls_at_theta(&start_theta, true)?;
+        let start_beta = self.beta.as_slice().to_vec();
+        self.fit_joint_glmm_from_supplied_start(
+            start_beta,
+            start_theta,
+            n_agq,
+            joint_optimizer,
+            JointSuppliedStart::StartTheta,
+        )
+    }
+
+    /// Run the joint stage from a supplied `(β, θ)`, with the current
+    /// conditional modes as the fallback start of the first conditional solve.
+    ///
+    /// Records the replaced initializer on the optimizer summary
+    /// (`initializer_feval`, `initializer_return_value`) so the start's
+    /// provenance stays visible. A [`JointSuppliedStart::StartTheta`] start on
+    /// the covariance boundary is lifted as in the profiled-start route (see
+    /// `joint_boundary_lifted_start`); a [`JointSuppliedStart::FittedOptimum`]
+    /// start is used exactly as stored.
+    pub(super) fn fit_joint_glmm_from_supplied_start(
+        &mut self,
+        start_beta: Vec<f64>,
+        mut start_theta: Vec<f64>,
+        n_agq: usize,
+        joint_optimizer: Optimizer,
+        kind: JointSuppliedStart,
+    ) -> Result<&mut Self> {
+        let (initializer_feval, initializer_label) = match kind {
+            JointSuppliedStart::StartTheta => (1, "SKIPPED:START_THETA_PIRLS_BETA"),
+            JointSuppliedStart::FittedOptimum => (0, "SKIPPED:FITTED_OPTIMUM"),
+        };
+        self.lmm.optsum.initializer_feval = Some(initializer_feval);
+        self.lmm.optsum.initializer_return_value = Some(initializer_label.to_string());
+        let n_beta = start_beta.len();
+        let warm_modes = self.u.clone();
+        let mut start_params = start_beta.clone();
+        start_params.extend_from_slice(&start_theta);
+        let mut start_objective = self.joint_glmm_deviance_at_params(&start_params, n_beta, n_agq);
+        self.take_pending_interrupt()?;
+        if !start_objective.is_finite() {
+            start_objective = self.joint_glmm_deviance_at_params_from(
+                &start_params,
+                n_beta,
+                n_agq,
+                Some(&warm_modes),
+            );
+            self.take_pending_interrupt()?;
+        }
+        if kind == JointSuppliedStart::StartTheta {
+            if let Some((lifted_theta, lifted_objective)) =
+                self.joint_boundary_lifted_start(&start_beta, &start_theta, n_agq, start_objective)?
+            {
+                start_theta = lifted_theta;
+                start_objective = lifted_objective;
+            }
+        }
+        self.lmm.optsum.optimizer = joint_optimizer;
+        self.lmm.optsum.backend = joint_optimizer.canonical_backend();
+        let maxeval = joint_glmm_configured_maxeval_for(
+            &self.lmm.optsum,
+            n_beta + start_theta.len(),
+            joint_optimizer,
+        );
+        self.fit_joint_glmm_from_start_with_scale(
+            start_beta,
+            start_theta,
+            start_objective,
+            n_agq,
+            maxeval,
+            None,
+            match kind {
+                JointSuppliedStart::StartTheta => JointStartScale::Global,
+                JointSuppliedStart::FittedOptimum => JointStartScale::Local,
+            },
+        )
+    }
+
     /// A start off the covariance boundary for the joint fit, when the
     /// fast-PIRLS start has a variance-component θ on (or within 1e-3 of) its
     /// lower bound and
@@ -197,6 +299,31 @@ impl GeneralizedLinearMixedModel {
         maxeval: u32,
         fallback_fast_pirls: Option<Self>,
     ) -> Result<&mut Self> {
+        self.fit_joint_glmm_from_start_with_scale(
+            start_beta,
+            start_theta,
+            profiled_start_objective,
+            n_agq,
+            maxeval,
+            fallback_fast_pirls,
+            JointStartScale::Global,
+        )
+    }
+
+    /// [`fit_joint_glmm_from_start`](Self::fit_joint_glmm_from_start) with
+    /// the first pass's initial steps (NLopt BOBYQA) or radius (TrustBQ)
+    /// chosen by `scale`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn fit_joint_glmm_from_start_with_scale(
+        &mut self,
+        start_beta: Vec<f64>,
+        start_theta: Vec<f64>,
+        profiled_start_objective: f64,
+        n_agq: usize,
+        maxeval: u32,
+        fallback_fast_pirls: Option<Self>,
+        scale: JointStartScale,
+    ) -> Result<&mut Self> {
         if !profiled_start_objective.is_finite() {
             return Err(MixedModelError::Optimization(
                 "joint GLMM starting conditional-mode solve did not converge".to_string(),
@@ -223,6 +350,7 @@ impl GeneralizedLinearMixedModel {
                 n_agq,
                 maxeval,
                 fallback_fast_pirls,
+                scale,
             ),
             Optimizer::NloptBobyqa => {
                 #[cfg(feature = "nlopt")]
@@ -234,6 +362,7 @@ impl GeneralizedLinearMixedModel {
                         n_agq,
                         maxeval,
                         fallback_fast_pirls,
+                        scale,
                     )
                 }
                 #[cfg(not(feature = "nlopt"))]
@@ -245,6 +374,7 @@ impl GeneralizedLinearMixedModel {
                         n_agq,
                         maxeval,
                         fallback_fast_pirls,
+                        scale,
                     );
                     Err(MixedModelError::Unsupported(
                         "joint GLMM NloptBobyqa requires the `nlopt` feature; rebuild with `--features nlopt` or pick TrustBq"
@@ -265,6 +395,7 @@ impl GeneralizedLinearMixedModel {
     }
 
     #[cfg(feature = "nlopt")]
+    #[allow(clippy::too_many_arguments)]
     fn fit_joint_glmm_from_start_nlopt_bobyqa(
         &mut self,
         start_beta: Vec<f64>,
@@ -273,6 +404,7 @@ impl GeneralizedLinearMixedModel {
         n_agq: usize,
         maxeval: u32,
         fallback_fast_pirls: Option<Self>,
+        scale: JointStartScale,
     ) -> Result<&mut Self> {
         use nlopt::{Algorithm as NloptAlgorithm, Nlopt, Target as NloptTarget};
 
@@ -355,7 +487,11 @@ impl GeneralizedLinearMixedModel {
         // stopped from the objective, so it is returned after each run.
         let take_interrupt = || model.borrow_mut().pending_progress_error.take();
         let mut params = initial;
-        let mut nlopt_result = run_bobyqa(&mut params, &initial_step, maxeval);
+        let first_steps = match scale {
+            JointStartScale::Global => initial_step.clone(),
+            JointStartScale::Local => joint_restart_steps(&initial_step, &params, &lower_bounds),
+        };
+        let mut nlopt_result = run_bobyqa(&mut params, &first_steps, maxeval);
         if let Some(message) = take_interrupt() {
             return Err(MixedModelError::Interrupted(message));
         }
@@ -457,6 +593,121 @@ impl GeneralizedLinearMixedModel {
             }
         }
 
+        // An FTOL stop is a statement about one step's improvement, not
+        // about stationarity, and the certificate judges the stop by the
+        // latter. While the certificate's own stationarity rule rejects the
+        // incumbent and budget remains, continue: a Newton step from the
+        // check's gradient/curvature readings, then a fresh BOBYQA model from
+        // the (possibly improved) incumbent. One check per stop, not per
+        // iteration, keeps the cost at about 2n + 1 evaluations per round.
+        let mut continuation = JointStationarityContinuation {
+            outcome: "not_run",
+            ..JointStationarityContinuation::default()
+        };
+        let mut last_check: Option<JointStationarityCheck> = None;
+        let continuable = matches!(nlopt_result, Ok((nlopt::SuccessState::FtolReached, _)))
+            && !matches!(
+                confirmation,
+                JointFtolConfirmation::Unconfirmed {
+                    reason: "restart_did_not_reproduce_incumbent",
+                    ..
+                }
+            );
+        if continuable {
+            let check_cost = 2 * n_params + 1;
+            let start_objective = match &nlopt_result {
+                Ok((_, fmin)) | Err((_, fmin)) => *fmin,
+            };
+            let mut incumbent = start_objective;
+            let spent = || usize::try_from(feval_count.get()).unwrap_or(usize::MAX);
+            loop {
+                let remaining = (maxeval as usize).saturating_sub(spent());
+                if remaining < check_cost {
+                    continuation.outcome = "insufficient_evaluation_budget";
+                    break;
+                }
+                let check = model.borrow_mut().joint_stationarity_check(
+                    &params,
+                    n_beta,
+                    n_agq,
+                    &lower_bounds,
+                    2.0e-2,
+                );
+                if let Some(message) = take_interrupt() {
+                    return Err(MixedModelError::Interrupted(message));
+                }
+                feval_count.set(feval_count.get() + check.evaluations as i64);
+                continuation.evaluations += check.evaluations;
+                if !check.fails {
+                    continuation.outcome = "stationary";
+                    last_check = Some(check);
+                    break;
+                }
+                if continuation.rounds == JOINT_MAX_STATIONARITY_CONTINUATIONS {
+                    continuation.outcome = "round_cap_reached";
+                    break;
+                }
+                continuation.rounds += 1;
+                let tolerance = ftol_abs.max(ftol_rel * incumbent.abs());
+                let mut improved = false;
+                if let Some(step) = check.newton_step(&lower_bounds, n_beta) {
+                    for trial in joint_newton_trials(&params, &step, &lower_bounds) {
+                        if spent() >= maxeval as usize {
+                            break;
+                        }
+                        let before = spent();
+                        let objective = obj_fn(&trial, None, &mut ());
+                        continuation.evaluations += spent() - before;
+                        if let Some(message) = take_interrupt() {
+                            return Err(MixedModelError::Interrupted(message));
+                        }
+                        if objective.is_finite() && objective < incumbent - tolerance {
+                            params = trial;
+                            incumbent = objective;
+                            improved = true;
+                            break;
+                        }
+                    }
+                }
+                let remaining = (maxeval as usize).saturating_sub(spent());
+                if remaining < min_restart_budget as usize {
+                    continuation.outcome = "insufficient_evaluation_budget";
+                    break;
+                }
+                let steps = joint_restart_steps(&initial_step, &params, &lower_bounds);
+                let mut candidate = params.clone();
+                let before = spent();
+                let result = run_bobyqa(&mut candidate, &steps, remaining as u32);
+                continuation.evaluations += spent() - before;
+                if let Some(message) = take_interrupt() {
+                    return Err(MixedModelError::Interrupted(message));
+                }
+                let best = match &result {
+                    Ok((_, fmin)) | Err((_, fmin)) => *fmin,
+                };
+                if best.is_finite()
+                    && best < incumbent
+                    && candidate.iter().all(|value| value.is_finite())
+                {
+                    improved |= best < incumbent - tolerance;
+                    params = candidate;
+                    incumbent = best;
+                }
+                if !improved {
+                    continuation.outcome = "no_progress";
+                    break;
+                }
+            }
+            continuation.gain = start_objective - incumbent;
+            // The stop stays an FTOL stop unless the continuation ran the
+            // fit's budget out short of stationarity.
+            nlopt_result = if continuation.outcome != "stationary" && spent() >= maxeval as usize {
+                Ok((nlopt::SuccessState::MaxEvalReached, incumbent))
+            } else {
+                Ok((nlopt::SuccessState::FtolReached, incumbent))
+            };
+        }
+
         let me = model.into_inner();
         let final_objective = me.joint_glmm_deviance_at_params(&params, n_beta, n_agq);
         me.refresh_dispersion();
@@ -490,13 +741,21 @@ impl GeneralizedLinearMixedModel {
             &lower_bounds,
             Some(me.lmm.dims.n),
         );
-        let mut certification_gradient = me.joint_laplace_certification_gradient(
-            &me.lmm.optsum.final_params.clone(),
-            n_beta,
-            n_agq,
-            &lower_bounds,
-            2.0e-2,
-        );
+        // The continuation's last check, when made at the final point, is
+        // exactly this probe (the state is at `final_params` either way).
+        let reused_gradient = last_check
+            .as_ref()
+            .and_then(|check| check.reusable_at(&me.lmm.optsum.final_params));
+        let mut certification_gradient = match reused_gradient {
+            Some(gradient) => gradient,
+            None => me.joint_laplace_certification_gradient(
+                &me.lmm.optsum.final_params.clone(),
+                n_beta,
+                n_agq,
+                &lower_bounds,
+                2.0e-2,
+            ),
+        };
         certificate.apply_derivative_evidence(
             OptimizerDerivativeEvidence {
                 method: EvidenceMethod::FiniteDifference,
@@ -527,6 +786,7 @@ impl GeneralizedLinearMixedModel {
         );
         mark_joint_optimizer_hessian_not_assessed(&mut certificate);
         record_joint_ftol_confirmation(&mut certificate, &confirmation, "NLopt BOBYQA");
+        record_joint_stationarity_continuation(&mut certificate, &continuation, "NLopt BOBYQA");
         me.take_pending_interrupt()?;
         if joint_certificate_requires_fallback(&certificate)
             && joint_candidate_materially_improves_profiled_start(&me.lmm.optsum)
@@ -553,6 +813,7 @@ impl GeneralizedLinearMixedModel {
         Ok(me)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fit_joint_glmm_from_start_trust_bq(
         &mut self,
         start_beta: Vec<f64>,
@@ -561,6 +822,7 @@ impl GeneralizedLinearMixedModel {
         n_agq: usize,
         maxeval: u32,
         fallback_fast_pirls: Option<Self>,
+        scale: JointStartScale,
     ) -> Result<&mut Self> {
         let mut fallback_fast_pirls = fallback_fast_pirls;
         let n_beta = self.beta.len();
@@ -692,7 +954,12 @@ impl GeneralizedLinearMixedModel {
             &lower_bounds_z,
             &upper_bounds,
             pass_options(
-                JOINT_TRUST_BQ_INITIAL_RADIUS,
+                match scale {
+                    JointStartScale::Global => JOINT_TRUST_BQ_INITIAL_RADIUS,
+                    JointStartScale::Local => {
+                        JOINT_RESTART_STEP_FACTOR * JOINT_TRUST_BQ_INITIAL_RADIUS
+                    }
+                },
                 JOINT_TRUST_BQ_FINAL_RADIUS,
                 maxeval as usize,
             ),
@@ -731,6 +998,146 @@ impl GeneralizedLinearMixedModel {
                 (restart, evaluations.get())
             },
         )?;
+
+        // As for NLopt BOBYQA: continue an FTOL/stagnation stop that the
+        // certificate's stationarity rule rejects, with a Newton step from
+        // the check's readings and a fresh TrustBQ model at the restart
+        // radius, while budget remains.
+        let mut result = result;
+        let mut check_evaluations = 0usize;
+        let mut continuation = JointStationarityContinuation {
+            outcome: "not_run",
+            ..JointStationarityContinuation::default()
+        };
+        let mut last_check: Option<JointStationarityCheck> = None;
+        let continuable = matches!(
+            result.stop_reason,
+            TrustBqStopReason::ObjectiveTolerance | TrustBqStopReason::ObjectiveStagnation
+        ) && !matches!(
+            confirmation,
+            JointFtolConfirmation::Unconfirmed {
+                reason: "restart_failed",
+                ..
+            }
+        );
+        if continuable {
+            let check_cost = 2 * n_params + 1;
+            let transform_lu = transform.clone().lu();
+            let to_z = |x: &[f64]| -> Option<Vec<f64>> {
+                let offset = DVector::from_iterator(
+                    n_params,
+                    x.iter().zip(&initial).map(|(value, start)| value - start),
+                );
+                transform_lu
+                    .solve(&offset)
+                    .filter(|z| z.iter().all(|value| value.is_finite()))
+                    .map(|z| z.as_slice().to_vec())
+            };
+            let stop_reason = result.stop_reason;
+            let start_objective = best_fmin.get().min(result.fmin);
+            let spent = |checks: usize| evaluations.get() + checks;
+            loop {
+                let incumbent = best_fmin.get().min(result.fmin);
+                let params = if best_fmin.get() <= result.fmin {
+                    best_params.borrow().clone()
+                } else {
+                    to_x(&result.x)
+                };
+                let remaining = (maxeval as usize).saturating_sub(spent(check_evaluations));
+                if remaining < check_cost {
+                    continuation.outcome = "insufficient_evaluation_budget";
+                    break;
+                }
+                let check = model.borrow_mut().joint_stationarity_check(
+                    &params,
+                    n_beta,
+                    n_agq,
+                    &lower_bounds,
+                    2.0e-2,
+                );
+                if let Some(message) = model.borrow_mut().pending_progress_error.take() {
+                    return Err(MixedModelError::Interrupted(message));
+                }
+                check_evaluations += check.evaluations;
+                continuation.evaluations += check.evaluations;
+                if !check.fails {
+                    continuation.outcome = "stationary";
+                    last_check = Some(check);
+                    break;
+                }
+                if continuation.rounds == JOINT_MAX_STATIONARITY_CONTINUATIONS {
+                    continuation.outcome = "round_cap_reached";
+                    break;
+                }
+                continuation.rounds += 1;
+                let tolerance = ftol_abs.max(ftol_rel * incumbent.abs());
+                let mut improved = false;
+                if let Some(step) = check.newton_step(&lower_bounds, n_beta) {
+                    for trial in joint_newton_trials(&params, &step, &lower_bounds) {
+                        if spent(check_evaluations) >= maxeval as usize {
+                            break;
+                        }
+                        let Some(z) = to_z(&trial) else {
+                            break;
+                        };
+                        continuation.evaluations += 1;
+                        let objective = objective_fn(&z)?;
+                        if objective < incumbent - tolerance {
+                            improved = true;
+                            break;
+                        }
+                    }
+                }
+                let remaining = (maxeval as usize).saturating_sub(spent(check_evaluations));
+                let Some(start) = to_z(&best_params.borrow().clone()) else {
+                    continuation.outcome = "no_progress";
+                    break;
+                };
+                if remaining < plan.min_restart_budget {
+                    continuation.outcome = "insufficient_evaluation_budget";
+                    break;
+                }
+                let before_restart = best_fmin.get();
+                let before = evaluations.get();
+                spent_before_pass.set(spent(check_evaluations));
+                let restart = minimize_trust_bq_with_progress(
+                    &start,
+                    &lower_bounds_z,
+                    &upper_bounds,
+                    pass_options(
+                        restart_radius,
+                        JOINT_TRUST_BQ_FINAL_RADIUS,
+                        remaining.min(plan.restart_budget),
+                    ),
+                    &mut objective_fn,
+                    &mut progress_fn,
+                );
+                continuation.evaluations += evaluations.get() - before;
+                match restart {
+                    Ok(restart) => result = restart,
+                    Err(error @ MixedModelError::Interrupted(_)) => return Err(error),
+                    Err(_) => {}
+                }
+                improved |= best_fmin.get() < before_restart - tolerance;
+                if !improved {
+                    continuation.outcome = "no_progress";
+                    break;
+                }
+            }
+            continuation.gain = start_objective - best_fmin.get().min(result.fmin);
+            // `result` now holds the last restart; the logged best point
+            // (selected below) is the incumbent. The stop keeps its FTOL
+            // label unless the continuation ran the budget out short of
+            // stationarity.
+            result.stop_reason = if continuation.outcome != "stationary"
+                && spent(check_evaluations) >= maxeval as usize
+            {
+                TrustBqStopReason::MaxEvaluations
+            } else {
+                stop_reason
+            };
+        }
+        let fevals = fevals.max(evaluations.get()) + check_evaluations;
 
         let logged_best_params = best_params.into_inner();
         let logged_best_fmin = best_fmin.get();
@@ -812,13 +1219,19 @@ impl GeneralizedLinearMixedModel {
             &lower_bounds,
             Some(me.lmm.dims.n),
         );
-        let mut certification_gradient = me.joint_laplace_certification_gradient(
-            &me.lmm.optsum.final_params.clone(),
-            n_beta,
-            n_agq,
-            &lower_bounds,
-            2.0e-2,
-        );
+        let reused_gradient = last_check
+            .as_ref()
+            .and_then(|check| check.reusable_at(&me.lmm.optsum.final_params));
+        let mut certification_gradient = match reused_gradient {
+            Some(gradient) => gradient,
+            None => me.joint_laplace_certification_gradient(
+                &me.lmm.optsum.final_params.clone(),
+                n_beta,
+                n_agq,
+                &lower_bounds,
+                2.0e-2,
+            ),
+        };
         // Read at the certified point: the probes' last evaluation restores
         // it, and a rejected polish below would leave the state elsewhere.
         let mut beta_hessian = me.joint_working_beta_hessian();
@@ -894,6 +1307,7 @@ impl GeneralizedLinearMixedModel {
         );
         mark_joint_optimizer_hessian_not_assessed(&mut certificate);
         record_joint_ftol_confirmation(&mut certificate, &confirmation, "TrustBQ");
+        record_joint_stationarity_continuation(&mut certificate, &continuation, "TrustBQ");
         me.take_pending_interrupt()?;
         if joint_certificate_requires_fallback(&certificate)
             && joint_candidate_materially_improves_profiled_start(&me.lmm.optsum)
@@ -1273,6 +1687,66 @@ impl GeneralizedLinearMixedModel {
             unassessable_indices,
             base_objective,
             curvature_probes,
+        }
+    }
+
+    /// Certification-aligned stationarity check of a joint optimizer stop.
+    ///
+    /// Runs the certificate's own noise-aware gradient probe
+    /// ([`joint_laplace_certification_gradient`](Self::joint_laplace_certification_gradient))
+    /// at `params` and applies the certificate's stationarity rule: the
+    /// Newton-decrement objective gap decides when its β-block estimate is
+    /// available, otherwise an assessed free gradient component above
+    /// `gradient_tolerance`. Components the probe could not assess are not
+    /// actionable and do not count as a failure. The probes' last evaluation
+    /// restores the model state at `params`.
+    pub(super) fn joint_stationarity_check(
+        &mut self,
+        params: &[f64],
+        n_beta: usize,
+        n_agq: usize,
+        lower_bounds: &[f64],
+        gradient_tolerance: f64,
+    ) -> JointStationarityCheck {
+        let certification = self.joint_laplace_certification_gradient(
+            params,
+            n_beta,
+            n_agq,
+            lower_bounds,
+            gradient_tolerance,
+        );
+        let beta_hessian = self.joint_working_beta_hessian();
+        let decrement = joint_newton_decrement(
+            &certification,
+            params,
+            lower_bounds,
+            n_beta,
+            beta_hessian.as_ref(),
+            JOINT_STATIONARITY_GAP_TOLERANCE,
+        );
+        let fails = match (decrement.eager.variant, decrement.eager.verdict) {
+            (
+                crate::compiler::NewtonDecrementVariant::BetaBlockThetaDiagonal,
+                crate::compiler::NewtonDecrementVerdict::ExceedsTolerance,
+            ) => true,
+            (
+                crate::compiler::NewtonDecrementVariant::BetaBlockThetaDiagonal,
+                crate::compiler::NewtonDecrementVerdict::WithinTolerance,
+            ) => false,
+            _ => certification_gradient_assessed_free_failure(
+                &certification,
+                params,
+                lower_bounds,
+                gradient_tolerance,
+            ),
+        };
+        let evaluations = certification.evaluation_count();
+        JointStationarityCheck {
+            params: params.to_vec(),
+            certification,
+            beta_hessian,
+            fails,
+            evaluations,
         }
     }
 
@@ -1921,6 +2395,208 @@ impl GeneralizedLinearMixedModel {
     }
 }
 
+/// Outcome of [`GeneralizedLinearMixedModel::joint_stationarity_check`].
+#[derive(Debug, Clone)]
+pub(super) struct JointStationarityCheck {
+    /// Point the check was made at.
+    pub(super) params: Vec<f64>,
+    pub(super) certification: JointLaplaceCertificationGradient,
+    pub(super) beta_hessian: Option<DMatrix<f64>>,
+    /// Whether the certificate's stationarity rule rejects `params`.
+    pub(super) fails: bool,
+    /// Objective evaluations the probe spent.
+    pub(super) evaluations: usize,
+}
+
+impl JointStationarityCheck {
+    /// The check's certification gradient when it was made at `params`
+    /// exactly, so the final certificate can reuse it instead of probing the
+    /// same point again.
+    pub(super) fn reusable_at(&self, params: &[f64]) -> Option<JointLaplaceCertificationGradient> {
+        (self.params == params).then(|| self.certification.clone())
+    }
+
+    /// Newton step from the check's own readings: the decrement's
+    /// gradient/curvature pair for each determined free coordinate, with the
+    /// fixed-effect block solved against the working Hessian when the
+    /// decrement uses it. Coordinates without a determined reading (or at a
+    /// bound) do not move. `None` when nothing can move.
+    pub(super) fn newton_step(&self, lower_bounds: &[f64], n_beta: usize) -> Option<Vec<f64>> {
+        let params = &self.params;
+        let mut step = vec![0.0; params.len()];
+        let mut readings = vec![None; params.len()];
+        for (index, reading) in readings.iter_mut().enumerate() {
+            if let DecrementReading::Determined {
+                gradient,
+                curvature,
+            } = decrement_reading(
+                &self.certification,
+                params,
+                lower_bounds,
+                index,
+                JOINT_STATIONARITY_GAP_TOLERANCE,
+            ) {
+                *reading = Some((gradient, curvature));
+            }
+        }
+        let beta_block = (n_beta > 0 && readings[..n_beta].iter().all(Option::is_some))
+            .then_some(self.beta_hessian.as_ref())
+            .flatten()
+            .filter(|hessian| hessian.nrows() == n_beta && hessian.ncols() == n_beta)
+            .and_then(|hessian| (0.5 * (hessian + hessian.transpose())).cholesky())
+            .map(|cholesky| {
+                let gradient = DVector::from_iterator(
+                    n_beta,
+                    readings[..n_beta].iter().map(|reading| reading.unwrap().0),
+                );
+                cholesky.solve(&gradient)
+            })
+            .filter(|solved| solved.iter().all(|value| value.is_finite()));
+        for (index, reading) in readings.iter().enumerate() {
+            let Some((gradient, curvature)) = reading else {
+                continue;
+            };
+            step[index] = match &beta_block {
+                Some(solved) if index < n_beta => -solved[index],
+                _ => -gradient / curvature,
+            };
+        }
+        let moves = step.iter().any(|value| *value != 0.0);
+        (moves && step.iter().all(|value| value.is_finite())).then_some(step)
+    }
+}
+
+/// Trial points along a Newton step, from the full step down to 1/16 of it,
+/// each projected onto the lower bounds (a coordinate that would cross its
+/// bound is placed on it).
+pub(super) fn joint_newton_trials(
+    params: &[f64],
+    step: &[f64],
+    lower_bounds: &[f64],
+) -> Vec<Vec<f64>> {
+    [1.0, 0.5, 0.25, 0.125, 0.0625]
+        .into_iter()
+        .map(|damping| {
+            params
+                .iter()
+                .zip(step)
+                .enumerate()
+                .map(|(index, (&value, &delta))| {
+                    let trial = value + damping * delta;
+                    let lower = lower_bounds
+                        .get(index)
+                        .copied()
+                        .unwrap_or(f64::NEG_INFINITY);
+                    trial.max(lower)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Cap on certification-aligned continuation rounds after an FTOL stop
+/// (each a stationarity check, a Newton step from its readings and a fresh
+/// optimizer restart); each round is also bounded by the remaining budget.
+const JOINT_MAX_STATIONARITY_CONTINUATIONS: usize = 4;
+
+/// Outcome of continuing a joint FTOL stop until the certificate's
+/// stationarity rule holds.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(super) struct JointStationarityContinuation {
+    /// Continuation rounds run (checks that failed and were acted on).
+    pub(super) rounds: usize,
+    /// Objective evaluations spent by the checks, steps and restarts.
+    pub(super) evaluations: usize,
+    /// Objective decrease achieved by the continuation.
+    pub(super) gain: f64,
+    /// Why the continuation ended: `stationary` (the last check passed),
+    /// `insufficient_evaluation_budget`, `round_cap_reached`,
+    /// `no_progress` (neither the step nor the restart lowered the
+    /// objective), or `not_run` (the stop needed no continuation).
+    pub(super) outcome: &'static str,
+}
+
+/// Records a certification-aligned continuation on the certificate, so the
+/// evaluations it spent and why it ended are visible.
+fn record_joint_stationarity_continuation(
+    certificate: &mut OptimizerCertificate,
+    continuation: &JointStationarityContinuation,
+    optimizer: &str,
+) {
+    if continuation.rounds == 0 {
+        return;
+    }
+    let resolved = continuation.outcome == "stationary";
+    let mut diagnostic = Diagnostic::new(
+        DiagnosticCode::OptimizerRecovery,
+        if resolved {
+            DiagnosticSeverity::Info
+        } else {
+            DiagnosticSeverity::Warning
+        },
+        DiagnosticStage::Certification,
+        if resolved {
+            format!(
+                "joint GLMM {optimizer} FTOL stop failed the certificate's stationarity rule; the optimizer was continued from the incumbent until it held"
+            )
+        } else {
+            format!(
+                "joint GLMM {optimizer} FTOL stop failed the certificate's stationarity rule and could not be continued to a stationary point ({})",
+                continuation.outcome
+            )
+        },
+    );
+    if !resolved {
+        diagnostic = diagnostic.with_suggested_actions(vec![
+            "raise max_feval so the joint optimizer can continue to stationarity".to_string(),
+        ]);
+    }
+    diagnostic
+        .payload
+        .insert("fit_mode".to_string(), serde_json::json!("joint_glmm"));
+    diagnostic.payload.insert(
+        "stationarity_continuation".to_string(),
+        serde_json::json!(continuation.outcome),
+    );
+    diagnostic.payload.insert(
+        "continuation_rounds".to_string(),
+        serde_json::json!(continuation.rounds),
+    );
+    diagnostic.payload.insert(
+        "continuation_evaluations".to_string(),
+        serde_json::json!(continuation.evaluations),
+    );
+    diagnostic.payload.insert(
+        "continuation_objective_gain".to_string(),
+        serde_json::json!(continuation.gain),
+    );
+    certificate.diagnostics.push(diagnostic);
+}
+
+/// Where a joint fit's start came from when the profiled initializer is
+/// replaced (see `fit_joint_glmm_from_supplied_start`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum JointSuppliedStart {
+    /// A caller-supplied θ, with β from one profiled PIRLS solve at it.
+    StartTheta,
+    /// The stored `(β, θ)` of a fitted joint optimum (convergence
+    /// verification's `restart_from_optimum`).
+    FittedOptimum,
+}
+
+/// Scale of a joint fit's first optimizer pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum JointStartScale {
+    /// The default initial steps/radius: one profiled standard error per β,
+    /// [`JOINT_THETA_STEP`] per θ.
+    Global,
+    /// The FTOL-confirmation restart's local scale
+    /// ([`JOINT_RESTART_STEP_FACTOR`] times the default, shrunk near a lower
+    /// bound so NLopt BOBYQA does not move the start off it), for a start
+    /// that is already a fitted optimum.
+    Local,
+}
+
 /// MixedModels.jl `OptSummary` default `ftol_rel`, used by its joint
 /// (`fast = false`) GLMM fit.
 const JOINT_FTOL_REL: f64 = 1.0e-12;
@@ -2529,4 +3205,126 @@ fn validate_glmm_fixed_effect_variances(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod stationarity_continuation_tests {
+    use super::*;
+
+    /// A check on the separable quadratic `f(x) = Σ c_i (x_i - m_i)^2 / 2`,
+    /// probed centrally at the default step only, as the certificate does
+    /// for coordinates that pass without escalation.
+    fn quadratic_check(params: &[f64], minimum: &[f64], curvature: &[f64]) -> JointStationarityCheck {
+        let f = |x: &[f64]| -> f64 {
+            x.iter()
+                .zip(minimum)
+                .zip(curvature)
+                .map(|((x, m), c)| 0.5 * c * (x - m).powi(2))
+                .sum()
+        };
+        let base = f(params);
+        let probes = (0..params.len())
+            .map(|index| {
+                let h = 1.0e-3;
+                let mut plus = params.to_vec();
+                plus[index] += h;
+                let mut minus = params.to_vec();
+                minus[index] -= h;
+                vec![JointFdProbe::central(h, f(&plus), f(&minus))]
+            })
+            .collect::<Vec<_>>();
+        let gradient = probes.iter().map(|probe| probe[0].gradient).collect::<Vec<_>>();
+        JointStationarityCheck {
+            params: params.to_vec(),
+            certification: JointLaplaceCertificationGradient {
+                gradient: gradient.clone(),
+                probe_gradient: gradient,
+                escalated_indices: Vec::new(),
+                unassessable_indices: Vec::new(),
+                base_objective: base,
+                curvature_probes: probes,
+            },
+            beta_hessian: None,
+            fails: true,
+            evaluations: 2 * params.len() + 1,
+        }
+    }
+
+    #[test]
+    fn newton_step_reaches_a_separable_quadratic_minimum() {
+        let minimum = [0.3, -1.2, 0.8];
+        let curvature = [4.0, 0.5, 2.0];
+        let params = [0.1, -1.0, 0.5];
+        let lower = [f64::NEG_INFINITY, f64::NEG_INFINITY, 0.0];
+        let check = quadratic_check(&params, &minimum, &curvature);
+        let step = check.newton_step(&lower, 2).expect("a determined step");
+        for ((x, delta), m) in params.iter().zip(&step).zip(&minimum) {
+            assert!((x + delta - m).abs() < 1e-6, "{x} + {delta} != {m}");
+        }
+        assert_eq!(check.certification.evaluation_count(), 2 * 3 + 1);
+    }
+
+    #[test]
+    fn newton_step_leaves_bound_coordinates_and_trials_respect_bounds() {
+        // θ (index 1) sits on its bound: excluded from the step.
+        let check = quadratic_check(&[0.0, 0.0], &[1.0, -0.5], &[1.0, 1.0]);
+        let lower = [f64::NEG_INFINITY, 0.0];
+        let step = check.newton_step(&lower, 1).expect("β can move");
+        assert!((step[0] - 1.0).abs() < 1e-6);
+        assert_eq!(step[1], 0.0);
+
+        // A step that would cross a bound is projected onto it.
+        let trials = joint_newton_trials(&[0.5, 0.2], &[0.0, -1.0], &[f64::NEG_INFINITY, 0.0]);
+        assert_eq!(trials.len(), 5);
+        assert_eq!(trials[0], vec![0.5, 0.0]);
+        assert!((trials[4][1] - (0.2 - 0.0625)).abs() < 1e-15);
+    }
+
+    #[test]
+    fn stationary_check_has_no_step_and_reuse_requires_the_same_point() {
+        let check = quadratic_check(&[1.0, 2.0], &[1.0, 2.0], &[1.0, 3.0]);
+        let lower = [f64::NEG_INFINITY; 2];
+        assert!(check
+            .newton_step(&lower, 2)
+            .is_none_or(|step| step.iter().all(|value| value.abs() < 1e-9)));
+        assert!(check.reusable_at(&[1.0, 2.0]).is_some());
+        assert!(check.reusable_at(&[1.0, 2.0 + 1e-12]).is_none());
+    }
+
+    #[test]
+    fn continuation_diagnostic_records_outcome_only_when_it_ran() {
+        let mut certificate = OptimizerCertificate::not_assessed();
+        record_joint_stationarity_continuation(
+            &mut certificate,
+            &JointStationarityContinuation {
+                outcome: "not_run",
+                ..JointStationarityContinuation::default()
+            },
+            "TrustBQ",
+        );
+        assert!(certificate.diagnostics.is_empty());
+        for (outcome, severity) in [
+            ("stationary", DiagnosticSeverity::Info),
+            ("insufficient_evaluation_budget", DiagnosticSeverity::Warning),
+        ] {
+            let mut certificate = OptimizerCertificate::not_assessed();
+            record_joint_stationarity_continuation(
+                &mut certificate,
+                &JointStationarityContinuation {
+                    rounds: 2,
+                    evaluations: 150,
+                    gain: 4.0e-6,
+                    outcome,
+                },
+                "TrustBQ",
+            );
+            let diagnostic = &certificate.diagnostics[0];
+            assert_eq!(diagnostic.severity, severity);
+            assert_eq!(
+                diagnostic.payload["stationarity_continuation"],
+                serde_json::json!(outcome)
+            );
+            assert_eq!(diagnostic.payload["continuation_rounds"], serde_json::json!(2));
+        }
+    }
 }

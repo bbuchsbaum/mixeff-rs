@@ -161,6 +161,10 @@ name = "probe_high_baseline_glmm"
 required-features = ["unstable-internals"]
 
 [[example]]
+name = "glmm_issue24_repro"
+required-features = ["unstable-internals"]
+
+[[example]]
 name = "probe_aphantasia_combined"
 required-features = ["unstable-internals"]
 
