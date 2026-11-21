@@ -2491,6 +2491,26 @@ pub(super) fn copy_and_scale_offdiag(
         }
     }
 
+    // The fused 2 × 2 kernel reads a dense A in one pass; every other shape
+    // (and a sparse A) streams through the existing L buffer instead of
+    // densifying A afresh and forming each entry from si·sj products.
+    if !(si == 2 && sj == 2 && matches!(a, MatrixBlock::Dense(_))) {
+        let shape = (a.nrows(), a.ncols());
+        let result = match l {
+            MatrixBlock::Dense(result) if result.shape() == shape => result,
+            _ => {
+                *l = MatrixBlock::Dense(DMatrix::zeros(shape.0, shape.1));
+                match l {
+                    MatrixBlock::Dense(result) => result,
+                    _ => unreachable!(),
+                }
+            }
+        };
+        fill_dense_from_block(result, a, 1.0);
+        lambda_transpose_a_lambda_in_place(result, &re_i.lambda, &re_j.lambda);
+        return;
+    }
+
     with_dense_block(a, |a_dense| {
         let nranef_i = a_dense.nrows();
         let nranef_j = a_dense.ncols();
@@ -2561,6 +2581,73 @@ pub(super) fn copy_and_scale_offdiag(
             }
         }
     });
+}
+
+/// `M ← (I ⊗ Λ_iᵀ) M (I ⊗ Λ_j)` in place for a column-major `M` whose rows
+/// come in level blocks of `Λ_i`'s order and columns in level blocks of
+/// `Λ_j`'s. Two streaming passes (columns, then rows within each column),
+/// each `O(entries · s)`; diagonal `Λ`s (zero-correlation terms) reduce to
+/// one scaling pass.
+pub(super) fn lambda_transpose_a_lambda_in_place(
+    m: &mut DMatrix<f64>,
+    lambda_i: &DMatrix<f64>,
+    lambda_j: &DMatrix<f64>,
+) {
+    let si = lambda_i.nrows();
+    let sj = lambda_j.nrows();
+    let nrows = m.nrows();
+    let ncols = m.ncols();
+    debug_assert_eq!(nrows % si, 0);
+    debug_assert_eq!(ncols % sj, 0);
+    let is_diagonal = |lam: &DMatrix<f64>| {
+        (0..lam.ncols()).all(|c| (0..lam.nrows()).all(|r| r == c || lam[(r, c)] == 0.0))
+    };
+    if is_diagonal(lambda_i) && is_diagonal(lambda_j) {
+        let row_scale: Vec<f64> = (0..nrows).map(|r| lambda_i[(r % si, r % si)]).collect();
+        for (c, column) in m.as_mut_slice().chunks_exact_mut(nrows.max(1)).enumerate() {
+            let col_scale = lambda_j[(c % sj, c % sj)];
+            for (value, &rs) in column.iter_mut().zip(&row_scale) {
+                *value *= rs * col_scale;
+            }
+        }
+        return;
+    }
+
+    // Right pass: each column block B ← B Λ_j.
+    let data = m.as_mut_slice();
+    let mut block = vec![0.0; nrows * sj];
+    for bj in 0..ncols / sj {
+        let start = bj * sj * nrows;
+        block.copy_from_slice(&data[start..start + nrows * sj]);
+        for c in 0..sj {
+            let dst = &mut data[start + c * nrows..start + (c + 1) * nrows];
+            dst.fill(0.0);
+            for k in 0..sj {
+                let w = lambda_j[(k, c)];
+                if w != 0.0 {
+                    let src = &block[k * nrows..(k + 1) * nrows];
+                    for (d, &s) in dst.iter_mut().zip(src) {
+                        *d += w * s;
+                    }
+                }
+            }
+        }
+    }
+
+    // Left pass: each si-row segment v of every column ← Λ_iᵀ v.
+    let mut segment = vec![0.0; si];
+    for column in data.chunks_exact_mut(nrows.max(1)) {
+        for chunk in column.chunks_exact_mut(si) {
+            segment.copy_from_slice(chunk);
+            for (r, out) in chunk.iter_mut().enumerate() {
+                let mut sum = 0.0;
+                for (k, &v) in segment.iter().enumerate() {
+                    sum += lambda_i[(k, r)] * v;
+                }
+                *out = sum;
+            }
+        }
+    }
 }
 
 /// Copy and right-multiply blockwise by Λ: L_kj = A_kj Λ_j
@@ -2738,6 +2825,11 @@ pub(super) fn transposed_rows_view(
 /// feature routes the product through faer's matmul instead.
 #[cfg(not(feature = "faer-backend"))]
 pub(super) fn gemm_sub_abt(c: &mut DMatrix<f64>, a: &DMatrix<f64>, b: &DMatrix<f64>) {
+    let work = a.nrows().saturating_mul(a.ncols()).saturating_mul(b.nrows());
+    if work >= super::dense_kernels::FAER_GEMM_MIN_WORK {
+        super::dense_kernels::gemm_acc(c, -1.0, a, false, b, true);
+        return;
+    }
     c.gemm(-1.0, a, &transposed_view(b), 1.0);
 }
 

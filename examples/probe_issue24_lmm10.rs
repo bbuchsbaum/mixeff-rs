@@ -89,6 +89,28 @@ fn main() -> Result<(), Box<dyn Error>> {
         _ => (272, 500, 160),
     };
     let data = simulate(n_sid, n_item, per, 11);
+    // `MIXEFF_DUMP_CSV=path` writes the simulated data for an lme4 or
+    // MixedModels.jl timing on identical rows.
+    if let Ok(path) = std::env::var("MIXEFF_DUMP_CSV") {
+        use mixeff_rs::model::data::Column;
+        let names = data.column_names();
+        let mut out = names.join(",") + "\n";
+        let n = n_sid * per;
+        for row in 0..n {
+            let cells: Vec<String> = names
+                .iter()
+                .map(|name| match data.column(name).unwrap() {
+                    Column::Numeric(v) => format!("{:.17e}", v[row]),
+                    Column::Categorical(c) => c.values[row].clone(),
+                    _ => unreachable!("probe data has numeric and categorical columns only"),
+                })
+                .collect();
+            out.push_str(&cells.join(","));
+            out.push('\n');
+        }
+        std::fs::write(&path, out)?;
+        println!("wrote {path}");
+    }
     let formula = parse_formula(
         "y ~ lag * block + trial + (1 + x1 + x2 + x3 + x4 + x5 || sid) + (1 + x1 + x2 + x3 || item)",
     )?;

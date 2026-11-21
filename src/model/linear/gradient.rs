@@ -1102,9 +1102,13 @@ impl ProfiledGradientInputs<'_> {
                     let l_inv = l_jj_inv
                         .as_ref()
                         .expect("dense diagonal block has an inverse");
-                    let mut r = l_inv.transpose();
-                    r -= &w;
-                    r * l_inv
+                    // (L⁻ᵀ − W) L⁻¹ = L⁻ᵀL⁻¹ − W L⁻¹.
+                    let mut z = DMatrix::zeros(sizes[j], sizes[j]);
+                    super::dense_kernels::gemm_acc(&mut z, 1.0, l_inv, true, l_inv, false);
+                    if j + 1 < k {
+                        super::dense_kernels::gemm_acc(&mut z, -1.0, &w, false, l_inv, false);
+                    }
+                    z
                 } else {
                     w.neg_mut();
                     right_divide_by_lower(&mut w, l_jj, l_jj_inv.as_ref());
@@ -1392,6 +1396,11 @@ const LOWER_INVERSE_BASE_ORDER: usize = 64;
 /// Dense inverse of a lower-triangular block.
 fn dense_lower_inverse(block: &MatrixBlock) -> DMatrix<f64> {
     with_dense_block(block, |l| {
+        if let Some(inv) =
+            super::dense_kernels::faer_lower_inverse(l, GRADIENT_SOLVE_ZERO_TOLERANCE)
+        {
+            return inv;
+        }
         let n = l.nrows();
         let mut inv = DMatrix::<f64>::zeros(n, n);
         lower_inverse_into(l.as_view(), &mut inv.as_view_mut());
@@ -1497,11 +1506,11 @@ const DENSE_PRODUCT_FILL_THRESHOLD: f64 = 0.25;
 /// `dst += lhs · rhs` for a block `rhs`.
 fn add_dense_times_block(dst: &mut DMatrix<f64>, lhs: &DMatrix<f64>, rhs: &MatrixBlock) {
     match rhs {
-        MatrixBlock::Dense(mat) => dst.gemm(1.0, lhs, mat, 1.0),
+        MatrixBlock::Dense(mat) => super::dense_kernels::gemm_acc(dst, 1.0, lhs, false, mat, false),
         MatrixBlock::Sparse(csc) => {
             let entries = (csc.nrows() * csc.ncols()) as f64;
             if entries > 0.0 && csc.nnz() as f64 >= DENSE_PRODUCT_FILL_THRESHOLD * entries {
-                dst.gemm(1.0, lhs, &rhs.as_dense(), 1.0);
+                super::dense_kernels::gemm_acc(dst, 1.0, lhs, false, &rhs.as_dense(), false);
                 return;
             }
             let offsets = csc.col_offsets();
@@ -1528,7 +1537,7 @@ fn add_dense_times_block(dst: &mut DMatrix<f64>, lhs: &DMatrix<f64>, rhs: &Matri
 /// `dst += lhsᵀ · rhs` for a block `rhs` sharing `lhs`'s row count.
 fn add_dense_transpose_times_block(dst: &mut DMatrix<f64>, lhs: &DMatrix<f64>, rhs: &MatrixBlock) {
     match rhs {
-        MatrixBlock::Dense(mat) => dst.gemm_tr(1.0, lhs, mat, 1.0),
+        MatrixBlock::Dense(mat) => super::dense_kernels::gemm_acc(dst, 1.0, lhs, true, mat, false),
         MatrixBlock::Sparse(_) => {
             let lhs_t = lhs.transpose();
             add_dense_times_block(dst, &lhs_t, rhs);
@@ -1768,7 +1777,7 @@ mod tests {
     /// pivot, on orders that exercise several recursion levels.
     #[test]
     fn blocked_lower_inverse_matches_forward_substitution() {
-        for (n, zero_pivot) in [(1usize, None), (63, None), (65, Some(40)), (300, Some(170))] {
+        for (n, zero_pivot) in [(1usize, None), (63, None), (65, Some(40)), (300, Some(170)), (400, None)] {
             let mut l = DMatrix::<f64>::zeros(n, n);
             for c in 0..n {
                 for r in c..n {
@@ -2786,6 +2795,21 @@ mod cost {
         let t0 = Instant::now();
         model.objective_at(&theta).unwrap();
         println!("objective_at {:8.1} ms", t0.elapsed().as_secs_f64() * 1e3);
+        // `ISSUE24_OBJECTIVE_LOOP=n` repeats the objective for profiling.
+        if let Some(reps) = std::env::var("ISSUE24_OBJECTIVE_LOOP")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+        {
+            let t0 = Instant::now();
+            for _ in 0..reps {
+                std::hint::black_box(model.objective_at_fast_or_generic(&theta).unwrap());
+            }
+            println!(
+                "objective_at_fast_or_generic x{reps}: {:8.1} ms each",
+                t0.elapsed().as_secs_f64() * 1e3 / reps as f64
+            );
+            return;
+        }
         let sizes: Vec<usize> = model.reterms.iter().map(|re| re.n_ranef()).collect();
         println!("sizes {sizes:?}");
         let inputs = ProfiledGradientInputs {
