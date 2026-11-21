@@ -561,12 +561,13 @@ impl LinearMixedModel {
             .analytic_optimizer_derivatives(&theta, &lower_bounds)
             .or_else(|| self.finite_difference_optimizer_derivatives(&theta, &lower_bounds));
         if let Some(derivatives) = derivatives {
-            let (gradient_tolerance, hessian_tolerance) =
+            let (gradient_tolerance, hessian_tolerance, objective_tolerance) =
                 self.derivative_certificate_tolerances(certificate.objective_value);
-            certificate.apply_derivative_evidence(
+            certificate.apply_derivative_evidence_with_materiality(
                 derivatives,
                 gradient_tolerance,
                 hessian_tolerance,
+                Some(objective_tolerance),
             );
         } else {
             certificate.mark_derivative_checks_incomplete(IncompleteCheckEvidence::new(
@@ -730,7 +731,11 @@ impl LinearMixedModel {
         None
     }
 
-    fn derivative_certificate_tolerances(&self, objective_value: Option<f64>) -> (f64, f64) {
+    /// `(gradient, Hessian, objective)` tolerances for the derivative
+    /// certificate. The objective tolerance is the optimizer's own stopping
+    /// scale; the gradient tolerance is its square root (a gradient of that
+    /// size predicts an objective gap of order the objective tolerance).
+    fn derivative_certificate_tolerances(&self, objective_value: Option<f64>) -> (f64, f64, f64) {
         let objective_scale = objective_value.unwrap_or(self.optsum.fmin).abs().max(1.0);
         let objective_tolerance = self
             .optsum
@@ -739,7 +744,7 @@ impl LinearMixedModel {
             .max(self.optsum.ftol_rel.max(0.0) * objective_scale);
         let gradient_tolerance = objective_tolerance.sqrt().max(1e-4);
         let hessian_tolerance = 1e-5_f64.max(gradient_tolerance * 1e-2);
-        (gradient_tolerance, hessian_tolerance)
+        (gradient_tolerance, hessian_tolerance, objective_tolerance)
     }
 
     /// Certificate derivative evidence from the analytic gradient
@@ -3166,27 +3171,43 @@ impl LinearMixedModel {
 
         // Analytic-gradient oracle for the full stage (Phase 5 S5.3). The
         // family policy chooses it; a caller control can force it either way.
-        // One silent probe at the start point checks that the blocked
-        // gradient can be formed for this design (its selected inverse has a
-        // size guard); otherwise the interpolation model is used.
+        // One probe at the start point checks that the blocked gradient can
+        // be formed for this design (its selected inverse has a size guard);
+        // otherwise the interpolation model is used and the stop label
+        // records why (`GRADIENT_ORACLE_DECLINED(reason): ...`), which the
+        // optimizer certificate reports as a diagnostic.
         let gradient_oracle_requested = gradient_oracle_control.resolve(policy.gradient_oracle);
-        let use_gradient_oracle = gradient_oracle_requested && {
+        let gradient_oracle_declined: Option<String> = if gradient_oracle_requested {
             let mut rw = reterms_work.borrow_mut();
             let mut lw = l_blocks_work.borrow_mut();
-            matches!(
-                Self::profiled_objective_and_gradient_from_parts(
-                    &a_blocks,
-                    &mut lw,
-                    &mut rw,
-                    &self.optsum.initial,
-                    dims,
-                    is_reml,
-                    fixed_sigma,
-                    cholesky_zero_pad_tolerance,
-                ),
-                Ok(Some(_))
-            )
+            let probe = Self::profiled_objective_and_gradient_from_parts(
+                &a_blocks,
+                &mut lw,
+                &mut rw,
+                &self.optsum.initial,
+                dims,
+                is_reml,
+                fixed_sigma,
+                cholesky_zero_pad_tolerance,
+            );
+            match probe {
+                Ok(Some(_)) => None,
+                Ok(None) => Some("start_point_not_evaluable".to_string()),
+                Err(_) => {
+                    let sizes: Vec<usize> = rw.iter().map(|re| re.n_ranef()).collect();
+                    let entries = super::gradient::selected_inverse_dense_entries(&lw, &sizes);
+                    let limit = super::gradient::blocked_gradient_max_dense_entries();
+                    Some(if entries > limit {
+                        format!("selected_inverse_entries={entries}>{limit}")
+                    } else {
+                        "gradient_not_formed".to_string()
+                    })
+                }
+            }
+        } else {
+            None
         };
+        let use_gradient_oracle = gradient_oracle_requested && gradient_oracle_declined.is_none();
         let mut oracle_fn = |theta: &[f64]| -> Result<(f64, Vec<f64>)> {
             let evaluated = {
                 let mut rw = reterms_work.borrow_mut();
@@ -3455,10 +3476,10 @@ impl LinearMixedModel {
                 (result.x, result.fmin)
             };
         let base_status = Self::trust_bq_status_label(result.stop_reason);
-        let base_status = if use_gradient_oracle {
-            format!("GRADIENT_ORACLE: {base_status}")
-        } else {
-            base_status
+        let base_status = match (&gradient_oracle_declined, use_gradient_oracle) {
+            (_, true) => format!("GRADIENT_ORACLE: {base_status}"),
+            (Some(reason), false) => format!("GRADIENT_ORACLE_DECLINED({reason}): {base_status}"),
+            (None, false) => base_status,
         };
         let return_value = Some(match &ladder_label {
             Some(label) => format!("START_LADDER({label}): {base_status}"),
