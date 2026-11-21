@@ -3402,6 +3402,30 @@ mod tests {
         assert_eq!(caveat.severity, DiagnosticSeverity::Warning);
         assert!(caveat.message.contains("fit status stands"));
 
+        // A near-flat free direction (eigenvalue below the Hessian
+        // tolerance) would inflate the decrement by 1/λ; the relative gate
+        // decides instead, and the caveat says why.
+        let mut flat = fresh();
+        flat.apply_derivative_evidence_with_materiality(
+            OptimizerDerivativeEvidence {
+                method: EvidenceMethod::Exact,
+                hessian_method: EvidenceMethod::FiniteDifference,
+                gradient: vec![0.03, 0.03],
+                hessian: Some(DMatrix::from_diagonal(&DVector::from_vec(vec![2.0, 1e-7]))),
+            },
+            0.024,
+            1e-5,
+            Some(5.9e-4),
+        );
+        assert_eq!(flat.status, FitStatus::ConvergedInterior);
+        let caveat = flat
+            .diagnostics
+            .iter()
+            .find(|d| d.code == DiagnosticCode::OptimizerNonconvergence)
+            .expect("a failed gradient check must be reported");
+        assert!(!caveat.payload.contains_key("newton_decrement"));
+        assert_eq!(caveat.payload.get("status_stands"), Some(&serde_json::json!(true)));
+
         // A passing gradient adds no caveat.
         let mut clean = fresh();
         clean.apply_derivative_evidence_with_materiality(evidence(0.01), 0.024, 1e-5, Some(5.9e-4));
@@ -5074,7 +5098,7 @@ impl OptimizerCertificate {
         let mut gradient_check_failed = false;
         let decrement = objective_tolerance.and_then(|tolerance| {
             let hessian = derivatives.hessian.as_ref()?;
-            free_newton_decrement(&derivatives.gradient, hessian, &boundary_mask)
+            free_newton_decrement(&derivatives.gradient, hessian, &boundary_mask, hessian_tolerance)
                 .map(|gap| (gap, tolerance))
         });
         // Whether a failed gradient check of magnitude `norm` is material.
@@ -5332,6 +5356,9 @@ impl OptimizerCertificate {
                 "treat the estimates as objective-equivalent to the optimum, not as a certified stationary point".to_string(),
                 "restart from the fitted parameters or compare an alternate optimizer (verify_convergence, where the host exposes it) if a stationary point matters".to_string(),
             ]);
+            diagnostic
+                .payload
+                .insert("status_stands".to_string(), serde_json::json!(true));
             diagnostic.payload.insert(
                 "derivative_failures".to_string(),
                 serde_json::json!(failures),
@@ -5669,12 +5696,15 @@ fn optimizer_budget_exhausted(optsum: &OptSummary) -> bool {
 
 /// `½ g_Fᵀ H_FF⁻¹ g_F` over the coordinates not flagged in `boundary_mask`:
 /// the objective decrease a Newton step on the free subspace predicts.
-/// `None` when the free block is not positive definite (the quadratic model
-/// then predicts no finite decrease) or any reading is non-finite.
+/// `None` when the symmetrized free block has an eigenvalue at or below
+/// `hessian_tolerance` (the rank check's threshold: along a near-flat
+/// direction the quadratic model's prediction is not trustworthy and would
+/// be inflated by `1/λ`), or any reading is non-finite.
 fn free_newton_decrement(
     gradient: &[f64],
     hessian: &DMatrix<f64>,
     boundary_mask: &[bool],
+    hessian_tolerance: f64,
 ) -> Option<f64> {
     let free: Vec<usize> = (0..gradient.len())
         .filter(|&index| !boundary_mask[index])
@@ -5685,9 +5715,19 @@ fn free_newton_decrement(
     if hessian.nrows() != gradient.len() || hessian.ncols() != gradient.len() {
         return None;
     }
-    let block = DMatrix::from_fn(free.len(), free.len(), |r, c| hessian[(free[r], free[c])]);
+    let block = DMatrix::from_fn(free.len(), free.len(), |r, c| {
+        0.5 * (hessian[(free[r], free[c])] + hessian[(free[c], free[r])])
+    });
     let g = nalgebra::DVector::from_iterator(free.len(), free.iter().map(|&i| gradient[i]));
     if !block.iter().chain(g.iter()).all(|value| value.is_finite()) {
+        return None;
+    }
+    let min_eigenvalue = SymmetricEigen::new(block.clone())
+        .eigenvalues
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min);
+    if !(min_eigenvalue > hessian_tolerance) {
         return None;
     }
     let cholesky = block.cholesky()?;
