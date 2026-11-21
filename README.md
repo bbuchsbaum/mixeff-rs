@@ -139,9 +139,17 @@ numerical output.
 | --- | :---: | --- |
 | `nlopt` | ✓ | NLopt BOBYQA/NEWUOA optimizers, the fastest path. Needs CMake and a C/C++ toolchain. |
 | `prima` | | Routes bounded LMM optimization through the PRIMA C library. Set `PRIMA_DIR` if it is installed under a custom prefix. |
-| `faer-backend` | | Experimental: faster blocked-Cholesky updates via [faer](https://crates.io/crates/faer) on crossed designs. Results differ at rounding level; benchmark before adopting. |
+| `faer-backend` | | Experimental: also routes the remaining small off-diagonal blocked-Cholesky updates through [faer](https://crates.io/crates/faer). Large dense blocks use faer regardless (see below). Results differ at rounding level. |
 | `rayon` | | Opt-in parallel execution for batch fitting of many responses. |
 | `unstable-internals` | | Exposes internal modules (`compiler`, `datasets`, `pathology`). Not covered by SemVer. |
+
+Dense blocks larger than 256 columns (the second grouping factor of a crossed
+design, for example) are always factored with [faer](https://crates.io/crates/faer),
+in parallel on native targets and sequentially on `wasm32`. Smaller blocks keep
+the crate's own kernels. Set `MIXEFF_NUM_THREADS` before the first fit to cap the
+threads (`1` is sequential; unset or `0` uses rayon's default, which honours
+`RAYON_NUM_THREADS`). Hosts with a core limit, such as an R package under
+`R CMD check`, should set it to `2` or less.
 
 With `default-features = false`, the crate builds in pure Rust and uses its
 own TrustBQ optimizer. This suits restricted build systems and binary
@@ -153,7 +161,7 @@ inherit the defaults:
 | Rust application | default (`nlopt`) |
 | Restricted or pure-Rust builds | `default-features = false` |
 | R package, CRAN build | `default-features = false` |
-| R package, performance build | explicit `nlopt`, adding `faer-backend` only after wrapper CI evidence |
+| R package, performance build | explicit `nlopt` |
 
 ## Documentation
 
