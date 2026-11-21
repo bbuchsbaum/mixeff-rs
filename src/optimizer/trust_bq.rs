@@ -1170,23 +1170,22 @@ const FRACTION_TO_BOUNDARY_KEEP: f64 = 0.1;
 /// a step may land exactly on the bound.
 const FRACTION_TO_BOUNDARY_SNAP: f64 = 1e-4;
 
-/// Limit `step` so no masked coordinate loses more than `1 − KEEP` of its
-/// distance to a finite lower bound, except coordinates already within the
-/// snap band.
+/// A step that would put a masked coordinate on (or within the snap band of)
+/// its finite lower bound stops instead at `KEEP` of the current distance.
+/// Steps that stay clear of the band, and coordinates already inside it,
+/// are left alone.
 fn apply_fraction_to_boundary(step: &mut [f64], x: &[f64], lower_bounds: &[f64], mask: &[bool]) {
     for i in 0..step.len() {
         let lower = lower_bounds[i];
         if !mask.get(i).copied().unwrap_or(false) || !lower.is_finite() || step[i] >= 0.0 {
             continue;
         }
+        let band = FRACTION_TO_BOUNDARY_SNAP * lower.abs().max(1.0);
         let room = x[i] - lower;
-        if room <= FRACTION_TO_BOUNDARY_SNAP * lower.abs().max(1.0) {
+        if room <= band || x[i] + step[i] - lower > band {
             continue;
         }
-        let limit = -(1.0 - FRACTION_TO_BOUNDARY_KEEP) * room;
-        if step[i] < limit {
-            step[i] = limit;
-        }
+        step[i] = -(1.0 - FRACTION_TO_BOUNDARY_KEEP) * room;
     }
 }
 
