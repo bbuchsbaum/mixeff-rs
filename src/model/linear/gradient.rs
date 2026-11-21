@@ -1210,6 +1210,30 @@ impl ProfiledGradientInputs<'_> {
                 if i == j {
                     continue;
                 }
+                // A sparse cross block (crossed designs) contracts over its
+                // stored entries only, with Λ_i applied per entry.
+                let (stored, stored_is_ji) = if i > j {
+                    (&self.a_blocks[block_index(i, j)], false)
+                } else {
+                    (&self.a_blocks[block_index(j, i)], true)
+                };
+                if let MatrixBlock::Sparse(csc) = stored {
+                    let (z, z_rows_are_j) = if j > i {
+                        (&selected.dense[j][i], true)
+                    } else {
+                        (&selected.dense[i][j], false)
+                    };
+                    add_sparse_cross_logdet_blocks(
+                        &mut d,
+                        csc,
+                        stored_is_ji,
+                        z,
+                        z_rows_are_j,
+                        &re_i.lambda,
+                        s,
+                    );
+                    continue;
+                }
                 let mut b = if i > j {
                     self.a_blocks[block_index(i, j)].as_dense()
                 } else {
@@ -1238,6 +1262,63 @@ impl ProfiledGradientInputs<'_> {
             result.push(d);
         }
         result
+    }
+}
+
+/// `D_ℓ[a, b] += Σ_r W[ℓ·s + a, r] · S[r, ℓ·s + b]` over the stored entries
+/// of a sparse cross block, where `S = S_ij` (`q_i × q_j`) and
+/// `W = Z_ji · blockdiag(Λ_iᵀ)`, i.e. `W[row, r] = Σ_m Z_ji[row, base(r) + m] ·
+/// Λ_i[r mod s_i, m]`. This equals the dense
+/// `Z_ji[ℓ rows, ·] (Λ_iᵀ S_ij)[·, ℓ cols]` product without densifying `S`.
+///
+/// `stored_is_ji` says the CSC holds `A_ji = S_ijᵀ` (rows over term `j`);
+/// `z_rows_are_j` says `z` is `Z_ji` (rows over `j`) rather than `Z_ij`.
+fn add_sparse_cross_logdet_blocks(
+    d: &mut [f64],
+    csc: &nalgebra_sparse::CscMatrix<f64>,
+    stored_is_ji: bool,
+    z: &DMatrix<f64>,
+    z_rows_are_j: bool,
+    lambda_i: &DMatrix<f64>,
+    s: usize,
+) {
+    let si = lambda_i.nrows();
+    let ss = s * s;
+    let offsets = csc.col_offsets();
+    let rows = csc.row_indices();
+    let values = csc.values();
+    for col in 0..csc.ncols() {
+        for idx in offsets[col]..offsets[col + 1] {
+            let value = values[idx];
+            if value == 0.0 {
+                continue;
+            }
+            let (r_i, c_j) = if stored_is_ji {
+                (col, rows[idx])
+            } else {
+                (rows[idx], col)
+            };
+            let level = c_j / s;
+            let b = c_j % s;
+            let r_local = r_i % si;
+            let base = r_i - r_local;
+            for a in 0..s {
+                let row_j = level * s + a;
+                let mut acc = 0.0;
+                for m in 0..si {
+                    let lam = lambda_i[(r_local, m)];
+                    if lam != 0.0 {
+                        let z_value = if z_rows_are_j {
+                            z[(row_j, base + m)]
+                        } else {
+                            z[(base + m, row_j)]
+                        };
+                        acc += z_value * lam;
+                    }
+                }
+                d[level * ss + a * s + b] += acc * value;
+            }
+        }
     }
 }
 

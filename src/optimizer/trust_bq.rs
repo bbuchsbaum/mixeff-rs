@@ -80,6 +80,31 @@ pub(crate) struct TrustBqOptions {
     /// current centre is at most `gradient_tolerance_rel · max(1, |f|)`.
     /// `0` (the default) disables the first-order stop.
     pub(crate) gradient_tolerance_rel: f64,
+    /// Gradient-oracle loop only: coordinates (`true` entries) on which a
+    /// step may remove at most `1 − FRACTION_TO_BOUNDARY_KEEP` of the
+    /// distance to the lower bound, unless that distance is already within
+    /// `FRACTION_TO_BOUNDARY_SNAP`; at the stop those coordinates are tried
+    /// on their bound. Meant for coordinates the objective is even in (a
+    /// scalar or zero-correlation variance, the last diagonal entry of a
+    /// covariance factor): landing exactly on the bound zeroes such a
+    /// coordinate's gradient and cross-Hessian row, and the trust-region step
+    /// can then never leave it. Empty disables the guard.
+    pub(crate) fraction_to_boundary: Vec<bool>,
+    /// Gradient-oracle loop only: when the trust radius falls to
+    /// `final_radius` while the projected gradient is still above the
+    /// loosened first-order band, re-seed the Hessian at the centre and
+    /// reopen the radius instead of stopping (at most
+    /// `MAX_RESEEDS_AT_RADIUS_STOP` times). A collapsed radius with a large
+    /// exact gradient means the secant model, not the point, has failed.
+    pub(crate) reseed_at_radius_stop: bool,
+    /// Gradient-oracle loop only: `(abs, rel)` of the caller's objective
+    /// tolerance. When set, objective-based stops (FTOL, stagnation) are
+    /// taken only once the projected gradient is within the matching
+    /// stationarity band `max(sqrt(max(abs, rel·|f|)), 1e-4)`, the band the
+    /// LMM optimizer certificate applies afterwards; and a radius collapse
+    /// above that band re-seeds instead of stopping (see
+    /// `reseed_at_radius_stop`). Unset keeps the loosened first-order band.
+    pub(crate) stationarity_objective_tolerance: Option<(f64, f64)>,
 }
 
 impl Default for TrustBqOptions {
@@ -104,6 +129,9 @@ impl Default for TrustBqOptions {
             rejected_step_model_reuse: 0,
             accepted_step_model_reuse: 0,
             gradient_tolerance_rel: 0.0,
+            fraction_to_boundary: Vec::new(),
+            reseed_at_radius_stop: false,
+            stationarity_objective_tolerance: None,
         }
     }
 }
@@ -1054,8 +1082,183 @@ const RESEED_RADIUS_CONTRACTION: f64 = 16.0;
 /// secant model says nothing about the optimum when the gradient is still
 /// large.
 const OBJECTIVE_STOP_GRADIENT_LOOSENING: f64 = 1e3;
+/// Projected-gradient band under which the gradient loop may take an
+/// objective-based stop, and above which a radius collapse re-seeds.
+fn gradient_stop_band(options: &TrustBqOptions, f: f64) -> f64 {
+    match options.stationarity_objective_tolerance {
+        Some((abs, rel)) => abs.max(rel * f.abs()).sqrt().max(1e-4),
+        None if options.gradient_tolerance_rel > 0.0 => {
+            OBJECTIVE_STOP_GRADIENT_LOOSENING * options.gradient_tolerance_rel * f.abs().max(1.0)
+        }
+        None => f64::INFINITY,
+    }
+}
+
+/// Whether the centre is stationary enough for an objective-based stop:
+/// the projected gradient is within [`gradient_stop_band`] and, when the
+/// caller supplied its objective tolerance, the model's Newton decrement
+/// `½ g_Fᵀ H_FF⁻¹ g_F` over the free coordinates is within it too. The
+/// decrement scales with the caller's tolerance (an absolute gradient band
+/// cannot: a tight `ftol` needs a gradient far below any fixed floor), and it
+/// is the materiality test the LMM certificate applies. A secant Hessian
+/// that is not positive definite on the free set leaves the gradient band
+/// alone in charge.
+fn stationary_for_objective_stop(
+    options: &TrustBqOptions,
+    x: &[f64],
+    f: f64,
+    g: &[f64],
+    hessian: &DMatrix<f64>,
+    lower_bounds: &[f64],
+    upper_bounds: &[f64],
+) -> bool {
+    if projected_gradient_norm(x, g, lower_bounds, upper_bounds) > gradient_stop_band(options, f) {
+        return false;
+    }
+    let Some((abs, rel)) = options.stationarity_objective_tolerance else {
+        return true;
+    };
+    let free: Vec<usize> = (0..x.len())
+        .filter(|&i| {
+            let at_lower = lower_bounds[i].is_finite() && x[i] <= lower_bounds[i] && g[i] >= 0.0;
+            let at_upper = upper_bounds[i].is_finite() && x[i] >= upper_bounds[i] && g[i] <= 0.0;
+            !(at_lower || at_upper)
+        })
+        .collect();
+    if free.is_empty() {
+        return true;
+    }
+    let block = DMatrix::from_fn(free.len(), free.len(), |r, c| {
+        0.5 * (hessian[(free[r], free[c])] + hessian[(free[c], free[r])])
+    });
+    let gradient = DVector::from_iterator(free.len(), free.iter().map(|&i| g[i]));
+    match block.cholesky() {
+        Some(cholesky) => {
+            let decrement = 0.5 * gradient.dot(&cholesky.solve(&gradient));
+            decrement <= abs.max(rel * f.abs())
+        }
+        None => true,
+    }
+}
+
+/// Re-seeds allowed by `TrustBqOptions::reseed_at_radius_stop` per run.
+const MAX_RESEEDS_AT_RADIUS_STOP: usize = 2;
+
+/// Whether a collapsed trust radius should re-seed the Hessian and continue
+/// rather than stop (`TrustBqOptions::reseed_at_radius_stop`).
+#[allow(clippy::too_many_arguments)]
+fn reseed_instead_of_radius_stop(
+    options: &TrustBqOptions,
+    reseeds_so_far: usize,
+    fevals: usize,
+    x: &[f64],
+    f: f64,
+    g: &[f64],
+    hessian: &DMatrix<f64>,
+    lower_bounds: &[f64],
+    upper_bounds: &[f64],
+) -> bool {
+    options.reseed_at_radius_stop
+        && reseeds_so_far < MAX_RESEEDS_AT_RADIUS_STOP
+        && fevals + x.len() + 1 < options.max_evaluations
+        && !stationary_for_objective_stop(options, x, f, g, hessian, lower_bounds, upper_bounds)
+}
+/// Fraction of a coordinate's distance to its lower bound that a
+/// fraction-to-boundary step keeps (`TrustBqOptions::fraction_to_boundary`).
+const FRACTION_TO_BOUNDARY_KEEP: f64 = 0.1;
+/// Distance to the lower bound (relative to `max(1, |bound|)`) within which
+/// a step may land exactly on the bound.
+const FRACTION_TO_BOUNDARY_SNAP: f64 = 1e-4;
+
+/// Limit `step` so no masked coordinate loses more than `1 − KEEP` of its
+/// distance to a finite lower bound, except coordinates already within the
+/// snap band.
+fn apply_fraction_to_boundary(step: &mut [f64], x: &[f64], lower_bounds: &[f64], mask: &[bool]) {
+    for i in 0..step.len() {
+        let lower = lower_bounds[i];
+        if !mask.get(i).copied().unwrap_or(false) || !lower.is_finite() || step[i] >= 0.0 {
+            continue;
+        }
+        let room = x[i] - lower;
+        if room <= FRACTION_TO_BOUNDARY_SNAP * lower.abs().max(1.0) {
+            continue;
+        }
+        let limit = -(1.0 - FRACTION_TO_BOUNDARY_KEEP) * room;
+        if step[i] < limit {
+            step[i] = limit;
+        }
+    }
+}
 
 pub(crate) fn minimize_with_gradient_and_progress<F, P>(
+    initial: &[f64],
+    lower_bounds: &[f64],
+    upper_bounds: &[f64],
+    options: TrustBqOptions,
+    mut oracle: F,
+    progress: P,
+) -> Result<TrustBqResult>
+where
+    F: FnMut(&[f64]) -> Result<(f64, Vec<f64>)>,
+    P: FnMut(&TrustBqProgress<'_>) -> Result<bool>,
+{
+    let snap_mask = options.fraction_to_boundary.clone();
+    let max_evaluations = options.max_evaluations;
+    let mut result = minimize_with_gradient_loop(
+        initial,
+        lower_bounds,
+        upper_bounds,
+        options,
+        &mut oracle,
+        progress,
+    )?;
+    if !snap_mask.is_empty() && result.fevals < max_evaluations {
+        snap_near_bound_coordinates(&mut result, lower_bounds, &snap_mask, &mut oracle)?;
+    }
+    Ok(result)
+}
+
+/// Fraction-to-boundary keeps a coordinate whose optimum is exactly on its
+/// bound strictly inside it (an even objective's gradient vanishes there in
+/// proportion to the distance, so the approach is geometric). At the stop,
+/// try every coordinate within the snap band on its bound: one evaluation,
+/// kept when the objective is no worse up to roundoff. A small interior
+/// optimum stays put because snapping it raises the objective.
+fn snap_near_bound_coordinates<F>(
+    result: &mut TrustBqResult,
+    lower_bounds: &[f64],
+    mask: &[bool],
+    oracle: &mut F,
+) -> Result<()>
+where
+    F: FnMut(&[f64]) -> Result<(f64, Vec<f64>)>,
+{
+    let mut snapped = result.x.clone();
+    let mut changed = false;
+    for ((value, &lower), &masked) in snapped.iter_mut().zip(lower_bounds).zip(mask) {
+        if masked
+            && lower.is_finite()
+            && *value > lower
+            && *value - lower <= FRACTION_TO_BOUNDARY_SNAP * lower.abs().max(1.0)
+        {
+            *value = lower;
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(());
+    }
+    let (snapped_f, _) = oracle(&snapped)?;
+    result.fevals += 1;
+    let roundoff = 64.0 * f64::EPSILON * (1.0 + result.fmin.abs());
+    if snapped_f.is_finite() && snapped_f <= result.fmin + roundoff {
+        result.x = snapped;
+        result.fmin = snapped_f;
+    }
+    Ok(())
+}
+
+fn minimize_with_gradient_loop<F, P>(
     initial: &[f64],
     lower_bounds: &[f64],
     upper_bounds: &[f64],
@@ -1107,6 +1310,7 @@ where
     let mut consecutive_rejections = 0usize;
     let mut consecutive_poor_accepts = 0usize;
     let mut radius_at_seed = radius;
+    let mut reseeds_at_radius_stop = 0usize;
     // The last seed count is reported through `last_model_sample_count`.
     let last_model_sample_count = n;
 
@@ -1121,6 +1325,45 @@ where
                 stop_reason: TrustBqStopReason::MaxEvaluations,
                 last_model_sample_count,
             });
+        }
+        if radius <= options.final_radius
+            && reseed_instead_of_radius_stop(
+                &options,
+                reseeds_at_radius_stop,
+                fevals,
+                &x,
+                f,
+                &g,
+                &hessian,
+                lower_bounds,
+                upper_bounds,
+            )
+        {
+            // Re-centre on the best point first (it may be a trial that
+            // improved the objective without passing the ratio test).
+            if best_x != x {
+                let (best_f_eval, best_g) = evaluate_oracle(&mut oracle, &best_x, &mut fevals)?;
+                x.clone_from(&best_x);
+                f = best_f_eval;
+                g = best_g;
+            }
+            hessian = seed_hessian_from_gradient(
+                &x,
+                &g,
+                lower_bounds,
+                upper_bounds,
+                options.max_evaluations,
+                &mut oracle,
+                &mut fevals,
+                &mut best_x,
+                &mut best_f,
+            )?;
+            reseeds_at_radius_stop += 1;
+            radius = ftol_radius;
+            radius_at_seed = radius;
+            consecutive_rejections = 0;
+            consecutive_poor_accepts = 0;
+            continue;
         }
         if radius <= options.final_radius {
             return Ok(TrustBqResult {
@@ -1159,8 +1402,15 @@ where
         let gradient_band = options.gradient_tolerance_rel * f.abs().max(1.0);
         // Objective-based stops below are gated on a loosened version of
         // the same band (no gate when the first-order stop is disabled).
-        let gradient_allows_objective_stop = options.gradient_tolerance_rel <= 0.0
-            || projected <= OBJECTIVE_STOP_GRADIENT_LOOSENING * gradient_band;
+        let gradient_allows_objective_stop = stationary_for_objective_stop(
+            &options,
+            &x,
+            f,
+            &g,
+            &hessian,
+            lower_bounds,
+            upper_bounds,
+        );
         if options.gradient_tolerance_rel > 0.0 && x == best_x && projected <= gradient_band {
             return Ok(TrustBqResult {
                 x: best_x,
@@ -1219,11 +1469,41 @@ where
             hessian: hessian.clone(),
             sample_count: 0,
         };
-        let step = trust_region_step(&model, &x, lower_bounds, upper_bounds, radius, true);
+        let mut step = trust_region_step(&model, &x, lower_bounds, upper_bounds, radius, true);
+        if !options.fraction_to_boundary.is_empty() {
+            apply_fraction_to_boundary(&mut step, &x, lower_bounds, &options.fraction_to_boundary);
+        }
         let step_norm = norm(&step);
-        if step_norm <= options.final_radius {
+        // With an exact gradient a step shorter than `final_radius` is still
+        // worth taking while the centre fails the stationarity test: the
+        // radius floor (no finer than 1e-5 for LMMs) otherwise discards the
+        // last Newton steps a tight objective tolerance needs.
+        let short_step_allowed = options.stationarity_objective_tolerance.is_some()
+            && step_norm > MIN_STEP
+            && !stationary_for_objective_stop(
+                &options,
+                &x,
+                f,
+                &g,
+                &hessian,
+                lower_bounds,
+                upper_bounds,
+            );
+        if step_norm <= options.final_radius && !short_step_allowed {
             radius *= options.shrink_factor;
-            if radius <= options.final_radius {
+            if radius <= options.final_radius
+                && !reseed_instead_of_radius_stop(
+                    &options,
+                    reseeds_at_radius_stop,
+                    fevals,
+                    &x,
+                    f,
+                    &g,
+                    &hessian,
+                    lower_bounds,
+                    upper_bounds,
+                )
+            {
                 return Ok(TrustBqResult {
                     x: best_x,
                     fmin: best_f,
@@ -1247,7 +1527,10 @@ where
             .map(|(xi, si)| xi + si)
             .collect::<Vec<_>>();
         project_in_place(&mut trial, lower_bounds, upper_bounds);
-        if distance(&x, &trial) <= options.final_radius {
+        let trial_distance = distance(&x, &trial);
+        if trial_distance <= MIN_STEP
+            || (trial_distance <= options.final_radius && !short_step_allowed)
+        {
             radius *= options.shrink_factor;
             continue;
         }
@@ -1299,12 +1582,15 @@ where
                 consecutive_poor_accepts = 0;
             }
             let objective_tol = options.ftol_abs + options.ftol_rel * old_f.abs().max(1.0);
-            let new_projected = projected_gradient_norm(&x, &g, lower_bounds, upper_bounds);
-            let new_gradient_allows_stop = options.gradient_tolerance_rel <= 0.0
-                || new_projected
-                    <= OBJECTIVE_STOP_GRADIENT_LOOSENING
-                        * options.gradient_tolerance_rel
-                        * f.abs().max(1.0);
+            let new_gradient_allows_stop = stationary_for_objective_stop(
+                &options,
+                &x,
+                f,
+                &g,
+                &hessian,
+                lower_bounds,
+                upper_bounds,
+            );
             if actual_reduction.abs() <= objective_tol
                 && (!options.ftol_requires_local_radius || radius <= ftol_radius)
                 && new_gradient_allows_stop

@@ -1816,6 +1816,24 @@ impl LinearMixedModel {
         Ok(None)
     }
 
+    /// Per θ coordinate: a diagonal entry of Λ with no free entry below it
+    /// in its column (a scalar or zero-correlation variance, or the last
+    /// diagonal entry of a covariance factor). ΛΛᵀ, and so the objective,
+    /// depends on such a coordinate only through its square, so its gradient
+    /// and cross-Hessian row vanish on the bound.
+    pub(super) fn even_variance_coordinates(&self) -> Vec<bool> {
+        self.parmap
+            .iter()
+            .map(|&(term, row, col)| {
+                row == col
+                    && !self
+                        .parmap
+                        .iter()
+                        .any(|&(t, r, c)| t == term && c == col && r > row)
+            })
+            .collect()
+    }
+
     pub(super) fn independent_variance_parameters(&self) -> bool {
         !self.parmap.is_empty() && self.parmap.iter().all(|&(_, row, col)| row == col)
     }
@@ -3387,6 +3405,12 @@ impl LinearMixedModel {
         // crossed rows.
         let full_stage_max_evaluations = policy.max_evaluations;
 
+        let even_variance_coordinates = self.even_variance_coordinates();
+        // The certificate's objective tolerance (`derivative_certificate_tolerances`).
+        let stationarity_objective_tolerance = (
+            self.optsum.ftol_abs.max(self.optsum.ftol_zero_abs),
+            self.optsum.ftol_rel.max(0.0),
+        );
         let mut certificate_stop = TrustBqCertificateStopState::new(
             n_theta,
             full_stage_max_evaluations,
@@ -3403,6 +3427,13 @@ impl LinearMixedModel {
                     Some(full_stage_max_evaluations),
                     &mut last_progress,
                 )?;
+            }
+            // The gradient route has the exact gradient at every iterate and
+            // its own stationarity-gated stops; the in-loop certificate's
+            // finite-difference KKT pass (2d + 1 objective evaluations that
+            // the evaluation count never sees) only slows it down (GH #24).
+            if use_gradient_oracle {
+                return Ok(false);
             }
             if !certificate_stop.should_check(progress) {
                 return Ok(false);
@@ -3437,6 +3468,15 @@ impl LinearMixedModel {
             rejected_step_model_reuse: policy.rejected_step_model_reuse,
             accepted_step_model_reuse: policy.accepted_step_model_reuse,
             gradient_tolerance_rel: policy.gradient_tolerance_rel,
+            // Gradient route (GH #24): keep small variances off their bound
+            // (where an even objective has a zero gradient the step can never
+            // leave), stop only at points the optimizer certificate's
+            // stationarity check accepts, and re-seed rather than stop when
+            // the radius collapses short of that. The interpolation loop
+            // ignores these.
+            fraction_to_boundary: even_variance_coordinates,
+            reseed_at_radius_stop: true,
+            stationarity_objective_tolerance: Some(stationarity_objective_tolerance),
             ..TrustBqOptions::default()
         };
         let result = if use_gradient_oracle {
@@ -3469,8 +3509,12 @@ impl LinearMixedModel {
 
         let logged_best_theta = best_theta.into_inner();
         let logged_best_fmin = best_fmin.get();
+        // Prefer the optimizer's own point unless a logged evaluation beat
+        // it by more than roundoff: the gradient route may return a point
+        // snapped onto a bound that ties its interior neighbour.
+        let roundoff = 64.0 * f64::EPSILON * (1.0 + result.fmin.abs());
         let (final_theta, final_fmin) =
-            if logged_best_fmin.is_finite() && logged_best_fmin <= result.fmin {
+            if logged_best_fmin.is_finite() && logged_best_fmin < result.fmin - roundoff {
                 (logged_best_theta, logged_best_fmin)
             } else {
                 (result.x, result.fmin)
