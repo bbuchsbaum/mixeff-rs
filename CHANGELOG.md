@@ -36,6 +36,18 @@ vs. `unstable-internals` surface inventory.
   entries, so crossed designs of a few thousand random effects per term keep
   the analytic gradient.
 
+### Fixed (numerical)
+
+- Large crossed LMMs whose analytic gradient was declined by the old
+  selected-inverse guard, or whose gradient-route fit stopped on an
+  accepted-step tolerance short of stationarity, now reach the optimum
+  (GH #24). Before/after on the issue's 272 × 500 design,
+  `(1 + x1 + … + x5 || sid) + (1 + x1 + x2 + x3 || item)`, REML: objective
+  58926.062972 (free gradient 1.60, tolerance 0.024, reported
+  `converged_interior`) → 58926.062777 (free gradient 0.005), matching
+  MixedModels.jl. Fits that previously converged are unchanged within the
+  parity band; every parity fixture and bench-harness objective gate passes.
+
 ### Fixed
 
 - A declined gradient oracle is no longer silent: the stop label reads
