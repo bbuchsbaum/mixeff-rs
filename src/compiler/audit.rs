@@ -3319,6 +3319,126 @@ mod tests {
             .any(|diagnostic| diagnostic.code == DiagnosticCode::OptimizerNonconvergence));
     }
 
+    /// GH #24: with an objective tolerance the Newton decrement, not
+    /// `|g| / |objective|`, decides whether a failed gradient check rejects
+    /// convergence, and a failure that leaves the status standing is
+    /// reported.
+    #[test]
+    fn newton_decrement_decides_gradient_failure_materiality() {
+        let params = vec![0.23, 0.14];
+        let lower_bounds = vec![0.0, 0.0];
+        let mut optsum = OptSummary::new(params.clone());
+        optsum.return_value =
+            "GRADIENT_ORACLE_DECLINED(selected_inverse_entries=20000000>16777216): FTOL_REACHED"
+                .to_string();
+        optsum.finitial = 60_000.0;
+        // A large deviance: |g| / |f| stays below 1e-4 for both gradients.
+        optsum.fmin = 58_926.0;
+        optsum.feval = 383;
+        optsum.final_params = params.clone();
+        let fresh = || {
+            OptimizerCertificate::from_opt_summary_with_context(
+                &optsum,
+                &params,
+                &lower_bounds,
+                Some(43_520),
+            )
+        };
+        let evidence = |g: f64| OptimizerDerivativeEvidence {
+            method: EvidenceMethod::FiniteDifference,
+            hessian_method: EvidenceMethod::FiniteDifference,
+            gradient: vec![g, 0.0],
+            hessian: Some(DMatrix::identity(2, 2) * 2.0),
+        };
+
+        let first = fresh();
+        assert!(first
+            .diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::OptimizerRouteFallback
+                && d.payload.get("reason")
+                    == Some(&serde_json::json!(
+                        "selected_inverse_entries=20000000>16777216"
+                    ))));
+
+        // ½ g²/h = 1.6²/4 = 0.64 > 5.9e-4: material although |g|/|f| ≈ 2.7e-5.
+        let mut material = fresh();
+        material.apply_derivative_evidence_with_materiality(
+            evidence(1.6),
+            0.024,
+            1e-5,
+            Some(5.9e-4),
+        );
+        assert_eq!(material.status, FitStatus::NotOptimized);
+        let rejection = material
+            .diagnostics
+            .iter()
+            .find(|d| d.code == DiagnosticCode::OptimizerNonconvergence)
+            .unwrap();
+        assert_eq!(
+            rejection.payload.get("newton_decrement"),
+            Some(&serde_json::json!(0.64))
+        );
+
+        // The legacy rule keeps that fit converged (and says nothing).
+        let mut legacy = fresh();
+        legacy.apply_derivative_evidence(evidence(1.6), 0.024, 1e-5);
+        assert_eq!(legacy.status, FitStatus::ConvergedInterior);
+
+        // ½ · 0.03² / 2 = 2.25e-4 < 5.9e-4: status stands, with a warning.
+        let mut immaterial = fresh();
+        immaterial.apply_derivative_evidence_with_materiality(
+            evidence(0.03),
+            0.024,
+            1e-5,
+            Some(5.9e-4),
+        );
+        assert_eq!(immaterial.status, FitStatus::ConvergedInterior);
+        let caveat = immaterial
+            .diagnostics
+            .iter()
+            .find(|d| d.code == DiagnosticCode::OptimizerNonconvergence)
+            .expect("a failed gradient check must be reported");
+        assert_eq!(caveat.severity, DiagnosticSeverity::Warning);
+        assert!(caveat.message.contains("fit status stands"));
+
+        // A near-flat free direction (eigenvalue below the Hessian
+        // tolerance) would inflate the decrement by 1/λ; the relative gate
+        // decides instead, and the caveat says why.
+        let mut flat = fresh();
+        flat.apply_derivative_evidence_with_materiality(
+            OptimizerDerivativeEvidence {
+                method: EvidenceMethod::Exact,
+                hessian_method: EvidenceMethod::FiniteDifference,
+                gradient: vec![0.03, 0.03],
+                hessian: Some(DMatrix::from_diagonal(&DVector::from_vec(vec![2.0, 1e-7]))),
+            },
+            0.024,
+            1e-5,
+            Some(5.9e-4),
+        );
+        assert_eq!(flat.status, FitStatus::ConvergedInterior);
+        let caveat = flat
+            .diagnostics
+            .iter()
+            .find(|d| d.code == DiagnosticCode::OptimizerNonconvergence)
+            .expect("a failed gradient check must be reported");
+        assert!(!caveat.payload.contains_key("newton_decrement"));
+        assert_eq!(
+            caveat.payload.get("status_stands"),
+            Some(&serde_json::json!(true))
+        );
+
+        // A passing gradient adds no caveat.
+        let mut clean = fresh();
+        clean.apply_derivative_evidence_with_materiality(evidence(0.01), 0.024, 1e-5, Some(5.9e-4));
+        assert_eq!(clean.status, FitStatus::ConvergedInterior);
+        assert!(!clean
+            .diagnostics
+            .iter()
+            .any(|d| d.code == DiagnosticCode::OptimizerNonconvergence));
+    }
+
     #[test]
     fn unavailable_derivative_probes_do_not_become_nonfinite_measurements() {
         let mut optsum = OptSummary::new(vec![0.5]);
@@ -4645,6 +4765,29 @@ impl OptimizerCertificate {
         let mut checks = Vec::new();
         let mut diagnostics = Vec::new();
 
+        if let Some(reason) = gradient_oracle_decline_reason(&optsum.return_value) {
+            let mut diagnostic = Diagnostic::new(
+                DiagnosticCode::OptimizerRouteFallback,
+                DiagnosticSeverity::Info,
+                DiagnosticStage::Certification,
+                format!(
+                    "analytic-gradient optimizer route was declined ({reason}); the fit used the derivative-free interpolation model"
+                ),
+            )
+            .with_suggested_actions(vec![
+                "expect a looser stationarity guarantee than the gradient route gives; the derivative checks below say whether the stop is stationary".to_string(),
+                "verify convergence (verify_convergence, where the host exposes it) if the derivative checks fail".to_string(),
+            ]);
+            diagnostic
+                .payload
+                .insert("reason".to_string(), serde_json::json!(reason));
+            diagnostic.payload.insert(
+                "return_code".to_string(),
+                serde_json::json!(optsum.return_value),
+            );
+            diagnostics.push(diagnostic);
+        }
+
         if optimizer_ok {
             checks.push(CertificateCheck::NotAssessed {
                 reason: "free-gradient KKT check requires derivative support".to_string(),
@@ -4832,9 +4975,38 @@ impl OptimizerCertificate {
 
     pub fn apply_derivative_evidence(
         &mut self,
+        derivatives: OptimizerDerivativeEvidence,
+        gradient_tolerance: f64,
+        hessian_tolerance: f64,
+    ) {
+        self.apply_derivative_evidence_with_materiality(
+            derivatives,
+            gradient_tolerance,
+            hessian_tolerance,
+            None,
+        );
+    }
+
+    /// [`Self::apply_derivative_evidence`] with the materiality of a failed
+    /// gradient KKT check decided by the Newton decrement.
+    ///
+    /// When `objective_tolerance` is `Some` and the free-coordinate Hessian
+    /// is positive definite, a gradient check that fails its absolute
+    /// tolerance rejects convergence exactly when the estimated remaining
+    /// objective decrease `½ g_Fᵀ H_FF⁻¹ g_F` (free coordinates `F`) exceeds
+    /// `objective_tolerance`. That gap is on the objective's own scale, so
+    /// the verdict does not drift with the number of observations the way
+    /// the `|g| / |objective|` gate does. Without a usable Hessian the
+    /// objective-relative gate decides, as in
+    /// [`Self::apply_derivative_evidence`]. Either way, a failed gradient
+    /// check that leaves the fit status standing is reported as a warning
+    /// diagnostic rather than silently.
+    pub fn apply_derivative_evidence_with_materiality(
+        &mut self,
         mut derivatives: OptimizerDerivativeEvidence,
         gradient_tolerance: f64,
         hessian_tolerance: f64,
+        objective_tolerance: Option<f64>,
     ) {
         if !self.evidence.optimizer_stop.acceptable_stop {
             return;
@@ -4926,14 +5098,30 @@ impl OptimizerCertificate {
         let mut failures = Vec::new();
         let mut convergence_failed = false;
         const MATERIAL_SCALED_GRADIENT_TOLERANCE: f64 = 1.0e-4;
+        let mut gradient_check_failed = false;
+        let decrement = objective_tolerance.and_then(|tolerance| {
+            let hessian = derivatives.hessian.as_ref()?;
+            free_newton_decrement(
+                &derivatives.gradient,
+                hessian,
+                &boundary_mask,
+                hessian_tolerance,
+            )
+            .map(|gap| (gap, tolerance))
+        });
+        // Whether a failed gradient check of magnitude `norm` is material.
+        let gradient_failure_material = |norm: f64| match decrement {
+            Some((gap, tolerance)) => gap > tolerance,
+            None => norm / objective_scale > MATERIAL_SCALED_GRADIENT_TOLERANCE,
+        };
         if free_gradient_norm <= gradient_tolerance {
             self.checks.push(CertificateCheck::FreeGradientOk {
                 tolerance: gradient_tolerance,
                 value: free_gradient_norm,
             });
         } else {
-            convergence_failed =
-                free_gradient_norm / objective_scale > MATERIAL_SCALED_GRADIENT_TOLERANCE;
+            gradient_check_failed = true;
+            convergence_failed = gradient_failure_material(free_gradient_norm);
             let message = format!(
                 "free-gradient norm {free_gradient_norm:.6e} exceeds tolerance {gradient_tolerance:.6e}"
             );
@@ -4953,6 +5141,7 @@ impl OptimizerCertificate {
                 value: boundary_violation_max,
             });
         } else {
+            gradient_check_failed = true;
             convergence_failed |=
                 boundary_violation_max / objective_scale > MATERIAL_SCALED_GRADIENT_TOLERANCE;
             let message = format!(
@@ -5144,6 +5333,53 @@ impl OptimizerCertificate {
                 "derivative_failures".to_string(),
                 serde_json::json!(failures),
             );
+            if let Some((gap, tolerance)) = decrement {
+                diagnostic
+                    .payload
+                    .insert("newton_decrement".to_string(), serde_json::json!(gap));
+                diagnostic.payload.insert(
+                    "objective_tolerance".to_string(),
+                    serde_json::json!(tolerance),
+                );
+            }
+            self.diagnostics.push(diagnostic);
+        } else if gradient_check_failed && objective_tolerance.is_some() {
+            let basis = match decrement {
+                Some((gap, tolerance)) => format!(
+                    "the estimated remaining objective decrease {gap:.3e} is within the objective tolerance {tolerance:.3e}"
+                ),
+                None => format!(
+                    "the gradient is below {MATERIAL_SCALED_GRADIENT_TOLERANCE:e} of the objective's magnitude and no positive-definite Hessian was available to estimate the remaining decrease"
+                ),
+            };
+            let mut diagnostic = Diagnostic::new(
+                DiagnosticCode::OptimizerNonconvergence,
+                DiagnosticSeverity::Warning,
+                DiagnosticStage::Certification,
+                format!(
+                    "derivative check failed its absolute tolerance, but the fit status stands because {basis}"
+                ),
+            )
+            .with_suggested_actions(vec![
+                "treat the estimates as objective-equivalent to the optimum, not as a certified stationary point".to_string(),
+                "restart from the fitted parameters or compare an alternate optimizer (verify_convergence, where the host exposes it) if a stationary point matters".to_string(),
+            ]);
+            diagnostic
+                .payload
+                .insert("status_stands".to_string(), serde_json::json!(true));
+            diagnostic.payload.insert(
+                "derivative_failures".to_string(),
+                serde_json::json!(failures),
+            );
+            if let Some((gap, tolerance)) = decrement {
+                diagnostic
+                    .payload
+                    .insert("newton_decrement".to_string(), serde_json::json!(gap));
+                diagnostic.payload.insert(
+                    "objective_tolerance".to_string(),
+                    serde_json::json!(tolerance),
+                );
+            }
             self.diagnostics.push(diagnostic);
         }
     }
@@ -5464,6 +5700,57 @@ fn optimizer_budget_exhausted(optsum: &OptSummary) -> bool {
     return_value == "MAXEVAL_REACHED"
         || return_value == "MAXTIME_REACHED"
         || (optsum.max_feval > 0 && optsum.feval >= optsum.max_feval)
+}
+
+/// `½ g_Fᵀ H_FF⁻¹ g_F` over the coordinates not flagged in `boundary_mask`:
+/// the objective decrease a Newton step on the free subspace predicts.
+/// `None` when the symmetrized free block has an eigenvalue at or below
+/// `hessian_tolerance` (the rank check's threshold: along a near-flat
+/// direction the quadratic model's prediction is not trustworthy and would
+/// be inflated by `1/λ`), or any reading is non-finite.
+fn free_newton_decrement(
+    gradient: &[f64],
+    hessian: &DMatrix<f64>,
+    boundary_mask: &[bool],
+    hessian_tolerance: f64,
+) -> Option<f64> {
+    let free: Vec<usize> = (0..gradient.len())
+        .filter(|&index| !boundary_mask[index])
+        .collect();
+    if free.is_empty() {
+        return Some(0.0);
+    }
+    if hessian.nrows() != gradient.len() || hessian.ncols() != gradient.len() {
+        return None;
+    }
+    let block = DMatrix::from_fn(free.len(), free.len(), |r, c| {
+        0.5 * (hessian[(free[r], free[c])] + hessian[(free[c], free[r])])
+    });
+    let g = nalgebra::DVector::from_iterator(free.len(), free.iter().map(|&i| gradient[i]));
+    if !block.iter().chain(g.iter()).all(|value| value.is_finite()) {
+        return None;
+    }
+    let min_eigenvalue = SymmetricEigen::new(block.clone())
+        .eigenvalues
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min);
+    if !(min_eigenvalue > hessian_tolerance) {
+        return None;
+    }
+    let cholesky = block.cholesky()?;
+    let step = cholesky.solve(&g);
+    let gap = 0.5 * g.dot(&step);
+    (gap.is_finite() && gap >= 0.0).then_some(gap)
+}
+
+/// The reason inside a `GRADIENT_ORACLE_DECLINED(reason)` stop-label
+/// wrapper, wherever it sits in the label chain.
+fn gradient_oracle_decline_reason(return_value: &str) -> Option<&str> {
+    let (_, rest) = return_value.split_once("GRADIENT_ORACLE_DECLINED(")?;
+    rest.split_once("):")
+        .map(|(reason, _)| reason)
+        .filter(|reason| !reason.is_empty())
 }
 
 fn optimizer_recovery_reason(return_value: &str) -> Option<&str> {

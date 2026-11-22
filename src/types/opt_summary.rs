@@ -622,6 +622,7 @@ pub(crate) fn optimizer_final_status_code(mut status: &str) -> &str {
             "KKT_BOUNDARY_RESTART",
             "START_LADDER",
             "ACTIVE_FACE",
+            "GRADIENT_ORACLE_DECLINED",
             "GRADIENT_ORACLE",
         ]
         .iter()
@@ -936,6 +937,20 @@ mod tests {
         );
         assert_eq!(
             status_of(10, "GRADIENT_ORACLE: MAXEVAL_REACHED"),
+            ConvergenceStatus::BudgetExhausted
+        );
+        assert_eq!(
+            status_of(
+                10,
+                "KKT_BOUNDARY_RESTART(scalar theta[3]): GRADIENT_ORACLE_DECLINED(selected_inverse_entries=20000000>16777216): FTOL_REACHED"
+            ),
+            ConvergenceStatus::Converged
+        );
+        assert_eq!(
+            status_of(
+                10,
+                "GRADIENT_ORACLE_DECLINED(start_point_not_evaluable): MAXEVAL_REACHED"
+            ),
             ConvergenceStatus::BudgetExhausted
         );
     }

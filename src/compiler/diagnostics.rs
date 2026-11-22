@@ -91,6 +91,9 @@ pub enum DiagnosticCode {
     SyntaxExpansion,
     CovarianceAssumption,
     StructuralRefusal,
+    /// The fit took a fallback optimizer route (for example the analytic
+    /// gradient oracle was declined for this design); informational.
+    OptimizerRouteFallback,
 }
 
 /// Machine-readable diagnostic with optional structured payload.
@@ -177,6 +180,10 @@ mod tests {
                 "\"optimizer_nonconvergence\"",
             ),
             (DiagnosticCode::OptimizerRecovery, "\"optimizer_recovery\""),
+            (
+                DiagnosticCode::OptimizerRouteFallback,
+                "\"optimizer_route_fallback\"",
+            ),
         ];
 
         for (code, expected) in cases {

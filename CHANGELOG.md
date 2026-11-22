@@ -12,7 +12,52 @@ vs. `unstable-internals` surface inventory.
 
 ## [Unreleased]
 
+### Changed
+
+- Large crossed LMMs fit several times faster (GH #24). Dense blocks larger
+  than 256 columns now use [faer](https://crates.io/crates/faer)'s parallel
+  kernels (rank-k downdate, Cholesky, triangular solve and inverse, large
+  matmuls); `faer` is a non-optional dependency. The new default `parallel`
+  feature runs those kernels in parallel through rayon, and
+  `MIXEFF_NUM_THREADS` caps the threads (`1` is sequential). Builds without
+  `parallel` (including `default-features = false`) and `wasm32` run them
+  sequentially without the rayon dependency stack. Smaller
+  blocks keep the existing bit-identical kernels. On a 272 × 500 subjects ×
+  items design with 10 variance parameters an objective evaluation went from
+  270 ms to 71 ms and the analytic gradient from 1.6 s to about 0.2 s.
+- The analytic-gradient LMM optimizer route no longer runs uncounted
+  finite-difference KKT probes inside its loop; keeps scalar, zero-correlation
+  and last-diagonal variances from landing exactly on zero mid-search (where
+  the gradient vanishes and the search could not leave), snapping them onto
+  the bound at the end when that is no worse; and stops only at points the
+  optimizer certificate accepts. On the design above the fit needs 73
+  evaluations instead of 162 plus a full KKT-guided restart.
+- The blocked-gradient selected-inverse guard rises from 4M to 2²⁴ dense
+  entries, so crossed designs of a few thousand random effects per term keep
+  the analytic gradient.
+
+### Fixed (numerical)
+
+- Large crossed LMMs whose analytic gradient was declined by the old
+  selected-inverse guard, or whose gradient-route fit stopped on an
+  accepted-step tolerance short of stationarity, now reach the optimum
+  (GH #24). Before/after on the issue's 272 × 500 design,
+  `(1 + x1 + … + x5 || sid) + (1 + x1 + x2 + x3 || item)`, REML: objective
+  58926.062972 (free gradient 1.60, tolerance 0.024, reported
+  `converged_interior`) → 58926.062777 (free gradient 0.005), matching
+  MixedModels.jl. Fits that previously converged are unchanged within the
+  parity band; every parity fixture and bench-harness objective gate passes.
+
 ### Fixed
+
+- A declined gradient oracle is no longer silent: the stop label reads
+  `GRADIENT_ORACLE_DECLINED(<reason>): …` and the optimizer certificate
+  carries an `optimizer_route_fallback` diagnostic (GH #24).
+- LMM certificates decide whether a failed gradient KKT check means "not
+  optimized" from the Newton decrement against the objective tolerance
+  instead of `|g| / |objective|`, which drifted with the number of
+  observations; a failed check that leaves a converged status standing now
+  emits a warning with `status_stands: true` (GH #24).
 
 - LMM fits no longer panic on `wasm32-unknown-unknown`. Since the fit-phase
   timing diagnostics landed, every fit called `std::time::Instant::now()`,

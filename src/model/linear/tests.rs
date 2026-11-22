@@ -3409,6 +3409,55 @@ fn test_large_theta_fit_uses_trust_bq_gradient_oracle() {
     assert!(model.sigma().is_finite());
 }
 
+/// GH #24: when the selected-inverse guard declines the gradient oracle, the
+/// stop label and the optimizer certificate say so, and a failed derivative
+/// check never leaves a converged status without a diagnostic.
+#[cfg(feature = "nlopt")]
+#[test]
+fn test_declined_gradient_oracle_is_reported() {
+    let data = simulate_large_theta_crossed(123);
+    let formula = parse_formula(
+        "reaction ~ 1 + days + (1 + days | subj) + (1 + days | item) + (1 + days | site)",
+    )
+    .unwrap();
+    let mut model = LinearMixedModel::new(formula, &data, None).unwrap();
+    model.optsum.max_feval = 3000;
+
+    super::gradient::MAX_DENSE_ENTRIES_OVERRIDE.with(|limit| limit.set(Some(1)));
+    let fitted = model.fit(true);
+    super::gradient::MAX_DENSE_ENTRIES_OVERRIDE.with(|limit| limit.set(None));
+    fitted.unwrap();
+
+    let return_value = model.optsum.return_value.clone();
+    assert!(
+        return_value.contains("GRADIENT_ORACLE_DECLINED(selected_inverse_entries="),
+        "{return_value}"
+    );
+    assert!(!return_value.contains("GRADIENT_ORACLE:"), "{return_value}");
+    let certificate = model.optimizer_certificate().unwrap();
+    let notice = certificate
+        .diagnostics
+        .iter()
+        .find(|d| d.code == DiagnosticCode::OptimizerRouteFallback)
+        .expect("declined oracle diagnostic");
+    assert!(notice.message.contains("selected_inverse_entries="));
+
+    let gradient_failed = certificate.checks.iter().any(|check| {
+        matches!(check, CertificateCheck::DerivativeMismatch { kind, .. }
+            if kind == "free_gradient_kkt_mismatch" || kind == "boundary_gradient_kkt_mismatch")
+    });
+    if gradient_failed {
+        assert!(
+            certificate
+                .diagnostics
+                .iter()
+                .any(|d| d.code == DiagnosticCode::OptimizerNonconvergence),
+            "failed gradient check without a diagnostic: {:?}",
+            certificate.diagnostics
+        );
+    }
+}
+
 #[cfg(feature = "nlopt")]
 #[test]
 fn test_large_theta_auto_fit_matches_or_beats_cobyla_baseline() {

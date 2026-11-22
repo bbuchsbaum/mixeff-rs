@@ -45,14 +45,23 @@ num-traits = "0.2"
 indexmap = "2"
 log = "0.4"
 nlopt = { version = "0.8.1", optional = true }
-faer = { version = "0.24", optional = true, default-features = false, features = ["std", "linalg"] }
+# Dense linear algebra for the large blocks of crossed designs (rank-k
+# downdate, Cholesky, triangular solves above 256 columns). Parallel through
+# rayon with the default `parallel` feature on native targets; sequential
+# otherwise (and always on wasm32).
+faer = { version = "0.24", default-features = false, features = ["std", "linalg"] }
 rayon = { version = "1.10", optional = true }
 csv = "1"
 toml = { version = "0.8", default-features = false, features = ["parse"] }
 minilp = "0.2"
 
 [features]
-default = ["nlopt"]
+default = ["nlopt", "parallel"]
+# Parallel faer kernels for large dense blocks (rayon). Off in
+# `default-features = false` builds, which keep faer sequential and skip the
+# rayon/spindle dependency stack; wasm32 is sequential either way.
+# `MIXEFF_NUM_THREADS` caps the threads at run time.
+parallel = ["faer/rayon"]
 # Enables NLopt (BOBYQA / large-θ paths and optional GLMM optimizer parity).
 # This is the default release optimizer path because it is substantially more
 # iteration-efficient on vector and crossed LMMs. Dependency-light builds can
@@ -72,11 +81,11 @@ unstable-internals = []
 # fitting (`BatchParallelism::Rayon`). Off by default; the serial path stays
 # the default at runtime even when the feature is compiled in.
 rayon = ["dep:rayon"]
-# EXPERIMENTAL: routes the hot blocked-Cholesky gemm downdates through faer's
-# matmul instead of nalgebra/matrixmultiply. Benchmark-gated (see mote
-# bd-01KWG71ZHZAS...); off by default. Objectives may drift at rounding level
-# versus the pinned perf_gate baselines, so do not enable in parity runs.
-faer-backend = ["dep:faer"]
+# EXPERIMENTAL: also routes the off-diagonal blocked-Cholesky gemm downdates
+# (`gemm_sub_abt`, `gemm_sub_rows_aat`) through faer's sequential matmul.
+# faer itself is now a default dependency (large dense blocks always use
+# it); this flag only covers those remaining nalgebra gemm call sites.
+faer-backend = []
 
 [dev-dependencies]
 approx = "0.5"

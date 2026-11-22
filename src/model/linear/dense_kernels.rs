@@ -46,6 +46,112 @@ pub(super) const DENSE_PANEL_WIDTH: usize = 96;
 /// downdate is used instead of one full gemm.
 const SYRK_MIN_INNER_DIM: usize = 16;
 
+/// Parallelism for the faer kernels on large dense blocks.
+///
+/// With the `parallel` feature on a native target, rayon with
+/// `MIXEFF_NUM_THREADS` threads (read once; unset, empty or `0` means
+/// rayon's default, all cores, which itself honours `RAYON_NUM_THREADS`).
+/// `MIXEFF_NUM_THREADS=1` makes the kernels sequential; hosts that must cap
+/// CPU use (an R package under `R CMD check`) set it before the first fit.
+/// Without the feature, and always on wasm32, the kernels are sequential.
+pub(crate) fn faer_par() -> faer::Par {
+    #[cfg(not(all(feature = "parallel", not(target_arch = "wasm32"))))]
+    {
+        faer::Par::Seq
+    }
+    #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
+    {
+        static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        let threads = *THREADS.get_or_init(|| {
+            std::env::var("MIXEFF_NUM_THREADS")
+                .ok()
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(0)
+        });
+        match threads {
+            1 => faer::Par::Seq,
+            n => faer::Par::rayon(n),
+        }
+    }
+}
+
+/// Products with at least this many multiply-adds go through faer (with
+/// [`faer_par`]); smaller ones keep nalgebra's gemm and its exact rounding,
+/// so small models are unaffected by the backend choice.
+pub(super) const FAER_GEMM_MIN_WORK: usize = 256 * 256 * 256;
+
+/// `dst += alpha · op(a) · op(b)`, with `op` the transpose when the flag is
+/// set. Large products use faer, small ones nalgebra.
+pub(super) fn gemm_acc(
+    dst: &mut DMatrix<f64>,
+    alpha: f64,
+    a: &DMatrix<f64>,
+    transpose_a: bool,
+    b: &DMatrix<f64>,
+    transpose_b: bool,
+) {
+    let (m, k) = if transpose_a {
+        (a.ncols(), a.nrows())
+    } else {
+        (a.nrows(), a.ncols())
+    };
+    let n = if transpose_b { b.nrows() } else { b.ncols() };
+    debug_assert_eq!(dst.shape(), (m, n));
+    if m.saturating_mul(n).saturating_mul(k) >= FAER_GEMM_MIN_WORK {
+        let a_ref = if transpose_a {
+            faer_ref(a).transpose()
+        } else {
+            faer_ref(a)
+        };
+        let b_ref = if transpose_b {
+            faer_ref(b).transpose()
+        } else {
+            faer_ref(b)
+        };
+        faer::linalg::matmul::matmul(
+            faer_mut(dst),
+            faer::Accum::Add,
+            a_ref,
+            b_ref,
+            alpha,
+            faer_par(),
+        );
+        return;
+    }
+    match (transpose_a, transpose_b) {
+        (false, false) => dst.gemm(alpha, a, b, 1.0),
+        (true, false) => dst.gemm_tr(alpha, a, b, 1.0),
+        (false, true) => dst.gemm(alpha, a, &b.transpose(), 1.0),
+        (true, true) => dst.gemm_tr(alpha, a, &b.transpose(), 1.0),
+    }
+}
+
+/// faer's (parallel) inverse of a dense lower-triangular `l` above the
+/// blocked threshold, when every pivot's magnitude is at least `zero_tol`.
+/// `None` leaves the caller's own kernel (and its zero-pivot rule) in charge.
+pub(super) fn faer_lower_inverse(l: &DMatrix<f64>, zero_tol: f64) -> Option<DMatrix<f64>> {
+    let n = l.nrows();
+    if n <= DENSE_BLOCKED_MIN_DIM || (0..n).any(|j| l[(j, j)].abs() < zero_tol) {
+        return None;
+    }
+    let mut inv = DMatrix::<f64>::zeros(n, n);
+    faer::linalg::triangular_inverse::invert_lower_triangular(
+        faer_mut(&mut inv),
+        faer_ref(l),
+        faer_par(),
+    );
+    Some(inv)
+}
+
+fn faer_ref(m: &DMatrix<f64>) -> faer::MatRef<'_, f64> {
+    faer::MatRef::from_column_major_slice(m.as_slice(), m.nrows(), m.ncols())
+}
+
+fn faer_mut(m: &mut DMatrix<f64>) -> faer::MatMut<'_, f64> {
+    let (rows, cols) = (m.nrows(), m.ncols());
+    faer::MatMut::from_column_major_slice_mut(m.as_mut_slice(), rows, cols)
+}
+
 /// In-place lower Cholesky of a dense symmetric block (only the lower
 /// triangle is read). See the module docs for the zero-pivot contract.
 pub(super) fn dense_cholesky_lower_in_place(mat: &mut DMatrix<f64>, tol: f64) -> Result<()> {
@@ -53,6 +159,10 @@ pub(super) fn dense_cholesky_lower_in_place(mat: &mut DMatrix<f64>, tol: f64) ->
     debug_assert_eq!(n, mat.ncols());
     if n <= DENSE_BLOCKED_MIN_DIM {
         cholesky_panel(mat, 0, n, tol)?;
+    } else if faer_cholesky_lower_in_place(mat) {
+        // Every pivot was positive, the only case in which the zero-pivot
+        // contract and a plain Cholesky agree; faer's blocked parallel
+        // factorization then equals ours to rounding.
     } else {
         let mut j0 = 0;
         while j0 < n {
@@ -66,6 +176,35 @@ pub(super) fn dense_cholesky_lower_in_place(mat: &mut DMatrix<f64>, tol: f64) ->
     }
     zero_strict_upper(mat);
     Ok(())
+}
+
+/// faer's Cholesky of the lower triangle of `mat`, in place. Returns `false`
+/// and leaves `mat` untouched when faer meets a non-positive pivot, so the
+/// caller's kernel can apply the zero-pivot contract.
+fn faer_cholesky_lower_in_place(mat: &mut DMatrix<f64>) -> bool {
+    use faer::dyn_stack::{MemBuffer, MemStack};
+    use faer::linalg::cholesky::llt::factor;
+    let n = mat.nrows();
+    let par = faer_par();
+    let mut work = mat.clone();
+    let mut mem = MemBuffer::new(factor::cholesky_in_place_scratch::<f64>(
+        n,
+        par,
+        Default::default(),
+    ));
+    let factored = factor::cholesky_in_place(
+        faer_mut(&mut work),
+        Default::default(),
+        par,
+        MemStack::new(&mut mem),
+        Default::default(),
+    );
+    if factored.is_ok() {
+        *mat = work;
+        true
+    } else {
+        false
+    }
 }
 
 /// Left-looking column sweep over columns `j0..j1`, assuming every column
@@ -159,6 +298,14 @@ pub(super) fn dense_rdiv_lower_transpose_in_place(a: &mut DMatrix<f64>, l: &DMat
         rdiv_panel(a, l, 0, n);
         return;
     }
+    if (0..n).all(|j| l[(j, j)].abs() >= BLOCK_TRIANGULAR_SOLVE_ZERO_TOLERANCE) {
+        // A L⁻ᵀ = (L⁻¹ Aᵀ)ᵀ: one triangular solve on the transposed view.
+        let par = faer_par();
+        let l_ref = faer_ref(l);
+        let at = faer_mut(a).transpose_mut();
+        faer::linalg::triangular_solve::solve_lower_triangular_in_place(l_ref, at, par);
+        return;
+    }
     let m = a.nrows();
     let mut j0 = 0;
     while j0 < n {
@@ -232,43 +379,27 @@ pub(super) fn use_symmetric_downdate(n: usize, k: usize) -> bool {
 /// only consumer of a downdated diagonal block is the dense Cholesky, which
 /// reads the lower triangle and returns an exactly-zero upper triangle.
 pub(super) fn symmetric_rank_k_downdate_lower(c: &mut DMatrix<f64>, a: &DMatrix<f64>) {
+    use faer::linalg::matmul::triangular::{matmul, BlockStructure};
     let n = c.nrows();
     debug_assert_eq!(n, c.ncols());
     debug_assert_eq!(n, a.nrows());
-    let k = a.ncols();
-    if n == 0 || k == 0 {
+    if n == 0 || a.ncols() == 0 {
         return;
     }
-    let a_data = a.as_slice();
-    let c_data = c.as_mut_slice();
-    let mut c0 = 0;
-    while c0 < n {
-        let c1 = (c0 + DENSE_PANEL_WIDTH).min(n);
-        let a_rows: DMatrixView<'_, f64, Dyn, Dyn> = DMatrixView::from_slice_with_strides_generic(
-            &a_data[c0..],
-            Dyn(n - c0),
-            Dyn(k),
-            Dyn(1),
-            Dyn(n),
-        );
-        let a_cols_t: DMatrixView<'_, f64, Dyn, Dyn> = DMatrixView::from_slice_with_strides_generic(
-            &a_data[c0..],
-            Dyn(k),
-            Dyn(c1 - c0),
-            Dyn(n),
-            Dyn(1),
-        );
-        let mut target: DMatrixViewMut<'_, f64, Dyn, Dyn> =
-            DMatrixViewMut::from_slice_with_strides_generic(
-                &mut c_data[c0 * n + c0..],
-                Dyn(n - c0),
-                Dyn(c1 - c0),
-                Dyn(1),
-                Dyn(n),
-            );
-        target.gemm(-1.0, &a_rows, &a_cols_t, 1.0);
-        c0 = c1;
-    }
+    // One lower-triangular product (faer's syrk equivalent): only the lower
+    // triangle of C, diagonal included, is written.
+    let a_ref = faer_ref(a);
+    matmul(
+        faer_mut(c),
+        BlockStructure::TriangularLower,
+        faer::Accum::Add,
+        a_ref,
+        BlockStructure::Rectangular,
+        a_ref.transpose(),
+        BlockStructure::Rectangular,
+        -1.0,
+        faer_par(),
+    );
 }
 
 #[cfg(test)]

@@ -198,10 +198,44 @@ impl LinearMixedModel {
 }
 
 /// Largest number of dense entries the block selected inverse may hold
-/// before the blocked gradient declines (callers then fall back to finite
-/// differences). Crossed designs with a few hundred random effects per
-/// term stay far below this.
-const BLOCKED_GRADIENT_MAX_DENSE_ENTRIES: usize = 4_000_000;
+/// before the blocked gradient declines (2²⁴ entries, 128 MiB; callers then
+/// fall back to the interpolation model or finite differences and record
+/// that they did). Crossed subject × item designs of a few thousand random
+/// effects per term fit under it: 272 subjects × 6 plus 500 items × 4
+/// (GH #24) needs about 5.9M entries.
+const BLOCKED_GRADIENT_MAX_DENSE_ENTRIES: usize = 16_777_216;
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only override of [`BLOCKED_GRADIENT_MAX_DENSE_ENTRIES`], so the
+    /// declined-oracle route can be exercised on a small model.
+    pub(super) static MAX_DENSE_ENTRIES_OVERRIDE: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The selected-inverse size guard in effect.
+pub(super) fn blocked_gradient_max_dense_entries() -> usize {
+    #[cfg(test)]
+    if let Some(limit) = MAX_DENSE_ENTRIES_OVERRIDE.with(std::cell::Cell::get) {
+        return limit;
+    }
+    BLOCKED_GRADIENT_MAX_DENSE_ENTRIES
+}
+
+/// Dense entries the block selected inverse holds for a factor with these
+/// per-term random-effect counts: every lower block pair except a
+/// level-structured leading diagonal block, of which only the level-diagonal
+/// blocks are formed.
+pub(super) fn selected_inverse_dense_entries(l_blocks: &[MatrixBlock], sizes: &[usize]) -> usize {
+    let k = sizes.len();
+    let leading_level_structured =
+        !l_blocks.is_empty() && LevelBlocks::is_level_structured(&l_blocks[0]);
+    (0..k)
+        .flat_map(|i| (0..=i).map(move |j| (i, j)))
+        .filter(|&(i, j)| !(i == 0 && j == 0 && leading_level_structured))
+        .map(|(i, j)| sizes[i] * sizes[j])
+        .sum()
+}
 
 /// Triangular-solve guard, matching the block solve helpers.
 const GRADIENT_SOLVE_ZERO_TOLERANCE: f64 = 1e-30;
@@ -1026,12 +1060,8 @@ impl ProfiledGradientInputs<'_> {
     fn selected_inverse(&self, sizes: &[usize]) -> Result<SelectedInverse> {
         let k = self.reterms.len();
         let leading_level_structured = LevelBlocks::is_level_structured(&self.l_blocks[0]);
-        let total: usize = (0..k)
-            .flat_map(|i| (0..=i).map(move |j| (i, j)))
-            .filter(|&(i, j)| !(i == 0 && j == 0 && leading_level_structured))
-            .map(|(i, j)| sizes[i] * sizes[j])
-            .sum();
-        if total > BLOCKED_GRADIENT_MAX_DENSE_ENTRIES {
+        let total = selected_inverse_dense_entries(self.l_blocks, sizes);
+        if total > blocked_gradient_max_dense_entries() {
             return Err(MixedModelError::Optimization(format!(
                 "blocked gradient: selected inverse would hold {total} dense entries"
             )));
@@ -1072,9 +1102,13 @@ impl ProfiledGradientInputs<'_> {
                     let l_inv = l_jj_inv
                         .as_ref()
                         .expect("dense diagonal block has an inverse");
-                    let mut r = l_inv.transpose();
-                    r -= &w;
-                    r * l_inv
+                    // (L⁻ᵀ − W) L⁻¹ = L⁻ᵀL⁻¹ − W L⁻¹.
+                    let mut z = DMatrix::zeros(sizes[j], sizes[j]);
+                    super::dense_kernels::gemm_acc(&mut z, 1.0, l_inv, true, l_inv, false);
+                    if j + 1 < k {
+                        super::dense_kernels::gemm_acc(&mut z, -1.0, &w, false, l_inv, false);
+                    }
+                    z
                 } else {
                     w.neg_mut();
                     right_divide_by_lower(&mut w, l_jj, l_jj_inv.as_ref());
@@ -1176,6 +1210,30 @@ impl ProfiledGradientInputs<'_> {
                 if i == j {
                     continue;
                 }
+                // A sparse cross block (crossed designs) contracts over its
+                // stored entries only, with Λ_i applied per entry.
+                let (stored, stored_is_ji) = if i > j {
+                    (&self.a_blocks[block_index(i, j)], false)
+                } else {
+                    (&self.a_blocks[block_index(j, i)], true)
+                };
+                if let MatrixBlock::Sparse(csc) = stored {
+                    let (z, z_rows_are_j) = if j > i {
+                        (&selected.dense[j][i], true)
+                    } else {
+                        (&selected.dense[i][j], false)
+                    };
+                    add_sparse_cross_logdet_blocks(
+                        &mut d,
+                        csc,
+                        stored_is_ji,
+                        z,
+                        z_rows_are_j,
+                        &re_i.lambda,
+                        s,
+                    );
+                    continue;
+                }
                 let mut b = if i > j {
                     self.a_blocks[block_index(i, j)].as_dense()
                 } else {
@@ -1204,6 +1262,63 @@ impl ProfiledGradientInputs<'_> {
             result.push(d);
         }
         result
+    }
+}
+
+/// `D_ℓ[a, b] += Σ_r W[ℓ·s + a, r] · S[r, ℓ·s + b]` over the stored entries
+/// of a sparse cross block, where `S = S_ij` (`q_i × q_j`) and
+/// `W = Z_ji · blockdiag(Λ_iᵀ)`, i.e. `W[row, r] = Σ_m Z_ji[row, base(r) + m] ·
+/// Λ_i[r mod s_i, m]`. This equals the dense
+/// `Z_ji[ℓ rows, ·] (Λ_iᵀ S_ij)[·, ℓ cols]` product without densifying `S`.
+///
+/// `stored_is_ji` says the CSC holds `A_ji = S_ijᵀ` (rows over term `j`);
+/// `z_rows_are_j` says `z` is `Z_ji` (rows over `j`) rather than `Z_ij`.
+fn add_sparse_cross_logdet_blocks(
+    d: &mut [f64],
+    csc: &nalgebra_sparse::CscMatrix<f64>,
+    stored_is_ji: bool,
+    z: &DMatrix<f64>,
+    z_rows_are_j: bool,
+    lambda_i: &DMatrix<f64>,
+    s: usize,
+) {
+    let si = lambda_i.nrows();
+    let ss = s * s;
+    let offsets = csc.col_offsets();
+    let rows = csc.row_indices();
+    let values = csc.values();
+    for col in 0..csc.ncols() {
+        for idx in offsets[col]..offsets[col + 1] {
+            let value = values[idx];
+            if value == 0.0 {
+                continue;
+            }
+            let (r_i, c_j) = if stored_is_ji {
+                (col, rows[idx])
+            } else {
+                (rows[idx], col)
+            };
+            let level = c_j / s;
+            let b = c_j % s;
+            let r_local = r_i % si;
+            let base = r_i - r_local;
+            for a in 0..s {
+                let row_j = level * s + a;
+                let mut acc = 0.0;
+                for m in 0..si {
+                    let lam = lambda_i[(r_local, m)];
+                    if lam != 0.0 {
+                        let z_value = if z_rows_are_j {
+                            z[(row_j, base + m)]
+                        } else {
+                            z[(base + m, row_j)]
+                        };
+                        acc += z_value * lam;
+                    }
+                }
+                d[level * ss + a * s + b] += acc * value;
+            }
+        }
     }
 }
 
@@ -1355,14 +1470,40 @@ fn lower_inverse_flat(get: impl Fn(usize, usize) -> f64, n: usize, out: &mut [f6
     }
 }
 
-/// Dense inverse of a lower-triangular block, one column at a time by
-/// forward substitution along the factor's contiguous columns.
+/// Order at or below which [`lower_inverse_into`] uses scalar forward
+/// substitution instead of recursing.
+const LOWER_INVERSE_BASE_ORDER: usize = 64;
+
+/// Dense inverse of a lower-triangular block.
 fn dense_lower_inverse(block: &MatrixBlock) -> DMatrix<f64> {
     with_dense_block(block, |l| {
+        if let Some(inv) =
+            super::dense_kernels::faer_lower_inverse(l, GRADIENT_SOLVE_ZERO_TOLERANCE)
+        {
+            return inv;
+        }
         let n = l.nrows();
         let mut inv = DMatrix::<f64>::zeros(n, n);
+        lower_inverse_into(l.as_view(), &mut inv.as_view_mut());
+        inv
+    })
+}
+
+/// `out ← L⁻¹` for lower-triangular `L` by recursive 2 × 2 blocking:
+/// with `L = [L₁ 0; B L₂]`, `L⁻¹ = [L₁⁻¹ 0; −L₂⁻¹ B L₁⁻¹ L₂⁻¹]`, so the
+/// off-diagonal block costs two matrix products. Small blocks use scalar
+/// forward substitution. A diagonal entry below the solve tolerance
+/// contributes a zero reciprocal ([`guarded_div`]); forward substitution is
+/// linear in its right-hand side, so the blocked and column-by-column
+/// recursions agree under that rule too. `out` must be zero on entry.
+fn lower_inverse_into(
+    l: nalgebra::DMatrixView<'_, f64>,
+    out: &mut nalgebra::DMatrixViewMut<'_, f64>,
+) {
+    let n = l.nrows();
+    if n <= LOWER_INVERSE_BASE_ORDER {
         for col in 0..n {
-            let mut x = inv.column_mut(col);
+            let mut x = out.column_mut(col);
             x[col] = 1.0;
             for m in col..n {
                 let scale = guarded_div(x[m], l[(m, m)]);
@@ -1374,8 +1515,16 @@ fn dense_lower_inverse(block: &MatrixBlock) -> DMatrix<f64> {
                 }
             }
         }
-        inv
-    })
+        return;
+    }
+    let h = n / 2;
+    let r = n - h;
+    lower_inverse_into(l.view((0, 0), (h, h)), &mut out.view_mut((0, 0), (h, h)));
+    lower_inverse_into(l.view((h, h), (r, r)), &mut out.view_mut((h, h), (r, r)));
+    // out₂₁ = −L₂⁻¹ (B L₁⁻¹).
+    let b_l1_inv = l.view((h, 0), (r, h)) * out.view((0, 0), (h, h));
+    let block = -(out.view((h, h), (r, r)) * b_l1_inv);
+    out.view_mut((h, 0), (r, h)).copy_from(&block);
 }
 
 /// Visit every stored entry of a block as `(row, col, value)`.
@@ -1438,11 +1587,11 @@ const DENSE_PRODUCT_FILL_THRESHOLD: f64 = 0.25;
 /// `dst += lhs · rhs` for a block `rhs`.
 fn add_dense_times_block(dst: &mut DMatrix<f64>, lhs: &DMatrix<f64>, rhs: &MatrixBlock) {
     match rhs {
-        MatrixBlock::Dense(mat) => dst.gemm(1.0, lhs, mat, 1.0),
+        MatrixBlock::Dense(mat) => super::dense_kernels::gemm_acc(dst, 1.0, lhs, false, mat, false),
         MatrixBlock::Sparse(csc) => {
             let entries = (csc.nrows() * csc.ncols()) as f64;
             if entries > 0.0 && csc.nnz() as f64 >= DENSE_PRODUCT_FILL_THRESHOLD * entries {
-                dst.gemm(1.0, lhs, &rhs.as_dense(), 1.0);
+                super::dense_kernels::gemm_acc(dst, 1.0, lhs, false, &rhs.as_dense(), false);
                 return;
             }
             let offsets = csc.col_offsets();
@@ -1469,7 +1618,7 @@ fn add_dense_times_block(dst: &mut DMatrix<f64>, lhs: &DMatrix<f64>, rhs: &Matri
 /// `dst += lhsᵀ · rhs` for a block `rhs` sharing `lhs`'s row count.
 fn add_dense_transpose_times_block(dst: &mut DMatrix<f64>, lhs: &DMatrix<f64>, rhs: &MatrixBlock) {
     match rhs {
-        MatrixBlock::Dense(mat) => dst.gemm_tr(1.0, lhs, mat, 1.0),
+        MatrixBlock::Dense(mat) => super::dense_kernels::gemm_acc(dst, 1.0, lhs, true, mat, false),
         MatrixBlock::Sparse(_) => {
             let lhs_t = lhs.transpose();
             add_dense_times_block(dst, &lhs_t, rhs);
@@ -1702,6 +1851,50 @@ mod tests {
         df.add_numeric("curvature", curvature).unwrap();
         df.add_categorical("subj", subj).unwrap();
         df
+    }
+
+    /// The recursive blocked inverse must match column-by-column forward
+    /// substitution, including the zero-reciprocal rule for a vanishing
+    /// pivot, on orders that exercise several recursion levels.
+    #[test]
+    fn blocked_lower_inverse_matches_forward_substitution() {
+        for (n, zero_pivot) in [
+            (1usize, None),
+            (63, None),
+            (65, Some(40)),
+            (300, Some(170)),
+            (400, None),
+        ] {
+            let mut l = DMatrix::<f64>::zeros(n, n);
+            for c in 0..n {
+                for r in c..n {
+                    let v = ((r * 31 + c * 17) % 23) as f64 / 23.0 - 0.5;
+                    l[(r, c)] = if r == c { 1.0 + v.abs() } else { 0.2 * v };
+                }
+            }
+            if let Some(p) = zero_pivot {
+                l[(p, p)] = 0.0;
+            }
+            let mut reference = DMatrix::<f64>::zeros(n, n);
+            for col in 0..n {
+                reference[(col, col)] = 1.0;
+                for m in col..n {
+                    let scale = guarded_div(reference[(m, col)], l[(m, m)]);
+                    reference[(m, col)] = scale;
+                    for r in (m + 1)..n {
+                        reference[(r, col)] -= scale * l[(r, m)];
+                    }
+                }
+            }
+            let blocked = dense_lower_inverse(&MatrixBlock::Dense(l.clone()));
+            let scale = reference.amax().max(1.0);
+            let err = (&blocked - &reference).amax();
+            assert!(err <= 1e-12 * scale, "n={n}: max error {err:e}");
+            if zero_pivot.is_none() {
+                let identity_err = (&l * &blocked - DMatrix::<f64>::identity(n, n)).amax();
+                assert!(identity_err <= 1e-12, "n={n}: L·L⁻¹ − I = {identity_err:e}");
+            }
+        }
     }
 
     pub(super) fn crossed_like(
@@ -2639,6 +2832,112 @@ mod cost {
                 }
                 MatrixBlock::Diagonal(_) => "Diagonal",
                 MatrixBlock::BlockDiagonal(_) => "BlockDiagonal",
+            };
+            println!("  L({i},{j}) {kind} {}x{}", b.nrows(), b.ncols());
+        }
+    }
+
+    /// GH #24 shape: `(1 + x1..x5 || sid) + (1 + x1..x3 || item)`, 272 × 6
+    /// and 500 × 4 random effects (about 5.9M selected-inverse entries).
+    #[test]
+    #[ignore]
+    fn issue24_gradient_phase_costs() {
+        let (n_sid, n_item, per) = (272usize, 500usize, 160usize);
+        let n = n_sid * per;
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut unif = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64
+        };
+        let mut df = crate::model::data::DataFrame::new();
+        let mut cols: Vec<Vec<f64>> = (0..6).map(|_| Vec::with_capacity(n)).collect();
+        let (mut sid, mut item) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        for s in 0..n_sid {
+            for _ in 0..per {
+                for col in cols.iter_mut() {
+                    col.push(unif() - 0.5);
+                }
+                sid.push(format!("s{s}"));
+                item.push(format!("i{}", (unif() * n_item as f64) as usize));
+            }
+        }
+        for (k, col) in cols.into_iter().enumerate() {
+            let name = if k == 0 {
+                "y".to_string()
+            } else {
+                format!("x{k}")
+            };
+            df.add_numeric(&name, col).unwrap();
+        }
+        df.add_categorical("sid", sid).unwrap();
+        df.add_categorical("item", item).unwrap();
+        let formula = parse_formula(
+            "y ~ 1 + x1 + (1 + x1 + x2 + x3 + x4 + x5 || sid) + (1 + x1 + x2 + x3 || item)",
+        )
+        .unwrap();
+        let mut model = LinearMixedModel::new(formula, &df, None).unwrap();
+        let theta = vec![0.5; model.theta().len()];
+        let t0 = Instant::now();
+        model.objective_at(&theta).unwrap();
+        println!("objective_at {:8.1} ms", t0.elapsed().as_secs_f64() * 1e3);
+        // `ISSUE24_OBJECTIVE_LOOP=n` repeats the objective for profiling.
+        if let Some(reps) = std::env::var("ISSUE24_OBJECTIVE_LOOP")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+        {
+            let t0 = Instant::now();
+            for _ in 0..reps {
+                std::hint::black_box(model.objective_at_fast_or_generic(&theta).unwrap());
+            }
+            println!(
+                "objective_at_fast_or_generic x{reps}: {:8.1} ms each",
+                t0.elapsed().as_secs_f64() * 1e3 / reps as f64
+            );
+            return;
+        }
+        let sizes: Vec<usize> = model.reterms.iter().map(|re| re.n_ranef()).collect();
+        println!("sizes {sizes:?}");
+        let inputs = ProfiledGradientInputs {
+            a_blocks: &model.a_blocks,
+            l_blocks: &model.l_blocks,
+            reterms: &model.reterms,
+            dims: model.dims,
+            reml: true,
+            sigma: None,
+            fe_blocks: None,
+            trailing_l: None,
+        };
+        let ms = |t: Instant| t.elapsed().as_secs_f64() * 1e3;
+        let t = Instant::now();
+        let (beta, c_inv) = inputs.beta_and_c_inverse(true);
+        println!("beta_and_c_inverse {:8.1} ms", ms(t));
+        let t = Instant::now();
+        std::hint::black_box(super::dense_lower_inverse(
+            &model.l_blocks[block_index(1, 1)],
+        ));
+        println!("dense_lower_inverse(L_11) {:8.1} ms", ms(t));
+        let t = Instant::now();
+        let selected = inputs.selected_inverse(&sizes).unwrap();
+        println!("selected_inverse {:8.1} ms", ms(t));
+        let t = Instant::now();
+        std::hint::black_box(inputs.logdet_m_level_blocks(&selected));
+        println!("logdet_m_level_blocks {:8.1} ms", ms(t));
+        let t = Instant::now();
+        std::hint::black_box(
+            inputs
+                .multi_term_gradient_parts(true, &beta, c_inv.as_deref())
+                .unwrap(),
+        );
+        println!("multi_term_gradient_parts (total) {:8.1} ms", ms(t));
+        for (i, j) in [(1usize, 0usize), (1, 1)] {
+            let b = &model.l_blocks[block_index(i, j)];
+            let kind = match b {
+                MatrixBlock::Dense(_) => "Dense".to_string(),
+                MatrixBlock::Sparse(c) => format!("Sparse nnz {}", c.nnz()),
+                MatrixBlock::Diagonal(_) => "Diagonal".to_string(),
+                MatrixBlock::BlockDiagonal(_) => "BlockDiagonal".to_string(),
             };
             println!("  L({i},{j}) {kind} {}x{}", b.nrows(), b.ncols());
         }

@@ -3793,6 +3793,7 @@ fn diagnostic_code_label(code: &DiagnosticCode) -> &'static str {
         DiagnosticCode::SyntaxExpansion => "syntax_expansion",
         DiagnosticCode::CovarianceAssumption => "covariance_assumption",
         DiagnosticCode::StructuralRefusal => "structural_refusal",
+        DiagnosticCode::OptimizerRouteFallback => "optimizer_route_fallback",
     }
 }
 
