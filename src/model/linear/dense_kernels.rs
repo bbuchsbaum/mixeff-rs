@@ -48,18 +48,18 @@ const SYRK_MIN_INNER_DIM: usize = 16;
 
 /// Parallelism for the faer kernels on large dense blocks.
 ///
-/// Native targets use rayon with `MIXEFF_NUM_THREADS` threads (read once;
-/// unset, empty or `0` means rayon's default, all cores, which itself honours
-/// `RAYON_NUM_THREADS`). `MIXEFF_NUM_THREADS=1` makes the kernels
-/// sequential; hosts that must cap CPU use (an R package under `R CMD
-/// check`) set it before the first fit. wasm32 has no threads and is always
-/// sequential.
+/// With the `parallel` feature on a native target, rayon with
+/// `MIXEFF_NUM_THREADS` threads (read once; unset, empty or `0` means
+/// rayon's default, all cores, which itself honours `RAYON_NUM_THREADS`).
+/// `MIXEFF_NUM_THREADS=1` makes the kernels sequential; hosts that must cap
+/// CPU use (an R package under `R CMD check`) set it before the first fit.
+/// Without the feature, and always on wasm32, the kernels are sequential.
 pub(crate) fn faer_par() -> faer::Par {
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(not(all(feature = "parallel", not(target_arch = "wasm32"))))]
     {
         faer::Par::Seq
     }
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(feature = "parallel", not(target_arch = "wasm32")))]
     {
         static THREADS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
         let threads = *THREADS.get_or_init(|| {

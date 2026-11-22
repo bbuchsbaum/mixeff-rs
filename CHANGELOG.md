@@ -17,8 +17,11 @@ vs. `unstable-internals` surface inventory.
 - Large crossed LMMs fit several times faster (GH #24). Dense blocks larger
   than 256 columns now use [faer](https://crates.io/crates/faer)'s parallel
   kernels (rank-k downdate, Cholesky, triangular solve and inverse, large
-  matmuls); `faer` is a non-optional dependency and `MIXEFF_NUM_THREADS` caps
-  its threads (`1` is sequential; `wasm32` is always sequential). Smaller
+  matmuls); `faer` is a non-optional dependency. The new default `parallel`
+  feature runs those kernels in parallel through rayon, and
+  `MIXEFF_NUM_THREADS` caps the threads (`1` is sequential). Builds without
+  `parallel` (including `default-features = false`) and `wasm32` run them
+  sequentially without the rayon dependency stack. Smaller
   blocks keep the existing bit-identical kernels. On a 272 × 500 subjects ×
   items design with 10 variance parameters an objective evaluation went from
   270 ms to 71 ms and the analytic gradient from 1.6 s to about 0.2 s.

@@ -1858,7 +1858,13 @@ mod tests {
     /// pivot, on orders that exercise several recursion levels.
     #[test]
     fn blocked_lower_inverse_matches_forward_substitution() {
-        for (n, zero_pivot) in [(1usize, None), (63, None), (65, Some(40)), (300, Some(170)), (400, None)] {
+        for (n, zero_pivot) in [
+            (1usize, None),
+            (63, None),
+            (65, Some(40)),
+            (300, Some(170)),
+            (400, None),
+        ] {
             let mut l = DMatrix::<f64>::zeros(n, n);
             for c in 0..n {
                 for r in c..n {

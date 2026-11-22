@@ -18,8 +18,8 @@ use mixeff_rs::model::data::DataFrame;
 use mixeff_rs::model::linear::{
     FitOptions, FitToleranceOverrides, LinearMixedModel, OptimizerControl, TrustBqGradientOracle,
 };
-use mixeff_rs::types::Optimizer;
 use mixeff_rs::model::traits::MixedModelFit;
+use mixeff_rs::types::Optimizer;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rand_distr::{Distribution, Normal};
@@ -122,10 +122,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     // `MIXEFF_PROBE_OPTIMIZER=newuoa|bobyqa|trustbq` forces the optimizer.
     match std::env::var("MIXEFF_PROBE_OPTIMIZER").as_deref() {
         Ok("newuoa") => {
-            model.fit_with_options(FitOptions::reml().with_optimizer_control(OptimizerControl::auto().with_optimizer(Optimizer::NloptNewuoa).with_max_feval(10_000)))?;
+            model.fit_with_options(
+                FitOptions::reml().with_optimizer_control(
+                    OptimizerControl::auto()
+                        .with_optimizer(Optimizer::NloptNewuoa)
+                        .with_max_feval(10_000),
+                ),
+            )?;
         }
         Ok("bobyqa") => {
-            model.fit_with_options(FitOptions::reml().with_optimizer_control(OptimizerControl::auto().with_optimizer(Optimizer::NloptBobyqa).with_max_feval(10_000)))?;
+            model.fit_with_options(
+                FitOptions::reml().with_optimizer_control(
+                    OptimizerControl::auto()
+                        .with_optimizer(Optimizer::NloptBobyqa)
+                        .with_max_feval(10_000),
+                ),
+            )?;
         }
         Ok("bobyqa_tight") => {
             let control = OptimizerControl::auto()
@@ -135,13 +147,14 @@ fn main() -> Result<(), Box<dyn Error>> {
             model.fit_with_options(FitOptions::reml().with_optimizer_control(control))?;
         }
         Ok("trustbq_dfo") | Ok("trustbq_dfo_tight") => {
-            let tight = std::env::var("MIXEFF_PROBE_OPTIMIZER").as_deref() == Ok("trustbq_dfo_tight");
+            let tight =
+                std::env::var("MIXEFF_PROBE_OPTIMIZER").as_deref() == Ok("trustbq_dfo_tight");
             let mut control = OptimizerControl::auto()
                 .with_optimizer(Optimizer::TrustBq)
                 .with_trust_bq_gradient_oracle(TrustBqGradientOracle::Disabled);
             if tight {
-                control = control
-                    .with_tolerances(FitToleranceOverrides::default().with_ftol_rel(1e-12));
+                control =
+                    control.with_tolerances(FitToleranceOverrides::default().with_ftol_rel(1e-12));
             }
             model.fit_with_options(FitOptions::reml().with_optimizer_control(control))?;
         }

@@ -2825,7 +2825,10 @@ pub(super) fn transposed_rows_view(
 /// feature routes the product through faer's matmul instead.
 #[cfg(not(feature = "faer-backend"))]
 pub(super) fn gemm_sub_abt(c: &mut DMatrix<f64>, a: &DMatrix<f64>, b: &DMatrix<f64>) {
-    let work = a.nrows().saturating_mul(a.ncols()).saturating_mul(b.nrows());
+    let work = a
+        .nrows()
+        .saturating_mul(a.ncols())
+        .saturating_mul(b.nrows());
     if work >= super::dense_kernels::FAER_GEMM_MIN_WORK {
         super::dense_kernels::gemm_acc(c, -1.0, a, false, b, true);
         return;

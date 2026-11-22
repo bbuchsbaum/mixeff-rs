@@ -138,18 +138,20 @@ numerical output.
 | Feature | Default | What it does |
 | --- | :---: | --- |
 | `nlopt` | ✓ | NLopt BOBYQA/NEWUOA optimizers, the fastest path. Needs CMake and a C/C++ toolchain. |
+| `parallel` | ✓ | Runs faer's large dense-block kernels in parallel (rayon). Without it they run sequentially and the rayon dependency stack is not built. |
 | `prima` | | Routes bounded LMM optimization through the PRIMA C library. Set `PRIMA_DIR` if it is installed under a custom prefix. |
 | `faer-backend` | | Experimental: also routes the remaining small off-diagonal blocked-Cholesky updates through [faer](https://crates.io/crates/faer). Large dense blocks use faer regardless (see below). Results differ at rounding level. |
 | `rayon` | | Opt-in parallel execution for batch fitting of many responses. |
 | `unstable-internals` | | Exposes internal modules (`compiler`, `datasets`, `pathology`). Not covered by SemVer. |
 
 Dense blocks larger than 256 columns (the second grouping factor of a crossed
-design, for example) are always factored with [faer](https://crates.io/crates/faer),
-in parallel on native targets and sequentially on `wasm32`. Smaller blocks keep
-the crate's own kernels. Set `MIXEFF_NUM_THREADS` before the first fit to cap the
-threads (`1` is sequential; unset or `0` uses rayon's default, which honours
-`RAYON_NUM_THREADS`). Hosts with a core limit, such as an R package under
-`R CMD check`, should set it to `2` or less.
+design, for example) are always factored with [faer](https://crates.io/crates/faer);
+smaller blocks keep the crate's own kernels. With the `parallel` feature on a
+native target those kernels use every core; set `MIXEFF_NUM_THREADS` before the
+first fit to cap them (`1` is sequential; unset or `0` uses rayon's default,
+which honours `RAYON_NUM_THREADS`). Hosts with a core limit, such as an R
+package under `R CMD check`, should set it to `2` or less, or build without
+`parallel`. Without the feature, and always on `wasm32`, they run sequentially.
 
 With `default-features = false`, the crate builds in pure Rust and uses its
 own TrustBQ optimizer. This suits restricted build systems and binary

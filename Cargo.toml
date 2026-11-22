@@ -47,7 +47,8 @@ log = "0.4"
 nlopt = { version = "0.8.1", optional = true }
 # Dense linear algebra for the large blocks of crossed designs (rank-k
 # downdate, Cholesky, triangular solves above 256 columns). Parallel through
-# rayon on native targets; sequential on wasm32 (see the target table below).
+# rayon with the default `parallel` feature on native targets; sequential
+# otherwise (and always on wasm32).
 faer = { version = "0.24", default-features = false, features = ["std", "linalg"] }
 rayon = { version = "1.10", optional = true }
 csv = "1"
@@ -55,7 +56,12 @@ toml = { version = "0.8", default-features = false, features = ["parse"] }
 minilp = "0.2"
 
 [features]
-default = ["nlopt"]
+default = ["nlopt", "parallel"]
+# Parallel faer kernels for large dense blocks (rayon). Off in
+# `default-features = false` builds, which keep faer sequential and skip the
+# rayon/spindle dependency stack; wasm32 is sequential either way.
+# `MIXEFF_NUM_THREADS` caps the threads at run time.
+parallel = ["faer/rayon"]
 # Enables NLopt (BOBYQA / large-θ paths and optional GLMM optimizer parity).
 # This is the default release optimizer path because it is substantially more
 # iteration-efficient on vector and crossed LMMs. Dependency-light builds can
@@ -91,11 +97,6 @@ criterion = { version = "0.5", default-features = false }
 # `getrandom/js` selects the browser/Node entropy backend that rand 0.8's
 # `getrandom` 0.2 requires on wasm32-unknown-unknown; as with any library, a
 # downstream wasm32 binary must make the same selection itself.
-# Native targets parallelize faer's kernels with rayon; wasm32-unknown-unknown
-# has no threads, so it keeps faer sequential (`dense_kernels::faer_par`).
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-faer = { version = "0.24", default-features = false, features = ["std", "linalg", "rayon"] }
-
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
 getrandom = { version = "0.2", features = ["js"] }

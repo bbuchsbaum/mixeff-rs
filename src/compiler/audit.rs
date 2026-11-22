@@ -3424,7 +3424,10 @@ mod tests {
             .find(|d| d.code == DiagnosticCode::OptimizerNonconvergence)
             .expect("a failed gradient check must be reported");
         assert!(!caveat.payload.contains_key("newton_decrement"));
-        assert_eq!(caveat.payload.get("status_stands"), Some(&serde_json::json!(true)));
+        assert_eq!(
+            caveat.payload.get("status_stands"),
+            Some(&serde_json::json!(true))
+        );
 
         // A passing gradient adds no caveat.
         let mut clean = fresh();
@@ -5098,8 +5101,13 @@ impl OptimizerCertificate {
         let mut gradient_check_failed = false;
         let decrement = objective_tolerance.and_then(|tolerance| {
             let hessian = derivatives.hessian.as_ref()?;
-            free_newton_decrement(&derivatives.gradient, hessian, &boundary_mask, hessian_tolerance)
-                .map(|gap| (gap, tolerance))
+            free_newton_decrement(
+                &derivatives.gradient,
+                hessian,
+                &boundary_mask,
+                hessian_tolerance,
+            )
+            .map(|gap| (gap, tolerance))
         });
         // Whether a failed gradient check of magnitude `norm` is material.
         let gradient_failure_material = |norm: f64| match decrement {

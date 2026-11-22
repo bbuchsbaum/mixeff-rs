@@ -1097,7 +1097,8 @@ fn gradient_stop_band(options: &TrustBqOptions, f: f64) -> f64 {
 /// Whether the centre is stationary enough for an objective-based stop:
 /// the projected gradient is within [`gradient_stop_band`] and, when the
 /// caller supplied its objective tolerance, the model's Newton decrement
-/// `½ g_Fᵀ H_FF⁻¹ g_F` over the free coordinates is within it too. The
+/// `½ g_Fᵀ H_FF⁻¹ g_F` over the free coordinates is within it and the
+/// Newton step `H_FF⁻¹ g_F` is within `final_radius`. The
 /// decrement scales with the caller's tolerance (an absolute gradient band
 /// cannot: a tight `ftol` needs a gradient far below any fixed floor), and it
 /// is the materiality test the LMM certificate applies. A secant Hessian
@@ -1134,8 +1135,12 @@ fn stationary_for_objective_stop(
     let gradient = DVector::from_iterator(free.len(), free.iter().map(|&i| g[i]));
     match block.cholesky() {
         Some(cholesky) => {
-            let decrement = 0.5 * gradient.dot(&cholesky.solve(&gradient));
-            decrement <= abs.max(rel * f.abs())
+            // The Newton step must be within the final radius too: on a badly
+            // scaled coordinate (small curvature) the objective gap is tiny
+            // long before the parameter is, and inference reads the parameter.
+            let newton_step = cholesky.solve(&gradient);
+            let decrement = 0.5 * gradient.dot(&newton_step);
+            decrement <= abs.max(rel * f.abs()) && newton_step.amax() <= options.final_radius
         }
         None => true,
     }
@@ -1410,7 +1415,16 @@ where
             lower_bounds,
             upper_bounds,
         );
-        if options.gradient_tolerance_rel > 0.0 && x == best_x && projected <= gradient_band {
+        // With the caller's objective tolerance supplied, the first-order
+        // stop must also pass the stationarity test: a tiny gradient on a
+        // coordinate of small curvature can still leave the parameter far
+        // from its optimum.
+        if options.gradient_tolerance_rel > 0.0
+            && x == best_x
+            && projected <= gradient_band
+            && (options.stationarity_objective_tolerance.is_none()
+                || gradient_allows_objective_stop)
+        {
             return Ok(TrustBqResult {
                 x: best_x,
                 fmin: best_f,
